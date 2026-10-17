@@ -1,0 +1,1 @@
+../../migrations/0049_endpoint_scopes_and_orders.up.sql

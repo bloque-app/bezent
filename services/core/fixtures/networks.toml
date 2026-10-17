@@ -1,0 +1,26 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Per-network finality times, for `networks.finality_seconds` (migration 0033; NFR-5, REQ-IC-2).
+# Not read by the core: the operator sets the value on the network's row when declaring it. The
+# reserve check's lag bound defaults to this plus 60 s, at most one hour, so a network that
+# finalizes slowly is not paused for it. Values are the time a block takes to the `finalized` tag
+# (REQ-OB-1), rounded up; DEC-17 replaces them with the measured values on the public testnets.
+
+[polygon]
+finality_seconds = 8
+# Polygon PoS, `finalized` tag (milestones): Circle counts 2-3 blocks, about 8 s.
+# https://developers.circle.com/cctp/concepts/finality-and-block-confirmations
+# (research/05-origin-networks-and-venues.md)
+
+[base]
+finality_seconds = 1200
+# Base, `finalized` tag (batch in a finalized Ethereum block): Base estimates about 20 minutes,
+# Circle 15-19. The bound is therefore 21 minutes.
+# https://docs.base.org/base-chain/network-information/transaction-finality
+# https://developers.circle.com/cctp/concepts/finality-and-block-confirmations
+
+[bnb-chain]
+finality_seconds = 8
+# BNB Chain, `finalized` tag (fast finality, BEP-126): a block is finalized once a descendant is
+# justified, two blocks on, so seconds. Rounded up to 8 s until measured on the BNB testnet.
+# https://docs.bnbchain.org/bnb-smart-chain/learn/consensus/finality/ (BNB Chain docs, fast finality)

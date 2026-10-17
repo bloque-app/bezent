@@ -1,0 +1,65 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+name: EVM contracts
+
+# F-008 (T-008-01; plan DEC-10): the Foundry project in contracts/evm. `forge build` and `forge test`,
+# unit tests and fork tests of Polygon, Base and BNB Chain at the blocks PR #19 pins (e2e/evm/forks.env).
+# Nothing here sends a transaction to a real network.
+#
+# Upstream RPCs: the repository secrets POLYGON_RPC_URL, BASE_RPC_URL and BSC_RPC_URL when set
+# (archive endpoints, possibly keyed); otherwise the public endpoints in test/fork/VaultFork.sol.
+# Foundry's fork state cache is kept between runs, keyed by the pinned blocks.
+# Actions are pinned by commit SHA (review of PR #28); the comment names the release.
+
+on:
+  pull_request:
+    paths: ["contracts/evm/**", ".gitmodules", ".github/workflows/evm-contracts.yml"]
+  push:
+    branches: [main]
+    paths: ["contracts/evm/**", ".gitmodules", ".github/workflows/evm-contracts.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evm-contracts-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+defaults:
+  run:
+    working-directory: contracts/evm
+
+jobs:
+  forge:
+    name: forge build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Pull requests from forks get no secrets: the public archive endpoints below stand in.
+      POLYGON_RPC_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.drpc.org' }}
+      BASE_RPC_URL: ${{ secrets.BASE_RPC_URL || 'https://mainnet.base.org' }}
+      BSC_RPC_URL: ${{ secrets.BSC_RPC_URL || 'https://bsc-mainnet.public.blastapi.io' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: true
+
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.7.1
+
+      - name: Fork state cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.foundry/cache/rpc
+          key: forge-rpc-${{ hashFiles('contracts/evm/test/fork/VaultFork.sol') }}
+
+      - name: forge fmt --check
+        run: forge fmt --check src script test
+
+      - name: "T-008-01: forge build"
+        run: forge build
+
+      - name: "T-008-01 to T-008-06: forge test"
+        run: forge test -vv

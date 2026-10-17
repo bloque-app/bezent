@@ -1,0 +1,9 @@
+[submodule "contracts/evm/lib/forge-std"]
+	path = contracts/evm/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std.git
+[submodule "contracts/evm/lib/safe-smart-account"]
+	path = contracts/evm/lib/safe-smart-account
+	url = https://github.com/safe-global/safe-smart-account.git
+[submodule "contracts/evm/lib/zodiac-modifier-roles"]
+	path = contracts/evm/lib/zodiac-modifier-roles
+	url = https://github.com/gnosisguild/zodiac-modifier-roles.git

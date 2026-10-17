@@ -1,0 +1,24 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "bezent-core"
+description = "bezent's core types: exact amounts, asset and network ids, the three reference kinds, coordinates"
+edition.workspace = true
+version.workspace = true
+license = "Apache-2.0 OR MIT"
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bezent_core"
+
+[dependencies]
+blake2 = "0.10"
+bs58 = "0.5"
+hex = "0.4"
+
+[dev-dependencies]
+trybuild.workspace = true
+
+[lints]
+workspace = true

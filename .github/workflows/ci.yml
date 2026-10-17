@@ -1,0 +1,174 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# F-001 T-001-06 (DEC-1): build, fmt, clippy, unit tests and the store tests against a real
+# PostgreSQL, on every pull request and on main. The toolchain comes from rust-toolchain.toml.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: (rustup toolchain install || rustup show) && cargo --version
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: build and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: (rustup toolchain install || rustup show) && cargo --version
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The empty services start, read their config path, and exit cleanly (T-001-01). The ingress
+      # serves since F-002: its start against the store and its graceful shutdown are an
+      # integration test (T-002-01); here it only prints its OpenAPI document.
+      - name: services start and stop
+        run: |
+          ./target/debug/bezent-ingress openapi | diff - services/ingress/openapi.json
+      # The EVM endpoint (F-009) checks its configuration, and refuses two providers that are one
+      # (DEC-12).
+      - name: evm-endpoint configuration check
+        run: |
+          ./target/debug/bezent-evm-endpoint --check services/evm-endpoint/fixtures/endpoint.toml
+          if ./target/debug/bezent-evm-endpoint --check services/evm-endpoint/fixtures/same-provider.toml; then
+            echo "two providers that are one were not refused" && exit 1
+          fi
+      # The Kreivo endpoint (F-007) checks its configuration and pinned chain spec, and refuses a
+      # spec of another network than the declared one (AC-I4.1).
+      - name: kreivo-endpoint configuration check
+        run: |
+          ./target/debug/bezent-kreivo-endpoint --check services/kreivo-endpoint/fixtures/endpoint.toml
+          if ./target/debug/bezent-kreivo-endpoint --check services/kreivo-endpoint/fixtures/wrong-network.toml; then
+            echo "the wrong network was not refused" && exit 1
+          fi
+      # The signer (F-005) loads and checks its configuration and test keys, then exits.
+      - name: signer configuration check
+        run: ./target/debug/bezent-signer --check services/signer/fixtures/signer.json
+      # The core (F-003) reads and checks its configuration, then exits.
+      - name: core configuration check
+        run: ./target/debug/bezent-core --check services/core/fixtures/core.toml
+
+  test:
+    name: tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Each store test creates its own database on this server (#[sqlx::test]).
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - run: (rustup toolchain install || rustup show) && cargo --version
+      - uses: Swatinem/rust-cache@v2
+      # The restore drill (T-001-05) runs pg_dump and psql; their major version must be at least
+      # the server's.
+      - name: PostgreSQL client 16
+        run: |
+          if ! pg_dump --version | grep -qE ' (1[6-9]|[2-9][0-9])\.'; then
+            sudo apt-get update -q
+            sudo apt-get install -yq postgresql-client-16
+            echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+          fi
+      - run: pg_dump --version && psql --version
+      - run: cargo test --workspace --locked
+
+  # F-009: the EVM endpoint against an anvil fork of Polygon at the block e2e/evm/forks.env pins,
+  # with F-008's vault deployed by its own script and Foundry's test keys (services/evm-endpoint/
+  # tests/fork.rs). anvil reads the pinned state from the upstream archive RPC; nothing is sent to
+  # a real network.
+  evm-endpoint-fork:
+    name: evm-endpoint fork tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      BEZENT_EVM_FORK_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.drpc.org' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: (rustup toolchain install || rustup show) && cargo --version
+      - uses: Swatinem/rust-cache@v2
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+      - name: anvil's fork state cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.foundry/cache/rpc
+          key: evm-endpoint-fork-${{ hashFiles('e2e/evm/forks.env', 'services/evm-endpoint/tests/fork.rs') }}
+      - name: "T-009-01 to T-009-06 on the Polygon fork"
+        run: cargo test -p bezent-evm-endpoint --test fork --locked -- --test-threads=1
+
+  # Licensing (docs/oss/LICENSING.md): every tracked file carries its licence (an SPDX header where
+  # the format allows a comment, REUSE.toml otherwise), the licence its path requires, and every
+  # dependency's licence is on deny.toml's list. Runs for every pull request, forks included: it
+  # needs no secret.
+  licensing:
+    name: licence headers, REUSE and dependency licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: SPDX headers and Cargo licence fields
+        run: python3 tools/oss/spdx.py --check
+      - name: REUSE compliance
+        uses: fsfe/reuse-action@v5
+      - run: (rustup toolchain install || rustup show) && cargo --version
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Dependency licences (workspace)
+        run: cargo deny check licenses
+      - name: Dependency licences (ink! contract)
+        run: cd contracts/bezent && cargo deny check licenses
+
+  # Secrets: the whole tree is scanned on every pull request. The allowlist (.gitleaks.toml) names the
+  # published test keys and public constants; anything else fails the job.
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | tar -xz gitleaks
+          ./gitleaks dir --config .gitleaks.toml --redact --no-banner --exit-code 1 .

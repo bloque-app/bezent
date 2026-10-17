@@ -1,0 +1,28 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# The endpoint's configuration shape, for `--check` in CI and the tests (T-007-01). It declares
+# Kreivo, whose light chain spec is pinned in ../chain-specs/kreivo.json. No secret is here: the
+# files it names hold them, and they need not exist for --check.
+network = "kreivo"
+genesis = "0xc710a5f16adc17bcd212cff0aedcbf1c1212a043cdc0fb2dcba861efe5305b01"
+chain_spec = "../chain-specs/kreivo.json"
+# Kusama's identity only (its id and genesis state root, from smoldot's ksmcc3.json at the pinned
+# fork): enough for --check. A deployment names the full relay chain spec.
+relay_chain_spec = "ksmcc3-identity.json"
+relay_genesis = "0xb0a8d493285c2df73290dfb7e61f870f17b41801197a149ca93654499ea3dafe"
+# The identity file has no checkpoint, so none is pinned (relay_checkpoint); a deployment's full
+# relay spec has one, and pins its hash here.
+para_id = 2281
+contract = "0x0000000000000000000000000000000000000000000000000000000000000001"
+start_block = 0
+database_url_file = "/run/secrets/bezent-kreivo-endpoint-db"
+
+[lane]
+key = "kreivo-mint"
+scheme = "sr25519"
+public_key = "0x0000000000000000000000000000000000000000000000000000000000000002"
+
+[signer]
+socket = "/run/bezent-signer/signer.sock"
+uid = 1001
+token_file = "/run/secrets/bezent-kreivo-endpoint-signer-token"

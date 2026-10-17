@@ -1,0 +1,1 @@
+../../migrations/0047_transfer_writers.up.sql

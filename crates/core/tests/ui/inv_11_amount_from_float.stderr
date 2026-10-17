@@ -1,0 +1,14 @@
+error[E0277]: the trait bound `Amount: From<f64>` is not satisfied
+ --> tests/ui/inv_11_amount_from_float.rs:6:27
+  |
+6 |     let _amount: Amount = Amount::from(1.5f64);
+  |                           ^^^^^^ the trait `From<f64>` is not implemented for `Amount`
+  |
+help: `Amount` implements trait `From<T>`
+ --> src/amount.rs
+  |
+  | impl From<u128> for Amount {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<u128>`
+...
+  | impl From<u64> for Amount {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^ `From<u64>`

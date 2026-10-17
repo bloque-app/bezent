@@ -1,0 +1,33 @@
+{
+  "network": "base",
+  "chainId": 8453,
+  "asset": "bEURC",
+  "originToken": { "symbol": "EURC", "address": "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42", "decimals": 6 },
+  "delivery": { "balance": "50000000000", "maxRefill": "50000000000", "refill": "50000000000", "period": 86400 },
+  "conversion": {
+    "venue": "aerodrome-slipstream",
+    "router": "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",
+    "convertibles": [
+      {
+        "symbol": "USDC",
+        "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "balance": "50000000000",
+        "maxRefill": "50000000000",
+        "refill": "50000000000",
+        "period": 86400,
+        "tickSpacing": 50,
+        "pool": "0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7"
+      }
+    ]
+  },
+  "safe": {
+    "singleton": "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762",
+    "proxyFactory": "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
+    "fallbackHandler": "0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99",
+    "multiSendCallOnly": "0x9641d764fc13c8B624c04430C7356C1C7C8102e2"
+  },
+  "zodiac": {
+    "rolesMastercopy": "0xF2964CE6161ce0e75964Fe7927cE114cb0B283D5",
+    "moduleProxyFactory": "0x000000000000aDdB49795b0f9bA5BC298cDda236"
+  }
+}

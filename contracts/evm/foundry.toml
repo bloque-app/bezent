@@ -1,0 +1,29 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# bezent's EVM contracts (F-008): a Foundry project of its own, outside any root workspace.
+# Fork tests read POLYGON_RPC_URL, BASE_RPC_URL and BSC_RPC_URL and fall back to public endpoints
+# (test/fork/Forks.sol); the fork blocks are the ones PR #19 pins in e2e/evm/forks.env.
+
+[profile.default]
+src = "src"
+script = "script"
+test = "test"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.28"
+evm_version = "shanghai"
+optimizer = true
+optimizer_runs = 200
+fs_permissions = [{ access = "read", path = "./config" }]
+remappings = [
+  "forge-std/=lib/forge-std/src/",
+  "@gnosis.pm/safe-contracts/=lib/safe-smart-account/",
+  "zodiac-roles/=lib/zodiac-modifier-roles/packages/evm/contracts/",
+]
+
+[fmt]
+line_length = 110
+
+[lint]
+# Tests build revert selectors and allowance values with plain casts on purpose.
+ignore = ["test/**/*.sol"]

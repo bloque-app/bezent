@@ -1,0 +1,15 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+.scratch/
+.DS_Store
+.claude/worktrees/
+target/
+node_modules/
+e2e/evm/.run/
+e2e/network/target/
+e2e/kreivo/contract-state.json
+.claude/target*/
+.claude/*target*/
+__pycache__/
+*.pdf
+.claude/

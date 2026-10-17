@@ -1,0 +1,1 @@
+../../migrations/0006_intents.up.sql

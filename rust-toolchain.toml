@@ -1,0 +1,7 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Pinned toolchain (F-001, T-001-01). Bump deliberately, in its own PR.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

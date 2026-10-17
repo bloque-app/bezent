@@ -1,0 +1,28 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The secret scan (the `secrets` job of .github/workflows/ci.yml). Everything it flags today is a test
+# value or a public constant, listed here by file so a new finding anywhere else fails the job:
+#
+# - images.yml: curl against the test sidecar with a fixed test requester credential;
+# - e2e/evm/lib.mjs: Circle's public CCTP contract addresses;
+# - the evm-endpoint fixture and the engine, evm and webhook tests: pinned hashes, public keys and test HMAC
+#   secrets that exist only in tests.
+
+title = "bezent"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Published test values and public constants"
+condition = "OR"
+paths = [
+  '''^\.github/workflows/images\.yml$''',
+  '''^e2e/evm/lib\.mjs$''',
+  '''^services/evm-endpoint/fixtures/endpoint\.toml$''',
+  '''^services/core/src/engine\.rs$''',
+  '''^services/evm-endpoint/src/evm\.rs$''',
+  '''^services/ingress/tests/webhooks\.rs$''',
+  '''^services/signer/fixtures/''',
+]

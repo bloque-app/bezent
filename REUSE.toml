@@ -1,0 +1,60 @@
+# Licence information for files that cannot carry a comment header (REUSE specification 3.2).
+# Every other file carries an SPDX header (tools/oss/spdx.py). docs/oss/LICENSING.md says why each part
+# has the licence it has. When several annotations match a file, the last one wins.
+version = 1
+
+# Data, lock files, manifests and generated files of the permissive part of the tree.
+[[annotations]]
+path = [
+  "**/*.json",
+  "**/Cargo.lock",
+  "**/package-lock.json",
+  "**/*.stderr",
+  "research/06-scripts/*.wat",
+  "**/.gitkeep",
+  "e2e/evm/forks.env",
+  "e2e/scripts/checksums.sha256",
+  "contracts/evm/.gitignore",
+  ".gitmodules",
+  "crates/core/tests/ui/*.rs",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (c) 2026 Pagos Cube LLC"
+SPDX-License-Identifier = "Apache-2.0 OR MIT"
+
+# The store's migrations: they keep the AGPL header they were applied with (sqlx checks each file's
+# checksum), so only the copyright is added here.
+[[annotations]]
+path = "crates/store/migrations/*.sql"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (c) 2026 Pagos Cube LLC"
+SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+# The ink! contract's lock file, and the services' fixtures (published test values, never a deployment's).
+[[annotations]]
+path = ["contracts/bezent/Cargo.lock", "services/**/*.json"]
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright (c) 2026 Pagos Cube LLC"
+SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+# Kreivo's chain specification, as published by Kreivo.
+[[annotations]]
+path = "services/kreivo-endpoint/chain-specs/kreivo.json"
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright (c) Virto Network"
+SPDX-License-Identifier = "GPL-3.0-only"
+
+# The specification, the plan and the overview: their YAML front matter opens the file (tools/md2artifact.py
+# reads it), so they carry no header. Pages rendered from Markdown are prose too.
+[[annotations]]
+path = ["SPEC.md", "PLAN.md", "OVERVIEW.md", "docs/*.html"]
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright (c) 2026 Pagos Cube LLC"
+SPDX-License-Identifier = "CC-BY-4.0"
+
+# bezent's marks: Pagos Cube LLC's, not licensed with the code (brand/README.md).
+[[annotations]]
+path = "brand/*.svg"
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright (c) 2026 Pagos Cube LLC"
+SPDX-License-Identifier = "LicenseRef-Trademark-Marks"

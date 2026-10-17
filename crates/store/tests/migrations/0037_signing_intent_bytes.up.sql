@@ -1,0 +1,1 @@
+../../migrations/0037_signing_intent_bytes.up.sql

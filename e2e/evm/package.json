@@ -1,0 +1,16 @@
+{
+  "name": "bezent-e2e-evm",
+  "private": true,
+  "description": "F-013: anvil forks of Polygon, Base and BNB Chain, and a local CCTP V2 attester and relay between the Polygon and Base forks.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "for f in *.mjs; do node --check $f || exit 1; done"
+  },
+  "dependencies": {
+    "viem": "2.56.9"
+  }
+}

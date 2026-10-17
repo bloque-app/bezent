@@ -1,0 +1,98 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+name: E2E (EVM forks)
+
+# F-013 (T-013-03, T-013-04; plan DEC-19): anvil forks of Polygon, Base and BNB Chain at the blocks
+# pinned in e2e/evm/forks.env; USDC, EURC and BTCB read on them; local CCTP V2 between the Polygon
+# and Base forks, a burn on Polygon minted on Base by the local relay. On GitHub-hosted runners:
+# nothing here needs the zombienet fleet.
+#
+# Upstream RPCs: the repository secrets POLYGON_RPC_URL, BASE_RPC_URL and BSC_RPC_URL when set
+# (archive endpoints, possibly keyed); otherwise up.sh's public defaults. anvil's state cache is
+# kept between runs, keyed by the pinned blocks, so a rerun asks upstream for little.
+
+on:
+  pull_request:
+    paths: ["e2e/evm/**", ".github/workflows/e2e-evm.yml"]
+  push:
+    branches: [main]
+    paths: ["e2e/evm/**", ".github/workflows/e2e-evm.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-evm-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  forks:
+    name: Forks and local CCTP
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EVM_OUT: ${{ github.workspace }}/e2e/evm/.run
+      # Pull requests from forks get no secrets: the public archive endpoints below stand in.
+      POLYGON_RPC_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.drpc.org' }}
+      BASE_RPC_URL: ${{ secrets.BASE_RPC_URL || 'https://mainnet.base.org' }}
+      BSC_RPC_URL: ${{ secrets.BSC_RPC_URL || 'https://bsc-mainnet.public.blastapi.io' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: anvil's fork state cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.foundry/cache/rpc
+          key: anvil-rpc-${{ hashFiles('e2e/evm/forks.env') }}
+
+      - name: Install the scripts' dependencies
+        working-directory: e2e/evm
+        run: npm ci --no-audit --no-fund && npm run check
+
+      - name: Start the forks (Polygon, Base, BNB Chain)
+        timeout-minutes: 5
+        run: e2e/evm/up.sh
+
+      - name: "T-013-03: forks at their pinned blocks; USDC, EURC, BTCB readable"
+        timeout-minutes: 10
+        working-directory: e2e/evm
+        run: node balances.mjs --summary "$EVM_OUT/balances.md"
+
+      - name: "T-013-04: local CCTP (test attester, threshold 1)"
+        timeout-minutes: 5
+        working-directory: e2e/evm
+        run: node cctp-setup.mjs
+
+      - name: "T-013-04: a burn on Polygon minted on Base by the local relay"
+        timeout-minutes: 10
+        working-directory: e2e/evm
+        run: |
+          node relay.mjs > "$EVM_OUT/relay.log" 2>&1 &
+          echo $! > "$EVM_OUT/relay.pid"
+          node cctp-burn.mjs --summary "$EVM_OUT/cctp.md"
+
+      - name: Job summary
+        if: always()
+        run: |
+          cat "$EVM_OUT"/balances.md "$EVM_OUT"/cctp.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo "::group::relay log"; cat "$EVM_OUT/relay.log" 2>/dev/null || true; echo "::endgroup::"
+
+      - name: Fork logs on failure
+        if: failure()
+        run: |
+          for f in "$EVM_OUT"/*.log; do echo "::group::$f"; tail -n 50 "$f"; echo "::endgroup::"; done
+
+      - name: Stop
+        if: always()
+        run: |
+          [ -f "$EVM_OUT/relay.pid" ] && kill "$(cat "$EVM_OUT/relay.pid")" 2>/dev/null || true
+          e2e/evm/up.sh down

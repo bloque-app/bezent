@@ -1,0 +1,1 @@
+../../migrations/0008_derived_views.up.sql

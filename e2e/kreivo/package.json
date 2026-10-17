@@ -1,0 +1,18 @@
+{
+  "name": "bezent-e2e-kreivo",
+  "private": true,
+  "description": "F-013: set up and check the zombienet Kreivo (the dedicated community, the six assets), deploy the bezent contract through ContractsStore and drive it, with polkadot-api.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "node --check setup.mjs && node --check check.mjs && node --check mainnet-metadata.mjs && node --check lib.mjs && node --check contract.mjs && node --check deploy.mjs && node --check req-hn-7.req-hn-8.inv-3.inv-8.ac-d2.2.ac-b5.1.ac-b5.2.ac-i2.1.ac-i2.2.mjs"
+  },
+  "dependencies": {
+    "@polkadot-labs/hdkd": "0.0.32",
+    "@polkadot-labs/hdkd-helpers": "0.0.34",
+    "polkadot-api": "2.1.8"
+  }
+}

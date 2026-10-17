@@ -1,0 +1,19 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# A configuration for `bezent-core --check` in CI. Not a deployment file: no real login.
+database_url = "postgres://bezent_core_login@localhost:5432/bezent"
+cycle_seconds = 5
+retry_preparation_seconds = 60
+default_deadline_seconds = 86400
+# A test deployment: the statement key below is the published test fixture's, refused elsewhere.
+environment = "test"
+
+# The daily statement (REQ-PR-1; PLAN DEC-16; issue #42): signed by the signer process with the
+# statement key, whose public half is all the core holds. This one is the published test fixture's
+# (services/signer/fixtures/test-keys.json, id "statement").
+[statement]
+signer_socket = "../../signer/fixtures/signer.sock"
+signer_uid = 1000
+signer_token_file = "core-signer-token"
+public_key = "0x66d5b675e8fddf84c70c76d1815d6a5d531bbc96de157b591489be0cdbe5f615"
+directory = "statements"

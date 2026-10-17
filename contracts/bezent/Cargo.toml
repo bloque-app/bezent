@@ -1,0 +1,48 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# F-006: bezent's contract on Kreivo (PLAN.md `DEC-6`, `DEC-7`; SPEC §7.F `CTR-HOME`).
+#
+# A Cargo workspace of its own, excluded from any root workspace: ink! and its WASM build have
+# nothing to do with the services' dependency tree. `.github/workflows/contracts.yml` builds it with
+# `cargo contract build --release` and runs its unit tests, only when `contracts/bezent/**` changes.
+#
+# Pinned like aledgent's settlement contract: ink! 5.1.1 (Kreivo's contract-side bindings),
+# `pallet-contracts` 49 on the runtime side, `cargo-contract` 5.0.3. The Kreivo commit is the merge
+# of kreivo#512 (`87f8728`, tag 0.17.1), which gives contracts `assets__mint` and `assets__burn`.
+[workspace]
+
+[package]
+name = "bezent-contract"
+version = "0.1.0"
+authors = ["Bloque <engineering@bloque.team>"]
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/bloque-app/bezent"
+description = "bezent's on-chain component on Kreivo: mints, redeems and refund-mints bridged assets within per-asset bounds, with pauses, delayed raises and ordered events."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ink = { version = "=5.1.1", default-features = false }
+scale = { package = "parity-scale-codec", version = "3.6.12", default-features = false, features = ["derive"] }
+scale-info = { version = "2.11", default-features = false, features = ["derive"], optional = true }
+
+[dev-dependencies]
+# Kreivo's chain-extension API types at the kreivo#512 merge (tag 0.17.1), without its runtime or
+# contract parts. Used only to prove that the contract's own binding (`src/kreivo.rs`) reads the
+# status codes as Kreivo writes them. It is not a dependency of the contract itself: the crate pulls
+# `frame-support` unconditionally, which does not build into the contract's WASM with the pinned
+# toolchain (the reason aledgent's settlement contract gives, F-026 NOTES, decision 3).
+kreivo-apis = { git = "https://github.com/virto-network/kreivo.git", rev = "87f8728cf25b5388e8427ce4cdba9f8f57a7ae33", default-features = false, features = ["std"] }
+# Kreivo's asset id at the same commit, to prove the contract's mirror encodes byte for byte the same.
+virto-common = { git = "https://github.com/virto-network/kreivo.git", rev = "87f8728cf25b5388e8427ce4cdba9f8f57a7ae33", default-features = false, features = ["scale"] }
+# The `MultiAddress` Kreivo's `Lookup` takes (`runtime/kreivo/src/lib.rs`, `Address`), already in the
+# tree through `kreivo-apis`; the mock decodes `Assets::transfer_approved` with it.
+sp-runtime = { version = "=48.0.0", default-features = false }
+
+[features]
+default = ["std"]
+std = ["ink/std", "scale/std", "scale-info/std"]
+ink-as-dependency = []

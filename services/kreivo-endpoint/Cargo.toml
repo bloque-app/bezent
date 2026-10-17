@@ -1,0 +1,56 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "bezent-kreivo-endpoint"
+description = "bezent kreivo-endpoint: observes the issuing network and reports observations at coordinates; decides nothing (DEC-3, DEC-5)"
+edition.workspace = true
+version.workspace = true
+license = "AGPL-3.0-or-later"
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bezent_kreivo_endpoint"
+
+[[bin]]
+name = "bezent-kreivo-endpoint"
+path = "src/main.rs"
+
+[features]
+default = ["light-client"]
+# Kreivo through subxt with an embedded smoldot light client (PLAN DEC-5): smoldot-light 2.x, from
+# aledgent's fork with the child-trie-root fix (aledgent#121), pinned by commit in the workspace's
+# `[patch.crates-io]`. Without it the crate builds its logic and the in-memory chain only, which is
+# what every test here runs against: no test reaches a real network.
+light-client = ["dep:subxt", "dep:smoldot-light", "dep:ed25519-zebra", "dep:scale-value"]
+
+[dependencies]
+bezent-store = { path = "../../crates/store" }
+# The signer link's client, and the core's check of a returned signature (F-005, AC-I1.2). The
+# endpoint holds no key: it never builds a key backend (REQ-AR-3).
+bezent-signer = { path = "../signer" }
+blake2 = "0.10"
+hex = "0.4"
+parity-scale-codec = { version = "3", default-features = false, features = ["derive", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { workspace = true, features = ["json"] }
+tokio = { workspace = true, features = ["net", "signal", "sync", "time", "fs"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
+subxt = { version = "0.44", optional = true }
+smoldot-light = { version = "2.1", optional = true }
+scale-value = { version = "0.18", optional = true }
+# Not used directly: smoldot uses ed25519-zebra's batch verifier, which 4.2 moved behind its
+# `alloc` feature without smoldot asking for it (as in aledgent's settle).
+ed25519-zebra = { version = "4", default-features = false, features = ["alloc"], optional = true }
+
+[dev-dependencies]
+sha2 = "0.10"
+# The core, for the two-step delivery end to end (tests/delivery.rs; PLAN DEC-3).
+bezent-core-service = { path = "../core" }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+[lints]
+workspace = true

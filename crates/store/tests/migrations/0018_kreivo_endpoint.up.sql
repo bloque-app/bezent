@@ -1,0 +1,1 @@
+../../migrations/0018_kreivo_endpoint.up.sql

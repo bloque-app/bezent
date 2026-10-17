@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/req_id_3_on_chain_as_bridge.rs:9:28
+  |
+9 |     wants_bridge_reference(on_chain);
+  |     ---------------------- ^^^^^^^^ expected `BridgeReference`, found `OnChainReference`
+  |     |
+  |     arguments to this function are incorrect
+  |
+note: function defined here
+ --> tests/ui/req_id_3_on_chain_as_bridge.rs:5:4
+  |
+5 | fn wants_bridge_reference(_: BridgeReference) {}
+  |    ^^^^^^^^^^^^^^^^^^^^^^ ------------------

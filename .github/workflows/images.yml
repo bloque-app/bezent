@@ -1,0 +1,312 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+name: Images
+
+# bezent's container images (deploy/docker/services.Dockerfile), built here and nowhere else, for
+# linux/amd64 on GitHub-hosted runners. They go to the GitHub Container Registry, as public packages,
+# in the organisation bloque-app:
+#
+#   ghcr.io/bloque-app/bezent-ingress
+#   ghcr.io/bloque-app/bezent-core
+#   ghcr.io/bloque-app/bezent-signer
+#   ghcr.io/bloque-app/bezent-kreivo-endpoint
+#   ghcr.io/bloque-app/bezent-evm-endpoint
+#   ghcr.io/bloque-app/bezent-sidecar        TEST only: for other repositories' e2e harnesses
+#
+# A pull request builds every image, runs each binary once inside it (a distroless image has no
+# shell, so a binary that does not link fails here), and starts the sidecar against a PostgreSQL
+# container as a harness would (deploy/e2e/README.md). It pushes nothing and holds no write
+# permission. A push to main (a merge) pushes every image as `sha-<commit>` and `edge`, then reads
+# each `sha-<commit>` back from the registry and records its digest in the run's summary
+# (`<image>:sha-<commit>@sha256:<digest>`), which is what a harness pins.
+#
+# The packages are public, so any harness pulls them without credentials; deploy/e2e/README.md says how.
+# Pushing needs this repository's own GITHUB_TOKEN, so it only happens in bloque-app/bezent.
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "services/**"
+      - "deploy/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".dockerignore"
+      - ".github/workflows/images.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "services/**"
+      - "deploy/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".dockerignore"
+      - ".github/workflows/images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: build and smoke-test
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      # One builder for the six targets: the Rust build stage is shared, so the workspace
+      # compiles once.
+      - name: Build ingress
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: deploy/docker/services.Dockerfile
+          target: ingress
+          platforms: linux/amd64
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=images
+          cache-to: type=gha,scope=images,mode=max
+          load: true
+          tags: bezent-ingress:ci
+      - name: Build core
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: deploy/docker/services.Dockerfile
+          target: core
+          platforms: linux/amd64
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=images
+          cache-to: type=gha,scope=images,mode=max
+          load: true
+          tags: bezent-core:ci
+      - name: Build signer
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: deploy/docker/services.Dockerfile
+          target: signer
+          platforms: linux/amd64
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=images
+          cache-to: type=gha,scope=images,mode=max
+          load: true
+          tags: bezent-signer:ci
+      - name: Build kreivo-endpoint
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: deploy/docker/services.Dockerfile
+          target: kreivo-endpoint
+          platforms: linux/amd64
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=images
+          cache-to: type=gha,scope=images,mode=max
+          load: true
+          tags: bezent-kreivo-endpoint:ci
+      - name: Build evm-endpoint
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: deploy/docker/services.Dockerfile
+          target: evm-endpoint
+          platforms: linux/amd64
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=images
+          cache-to: type=gha,scope=images,mode=max
+          load: true
+          tags: bezent-evm-endpoint:ci
+      - name: Build sidecar
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: deploy/docker/services.Dockerfile
+          target: sidecar
+          platforms: linux/amd64
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=images
+          cache-to: type=gha,scope=images,mode=max
+          load: true
+          tags: bezent-sidecar:ci
+
+      # Each binary starts inside its image and refuses a configuration that is not there (exit
+      # status 1 or 2): it links, it runs as its user, and nothing is baked in.
+      - name: Each image runs its binary
+        run: |
+          set +e -uo pipefail
+          for t in ingress core signer kreivo-endpoint evm-endpoint; do
+            user=$(docker image inspect -f '{{.Config.User}}' "bezent-$t:ci")
+            want=65532:65532; [ "$t" = signer ] && want=65533:65533
+            test "$user" = "$want" || { echo "bezent-$t runs as '$user', not $want"; exit 1; }
+            docker run --rm "bezent-$t:ci" /nonexistent.conf > /dev/null 2> "$RUNNER_TEMP/$t.err"
+            code=$?
+            cat "$RUNNER_TEMP/$t.err"
+            case "$code" in 1|2) ;; *) echo "bezent-$t exited $code, expected 1 or 2"; exit 1 ;; esac
+          done
+          test "$(docker image inspect -f '{{.Config.User}}' bezent-sidecar:ci)" = "65532:65532"
+
+      # As a harness runs it (deploy/e2e/README.md): a PostgreSQL service, the sidecar beside it,
+      # healthy through the image's own health check, then the query surface answers with a
+      # requester's credential and refuses without one. And the guard: no test environment, no start.
+      - name: The sidecar as a service container
+        run: |
+          set -euo pipefail
+          docker network create bz
+          docker run -d --name pg --network bz \
+            -e POSTGRES_DB=bezent -e POSTGRES_USER=bloque -e POSTGRES_PASSWORD=bloque \
+            --health-cmd pg_isready --health-interval 2s --health-retries 30 \
+            public.ecr.aws/docker/library/postgres:18-alpine
+          for i in $(seq 1 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' pg)" = healthy ] && break
+            [ "$i" = 60 ] && { docker logs pg; exit 1; }
+            sleep 1
+          done
+          URL=postgres://bloque:bloque@pg:5432/bezent
+          # Refuses to start without BEZENT_SIDECAR_ENVIRONMENT=test.
+          if docker run --rm --network bz -e BEZENT_SIDECAR_DATABASE_URL=$URL \
+               -e BEZENT_SIDECAR_REQUESTERS=swaps=ci-1.ci-swaps-secret-0123456789 \
+               bezent-sidecar:ci serve; then
+            echo "the sidecar started without BEZENT_SIDECAR_ENVIRONMENT=test"; exit 1
+          fi
+          # Refuses a store that holds a production network, and leaves it unchanged: no migration,
+          # no login role (REQ-KY-6).
+          docker exec pg psql -U bloque -d postgres -qc 'CREATE DATABASE prodlike'
+          docker exec pg psql -U bloque -d prodlike -qc \
+            "CREATE TABLE networks (network text); INSERT INTO networks VALUES ('polygon-mainnet')"
+          if docker run --rm --network bz -e BEZENT_SIDECAR_ENVIRONMENT=test \
+               -e BEZENT_SIDECAR_DATABASE_URL=postgres://bloque:bloque@pg:5432/prodlike \
+               -e BEZENT_SIDECAR_REQUESTERS=swaps=ci-1.ci-swaps-secret-0123456789 \
+               bezent-sidecar:ci serve 2> "$RUNNER_TEMP/prodlike.err"; then
+            echo "the sidecar started on a store with a production network"; exit 1
+          fi
+          cat "$RUNNER_TEMP/prodlike.err"
+          grep -q polygon-mainnet "$RUNNER_TEMP/prodlike.err"
+          test "$(docker exec pg psql -U bloque -d prodlike -Atc \
+            "SELECT count(*) FROM pg_tables WHERE schemaname='public'")" = 1
+          test "$(docker exec pg psql -U bloque -d prodlike -Atc \
+            "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'bezent_%'")" = 0
+          test "$(docker exec pg psql -U bloque -d prodlike -Atc 'SELECT count(*) FROM networks')" = 1
+          docker run -d --name sidecar --network bz -p 18080:8080 \
+            -e BEZENT_SIDECAR_ENVIRONMENT=test -e BEZENT_SIDECAR_DATABASE_URL=$URL \
+            -e BEZENT_SIDECAR_REQUESTERS=swaps=ci-1.ci-swaps-secret-0123456789 \
+            --health-cmd "bezent-sidecar health" --health-interval 1s --health-retries 60 \
+            bezent-sidecar:ci
+          for i in $(seq 1 90); do
+            h=$(docker inspect -f '{{.State.Health.Status}}' sidecar)
+            [ "$h" = healthy ] && break
+            [ "$i" = 90 ] && { docker logs sidecar; exit 1; }
+            sleep 1
+          done
+          echo "sidecar: $h"
+          B=http://127.0.0.1:18080
+          test "$(curl -s -o /dev/null -w '%{http_code}' $B/v0/routes)" = 401
+          curl -sf -H 'Authorization: Bearer ci-1.ci-swaps-secret-0123456789' $B/v0/routes \
+            | tee /dev/stderr | grep -q '"asset":"bUSDC"'
+          # The driver's gates. Without BEZENT_SIDECAR_DRIVER_TOKEN nothing listens on 8090.
+          IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "bz").IPAddress}}' sidecar)
+          if curl -s --connect-timeout 3 -o /dev/null http://$IP:8090/driver/v0/readings; then
+            echo "port 8090 is open without BEZENT_SIDECAR_DRIVER_TOKEN"; exit 1
+          fi
+          # With the token it is bound; once the store declares a production network every call
+          # answers 404 and nothing is written.
+          docker exec pg psql -U bloque -d postgres -qc 'CREATE DATABASE driven'
+          docker run -d --name driven --network bz \
+            -e BEZENT_SIDECAR_ENVIRONMENT=test \
+            -e BEZENT_SIDECAR_DATABASE_URL=postgres://bloque:bloque@pg:5432/driven \
+            -e BEZENT_SIDECAR_REQUESTERS=swaps=ci-1.ci-swaps-secret-0123456789 \
+            -e BEZENT_SIDECAR_DRIVER_TOKEN=ci-driver-token-0123456789 \
+            --health-cmd "bezent-sidecar health" --health-interval 1s --health-retries 60 \
+            bezent-sidecar:ci
+          for i in $(seq 1 90); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' driven)" = healthy ] && break
+            [ "$i" = 90 ] && { docker logs driven; exit 1; }
+            sleep 1
+          done
+          DIP=$(docker inspect -f '{{(index .NetworkSettings.Networks "bz").IPAddress}}' driven)
+          D=http://$DIP:8090/driver/v0
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -d '{"amount":"1"}' $D/arrivals)" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Authorization: Bearer ci-driver-token-0123456789' \
+            -H 'Content-Type: application/json' -d '{"amount":"1"}' $D/arrivals)" = 200
+          before=$(docker exec pg psql -U bloque -d driven -Atc 'SELECT count(*) FROM observations')
+          test "$before" -ge 1
+          docker exec pg psql -U bloque -d driven -qc \
+            "INSERT INTO networks VALUES ('polygon-mainnet', 'origin', 'evm')"
+          for call in 'arrivals {"amount":"1"}' 'finality {"network":"polygon-amoy"}'; do
+            set -- $call
+            test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Authorization: Bearer ci-driver-token-0123456789' \
+              -H 'Content-Type: application/json' -d "$2" $D/$1)" = 404
+          done
+          test "$(docker exec pg psql -U bloque -d driven -Atc 'SELECT count(*) FROM observations')" = "$before"
+          docker rm -f driven > /dev/null
+          docker rm -f sidecar pg > /dev/null
+          size=$(docker image inspect -f '{{.Size}}' bezent-sidecar:ci)
+          echo "bezent-sidecar (linux/amd64): $((size / 1024 / 1024)) MiB" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: publish ${{ matrix.target }}
+    # A merge to main, or a manual dispatch on main. One image at a time: the first builds the
+    # shared stage and the cache hands it to the rest.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'bloque-app/bezent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        target: [ingress, core, signer, kreivo-endpoint, evm-endpoint, sidecar]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/bloque-app/bezent-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: deploy/docker/services.Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=images
+          cache-to: type=gha,scope=images,mode=max
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+            ${{ env.IMAGE }}:edge
+      # Each tag, read back from the registry (whole: a `head` would end it in SIGPIPE), and the
+      # digest a harness pins. It must be the digest the build pushed: a mismatch means a tag moved
+      # between the push and the read-back.
+      - name: Digests
+        env:
+          PUSHED: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for t in "sha-$GITHUB_SHA" edge; do
+            docker buildx imagetools inspect "$IMAGE:$t"
+          done
+          digest=$(docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" --format '{{json .Manifest}}' | jq -r .digest)
+          test -n "$digest"
+          test -n "$PUSHED"
+          test "$digest" = "$PUSHED" || { echo "digest mismatch: registry $digest, build $PUSHED"; exit 1; }
+          echo "- \`$IMAGE:sha-$GITHUB_SHA@$digest\`" >> "$GITHUB_STEP_SUMMARY"

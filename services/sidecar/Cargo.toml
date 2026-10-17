@@ -1,0 +1,43 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "bezent-sidecar"
+description = "bezent for other repositories' e2e harnesses: ingress, core and a test signer in one process, on an external PostgreSQL, with a test-only chain-event driver; TEST networks only"
+edition.workspace = true
+version.workspace = true
+license = "AGPL-3.0-or-later"
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bezent_sidecar"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bezent-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+alloy = { version = "1.8", default-features = false, features = ["std", "consensus"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
+bezent-core-service = { path = "../core" }
+bezent-evm-endpoint = { path = "../evm-endpoint" }
+bezent-ingress = { path = "../ingress" }
+bezent-signer = { path = "../signer" }
+bezent-store = { path = "../../crates/store" }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { workspace = true, features = ["json", "chrono"] }
+tokio = { workspace = true, features = ["net", "signal", "sync", "time", "io-util", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

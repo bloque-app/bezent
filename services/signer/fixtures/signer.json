@@ -1,0 +1,67 @@
+{
+  "socket": "signer.sock",
+  "callers": [
+    {
+      "name": "core",
+      "uid": 1000,
+      "token_sha256": [
+        "711fef65d2af3b4b1cdae5d79e9aee02bb191de586e96834d73dad9aa74536df"
+      ]
+    }
+  ],
+  "networks": [
+    {
+      "id": "kreivo-local",
+      "environment": "test",
+      "issuing": true,
+      "contract_account": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "genesis": "0x4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b"
+    },
+    {
+      "id": "polygon-amoy",
+      "environment": "test",
+      "chain_id": 80002,
+      "delivery": {
+        "roles": "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+        "multisend": "0x9641d764fc13c8b624c04430c7356c1c7c8102e2",
+        "emitter": "0xa3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+        "role": "bezent.delivery"
+      }
+    }
+  ],
+  "keys": {
+    "backend": "file",
+    "path": "test-keys.json"
+  },
+  "bindings": [
+    {
+      "key": "kreivo-mint",
+      "network": "kreivo-local",
+      "purposes": [
+        "mint",
+        "refund-mint"
+      ],
+      "window_cap": "1000000000",
+      "window_seconds": 86400
+    },
+    {
+      "key": "kreivo-destroy",
+      "network": "kreivo-local",
+      "purposes": [
+        "destroy"
+      ],
+      "window_cap": "1000000000",
+      "window_seconds": 86400
+    },
+    {
+      "key": "polygon-payout",
+      "network": "polygon-amoy",
+      "purposes": [
+        "payout"
+      ],
+      "window_cap": "1000000000",
+      "window_seconds": 86400
+    }
+  ],
+  "statement_key": "statement"
+}

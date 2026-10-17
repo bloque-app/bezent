@@ -1,0 +1,9 @@
+{
+  "name": "Kusama",
+  "id": "ksmcc3",
+  "chainType": "Live",
+  "bootNodes": [],
+  "genesis": {
+    "stateRootHash": "0xb0006203c3a6e6bd2c6a17b1d4ae8ca49a31da0f4579da950b127774b44aef6b"
+  }
+}

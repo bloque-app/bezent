@@ -1,0 +1,2012 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "bezent ingress",
+    "description": "The request surface (CTR-REQ, SPEC §7.A), the query surface (CTR-QRY, §7.B) and webhooks (CTR-EVT, §7.C). Amounts are decimal strings of exact integer minor units; on-chain bytes are 0x-prefixed hexadecimal.\n\nWebhooks (REQ-ST-5, REQ-IC-5): a POST with a JSON body that only points at the sequenced log, never an outcome. A transfer notification is {\"type\": \"transfer\", \"seq\", \"dedupe_key\", \"bridge_reference\", \"request_reference\"}; a condition notification is {\"type\": \"condition\", \"seq\", \"dedupe_key\", \"condition\", \"route\": {\"asset\", \"network\", \"kind\"}}, sent to every requester granted on the route (a grant of the route's kind), whether or not it has a transfer there, once when a shared gate condition starts on the route and once when it clears. Headers: bezent-timestamp (Unix seconds), bezent-signature (v1=<hex HMAC-SHA256 of '<timestamp>.<raw body>' under the requester's secret>), bezent-dedupe-key. To verify a delivery, in this order: (1) reject it unless bezent-timestamp is within a bound of your clock (for example 5 minutes either way), so a captured delivery cannot be replayed later; (2) compute the signature over the timestamp and the raw body and compare it with bezent-signature in constant time; (3) de-duplicate by dedupe_key, keeping the keys you have seen for at least the whole retry window (about 70 minutes with the default bound, and longer if the operator configures more attempts or a longer back-off), not just the timestamp bound, since a retry carries the same key and body with a new timestamp and signature and can arrive that late. Delivery is at-least-once: answer 2xx to acknowledge; anything else is retried with back-off and dead-lettered after a bound. Rotating the secret (POST /v0/webhooks/secret) takes effect at once, retries included: accept either the old or the new secret until your receiver holds the new one; a delivery you reject meanwhile is retried, and counts toward the bound. Then re-read the status or the log from your last position; no notification is needed to stay current.",
+    "license": {
+      "name": "AGPL-3.0-or-later"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "service"
+        ],
+        "summary": "Liveness and the store's readiness.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/deposits": {
+      "post": {
+        "tags": [
+          "requests"
+        ],
+        "summary": "Request a deposit (`REQ-RQ-3`): bind the arrival at a coordinate.",
+        "operationId": "deposit",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DepositRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A repeat: the original's status (REQ-ID-1)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferStatus"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Taken in now: `Accepted`, or `Refused` with its named error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferStatus"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "taken-in: taken in, but the status could not be read back; read it by request reference",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ERR-Overloaded: nothing recorded; retry. not-final: the arrival is observed but not final yet; nothing recorded, the request reference is not consumed: send the same request again once it is final. outcome-unknown: repeat the same request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/log": {
+      "get": {
+        "tags": [
+          "queries"
+        ],
+        "summary": "The sequenced log from a position (`REQ-ST-4`): this requester's entries in the positions after\n`after`. Positions are gapless across the log, and an entry's position is its stable key\n(`REQ-ST-5`). Read again from `next_after` until it reaches `head`.",
+        "operationId": "log",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "path",
+            "description": "Read positions after this one (0 reads from the start).",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "description": "The most positions to cover; at most the configured page.",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/refunds": {
+      "post": {
+        "tags": [
+          "requests"
+        ],
+        "summary": "Request the refund of an unassociated arrival (`REQ-RQ-6`). The refund waits in `Received` for\nthe operator's second approver (`REQ-IN-6`, `F-014`).",
+        "operationId": "refund",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefundRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A repeat: the original's status (REQ-ID-1)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferStatus"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Taken in now: `Received` (awaiting the operator's second approver), or `Refused`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferStatus"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "taken-in: taken in, but the status could not be read back; read it by request reference",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ERR-Overloaded: nothing recorded; retry. not-final: the arrival is observed but not final yet; nothing recorded, the request reference is not consumed: send the same request again once it is final. outcome-unknown: repeat the same request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/reserve-equation": {
+      "get": {
+        "tags": [
+          "queries"
+        ],
+        "summary": "The reserve equation's latest evaluation, as stored (`REQ-RQ-8`). The reserve check that\nstores evaluations is `F-004`; until then there is none.",
+        "operationId": "reserve_equation",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReserveEquation"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/reserves": {
+      "get": {
+        "tags": [
+          "queries"
+        ],
+        "summary": "Reserve per (asset, network), as the reserve book holds it (`REQ-RQ-8`).",
+        "operationId": "reserves",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reserves"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/routes": {
+      "get": {
+        "tags": [
+          "queries"
+        ],
+        "summary": "The route table with current capacity (`REQ-LM-1`, `REQ-AS-5`).",
+        "operationId": "routes",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteTable"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/transfers/by-bridge/{reference}": {
+      "get": {
+        "tags": [
+          "queries"
+        ],
+        "summary": "Status by bridge reference (`REQ-ST-2`).",
+        "operationId": "by_bridge",
+        "parameters": [
+          {
+            "name": "reference",
+            "in": "path",
+            "description": "The bridge reference",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/transfers/by-coordinate": {
+      "get": {
+        "tags": [
+          "queries"
+        ],
+        "summary": "Status by coordinate (`REQ-ST-2`): the transfers this requester may read that the coordinate\nfunds.",
+        "operationId": "by_coordinate",
+        "parameters": [
+          {
+            "name": "network",
+            "in": "path",
+            "description": "The network.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_number",
+            "in": "path",
+            "description": "The block's number.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "block_hash",
+            "in": "path",
+            "description": "The block's hash, `0x`-prefixed hexadecimal.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "position_kind",
+            "in": "path",
+            "description": "`transaction` or `log`.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PositionKind"
+            }
+          },
+          {
+            "name": "position_index",
+            "in": "path",
+            "description": "The index in the block.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/transfers/by-request/{reference}": {
+      "get": {
+        "tags": [
+          "queries"
+        ],
+        "summary": "Status by request reference (`REQ-ST-2`).",
+        "operationId": "by_request",
+        "parameters": [
+          {
+            "name": "reference",
+            "in": "path",
+            "description": "The request reference",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/webhooks/conditions": {
+      "put": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Registers the URL conditions are notified to (`REQ-IC-5`). It replaces any earlier one.",
+        "operationId": "register_conditions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackRegistration"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConditionCallback"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "webhooks-disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/webhooks/deliveries": {
+      "get": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "This requester's deliveries, by id: what is pending, delivered or dead-lettered.",
+        "operationId": "deliveries",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "path",
+            "description": "Only deliveries in this state: `pending`, `delivered` or `dead`.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "path",
+            "description": "Deliveries with an id after this one.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "description": "The most deliveries returned, at most 500.",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "webhooks-disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/webhooks/secret": {
+      "post": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Makes a new signing secret and returns it, once (`REQ-ST-5`). Every later delivery, retries\nincluded, is signed with it.",
+        "operationId": "rotate_secret",
+        "responses": {
+          "201": {
+            "description": "The new secret; shown once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookSecret"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "webhooks-disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/webhooks/transfers/by-bridge/{reference}": {
+      "put": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Sets the callback URL of a transfer, by bridge reference (`REQ-ST-5`, `REQ-ID-4`).",
+        "operationId": "register_by_bridge",
+        "parameters": [
+          {
+            "name": "reference",
+            "in": "path",
+            "description": "The bridge reference",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackRegistration"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The same URL again, or a new URL that replaced the earlier one (each change is recorded)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferCallback"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferCallback"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No transfer this requester's request made or reached has that reference: knowing a reference is not enough (REQ-ID-4)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "webhooks-disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/webhooks/transfers/by-request/{reference}": {
+      "put": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Sets the callback URL of a transfer, by request reference (`REQ-ST-5`, `REQ-ID-4`).",
+        "operationId": "register_by_request",
+        "parameters": [
+          {
+            "name": "reference",
+            "in": "path",
+            "description": "The requester's request reference",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackRegistration"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The same URL again, or a new URL that replaced the earlier one (each change is recorded)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferCallback"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferCallback"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No transfer of this requester has that reference (a request refused before any transfer was made has nothing to notify)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "webhooks-disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v0/withdrawals/extras": {
+      "post": {
+        "tags": [
+          "requests"
+        ],
+        "summary": "Add a withdrawal's extras by its redemption's reference (`REQ-RQ-4`, `REQ-RQ-9`).",
+        "operationId": "withdrawal_extras",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WithdrawalExtrasRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A repeat: the original's status (REQ-ID-1)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferStatus"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Taken in now: the withdrawal's status, or `Refused` with its named error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferStatus"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "taken-in: taken in, but the status could not be read back; read it by request reference",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CallbackRegistration": {
+        "type": "object",
+        "description": "A callback URL to register.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "An absolute `https` URL, without user information or fragment, at most 2048 bytes, whose\nhost is or resolves only to global addresses: a loopback, private, link-local or other\ninternal address is refused here when written as one, and when the host resolves to one\nat send time. It is\nsealed at rest and never logged, so it may carry the requester's own access token."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CapacityOut": {
+        "type": "object",
+        "description": "A route's capacity: transfers it carries at once, not yet terminal.",
+        "required": [
+          "declared",
+          "in_flight",
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "integer",
+            "format": "int64",
+            "description": "What is left: the current capacity."
+          },
+          "declared": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The declared capacity."
+          },
+          "in_flight": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Transfers in flight now."
+          }
+        }
+      },
+      "ConditionCallback": {
+        "type": "object",
+        "description": "The condition URL, as registered.",
+        "required": [
+          "registered_at"
+        ],
+        "properties": {
+          "registered_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this URL was registered; it replaces any earlier one."
+          }
+        }
+      },
+      "CoordinateBody": {
+        "type": "object",
+        "description": "A coordinate: network, block number, block hash and position (SPEC §2). A pointer bezent\nverifies, never a claim (`REQ-RQ-7`).",
+        "required": [
+          "network",
+          "block_number",
+          "block_hash",
+          "position"
+        ],
+        "properties": {
+          "block_hash": {
+            "type": "string",
+            "description": "The block's hash, `0x`-prefixed hexadecimal."
+          },
+          "block_number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The block's number.",
+            "minimum": 0
+          },
+          "network": {
+            "type": "string",
+            "description": "The network, as bezent names it."
+          },
+          "position": {
+            "$ref": "#/components/schemas/PositionBody",
+            "description": "The movement's position in the block."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CoordinateOut": {
+        "type": "object",
+        "description": "A coordinate in an answer.",
+        "required": [
+          "network",
+          "block_number",
+          "block_hash",
+          "position"
+        ],
+        "properties": {
+          "block_hash": {
+            "type": "string",
+            "description": "The block's hash."
+          },
+          "block_number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The block's number."
+          },
+          "network": {
+            "type": "string",
+            "description": "The network."
+          },
+          "position": {
+            "$ref": "#/components/schemas/PositionBody",
+            "description": "The movement's position in the block."
+          }
+        }
+      },
+      "DeliveryList": {
+        "type": "object",
+        "description": "A page of deliveries.",
+        "required": [
+          "deliveries"
+        ],
+        "properties": {
+          "deliveries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeliveryOut"
+            },
+            "description": "The deliveries, by id."
+          },
+          "next_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The `after` of the next page, when this one was full."
+          }
+        }
+      },
+      "DeliveryOut": {
+        "type": "object",
+        "description": "One delivery of a notification.",
+        "required": [
+          "id",
+          "seq",
+          "dedupe_key",
+          "target",
+          "state",
+          "attempts",
+          "created_at",
+          "next_attempt_at"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Attempts made."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was appended."
+          },
+          "dedupe_key": {
+            "type": "string",
+            "description": "Its stable de-duplication key (`REQ-ST-5`)."
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it ended delivered or dead."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The delivery's id; also the `after` of the next page."
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last attempt failed, if it did, as a coarse class only: `no-secret`,\n`url-unopenable`, `url-not-allowed`, `address-not-allowed` (also a host that does not resolve), `timeout`,\n`connect-failed`, `http-status` (with `last_status`), `request-failed` or\n`notice-refused`. Never an address, an error text or a response body."
+          },
+          "last_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The HTTP status of the last attempt, if one answered."
+          },
+          "next_attempt_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the next attempt is due, while pending."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The log position it points at."
+          },
+          "state": {
+            "type": "string",
+            "description": "`pending`, `delivered` or `dead` (dead-lettered after the configured attempts)."
+          },
+          "target": {
+            "type": "string",
+            "description": "`transfer` (a transfer's callback URL) or `condition` (the condition URL)."
+          }
+        }
+      },
+      "DepositRequest": {
+        "type": "object",
+        "description": "Request a deposit (`REQ-RQ-3`): bind the arrival at a coordinate, and name where it is minted\nand where it is refunded.",
+        "required": [
+          "request_reference",
+          "coordinate",
+          "destination",
+          "refund_destination"
+        ],
+        "properties": {
+          "coordinate": {
+            "$ref": "#/components/schemas/CoordinateBody",
+            "description": "The coordinate of the arrival at a reserve address: an observation its endpoint recorded\nas kind `arrival`, or `conversion_output` (the output of a conversion into the reserve,\n`REQ-CV-2`), final and not yet consumed; never a convertible arrival (`REQ-CV-1`), a payout\nleg or any other kind (`REQ-RQ-3`, `REQ-IN-3`, `INV-2`). Otherwise `ERR-SourceNotFound`,\nrecorded. An arrival of one of those kinds that is observed but not final yet is answered\n`not-final` (HTTP 503) and nothing is recorded: the same request, sent again once it is\nfinal, is taken in."
+          },
+          "destination": {
+            "$ref": "#/components/schemas/DestinationBody",
+            "description": "Where the bridged asset is minted: an address on the issuing network (`REQ-IN-5`)."
+          },
+          "refund_destination": {
+            "$ref": "#/components/schemas/DestinationBody",
+            "description": "Where the value is refunded if the mint is proven never to execute: an address on the\narrival's network (`REQ-RF-2`, `REQ-OT-4`)."
+          },
+          "request_reference": {
+            "type": "string",
+            "description": "The requester's reference, unique for this requester forever (`REQ-RQ-1`, `REQ-ID-1`)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "DestinationBody": {
+        "type": "object",
+        "description": "A destination: a network and an address on it.",
+        "required": [
+          "network",
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The address, in the network's own format."
+          },
+          "network": {
+            "type": "string",
+            "description": "The network, as bezent names it."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "The body of every answer that is not a status.",
+        "required": [
+          "error",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "A human-readable explanation. Never carries a secret."
+          },
+          "error": {
+            "type": "string",
+            "description": "The named error of SPEC §10 (`ERR-*`), or `not-final`, `not-found`, `internal`,\n`outcome-unknown`, `taken-in` or `webhooks-disabled`."
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "description": "The health answer.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "`ok` when the store answers."
+          }
+        }
+      },
+      "LogEntry": {
+        "type": "object",
+        "description": "One entry of the sequenced log. Its position is its stable key (`REQ-ST-4`, `REQ-ST-5`).",
+        "required": [
+          "seq",
+          "kind",
+          "payload",
+          "appended_at"
+        ],
+        "properties": {
+          "appended_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was appended."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`transfer`, `transition` or `refusal`."
+          },
+          "payload": {
+            "type": "object",
+            "description": "What changed."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The position, gapless across the log."
+          }
+        }
+      },
+      "LogPage": {
+        "type": "object",
+        "description": "A page of the sequenced log: this requester's entries in positions (`after`, `next_after`].",
+        "required": [
+          "entries",
+          "next_after",
+          "head"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogEntry"
+            },
+            "description": "The entries, in order."
+          },
+          "head": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The log's last position now."
+          },
+          "next_after": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The position to read after next time."
+          }
+        }
+      },
+      "Milestone": {
+        "type": "object",
+        "description": "A milestone: the coordinate a state change rests on, and when bezent saw it (`REQ-TR-2`,\n`REQ-TR-4`, `NFR-3`).",
+        "required": [
+          "network",
+          "block_number",
+          "block_hash",
+          "block_time",
+          "seen_at"
+        ],
+        "properties": {
+          "block_hash": {
+            "type": "string",
+            "description": "The block's hash."
+          },
+          "block_number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The block's number."
+          },
+          "block_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The block's time."
+          },
+          "network": {
+            "type": "string",
+            "description": "The network."
+          },
+          "seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When bezent saw it."
+          }
+        }
+      },
+      "PositionBody": {
+        "type": "object",
+        "description": "A movement's position in its block.",
+        "required": [
+          "kind",
+          "index"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Its index in the block.",
+            "minimum": 0
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PositionKind",
+            "description": "Transaction or log."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PositionKind": {
+        "type": "string",
+        "description": "Where in a block a movement is.",
+        "enum": [
+          "transaction",
+          "log"
+        ]
+      },
+      "RefundRequest": {
+        "type": "object",
+        "description": "Request the refund of an unassociated arrival (`REQ-RQ-6`). It waits in `Received` for the\noperator's second approver (`REQ-IN-6`).",
+        "required": [
+          "request_reference",
+          "coordinate",
+          "destination"
+        ],
+        "properties": {
+          "coordinate": {
+            "$ref": "#/components/schemas/CoordinateBody",
+            "description": "The coordinate of the unassociated arrival: an observation at a reserve its endpoint\nrecorded as kind `arrival` (whatever its amount against the route's bounds, whoever sent\nit), `other_arrival` (a token not admitted), `convertible_arrival` or `conversion_output`,\nfinal and not yet consumed (`REQ-RQ-6`, `REQ-IN-6`, `INV-2`). Otherwise\n`ERR-SourceNotFound`, recorded. One observed but not final yet is answered `not-final`\n(HTTP 503), nothing recorded: send the same request again once it is final."
+          },
+          "destination": {
+            "$ref": "#/components/schemas/DestinationBody",
+            "description": "Where the value is returned: an address on the arrival's network (`REQ-OT-4`)."
+          },
+          "request_reference": {
+            "type": "string",
+            "description": "The requester's reference, unique for this requester forever."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveEquation": {
+        "type": "object",
+        "description": "The reserve equation's latest evaluation, as stored (`REQ-RQ-8`). None is stored until the\nreserve check exists (`F-004`).",
+        "properties": {
+          "latest": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The latest evaluation, or null."
+          }
+        }
+      },
+      "ReserveOut": {
+        "type": "object",
+        "description": "Reserve per (asset, network), as the reserve book holds it (`REQ-RQ-8`).",
+        "required": [
+          "asset",
+          "network",
+          "address",
+          "balance"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The reserve address (`REQ-BK-5`)."
+          },
+          "asset": {
+            "type": "string",
+            "description": "The bridged asset."
+          },
+          "balance": {
+            "type": "string",
+            "description": "The reserve book's balance, in the asset's book unit."
+          },
+          "network": {
+            "type": "string",
+            "description": "The origin network."
+          }
+        }
+      },
+      "Reserves": {
+        "type": "object",
+        "description": "Reserves.",
+        "required": [
+          "reserves"
+        ],
+        "properties": {
+          "reserves": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReserveOut"
+            },
+            "description": "One per declared reserve."
+          }
+        }
+      },
+      "RouteOut": {
+        "type": "object",
+        "description": "One route of the route table (`REQ-AS-5`, `REQ-LM-1`).",
+        "required": [
+          "asset",
+          "network",
+          "direction",
+          "minimum",
+          "maximum",
+          "window",
+          "capacity",
+          "cutoffs",
+          "venue_addresses",
+          "completion_budget_seconds",
+          "paused"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "The bridged asset."
+          },
+          "capacity": {
+            "$ref": "#/components/schemas/CapacityOut",
+            "description": "The capacity."
+          },
+          "completion_budget_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The completion budget, in seconds (`NFR-2`)."
+          },
+          "cutoffs": {
+            "type": "object",
+            "description": "The cut-offs, as declared."
+          },
+          "direction": {
+            "type": "string",
+            "description": "`deposit` or `withdrawal`."
+          },
+          "maximum": {
+            "type": "string",
+            "description": "The maximum per transfer."
+          },
+          "minimum": {
+            "type": "string",
+            "description": "The minimum per transfer, in the origin token's minor units."
+          },
+          "network": {
+            "type": "string",
+            "description": "The origin network."
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "Whether the route, its asset, its direction or the bridge is paused (`REQ-GV-1`)."
+          },
+          "venue_addresses": {
+            "type": "object",
+            "description": "The venue addresses, for venue routes."
+          },
+          "venue_minimum": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Any minimum a venue imposes."
+          },
+          "window": {
+            "$ref": "#/components/schemas/WindowOut",
+            "description": "The window limit."
+          }
+        }
+      },
+      "RouteTable": {
+        "type": "object",
+        "description": "The route table.",
+        "required": [
+          "routes"
+        ],
+        "properties": {
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RouteOut"
+            },
+            "description": "Every declared route; a route not here does not exist (`REQ-AS-5`)."
+          }
+        }
+      },
+      "TransferCallback": {
+        "type": "object",
+        "description": "A transfer's callback, as registered.",
+        "required": [
+          "bridge_reference",
+          "request_reference",
+          "registered_at"
+        ],
+        "properties": {
+          "bridge_reference": {
+            "type": "string",
+            "description": "The transfer's bridge reference."
+          },
+          "registered_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the URL now in use was registered."
+          },
+          "request_reference": {
+            "type": "string",
+            "description": "The requester's own reference for it."
+          }
+        }
+      },
+      "TransferList": {
+        "type": "object",
+        "description": "The transfers bound to a coordinate that this requester may read.",
+        "required": [
+          "transfers"
+        ],
+        "properties": {
+          "transfers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransferStatus"
+            },
+            "description": "The transfers."
+          }
+        }
+      },
+      "TransferStatus": {
+        "type": "object",
+        "description": "Where a transfer stands (`REQ-RQ-1`, `REQ-RQ-8`, `REQ-ST-2`). Observations, not verdicts\n(`REQ-ST-3`): included, final and completed are separate milestones (`REQ-TR-4`).",
+        "required": [
+          "request_reference",
+          "bridge_reference",
+          "kind",
+          "state"
+        ],
+        "properties": {
+          "amount": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The amount, as a decimal string (`INV-11`): in the asset's book unit, or in the origin\ntoken's minor units when the transfer names a token instead of an asset."
+          },
+          "asset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bridged asset."
+          },
+          "bridge_reference": {
+            "type": "string",
+            "description": "bezent's reference (`REQ-ID-3`)."
+          },
+          "condition": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The named condition held, if any (§10)."
+          },
+          "destination": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DestinationBody",
+                "description": "Where it is delivered."
+              }
+            ]
+          },
+          "destination_final": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Milestone",
+                "description": "The destination leg is final."
+              }
+            ]
+          },
+          "destination_included": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Milestone",
+                "description": "The destination leg is included."
+              }
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the named error means for this request, when it is worth saying\n(`ERR-InvalidDestination`: a destination that is malformed, or one the bridge does not\ndeliver to). Derived from `error`, so a repeat of the request answers alike."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The named error of a refusal (§10)."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Its expiry."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`deposit`, `withdrawal` or `refund`."
+          },
+          "refund_destination": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DestinationBody",
+                "description": "Where it is refunded."
+              }
+            ]
+          },
+          "request_reference": {
+            "type": "string",
+            "description": "The request reference the transfer carries."
+          },
+          "source": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CoordinateOut",
+                "description": "The coordinate of the leg that funds it."
+              }
+            ]
+          },
+          "source_final": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Milestone",
+                "description": "The source leg is final."
+              }
+            ]
+          },
+          "state": {
+            "type": "string",
+            "description": "The state (§5.4)."
+          },
+          "token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The origin token, only on the refund of an unassociated arrival whose token is not\nadmitted: such a refund names no bridged asset (`REQ-RQ-6`, `REQ-IN-6`)."
+          }
+        }
+      },
+      "WebhookSecret": {
+        "type": "object",
+        "description": "A new signing secret. It is shown once; bezent keeps it sealed.",
+        "required": [
+          "secret",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "From when deliveries are signed with it, retries included; the secret before it is no\nlonger used. Accept either until your receiver holds this one: a delivery rejected\nmeanwhile is retried, and counts toward the dead-letter bound."
+          },
+          "secret": {
+            "type": "string",
+            "description": "32 random bytes, hexadecimal. Verify a delivery by first rejecting a `bezent-timestamp`\noutside a bound of your clock (for example 5 minutes either way: replay protection), then\ncomputing HMAC-SHA256 under these bytes of `<bezent-timestamp header>.<raw body>` and\ncomparing `v1=<hex>` with the `bezent-signature` header in constant time, then\nde-duplicating by `bezent-dedupe-key` (kept for longer than the bound)."
+          }
+        }
+      },
+      "WindowOut": {
+        "type": "object",
+        "description": "A route's window limit and how much of it is used (`REQ-LM-1`).",
+        "required": [
+          "limit",
+          "seconds",
+          "used",
+          "remaining"
+        ],
+        "properties": {
+          "limit": {
+            "type": "string",
+            "description": "The most the route carries in one window, in the origin token's minor units."
+          },
+          "remaining": {
+            "type": "string",
+            "description": "What is left of it."
+          },
+          "seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The window's length, in seconds."
+          },
+          "used": {
+            "type": "string",
+            "description": "What the trailing window has used."
+          }
+        }
+      },
+      "WithdrawalExtrasRequest": {
+        "type": "object",
+        "description": "Add, by a redemption's on-chain reference, what a withdrawal may carry beyond the redemption\n(`REQ-RQ-4`): an expiry, and for an attested backend the payout instructions relayed for the\nredemption's commitment (`REQ-RQ-9`). At least one is given. A withdrawal's refund always goes\nto its redeemer (`REQ-RF-4`, amendment 0011), so no refund destination is taken.",
+        "required": [
+          "request_reference",
+          "redemption_reference"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The withdrawal's expiry."
+          },
+          "instructions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The payout instructions, `0x`-prefixed hexadecimal of their encoded bytes, whose BLAKE2b-256\nmust equal the redemption's commitment (`REQ-RQ-9`)."
+          },
+          "redemption_reference": {
+            "type": "string",
+            "description": "The redemption's on-chain reference, `0x`-prefixed hexadecimal (`REQ-OT-2`)."
+          },
+          "request_reference": {
+            "type": "string",
+            "description": "The requester's reference, unique for this requester forever."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A requester's credential, `<credential id>.<secret>` (REQ-PN-1)"
+      }
+    }
+  }
+}

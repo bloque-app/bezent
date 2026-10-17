@@ -1,0 +1,354 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+name: E2E (zombienet)
+
+# F-013 (T-013-01, T-013-02; plan DEC-19, DEC-7): bezent's issuing-network test bed. A relay chain
+# and Kreivo 0.17.1 from release artifacts, with the six assets in genesis; the dedicated community
+# registered as aledgent registers its own; then a check that reads each asset's metadata and roles
+# from the running chain.
+#
+# Forked from aledgent's `.github/workflows/e2e-zombienet.yml`. What carries over, and why:
+#
+# - A self-hosted x86-64 pool, which GitHub-hosted runners cannot replace (a relay chain and Kreivo
+#   need more memory than they have). The jobs are therefore opt-in: they run only where the repository
+#   variable ZOMBIENET_RUNS_ON names the pool's runner label, and never for pull requests from forks
+#   (a public repository must not give them a self-hosted runner). Never plain `self-hosted`: that label
+#   also matches other runners. Never run zombienet on a laptop.
+# - The network comes from release artifacts only (e2e/scripts/prepare.sh): the Kreivo runtime wasm
+#   and polkadot-sdk binaries. zombienet builds Kreivo's genesis from the wasm itself.
+# - The fleet has no Rust toolchain: `spawn_network` builds in a `rust:1-bookworm` container on the
+#   same runner, in a job-local directory deleted at the end.
+# - Bring-up is its own step; per-runner zombienet scratch (TMPDIR under RUNNER_TEMP); the network
+#   is stopped and removed whatever the outcome.
+#
+# What differs: Kreivo 0.17.1 (aledgent pins 0.17.0), one Kreivo node, bezent's assets, and it runs
+# on pull requests that touch the bed (the check is short: the spawn dominates).
+#
+# T-013-05 (plan DEC-6, REQ-HN-10): the bezent contract (contracts/bezent), built with
+# `cargo contract build --release` on a hosted runner (the fleet has no Rust toolchain and the build
+# needs none of the network), is deployed on the bed through ContractsStore by the dedicated
+# community, as on mainnet, then driven by an end-to-end check named after the ids it proves.
+
+on:
+  pull_request:
+    paths: ["e2e/network/**", "e2e/kreivo/**", "e2e/scripts/**", "contracts/bezent/**", ".github/workflows/e2e-zombienet.yml"]
+  push:
+    branches: [main]
+    paths: ["e2e/network/**", "e2e/kreivo/**", "e2e/scripts/**", "contracts/bezent/**", ".github/workflows/e2e-zombienet.yml"]
+  workflow_dispatch:
+    inputs:
+      kreivo_release:
+        description: "Kreivo release tag of virto-network/kreivo (0.17.1 = spec 134, kreivo#512)"
+        type: string
+        default: "0.17.1"
+      psdk_release:
+        description: "polkadot-sdk release for polkadot and polkadot-parachain (Kreivo 0.17 needs stable2606)"
+        type: string
+        default: polkadot-stable2606-2
+
+permissions:
+  contents: read
+
+# The pool runs one job per runner, each in its own VM: runs on different refs share nothing.
+concurrency:
+  group: e2e-zombienet-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # As contracts.yml builds it (toolchain from contracts/bezent/rust-toolchain.toml, cargo-contract
+  # pinned), so the bed runs the artefact CI builds.
+  contract:
+    name: bezent contract (cargo contract build)
+    if: ${{ vars.ZOMBIENET_RUNS_ON != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      sha256: ${{ steps.sum.outputs.sha256 }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_CONTRACT_VERSION: 5.0.3
+    defaults:
+      run:
+        working-directory: contracts/bezent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91
+        with:
+          components: rust-src
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts/bezent
+          key: e2e-build
+          cache-bin: true
+      - name: Install cargo-contract ${{ env.CARGO_CONTRACT_VERSION }}
+        run: |
+          if ! cargo contract --version 2>/dev/null | grep -q "$CARGO_CONTRACT_VERSION"; then
+            cargo install cargo-contract --version "$CARGO_CONTRACT_VERSION" --locked --force
+          fi
+          cargo contract --version
+      - run: cargo contract build --release
+      # One checksum over both files, in a fixed order; the bed verifies it before deploying.
+      - name: Checksum the artefact
+        id: sum
+        run: |
+          cd target/ink
+          sum=$(sha256sum bezent_contract.wasm bezent_contract.json | sha256sum | cut -d' ' -f1)
+          echo "sha256=$sum" >> "$GITHUB_OUTPUT"
+          echo "contract artefact sha256: $sum"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bezent-contract-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            contracts/bezent/target/ink/bezent_contract.wasm
+            contracts/bezent/target/ink/bezent_contract.json
+          if-no-files-found: error
+          retention-days: 7
+
+  bed:
+    name: Kreivo test bed
+    needs: contract
+    if: ${{ vars.ZOMBIENET_RUNS_ON != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ vars.ZOMBIENET_RUNS_ON }}
+    timeout-minutes: 90
+    env:
+      IMAGE: rust:1-bookworm
+      KREIVO_RELEASE: ${{ inputs.kreivo_release || '0.17.1' }}
+      PSDK_RELEASE: ${{ inputs.psdk_release || 'polkadot-stable2606-2' }}
+      # Kreivo 0.17.1's spec version; the check fails on any other runtime.
+      KREIVO_SPEC_VERSION: "134"
+    steps:
+      - name: Host facts
+        run: |
+          printf 'METER host cores=%s ram_mb=%s disk_free_gb=%s load=%s\n' \
+            "$(nproc)" "$(free -m | awk '/^Mem:/{print $2}')" \
+            "$(df -BG --output=avail "$RUNNER_TEMP" | tail -1 | tr -dc '0-9')" \
+            "$(awk '{print $1}' /proc/loadavg)"
+          docker --version
+
+      - uses: actions/checkout@v4
+
+      - name: Job-local work directory
+        run: |
+          set -eu
+          WORK=$RUNNER_TEMP/e2e-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT
+          {
+            echo "WORK=$WORK"
+            echo "E2E_OUT=$WORK/out"
+            echo "ARTIFACTS=$WORK/artifacts"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$WORK/src" "$WORK/out" "$WORK/dist" "$WORK/artifacts" "$WORK/target" \
+                   "$WORK/cargo-registry" "$WORK/cargo-git"
+          # A copy of this commit: the container never writes into the runner's checkout.
+          git archive HEAD | tar -x -C "$WORK/src"
+          if docker image inspect "$IMAGE" >/dev/null 2>&1; then echo "PULLED_IMAGE=no" >> "$GITHUB_ENV"; else echo "PULLED_IMAGE=yes" >> "$GITHUB_ENV"; fi
+          for i in 1 2 3 4 5; do docker pull -q "$IMAGE" && break; sleep $((i * 15)); done
+
+      # Restored and saved explicitly: the clean-up at the end deletes the directory before a
+      # post-job save would run.
+      - name: Restore build caches
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.WORK }}/cargo-registry
+            ${{ env.WORK }}/cargo-git
+            ${{ env.WORK }}/target
+          key: bezent-e2e-network-v1-${{ hashFiles('e2e/network/Cargo.lock') }}
+          restore-keys: bezent-e2e-network-v1-
+
+      - name: Build spawn_network (container)
+        timeout-minutes: 45
+        run: |
+          docker run --rm --init --name "e2e-build-$GITHUB_RUN_ID" \
+            -v "$WORK":/w \
+            -v "$WORK/cargo-registry":/usr/local/cargo/registry \
+            -v "$WORK/cargo-git":/usr/local/cargo/git \
+            -w /w "$IMAGE" bash /w/src/e2e/scripts/build.sh
+          # The container wrote as root; the runner reads the outputs.
+          docker run --rm -v "$WORK":/w "$IMAGE" chmod -R a+rX /w/dist /w/target /w/cargo-registry /w/cargo-git
+          ls -la "$WORK/dist"
+
+      - name: Save build caches
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.WORK }}/cargo-registry
+            ${{ env.WORK }}/cargo-git
+            ${{ env.WORK }}/target
+          key: bezent-e2e-network-v1-${{ hashFiles('e2e/network/Cargo.lock') }}
+
+      - name: Fetch release artifacts
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUT: ${{ env.WORK }}/artifacts
+        run: |
+          ./e2e/scripts/prepare.sh
+          cat "$ARTIFACTS/artifacts.env" >> "$GITHUB_ENV"
+          {
+            echo "### Runtime under test"
+            echo '```'
+            cat "$ARTIFACTS/artifacts.env"
+            "$ARTIFACTS/bin/polkadot-parachain" --version
+            "$ARTIFACTS/bin/polkadot" --version
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install the checks' dependencies (polkadot-api)
+        working-directory: e2e/kreivo
+        run: npm ci --no-audit --no-fund && npm run check
+
+      # zombienet writes its base directory under $TMPDIR and hands it to each node as --base-path,
+      # so a per-runner TMPDIR makes the patterns below match this job's nodes only.
+      - name: Isolate this runner's zombienet scratch
+        run: |
+          ZN="$RUNNER_TEMP/zn"
+          mkdir -p "$ZN"
+          echo "TMPDIR=$ZN" >> "$GITHUB_ENV"
+          df -h "$ZN" | tail -1
+
+      - name: Reclaim the host before spawning a network
+        run: |
+          echo "stale nodes from this runner: $(pgrep -cf "$TMPDIR/zombie-" 2>/dev/null || echo 0)"
+          pkill -f "$TMPDIR/zombie-" || true
+          find "$TMPDIR" /tmp -maxdepth 1 -name 'zombie-*' -type d -mmin +180 -exec rm -rf {} + 2>/dev/null || true
+          df -h "$TMPDIR" | tail -1
+
+      - name: "T-013-01: spawn the network"
+        timeout-minutes: 25
+        env:
+          ZOMBIENET_KREIVO_WASM: ${{ env.WORK }}/artifacts/kreivo_runtime.compact.compressed.wasm
+          ZOMBIENET_POLKADOT_BIN: ${{ env.WORK }}/artifacts/bin/polkadot
+          ZOMBIENET_POLKADOT_PARACHAIN_BIN: ${{ env.WORK }}/artifacts/bin/polkadot-parachain
+        run: |
+          set -euo pipefail
+          # polkadot finds its workers on PATH.
+          export PATH="$ARTIFACTS/bin:$PATH"
+          ENDPOINTS="$WORK/out/endpoints.env"
+          rm -f "$ENDPOINTS"
+          ZOMBIENET_ENV_FILE="$ENDPOINTS" nohup "$WORK/dist/spawn_network" > "$WORK/out/network.log" 2>&1 &
+          echo $! > "$WORK/spawn_network.pid"
+          for _ in $(seq 1 280); do
+            [ -s "$ENDPOINTS" ] && break
+            if ! kill -0 "$(cat "$WORK/spawn_network.pid")" 2>/dev/null; then
+              echo "::error::spawn_network exited before the network came up"
+              tail -100 "$WORK/out/network.log"
+              exit 1
+            fi
+            sleep 5
+          done
+          [ -s "$ENDPOINTS" ] || { echo "::error::the network did not come up in time"; tail -100 "$WORK/out/network.log"; exit 1; }
+          # shellcheck disable=SC1090
+          . "$ENDPOINTS"
+          for uri in "$KREIVO_WS" "$RELAY_WS"; do
+            curl -s -m 5 -H 'Content-Type: application/json' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"system_chain","params":[]}' \
+              "http://127.0.0.1:${uri##*:}" | grep -q result \
+              || { echo "::error::$uri does not answer"; exit 1; }
+          done
+          cat "$ENDPOINTS" >> "$GITHUB_ENV"
+          # The genesis hash of the chain this harness just produced: the checks refuse to use dev
+          # keys on any chain that does not have it (e2e/kreivo/lib.mjs, assertTestBed).
+          GENESIS=$(curl -s -m 5 -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[0]}' \
+            "http://127.0.0.1:${KREIVO_WS##*:}" | sed -n 's/.*"result":"\(0x[0-9a-f]\{64\}\)".*/\1/p')
+          [ -n "$GENESIS" ] || { echo "::error::could not read Kreivo's genesis hash"; exit 1; }
+          echo "E2E_GENESIS_HASH=$GENESIS" >> "$GITHUB_ENV"
+          echo "Kreivo genesis hash: $GENESIS"
+          grep METER "$WORK/out/network.log" || true
+
+      - name: "T-013-02: register the dedicated community"
+        timeout-minutes: 10
+        working-directory: e2e/kreivo
+        run: node setup.mjs
+
+      - name: "T-013-02: read the assets' metadata and roles from the chain"
+        timeout-minutes: 10
+        working-directory: e2e/kreivo
+        run: node check.mjs --summary "$E2E_OUT/assets.md"
+
+      - name: "T-013-05: fetch the contract built by this run"
+        uses: actions/download-artifact@v4
+        with:
+          name: bezent-contract-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.WORK }}/contract
+
+      - name: "T-013-05: verify the contract is the one the build job checksummed"
+        env:
+          WANT: ${{ needs.contract.outputs.sha256 }}
+        run: |
+          set -eu
+          [ -n "$WANT" ] || { echo "::error::the build job published no checksum"; exit 1; }
+          cd "$WORK/contract"
+          got=$(sha256sum bezent_contract.wasm bezent_contract.json | sha256sum | cut -d' ' -f1)
+          [ "$got" = "$WANT" ] || { echo "::error::contract artefact sha256 $got, build job said $WANT"; exit 1; }
+          echo "contract artefact sha256 $got matches the build job's"
+
+      - name: "T-013-05: deploy the contract through ContractsStore, as the community"
+        timeout-minutes: 15
+        working-directory: e2e/kreivo
+        env:
+          CONTRACT_DIR: ${{ env.WORK }}/contract
+          CONTRACT_STATE: ${{ env.WORK }}/out/contract-state.json
+        run: node deploy.mjs --summary "$E2E_OUT/contract.md"
+
+      - name: "T-013-05: REQ-HN-7, REQ-HN-8, INV-3, INV-8, AC-D2.2, AC-B5.1, AC-B5.2, AC-I2.1, AC-I2.2 on the chain"
+        timeout-minutes: 30
+        working-directory: e2e/kreivo
+        env:
+          CONTRACT_DIR: ${{ env.WORK }}/contract
+          CONTRACT_STATE: ${{ env.WORK }}/out/contract-state.json
+        run: node req-hn-7.req-hn-8.inv-3.inv-8.ac-d2.2.ac-b5.1.ac-b5.2.ac-i2.1.ac-i2.2.mjs --summary "$E2E_OUT/contract-e2e.md"
+
+      - name: Job summary
+        if: always()
+        run: |
+          for f in assets contract contract-e2e; do
+            cat "$E2E_OUT/$f.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          done
+
+      - name: Collect node logs on failure
+        if: failure()
+        run: |
+          shopt -s nullglob
+          mkdir -p "$E2E_OUT/logs"
+          cp "$WORK/out/network.log" "$E2E_OUT/logs/" 2>/dev/null || true
+          for f in "$TMPDIR"/zombie-*/*/*.log "$TMPDIR"/zombie-*/*.log; do
+            cp "$f" "$E2E_OUT/logs/$(basename "$(dirname "$f")")-$(basename "$f")" 2>/dev/null || true
+          done
+          for f in "$E2E_OUT"/logs/*.log; do
+            echo "::group::$f"; tail -n 150 "$f"; echo "::endgroup::"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-zombienet-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.E2E_OUT }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Stop the network and clean up
+        if: always()
+        run: |
+          if [ -f "${WORK:-}/spawn_network.pid" ]; then
+            kill -TERM "$(cat "$WORK/spawn_network.pid")" 2>/dev/null || true
+            sleep 5
+          fi
+          pkill -f "${WORK:-/nonexistent}/dist/spawn_network" || true
+          [ -n "${TMPDIR:-}" ] && pkill -f "$TMPDIR/zombie-" || true
+          sleep 2
+          [ -n "${TMPDIR:-}" ] && find "$TMPDIR" -maxdepth 1 -name 'zombie-*' -type d -exec rm -rf {} + 2>/dev/null || true
+          rm -rf e2e/kreivo/node_modules
+          if [ -n "${WORK:-}" ] && [ -d "$WORK" ]; then
+            docker run --rm -v "$WORK":/w "$IMAGE" find /w -mindepth 1 -delete || true
+            rmdir "$WORK" || rm -rf "$WORK" || true
+          fi
+          if [ "${PULLED_IMAGE:-no}" = yes ]; then docker image rm "$IMAGE" >/dev/null || true; fi
+          df -h "$RUNNER_TEMP" | tail -1

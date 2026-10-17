@@ -1,0 +1,26 @@
+{
+  "comment": "TEST KEYS ONLY, published in this repository: anyone can sign with them. Never fund them, and never give them authority over anything outside a local or test network (REQ-KY-6). Each seed is the SHA-256 of 'bezent published test fixture <id>'.",
+  "environment": "test",
+  "keys": [
+    {
+      "id": "kreivo-mint",
+      "scheme": "sr25519",
+      "seed": "0xa2f4eed605d1f7361b0da5277987d22ef0d5c4dce9205bd0b73a9389d896e8f2"
+    },
+    {
+      "id": "kreivo-destroy",
+      "scheme": "ecdsa",
+      "seed": "0x1326dbc3e5b45963b53753278116acec70cf9ddbb6d93d1b82523b67b2c7e763"
+    },
+    {
+      "id": "polygon-payout",
+      "scheme": "secp256k1-evm",
+      "seed": "0x70801b3e9ccd100e635e4b9f22aed955de33cbb69a1cd3d76f3410052b8f878f"
+    },
+    {
+      "id": "statement",
+      "scheme": "ed25519",
+      "seed": "0x8c740feadcb84ac72f5899d4d1b981d3112e6313cbd271b990f87f3c695cc201"
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+../../migrations/0019_endpoint_role.up.sql

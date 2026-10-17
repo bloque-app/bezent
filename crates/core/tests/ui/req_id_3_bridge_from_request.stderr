@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `BridgeReference: From<RequestReference>` is not satisfied
+ --> tests/ui/req_id_3_bridge_from_request.rs:7:44
+  |
+7 |     let _bridge: BridgeReference = request.into();
+  |                                            ^^^^ the trait `From<RequestReference>` is not implemented for `BridgeReference`
+  |
+  = note: required for `RequestReference` to implement `Into<BridgeReference>`

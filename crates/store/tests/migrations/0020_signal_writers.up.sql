@@ -1,0 +1,1 @@
+../../migrations/0020_signal_writers.up.sql

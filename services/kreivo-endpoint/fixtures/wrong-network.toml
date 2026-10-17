@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# AC-I4.1: Kreivo's pinned chain spec, declared as another network. The endpoint must refuse to
+# start (exit status 1) before it reads, builds or submits anything.
+network = "kreivo"
+genesis = "0x0101010101010101010101010101010101010101010101010101010101010101"
+chain_spec = "../chain-specs/kreivo.json"
+contract = "0x0000000000000000000000000000000000000000000000000000000000000001"
+start_block = 0
+database_url_file = "/run/secrets/bezent-kreivo-endpoint-db"
+
+[lane]
+key = "kreivo-mint"
+scheme = "sr25519"
+public_key = "0x0000000000000000000000000000000000000000000000000000000000000002"
+
+[signer]
+socket = "/run/bezent-signer/signer.sock"
+uid = 1001
+token_file = "/run/secrets/bezent-kreivo-endpoint-signer-token"

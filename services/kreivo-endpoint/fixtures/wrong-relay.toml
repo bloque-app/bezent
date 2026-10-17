@@ -1,0 +1,24 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# AC-I4.1 (review S5): Kreivo, with its relay chain declared as another network than the relay chain
+# spec describes. The endpoint must refuse to start (exit status 1) before it reads, builds or
+# submits anything.
+network = "kreivo"
+genesis = "0xc710a5f16adc17bcd212cff0aedcbf1c1212a043cdc0fb2dcba861efe5305b01"
+chain_spec = "../chain-specs/kreivo.json"
+relay_chain_spec = "ksmcc3-identity.json"
+relay_genesis = "0x0202020202020202020202020202020202020202020202020202020202020202"
+para_id = 2281
+contract = "0x0000000000000000000000000000000000000000000000000000000000000001"
+start_block = 0
+database_url_file = "/run/secrets/bezent-kreivo-endpoint-db"
+
+[lane]
+key = "kreivo-mint"
+scheme = "sr25519"
+public_key = "0x0000000000000000000000000000000000000000000000000000000000000002"
+
+[signer]
+socket = "/run/bezent-signer/signer.sock"
+uid = 1001
+token_file = "/run/secrets/bezent-kreivo-endpoint-signer-token"

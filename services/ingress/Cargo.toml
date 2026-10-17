@@ -1,0 +1,50 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "bezent-ingress"
+description = "bezent ingress: the request and query surfaces, over HTTP and JSON, on the store (DEC-3, DEC-15; F-002)"
+edition.workspace = true
+version.workspace = true
+license = "AGPL-3.0-or-later"
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bezent_ingress"
+
+[[bin]]
+name = "bezent-ingress"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
+bezent-core.workspace = true
+bezent-store = { path = "../../crates/store" }
+blake2 = "0.10"
+bs58 = "0.5"
+# Webhooks (REQ-ST-5, issue #2): secrets and URLs sealed at rest under the ingress's webhook key,
+# HMAC-SHA256 signatures, and the dispatcher's HTTP client.
+chacha20poly1305 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+getrandom = "0.3"
+hex = "0.4"
+hmac = "0.12"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sha3 = "0.10"
+sqlx = { workspace = true, features = ["json", "chrono"] }
+tokio = { workspace = true, features = ["net", "signal", "sync", "time"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
+url = "2"
+utoipa = { version = "5", features = ["chrono"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

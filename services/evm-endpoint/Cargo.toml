@@ -1,0 +1,52 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "bezent-evm-endpoint"
+description = "bezent evm-endpoint: observes the reserve vault on an EVM origin network and reports observations at coordinates; decides nothing (DEC-3, DEC-8)"
+edition.workspace = true
+version.workspace = true
+license = "AGPL-3.0-or-later"
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bezent_evm_endpoint"
+
+[[bin]]
+name = "bezent-evm-endpoint"
+path = "src/main.rs"
+
+[dependencies]
+bezent-store = { path = "../../crates/store" }
+# The signer link's client, and the check of a returned or observed signature (F-005, AC-I1.2).
+# The endpoint holds no key: it never builds a key backend (REQ-AR-3).
+bezent-signer = { path = "../signer" }
+# alloy (PLAN DEC-8): primitives, the ABI, EIP-1559 transactions, and the JSON-RPC client over HTTP.
+alloy = { version = "1.8", default-features = false, features = [
+    "std",
+    "consensus",
+    "eips",
+    "rlp",
+    "sol-types",
+    "rpc-client",
+    "reqwest",
+    "reqwest-rustls-tls",
+    "k256",
+] }
+# Public keys to addresses (the lane key, AC-I1.2).
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+url = "2"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { workspace = true, features = ["json"] }
+tokio = { workspace = true, features = ["net", "signal", "sync", "time", "fs"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[lints]
+workspace = true

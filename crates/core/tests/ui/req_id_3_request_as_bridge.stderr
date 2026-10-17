@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/req_id_3_request_as_bridge.rs:9:28
+  |
+9 |     wants_bridge_reference(&request);
+  |     ---------------------- ^^^^^^^^ expected `&BridgeReference`, found `&RequestReference`
+  |     |
+  |     arguments to this function are incorrect
+  |
+  = note: expected reference `&BridgeReference`
+             found reference `&RequestReference`
+note: function defined here
+ --> tests/ui/req_id_3_request_as_bridge.rs:5:4
+  |
+5 | fn wants_bridge_reference(_: &BridgeReference) {}
+  |    ^^^^^^^^^^^^^^^^^^^^^^ -------------------

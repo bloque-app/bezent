@@ -1,0 +1,48 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "bezent-core-service"
+description = "bezent core: the state machine, conditions, deadlines and review; the one process that decides (DEC-3; F-003)"
+edition.workspace = true
+version.workspace = true
+license = "AGPL-3.0-or-later"
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bezent_core_service"
+
+[[bin]]
+name = "bezent-core"
+path = "src/main.rs"
+
+[dependencies]
+bezent-core.workspace = true
+bezent-store = { path = "../../crates/store" }
+# The compromise path and signature checks (F-005); the core holds no key.
+bezent-signer = { path = "../signer" }
+blake2 = "0.10"
+bs58 = "0.5"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# The statement key's public half, checked at start (issue #42; REQ-PR-1).
+ed25519-dalek = "2"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+# Keccak-256: a payout token's delivery allowance key, as the vault's Roles modifier names it
+# (F-008; PR #52 review S-2).
+sha3 = "0.10"
+sqlx = { workspace = true, features = ["json", "chrono"] }
+tokio = { workspace = true, features = ["signal", "time"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
+
+[dev-dependencies]
+# The test payout key's EVM address, for the cancels the tests prepare as the EVM endpoint would
+# (issue #41; the signer reads a cancel's bytes).
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+
+[lints]
+workspace = true

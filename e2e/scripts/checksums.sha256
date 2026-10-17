@@ -1,0 +1,14 @@
+# Pinned SHA-256 of every release asset prepare.sh downloads: "<sha256>  <release>/<asset>".
+# Computed from the exact assets, and cross-checked against what the releases publish: each
+# polkadot-sdk asset against its `<asset>.sha256`, the Kreivo wasm against the `sha256` in
+# `kreivo_runtime-srtool-digest.json` (srtool build of commit 87f8728). Bumping KREIVO_RELEASE or
+# PSDK_RELEASE means adding its lines here; prepare.sh refuses an asset with no pinned line.
+27d7367992656fa4ca421ffca7bdbcafb20a898152626c0652d7f1788ae65f21  0.17.1/kreivo_runtime.compact.compressed.wasm
+d4727edf8c4a46ae6afafdaa5b83f320f763a67a9a3e302bce89f36167c3c038  polkadot-stable2606-2/polkadot
+0a2a31a338ace771f06015c350119bf852a907cb3a2fbdc2b26cdf915c25d63c  polkadot-stable2606-2/polkadot-aarch64-apple-darwin
+ebf35102ba4d3e32599d29ae966ef04334c8e617408958617f92db84094d7e9b  polkadot-stable2606-2/polkadot-execute-worker
+543eb076d65db2eeb9c030fa999608e0cdb5a5727b5fe9b9edd5024605a0237e  polkadot-stable2606-2/polkadot-execute-worker-aarch64-apple-darwin
+8b99d593df24e22acfd02e11bda115da45be0973ed973e9e0c9c00b9cec12847  polkadot-stable2606-2/polkadot-prepare-worker
+d2e728eb84f543a617fa9389ee75233e7e3898743f56f8859da8c362a8e5c333  polkadot-stable2606-2/polkadot-prepare-worker-aarch64-apple-darwin
+e89c00392e25c2de0d2c78ead52967495b94e491e3dfc32324996b2e7a236129  polkadot-stable2606-2/polkadot-parachain
+0562dfb2429164d605fb7a56460322217f5ff29a18406ed4c5f925d65005bced  polkadot-stable2606-2/polkadot-parachain-aarch64-apple-darwin

@@ -1,0 +1,16 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Who reviews what (GOVERNANCE.md), in the public repository bloque-app/bezent. The teams must exist
+# in bloque-app.
+
+*                       @bloque-app/bezent-maintainers
+
+# The specification and its amendments: the spec owner rules on them.
+/SPEC.md                @bloque-app/bezent-spec-owner
+/amendments/            @bloque-app/bezent-spec-owner
+/GOVERNANCE.md          @bloque-app/bezent-spec-owner
+
+# Licensing: the boundary between the AGPL parts and the permissive parts.
+/docs/oss/              @bloque-app/bezent-spec-owner
+/REUSE.toml             @bloque-app/bezent-maintainers
+/LICENSES/              @bloque-app/bezent-spec-owner

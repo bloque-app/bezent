@@ -1,0 +1,35 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Refused by --check (DEC-12): both providers read their URL from the same file, so they are not
+# independent. Otherwise the same as endpoint.toml.
+network = "polygon"
+chain_id = 137
+pinned_block = 95400000
+pinned_hash = "0xcc89572742615188f853cc9e74e7f5279a369fbb4a019afc8027ec974b7fedd3"
+vault = "0x00000000000000000000000000000000000000a1"
+roles = "0x00000000000000000000000000000000000000a2"
+emitter = "0x00000000000000000000000000000000000000a3"
+multisend = "0x9641d764fc13c8B624c04430C7356C1C7C8102e2"
+start_block = 95400000
+database_url_file = "/run/secrets/bezent-evm-polygon-db"
+
+[[providers]]
+name = "a"
+url_file = "/run/secrets/bezent-evm-polygon-rpc-a"
+
+[[providers]]
+name = "b"
+url_file = "/run/secrets/bezent-evm-polygon-rpc-a"
+
+[lane]
+key = "polygon-payout"
+public_key = "0x03bf6ee64a8d2fdc551ec8bb9ef862ef6b4bcb1805cdc520c3aa5866c0575fd3b5"
+
+[gas]
+max_gas = 500000
+max_fee_per_gas = "3000000000000"
+
+[signer]
+socket = "/run/bezent-signer/signer.sock"
+uid = 1001
+token_file = "/run/secrets/bezent-evm-polygon-signer-token"
