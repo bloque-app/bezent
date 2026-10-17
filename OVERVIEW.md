@@ -307,11 +307,15 @@ key, reaches every asset at once; each asset's own bounds cap what it can lose.
 
 ### 4.1 Starting bounds
 
-The spec says each asset's limits are sized from Swaps' current volumes and recorded in the plan. The owner
-ruled the first values on 2026-10-13 (`DEC-17`), from a measurement of Swaps' production volumes:
+The spec says each asset's limits are sized from Swaps' current volumes. @pandres95 ruled the first values on
+2026-10-13 (`DEC-17`), from a measurement of Swaps' production volumes. They are configuration values, not part of
+the code or of this document: `config/bounds.example.toml` carries the recommended starting values, commented.
 
-| Asset | Supply ceiling | Mint window (24 h) | Largest single mint |
-|---|---|---|---|
+The volume bezent must sustain without redesign is ten times what Swaps does today (`NFR-10`); the figures are
+kept privately. An asset that had no orders in that period takes another asset's figures converted at the day's
+exchange rate when its bounds are configured; the rate and its source are recorded with each configuration.
+
+---|---|---|---|
 | **bUSDC** (in USD) | 360,000 | 120,000 | 50,000 |
 | **COPM** (in pesos) | 90,000,000 | 30,000,000 | 16,000,000 |
 

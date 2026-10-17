@@ -441,19 +441,15 @@ Swaps' production volumes per asset class, read without writing; `F-016` measure
 - Sizing from the requester's current volumes is what the spec decided (`OQ-6`, closed by amendment 0005). The figures
   are not known yet; `F-016` measures them.
 
-Ruled by the owner (`pl-bounds`, 2026-10-13), from `F-016`'s report on the requester's production volumes (the
-report and the volume figures it rests on are kept privately):
-
-| Asset | Supply ceiling | Mint window (24 h) | Per-transfer maximum |
-|---|---|---|---|
-| bUSDC | 360,000 | 120,000 | 50,000 |
-| COPM | 90,000,000 | 30,000,000 | 16,000,000 |
-| bEURC, bBTC | the bUSDC figures converted at the day's exchange rate when the bounds are configured | same | same |
-| MXNB, BRLB | the COPM figures converted at the day's exchange rate when the bounds are configured | same | same |
-
-The ten-times volume figures that `NFR-10` asks for are recorded privately with the report. The converted rows are the
-owner's ("around equivalent exchanges"): their assets had no orders in the measured window. The rate used and its
-source are recorded with each configuration.
+Ruled by @pandres95 (`pl-bounds`, 2026-10-13), from `F-016`'s report on the requester's production volumes (the
+report and the volume figures it rests on are kept privately): **the bounds are configuration values, not part of
+this plan or of the code.** Each asset has a supply ceiling, a mint window (an amount per window length), a
+per-transfer maximum and a redemption minimum, and a raise delay applies to the contract as a whole
+(`REQ-GV-3`). They are set when the contract is instantiated and raised or lowered only through the contract's own
+roles; `config/bounds.example.toml` carries the recommended starting values, commented. For an asset that had no
+orders in the measured window the figures are converted from another asset's at the day's exchange rate when its
+bounds are configured ("around equivalent exchanges"); the rate used and its source are recorded with each
+configuration. The ten-times volume figures that `NFR-10` asks for are recorded privately with the report.
 *Serves:* the bounds of §7.F and their on-chain enforcement (`INV-3`), declared route limits (`REQ-LM-1`), and
 sustained volume with the figures in the plan (`NFR-10`). *Cost:* reading production data needs care to stay
 read-only; nothing in bezent writes to Swaps' database.

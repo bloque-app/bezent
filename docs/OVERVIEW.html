@@ -822,39 +822,16 @@ payout is final. The owner chose to burn at once (2026-10-11), and
 </blockquote>
 <h3 id="41-starting-bounds">4.1 Starting bounds</h3>
 <p>The spec says each asset's limits are sized from Swaps' current
-volumes and recorded in the plan. The owner ruled the first values on
-2026-10-13 (<code>DEC-17</code>), from a measurement of Swaps'
-production volumes:</p>
-<div class="scroll"><table>
-<thead>
-<tr class="header">
-<th>Asset</th>
-<th>Supply ceiling</th>
-<th>Mint window (24 h)</th>
-<th>Largest single mint</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td><strong>bUSDC</strong> (in USD)</td>
-<td>360,000</td>
-<td>120,000</td>
-<td>50,000</td>
-</tr>
-<tr class="even">
-<td><strong>COPM</strong> (in pesos)</td>
-<td>90,000,000</td>
-<td>30,000,000</td>
-<td>16,000,000</td>
-</tr>
-</tbody>
-</table></div>
+volumes. @pandres95 ruled the first values on 2026-10-13
+(<code>DEC-17</code>), from a measurement of Swaps' production volumes.
+They are configuration values, not part of the code or of this document:
+<code>config/bounds.example.toml</code> carries the recommended starting
+values, commented.</p>
 <p>The volume bezent must sustain without redesign is ten times what
 Swaps does today (<code>NFR-10</code>); the figures are kept privately.
-The other assets had no orders in that period, so bEURC and bBTC take
-the bUSDC figures, and MXNB and BRLB the COPM figures, converted at the
-day's exchange rate when their bounds are configured; the rate and its
-source are recorded with each configuration.</p>
+An asset that had no orders in that period takes another asset's figures
+converted at the day's exchange rate when its bounds are configured; the
+rate and its source are recorded with each configuration.</p>
 <hr />
 <h2 id="5-reserves-and-the-reserve-equation">5. Reserves and the reserve
 equation</h2>

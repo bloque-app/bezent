@@ -830,52 +830,22 @@ measures them and they are recorded here before
 (<code>OQ-6</code>, closed by amendment 0005). The figures are not known
 yet; <code>F-016</code> measures them.</li>
 </ul>
-<p>Ruled by the owner (<code>pl-bounds</code>, 2026-10-13), from
+<p>Ruled by @pandres95 (<code>pl-bounds</code>, 2026-10-13), from
 <code>F-016</code>'s report on the requester's production volumes (the
-report and the volume figures it rests on are kept privately):</p>
-<div class="scroll"><table>
-<thead>
-<tr class="header">
-<th>Asset</th>
-<th>Supply ceiling</th>
-<th>Mint window (24 h)</th>
-<th>Per-transfer maximum</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td>bUSDC</td>
-<td>360,000</td>
-<td>120,000</td>
-<td>50,000</td>
-</tr>
-<tr class="even">
-<td>COPM</td>
-<td>90,000,000</td>
-<td>30,000,000</td>
-<td>16,000,000</td>
-</tr>
-<tr class="odd">
-<td>bEURC, bBTC</td>
-<td>the bUSDC figures converted at the day's exchange rate when the
-bounds are configured</td>
-<td>same</td>
-<td>same</td>
-</tr>
-<tr class="even">
-<td>MXNB, BRLB</td>
-<td>the COPM figures converted at the day's exchange rate when the
-bounds are configured</td>
-<td>same</td>
-<td>same</td>
-</tr>
-</tbody>
-</table></div>
-<p>The ten-times volume figures that <code>NFR-10</code> asks for are
-recorded privately with the report. The converted rows are the owner's
-("around equivalent exchanges"): their assets had no orders in the
-measured window. The rate used and its source are recorded with each
-configuration. <em>Serves:</em> the bounds of §7.F and their on-chain
+report and the volume figures it rests on are kept privately):
+<strong>the bounds are configuration values, not part of this plan or of
+the code.</strong> Each asset has a supply ceiling, a mint window (an
+amount per window length), a per-transfer maximum and a redemption
+minimum, and a raise delay applies to the contract as a whole
+(<code>REQ-GV-3</code>). They are set when the contract is instantiated
+and raised or lowered only through the contract's own roles;
+<code>config/bounds.example.toml</code> carries the recommended starting
+values, commented. For an asset that had no orders in the measured window
+the figures are converted from another asset's at the day's exchange rate
+when its bounds are configured ("around equivalent exchanges"); the rate
+used and its source are recorded with each configuration. The ten-times
+volume figures that <code>NFR-10</code> asks for are recorded privately
+with the report. <em>Serves:</em> the bounds of §7.F and their on-chain
 enforcement (<code>INV-3</code>), declared route limits
 (<code>REQ-LM-1</code>), and sustained volume with the figures in the
 plan (<code>NFR-10</code>). <em>Cost:</em> reading production data needs

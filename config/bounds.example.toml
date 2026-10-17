@@ -1,0 +1,49 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Recommended starting bounds for the Kreivo contract (PLAN.md DEC-17; SPEC.md §7.F, INV-3). An EXAMPLE:
+# bounds are configuration, not code, and each deployment sets and records its own. They reach the
+# contract as the `assets` argument of its constructor (`new(roles, raise_delay, assets)`, one
+# `AssetConfig { bounds, backends, initial_supply }` per asset; `contracts/bezent/src/types.rs`), which the
+# deployment tooling builds from a file of this shape (`e2e/kreivo/deploy.mjs` does it with test values).
+#
+# Amounts are in the asset's minor units. A comment gives the human figure.
+# Kreivo produces a block about every 2.07 s, so 24 h = 41,739 blocks.
+
+[contract]
+# How long a raise of any bound waits before anyone may apply it (REQ-GV-3). 24 h in blocks.
+raise_delay_blocks = 41_739
+
+# bUSDC, 6 decimals.
+[assets.bUSDC.bounds]
+# The most supply that may exist at once: 360,000 bUSDC.
+supply_ceiling = 360_000_000_000
+# The most that may be minted in one window, refund mints included: 120,000 bUSDC per 24 h.
+window_amount = 120_000_000_000
+# The window's length: 24 h in blocks. The window slides.
+window_blocks = 41_739
+# The most one mint may carry: 50,000 bUSDC.
+per_transfer_max = 50_000_000_000
+# The least one redemption may carry: 10 bUSDC.
+redeem_minimum = 10_000_000
+
+# COPM, 2 decimals.
+[assets.COPM.bounds]
+# 90,000,000 COPM.
+supply_ceiling = 9_000_000_000
+# 30,000,000 COPM per 24 h.
+window_amount = 3_000_000_000
+window_blocks = 41_739
+# 16,000,000 COPM.
+per_transfer_max = 1_600_000_000
+# 10 bUSDC converted to COPM at the day's rate, in COPM minor units (fill in at configuration time).
+# redeem_minimum = <10 bUSDC at the day's rate>
+
+# Every other asset (bEURC, bBTC, MXNB, BRLB): take the bUSDC figures above, converted at the day's exchange rate,
+# for the five bounds, in the asset's own decimals. Record the rate used and its source with the configuration.
+# [assets.<NAME>.bounds]
+# supply_ceiling = ...
+# window_amount = ...
+# window_blocks = 41_739
+# per_transfer_max = ...
+# redeem_minimum = ...
