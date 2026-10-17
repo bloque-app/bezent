@@ -315,17 +315,6 @@ The volume bezent must sustain without redesign is ten times what Swaps does tod
 kept privately. An asset that had no orders in that period takes another asset's figures converted at the day's
 exchange rate when its bounds are configured; the rate and its source are recorded with each configuration.
 
----|---|---|---|
-| **bUSDC** (in USD) | 360,000 | 120,000 | 50,000 |
-| **COPM** (in pesos) | 90,000,000 | 30,000,000 | 16,000,000 |
-
-The volume bezent must sustain without redesign is ten times what Swaps does today (`NFR-10`); the figures are
-kept privately. The other assets had no orders in that period, so bEURC and bBTC take the bUSDC figures, and MXNB and BRLB the COPM figures, converted at the day's
-exchange rate when their bounds are configured; the rate and its source are recorded with each
-configuration.
-
----
-
 ## 5. Reserves and the reserve equation
 
 For each bridged asset, at a final point on every network (`SPEC.md` §5.3):
