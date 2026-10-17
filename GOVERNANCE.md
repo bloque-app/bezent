@@ -14,7 +14,7 @@ change.
 |---|---|---|
 | **Contributor** | Anyone who opens an issue, a discussion or a pull request | Nothing alone; proposes |
 | **Maintainer** | Listed in `CODEOWNERS`. Today, members of Bloque's bezent team | Merges pull requests; rules on plan changes (`PLAN.md`, `DEC-*`, features); triages issues; cuts releases |
-| **Spec owner** | One maintainer, named in `CODEOWNERS` for `SPEC.md` and `amendments/` | Rules on amendments to `SPEC.md` and closes open questions (`OQ-*`). Where documents say "the owner ruled", this is the role they mean |
+| **Spec owner** | One maintainer, named in `CODEOWNERS` for `SPEC.md` and `amendments/` | Rules on amendments to `SPEC.md` and closes open questions (`OQ-*`). Where documents name a ruling by @pandres95, this is the role they mean; today it is him |
 | **Upstream maintainers** | The maintainers of Kreivo and of the other projects bezent builds on | Their own projects. bezent proposes; they decide |
 
 ## How decisions are made
@@ -59,7 +59,7 @@ and has every runbook exercised (`PLAN.md`, `M-4`); its notes name the licence o
 
 "bezent" and "Bloque" are names used by Pagos Cube LLC (Bloque). The open-source licences cover the code and the
 documents. They do not grant the right to use those names to endorse or promote a derived product. A fork should use a
-different name. A trademark clearance of "bezent" is pending.
+different name. The IP and trademark position of "bezent" was signed off by @olanod on 2026-10-17.
 
 ## Changes to this document
 

@@ -7,7 +7,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 Milestone `M-1` (first module); attested reports in `M-3`. Serves SPEC v0.5.2 §3 and §7.A–§7.C from the requester's
 side: `REQ-RQ-1`, `REQ-RQ-3`, `REQ-RQ-4`, `REQ-RQ-6`, `REQ-RQ-7`, `REQ-RQ-8`, `REQ-RQ-9`, `REQ-ID-1`, `REQ-ST-4`,
-`REQ-ST-5`, `REQ-TR-5` (plan `DEC-15`, `DEC-19`). Go-ahead from the owner on 2026-10-15; the PR stays a **draft** until
+`REQ-ST-5`, `REQ-TR-5` (plan `DEC-15`, `DEC-19`). Go-ahead from @pandres95 on 2026-10-15; the PR stays a **draft** until
 bezent's core is ready.
 
 ## What it builds (in the Swaps platform, under that repo's own rules: its CLAUDE.md, API documentation guide, review)
@@ -36,4 +36,4 @@ internal to Swaps).
 
 The module's unit tests cover pause and resume, lost-callback recovery from the log, idempotent retries and refusals;
 the sidecar job is green; the draft PR is open in the Swaps platform repository, reviewed by a bezent reviewer, and left
-as a draft until the owner says the core is ready.
+as a draft until @pandres95 says the core is ready.

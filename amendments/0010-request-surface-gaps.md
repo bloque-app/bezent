@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0010 — three gaps in the request surface
 
-**Status:** ruled by the owner on the decision form, 2026-10-13 (`sp-request-gaps`). Applied to `SPEC.md` v0.5.0.
+**Status:** ruled by @pandres95 on the decision form, 2026-10-13 (`sp-request-gaps`). Applied to `SPEC.md` v0.5.0.
 **Target:** `SPEC.md` v0.4.0 (§7.A, §8.4, §10)
 **Date:** 2026-10-13
 **Rationale in one line:** building the ingress (`F-002`, PR #22) found three places where the spec names a request

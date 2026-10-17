@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0008 — a redemption's reference is scoped to its redeemer
 
-**Status:** ruled by the owner on the decision form, 2026-10-13 (`sp-redemption-ref`). Applied to `SPEC.md` v0.5.0.
+**Status:** ruled by @pandres95 on the decision form, 2026-10-13 (`sp-redemption-ref`). Applied to `SPEC.md` v0.5.0.
 **Target:** `SPEC.md` v0.4.0
 **Date:** 2026-10-13
 **Rationale in one line:** the contract's review found that if redemptions and mints share one set of references,

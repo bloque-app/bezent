@@ -15,7 +15,7 @@ binds them).
 | BR | SPEC | Note |
 |---|---|---|
 | `BR-KR-1` | `REQ-LG-1`, `REQ-AR-2` | |
-| `BR-KR-2` | `REQ-IN-5`, `REQ-LG-2`, §7.F "mint into a ledger" | Answers note Q4 as *yes*, atomically with the mint. Owner to confirm |
+| `BR-KR-2` | `REQ-IN-5`, `REQ-LG-2`, §7.F "mint into a ledger" | Answers note Q4 as *yes*, atomically with the mint. @pandres95 to confirm |
 | `BR-KR-3` | `REQ-PV-4`, `INV-12` | |
 | `BR-KR-4` | `REQ-OT-1`, `REQ-OT-2`, `REQ-ID-2` | |
 | `BR-OUT-1` | §2 Disposition, `US-C1` | |

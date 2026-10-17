@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0004 — a bridged asset with less precision than its reserve token
 
-**Status:** ruled by the owner on the decision form, 2026-10-13 (`br-bbtc-decimals`: 8 decimals with a dust rule;
+**Status:** ruled by @pandres95 on the decision form, 2026-10-13 (`br-bbtc-decimals`: 8 decimals with a dust rule;
 `br-dust-rule`: the remainder goes to surplus). Applied to `SPEC.md` v0.3.3.
 **Target:** `SPEC.md` v0.3.2
 **Date:** 2026-10-13

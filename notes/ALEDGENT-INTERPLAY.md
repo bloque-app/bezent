@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # bezent and aledgent — how they meet (from the aledgent session, 2026-10-15)
 
-Source: a first take from the Aledgent session, asked at the owner's request (`pl-pr-e2e` note, 2026-10-15).
+Source: a first take from the Aledgent session, asked at @pandres95's request (`pl-pr-e2e` note, 2026-10-15).
 Informative; the spec and plan bind.
 
 ## Operations

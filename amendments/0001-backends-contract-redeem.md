@@ -3,9 +3,9 @@ Copyright (c) 2026 Pagos Cube LLC
 SPDX-License-Identifier: CC-BY-4.0
 -->
 
-# Amendment 0001 — one core with backends, the Kreivo contract, redeem, and the owner's rulings to 2026-10-11
+# Amendment 0001 — one core with backends, the Kreivo contract, redeem, and @pandres95's rulings to 2026-10-11
 
-**Status:** ruled by the owner on the decision form ("USDB Bridge Decisions") and in chat, 2026-10-04 to
+**Status:** ruled by @pandres95 on the decision form ("USDB Bridge Decisions") and in chat, 2026-10-04 to
 2026-10-11; to be applied to `SPEC.md` v0.3.0
 **Target:** `SPEC.md` v0.2.0
 **Date:** 2026-10-11
@@ -69,7 +69,7 @@ withdrawn identifier stays withdrawn.
 - `OQ-1` is closed by this item.
 - Notes: bUSDC is reserved on Polygon, bEURC on Base, and bBTC on BNB Chain (as BTCB, `br-bbtc-backing`).
 
-## A4 — Mint only on the backend's finality signal (`gen-reversal`, the owner's note)
+## A4 — Mint only on the backend's finality signal (`gen-reversal`, @pandres95's note)
 
 - Add **`REQ-OB-7`**. A mint MUST rest on the backend's own finality signal. For an attested backend, that is
   the party's report that the payment is final under its rail's rules. The party MUST NOT report a payment
@@ -86,7 +86,7 @@ withdrawn identifier stays withdrawn.
   group's governance is the upgrade authority of `REQ-GV-3`.
 - `OQ-5` is closed by this item (who governs: the dedicated group's governance).
 
-## A6 — Mint to the order's destination; redeem by anyone, burnt at once (`br-redeem-burn`, the owner's design of 2026-10-11)
+## A6 — Mint to the order's destination; redeem by anyone, burnt at once (`br-redeem-burn`, @pandres95's design of 2026-10-11)
 
 - §7.F's table is replaced by:
 
@@ -181,7 +181,7 @@ withdrawn identifier stays withdrawn.
 |---|---|---|
 | `br-split` | The core/operator split | §4.2 already says it |
 | `gen-reserve-book` | Reserve book in the core | The plan (`REQ-BK-*` stand) |
-| `br-fiat-on-kreivo` | Fiat-backed assets live on the issuing network | A deployment decision (the owner's ruling); A1–A2 cover it |
+| `br-fiat-on-kreivo` | Fiat-backed assets live on the issuing network | A deployment decision (@pandres95's ruling); A1–A2 cover it |
 | `br-usdb-params` | 6 decimals, not sufficient | The plan, per asset; A8 covers "not sufficient" |
 | `br-dex` (Binance out) | No Binance in V0 | A10 |
 | `gen-legal` | Licences already covered | Nothing |
@@ -251,7 +251,7 @@ Text that contradicts the rulings above, found while applying them. Each change 
 - **Attested assets rest on a requester's word.** For COPM, MXNB and BRLB, the ramp's reports are the
   observations. The chain bounds how much can be minted. It cannot tell a real payment from a reported one.
 - **Burning at once uses the mint authority for refunds.** That is one refund per redemption, within the
-  window. Escrow would have avoided it; the owner chose simplicity.
+  window. Escrow would have avoided it; @pandres95 chose simplicity.
 - **No direct delivery into aledgent in V0.** Every deposit for aledgent passes through the requester's
   account: one more hop, and one more party holding value briefly.
 

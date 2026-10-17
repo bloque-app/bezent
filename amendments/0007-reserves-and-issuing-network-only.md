@@ -5,13 +5,13 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0007 — bezent bridges reserves and the issuing network; reversals are the attesting party's
 
-**Status:** ruled by the owner on the decision form, 2026-10-13 (`pl-scope`: "Yes; Swaps runs DEX and CCTP via
+**Status:** ruled by @pandres95 on the decision form, 2026-10-13 (`pl-scope`: "Yes; Swaps runs DEX and CCTP via
 Roles"; `oq-14`: "Swaps covers it; pause past the floor"). A5 ruled in chat (`pl-cross-network`, "Rule that way you recommend"). A1–A6 applied to `SPEC.md` v0.4.0.
 **Target:** `SPEC.md` v0.3.4
 **Date:** 2026-10-13
 **Rationale in one line:** bezent's job narrows to moving value between each asset's reserve and the issuing
 network. Getting value into a reserve (deposit addresses, sweeps, routing) and turning other tokens into the
-origin token are the requester's, done with tools the requester runs. The owner's note (`pl-evmhot`): "our work
+origin token are the requester's, done with tools the requester runs. @pandres95's note (`pl-evmhot`): "our work
 limits to bridging between reserves and Kreivo"; evmhot only sweeps; Swaps, then rutent, routes funds to the
 reserves.
 
@@ -64,7 +64,7 @@ convertible holdings at that address into the origin token. The network MUST enf
 out of the reserve address by any other path. Every conversion is observed at its coordinate and recorded like any
 other movement.
 
-*Why:* this is how the owner's "Swaps runs DEX via Roles" stays inside guardrail 12: the requester converts, but
+*Why:* this is how @pandres95's "Swaps runs DEX via Roles" stays inside guardrail 12: the requester converts, but
 never holds a key that can take reserve out, never asserts an arrival, and the reserve equation stays bezent's.
 Convertible holdings back nothing until converted (`REQ-CV-4`), so the role puts no reserve at risk.
 
@@ -77,7 +77,7 @@ them".
 
 ## A5 — Payouts only on the reserve's network (`pl-cross-network`)
 
-Ruled by the owner in chat, 2026-10-13 ("Rule that way you recommend"): a withdrawal to another network is the
+Ruled by @pandres95 in chat, 2026-10-13 ("Rule that way you recommend"): a withdrawal to another network is the
 requester's. bezent pays on the reserve's network; the requester names its own account there as the beneficiary and
 delivers onward from its own funds. Every outflow from a reserve stays signed by bezent.
 
@@ -101,7 +101,7 @@ be reduced, and nothing already minted is clawed back. If the shortfall takes th
 
 - `OQ-14` closes: "*Closed by amendment 0007 (A6):* the attesting party covers it, within one business day;
   holders are never clawed back; mints pause while surplus is below its floor (`REQ-BE-6`)."
-- The owner's note on `gen-reversal` stands as context: the rails never settle instantly, and a mint always waits
+- @pandres95's note on `gen-reversal` stands as context: the rails never settle instantly, and a mint always waits
   for the rail's finality (`REQ-OB-7`); `REQ-BE-6` covers only later reversals such as a chargeback or a fraud
   recall.
 

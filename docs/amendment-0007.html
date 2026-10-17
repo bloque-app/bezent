@@ -121,7 +121,7 @@ SPDX-License-Identifier: CC-BY-4.0
 id="amendment-0007--bezent-bridges-reserves-and-the-issuing-network-reversals-are-the-attesting-partys">Amendment
 0007 — bezent bridges reserves and the issuing network; reversals are
 the attesting party's</h1>
-<p><strong>Status:</strong> ruled by the owner on the decision form,
+<p><strong>Status:</strong> ruled by @pandres95 on the decision form,
 2026-10-13 (<code>pl-scope</code>: "Yes; Swaps runs DEX and CCTP via
 Roles"; <code>oq-14</code>: "Swaps covers it; pause past the floor"). A5
 ruled in chat (<code>pl-cross-network</code>, "Rule that way you
@@ -131,8 +131,8 @@ recommend"). A1–A6 applied to <code>SPEC.md</code> v0.4.0.
 line:</strong> bezent's job narrows to moving value between each asset's
 reserve and the issuing network. Getting value into a reserve (deposit
 addresses, sweeps, routing) and turning other tokens into the origin
-token are the requester's, done with tools the requester runs. The
-owner's note (<code>pl-evmhot</code>): "our work limits to bridging
+token are the requester's, done with tools the requester runs.
+@pandres95's note (<code>pl-evmhot</code>): "our work limits to bridging
 between reserves and Kreivo"; evmhot only sweeps; Swaps, then rutent,
 routes funds to the reserves.</p>
 <h2
@@ -215,7 +215,7 @@ token, (b) sends the output only to the same reserve address, and (c) is
 bounded per window. The role MUST NOT move value out of the reserve
 address by any other path. Every conversion is observed at its
 coordinate and recorded like any other movement.</p>
-<p><em>Why:</em> this is how the owner's "Swaps runs DEX via Roles"
+<p><em>Why:</em> this is how @pandres95's "Swaps runs DEX via Roles"
 stays inside guardrail 12: the requester converts, but never holds a key
 that can take reserve out, never asserts an arrival, and the reserve
 equation stays bezent's. Convertible holdings back nothing until
@@ -230,7 +230,7 @@ of scope) gains "issuing deposit addresses and sweeping them".</p>
 <h2 id="a5--payouts-only-on-the-reserves-network-pl-cross-network">A5 —
 Payouts only on the reserve's network
 (<code>pl-cross-network</code>)</h2>
-<p>Ruled by the owner in chat, 2026-10-13 ("Rule that way you
+<p>Ruled by @pandres95 in chat, 2026-10-13 ("Rule that way you
 recommend"): a withdrawal to another network is the requester's. bezent
 pays on the reserve's network; the requester names its own account there
 as the beneficiary and delivers onward from its own funds. Every outflow
@@ -272,8 +272,8 @@ reserve is restored.</p>
 the attesting party covers it, within one business day; holders are
 never clawed back; mints pause while surplus is below its floor
 (<a class="ref" href="#REQ-BE-6"><code>REQ-BE-6</code></a>)."</li>
-<li>The owner's note on <code>gen-reversal</code> stands as context: the
-rails never settle instantly, and a mint always waits for the rail's
+<li>@pandres95's note on <code>gen-reversal</code> stands as context:
+the rails never settle instantly, and a mint always waits for the rail's
 finality (<code>REQ-OB-7</code>); <a class="ref" href="#REQ-BE-6"><code>REQ-BE-6</code></a> covers only
 later reversals such as a chargeback or a fraud recall.</li>
 </ul>

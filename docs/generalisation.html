@@ -70,12 +70,12 @@ hr{border:0;border-top:1px solid var(--rule);margin:28px 0}
 <div class="page">
   <nav class="rail" aria-label="Contents"><details open><summary>Contents</summary><ul>
 <li><a
-href="#name-one-core-many-backends-summary-can-bezents-mechanism-be-generalised-to-every-backed-asset-busdc-beurc-bbtc-bcop-bmxn-bbrl-with-swaps-or-the-ramp-driving-the-operations-yes-with-one-honest-change-an-assurance-class-per-backend-answer-to-the-owners-question-of-2026-10-07-status-informative-design-note-nothing-here-is-ruled-date-2026-10-07"
-id="toc-name-one-core-many-backends-summary-can-bezents-mechanism-be-generalised-to-every-backed-asset-busdc-beurc-bbtc-bcop-bmxn-bbrl-with-swaps-or-the-ramp-driving-the-operations-yes-with-one-honest-change-an-assurance-class-per-backend-answer-to-the-owners-question-of-2026-10-07-status-informative-design-note-nothing-here-is-ruled-date-2026-10-07">name:
+href="#name-one-core-many-backends-summary-can-bezents-mechanism-be-generalised-to-every-backed-asset-busdc-beurc-bbtc-bcop-bmxn-bbrl-with-swaps-or-the-ramp-driving-the-operations-yes-with-one-honest-change-an-assurance-class-per-backend-answer-to-pandres95s-question-of-2026-10-07-status-informative-design-note-nothing-here-is-ruled-date-2026-10-07"
+id="toc-name-one-core-many-backends-summary-can-bezents-mechanism-be-generalised-to-every-backed-asset-busdc-beurc-bbtc-bcop-bmxn-bbrl-with-swaps-or-the-ramp-driving-the-operations-yes-with-one-honest-change-an-assurance-class-per-backend-answer-to-pandres95s-question-of-2026-10-07-status-informative-design-note-nothing-here-is-ruled-date-2026-10-07">name:
 One core, many backends summary: Can bezent's mechanism be generalised
 to every backed asset (bUSDC, bEURC, bBTC, bCOP, bMXN, bBRL), with Swaps
 or the ramp driving the operations? Yes, with one honest change, an
-assurance class per backend. Answer to the owner's question of
+assurance class per backend. Answer to @pandres95's question of
 2026-10-07. status: informative design note; nothing here is ruled date:
 2026-10-07</a></li>
 <li><a href="#one-core-many-backends"
@@ -103,9 +103,10 @@ spec</a></li>
 href="#8-since-2026-10-07-a-contract-on-kreivo-and-bnb-chain-for-bbtc"
 id="toc-8-since-2026-10-07-a-contract-on-kreivo-and-bnb-chain-for-bbtc">8.
 Since 2026-10-07: a contract on Kreivo, and BNB Chain for bBTC</a></li>
-<li><a href="#9-the-kreivo-contracts-two-operations-owner-2026-10-11"
-id="toc-9-the-kreivo-contracts-two-operations-owner-2026-10-11">9. The
-Kreivo contract's two operations (owner, 2026-10-11)</a></li>
+<li><a
+href="#9-the-kreivo-contracts-two-operations-pandres95-2026-10-11"
+id="toc-9-the-kreivo-contracts-two-operations-pandres95-2026-10-11">9.
+The Kreivo contract's two operations (@pandres95, 2026-10-11)</a></li>
 </ul></li>
 </ul>
 </details></nav>
@@ -127,11 +128,11 @@ SPDX-License-Identifier: CC-BY-4.0
 
 <hr />
 <h2
-id="name-one-core-many-backends-summary-can-bezents-mechanism-be-generalised-to-every-backed-asset-busdc-beurc-bbtc-bcop-bmxn-bbrl-with-swaps-or-the-ramp-driving-the-operations-yes-with-one-honest-change-an-assurance-class-per-backend-answer-to-the-owners-question-of-2026-10-07-status-informative-design-note-nothing-here-is-ruled-date-2026-10-07">name:
+id="name-one-core-many-backends-summary-can-bezents-mechanism-be-generalised-to-every-backed-asset-busdc-beurc-bbtc-bcop-bmxn-bbrl-with-swaps-or-the-ramp-driving-the-operations-yes-with-one-honest-change-an-assurance-class-per-backend-answer-to-pandres95s-question-of-2026-10-07-status-informative-design-note-nothing-here-is-ruled-date-2026-10-07">name:
 One core, many backends summary: Can bezent's mechanism be generalised
 to every backed asset (bUSDC, bEURC, bBTC, bCOP, bMXN, bBRL), with Swaps
 or the ramp driving the operations? Yes, with one honest change, an
-assurance class per backend. Answer to the owner's question of
+assurance class per backend. Answer to @pandres95's question of
 2026-10-07. status: informative design note; nothing here is ruled date:
 2026-10-07</h2>
 <h1 id="one-core-many-backends">One core, many backends</h1>
@@ -139,9 +140,10 @@ assurance class per backend. Answer to the owner's question of
 v0.2.0); aledgent <code>PLAN.md</code> at <code>a3cb28b</code>
 (<code>DEC-20</code>). Claims are tagged <strong>[Spec]</strong> (in
 bridge <code>SPEC.md</code>), <strong>[Plan]</strong> (aledgent's plan),
-<strong>[Ruled]</strong> (an owner ruling), <strong>[Knowledge]</strong>
-(general facts about a network or rail, to confirm before relying on
-them) or <strong>[Inference]</strong> (my reasoning).</p>
+<strong>[Ruled]</strong> (a ruling by @pandres95),
+<strong>[Knowledge]</strong> (general facts about a network or rail, to
+confirm before relying on them) or <strong>[Inference]</strong> (my
+reasoning).</p>
 <h2 id="1-verdict">1. Verdict</h2>
 <p><strong>Yes, it generalises, and it is not a different
 monster.</strong> The part that makes a bridge safe is the same for
@@ -292,7 +294,7 @@ gives each arrival a stable id and a short wait before mint.
 <li><strong>Reversals after "final".</strong> A return or chargeback
 after mint becomes a loss against surplus, never a change in supply. The
 backend must declare its reversal window, and the mint waits past
-whatever part of it the owner rules. <strong>[Inference]</strong></li>
+whatever part of it @pandres95 rules. <strong>[Inference]</strong></li>
 <li><strong>Independence of evidence.</strong> The core should read bank
 evidence itself, with read-only API access. If it only hears it from the
 ramp, the ramp effectively asserts arrivals, which the spec forbids
@@ -344,7 +346,7 @@ For banks that means:</p>
 </ul>
 <h2 id="7-what-it-changes-in-the-spec">7. What it changes in the
 spec</h2>
-<p>One amendment, after the owner rules:</p>
+<p>One amendment, after @pandres95 rules:</p>
 <ol type="1">
 <li>§4.4(b) "origin networks" becomes a <strong>backend
 contract</strong> of capabilities.</li>
@@ -363,8 +365,8 @@ bank or network.</li>
 <h2
 id="8-since-2026-10-07-a-contract-on-kreivo-and-bnb-chain-for-bbtc">8.
 Since 2026-10-07: a contract on Kreivo, and BNB Chain for bBTC</h2>
-<p>Owner, 2026-10-11, after kreivo#512 and a conversation with a Kreivo
-collaborator.</p>
+<p>@pandres95, 2026-10-11, after kreivo#512 and a conversation with a
+Kreivo collaborator.</p>
 <h3 id="81-the-kreivo-end-is-always-one-contract-kreivo512">8.1 The
 Kreivo end is always one contract (kreivo#512)</h3>
 <p>kreivo#512 (runtime 0.17.1, open on 2026-10-11) adds
@@ -432,9 +434,9 @@ costs the most to build. <strong>[Knowledge] [Inference]</strong></li>
 which suits Swaps' existing Binance flows.
 <strong>[Inference]</strong></li>
 </ul>
-<h2 id="9-the-kreivo-contracts-two-operations-owner-2026-10-11">9. The
-Kreivo contract's two operations (owner, 2026-10-11)</h2>
-<p>The owner's design: fiat-backed assets also live on Kreivo, so that
+<h2 id="9-the-kreivo-contracts-two-operations-pandres95-2026-10-11">9.
+The Kreivo contract's two operations (@pandres95, 2026-10-11)</h2>
+<p>@pandres95's design: fiat-backed assets also live on Kreivo, so that
 DAOs and other accounts can use them, and the Kreivo end has two
 operations:</p>
 <ol type="1">

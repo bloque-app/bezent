@@ -10,7 +10,7 @@ edition: 5 (supersedes the editions of 2026-10-01, 2026-10-02, 2026-10-03 and 20
 # bezent — Design overview
 
 This document states **how the problem is understood and what the specification now says**, in plain
-language, for the owner and a reviewer: the problem, the shape, the Kreivo contract, the reserves, how
+language, for @pandres95 and a reviewer: the problem, the shape, the Kreivo contract, the reserves, how
 value flows, the trust it asks for, and what is ruled and what comes next.
 
 `SPEC.md` names no network or product. This overview does, because a discussion needs them; the names and
@@ -302,7 +302,7 @@ key, reaches every asset at once; each asset's own bounds cap what it can lose.
   (`REQ-OT-6`, `REQ-RF-4`, `INV-8`). bezent may instead try the payout again until the deadline
   (`REQ-RF-5`).
 
-> `notes/GENERALISATION.md` §9 proposed escrow until the payout is final. The owner chose to burn at once
+> `notes/GENERALISATION.md` §9 proposed escrow until the payout is final. @pandres95 chose to burn at once
 > (2026-10-11), and `SPEC.md` follows that.
 
 ### 4.1 Starting bounds
@@ -467,7 +467,7 @@ sequenceDiagram
 - **Swaps' report is the evidence** (`REQ-BE-5`), recorded with Swaps' own identifiers (`REQ-BE-4`). Only a
   requester holding the attesting grant may report. The contract's mint window and supply ceiling limit a
   wrong report.
-- **Swaps must not report a payment final before its rail guarantees it** (`REQ-OB-7`). The owner's note:
+- **Swaps must not report a payment final before its rail guarantees it** (`REQ-OB-7`). @pandres95's note:
   whether by Bre-B, PSE, a payment link or a bank deposit, the payment must clear before issuance is ordered.
 - **A reversal after that** (a chargeback, a fraud recall) is Swaps' to cover within one business day,
   charged meanwhile to surplus, with holders never clawed back and mints paused under the surplus floor
@@ -681,7 +681,7 @@ for people; eligibility.
 
 ## 10. Rulings and open questions
 
-### 10.1 Ruled by the owner
+### 10.1 Ruled by @pandres95
 
 The last column says whether each ruling still holds and, where it changed the spec, which amendment wrote
 it in (in `amendments/`); a ruling that binds only how bezent is built names its plan decision (`DEC-*` in

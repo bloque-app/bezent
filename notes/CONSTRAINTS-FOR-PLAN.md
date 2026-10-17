@@ -10,17 +10,17 @@ specification. Everything here is an intended binding, a technical fact or a mea
 material a plan needs and a specification must not carry. Sources are the research notes in
 `research/`, cited by number. Facts read on 2026-09-30; asset table updated 2026-10-11. Sections below that speak of USDB, per-network reserves, rebalancing or Binance predate amendment 0001 and are kept as research context.
 
-## Owner rulings
+## @pandres95 rulings
 
 | Date | Ruling | Where it lands |
 |---|---|---|
 | 2026-10-01 | **Rely on Swaps** to keep the design simple. A plan-level decision: wherever Swaps already does a job, the plan uses Swaps instead of building it into bezent | "Relying on Swaps" below; `SPEC.md` `REQ-RB-3` loosened in v0.1.1 so the plan has room |
-| 2026-10-01 | **Internal shape: one ingress, three components.** A single ingress takes bridging requests in and enqueues them. (1) **External network endpoints**: evmhot-shaped, per chain; receive deposits, make withdrawals; sweeps go to a Bloque treasury, not to Binance. (2) **Asset unification / disaggregation**, relying on Swaps: USDT ⇄ USDC conversion, Polygon ⇄ Base through Circle. (3) **Kreivo endpoint**: a light client that mints and burns, nothing more | "Internal shape" below; `SPEC.md` changes pending the owner's answer on how conversion is modelled |
+| 2026-10-01 | **Internal shape: one ingress, three components.** A single ingress takes bridging requests in and enqueues them. (1) **External network endpoints**: evmhot-shaped, per chain; receive deposits, make withdrawals; sweeps go to a Bloque treasury, not to Binance. (2) **Asset unification / disaggregation**, relying on Swaps: USDT ⇄ USDC conversion, Polygon ⇄ Base through Circle. (3) **Kreivo endpoint**: a light client that mints and burns, nothing more | "Internal shape" below; `SPEC.md` changes pending @pandres95's answer on how conversion is modelled |
 | 2026-10-01 | **USDT is never reserve.** The reserve is USDC. Swaps converts USDT to USDC (deposits) and back (withdrawals); bezent mints against the USDC that arrives. The bridged asset on Kreivo is **USDB** | `SPEC.md` v0.2.0 §5.10 (`REQ-CV-*`), `REQ-AS-7`, `OQ-4` partly closed |
 | 2026-10-01 | **CCTP is for netting, and batching Polygon → Base is key.** A Base withdrawal larger than Base's reserve takes only the remainder from Polygon through CCTP (or the reverse) | `REQ-RB-9` (batching), `REQ-RB-10` (netting first); "CCTP in practice" below |
 | 2026-10-01 | **Asset Hub is out of scope as an origin network.** XCM is already trustless and works well; bezent must not put a custodian on that path | `SPEC.md` v0.1.1 §1.6 and §13; below |
 
-## Assets and backends (owner, to 2026-10-11; amendment 0001)
+## Assets and backends (@pandres95, to 2026-10-11; amendment 0001)
 
 | Asset on Kreivo | Backend | Assurance | Reserve | Notes |
 |---|---|---|---|---|
@@ -65,7 +65,7 @@ material a plan needs and a specification must not carry. Sources are the resear
                                                          ├─> (2) Unification / disaggregation  on Swaps: USDT ⇄ USDC, Polygon ⇄ Base via CCTP
                                                          └─> (3) Kreivo endpoint              light client: mint, escrow/destroy, return
 
-Readings and consequences, to confirm with the owner:
+Readings and consequences, to confirm with @pandres95:
 
 - **Swaps runs component (2) as graphs.** The ingress and its queue are bezent's own and hold transfer
   state and the reserve equation (`REQ-BK-1`), so that nothing the trust model rests on sits in Swaps.
@@ -114,7 +114,7 @@ Facts (research 05; Circle's documentation, 2026-10-01):
 - **Time** (standard): **Polygon → Base ≈ 8 s** plus attestation and the destination call; **Base → Polygon ≈
   15–19 min**, because the attestation waits for Base's finality.
 
-What that means for the design, per the owner's ruling:
+What that means for the design, per @pandres95's ruling:
 
 - **Netting first** (`REQ-RB-10`). A Base withdrawal is paid from Base's reserve. Only the part Base lacks
   moves, and only from Polygon.
@@ -133,7 +133,7 @@ What that means for the design, per the owner's ruling:
 
 ## Relying on Swaps
 
-The owner's ruling of 2026-10-01: to simplify the design, the plan relies on Swaps. What Swaps already
+@pandres95's ruling of 2026-10-01: to simplify the design, the plan relies on Swaps. What Swaps already
 does, bezent does not rebuild:
 
 | Job | Swaps today (research 02) | Bridge's part |
@@ -175,7 +175,7 @@ well. bezent never treats Asset Hub as an origin network (`SPEC.md` §13). Conse
 
 ## This is R0 of the Kreivo Bridge
 
-The owner's message-backed **Kreivo Bridge** spec (the Kreivo repository's `specs/kreivo-bridge/SPEC.md`
+@pandres95's message-backed **Kreivo Bridge** spec (the Kreivo repository's `specs/kreivo-bridge/SPEC.md`
 v0.2.0, 2026-09-19) defines a release **R0 — interim issuance**: Bloque mints a bridged asset against
 reserves it holds and publishes (`REQ-R0-1`, `REQ-R0-2`), until a message-backed binding (R1: Polkadot
 Asset Hub escrow; R2: EVM escrows with a messaging provider) takes over, at which point Bloque's issuer
@@ -183,19 +183,19 @@ right ends (`REQ-R0-3`). This bridge is that R0, specified as a system. Research
 
 Consequences the plan must carry:
 
-- **USDB is a new local asset, `Here(103)`** (owner, 2026-10-03), not one of the runtime's reserved
+- **USDB is a new local asset, `Here(103)`** (@pandres95, 2026-10-03), not one of the runtime's reserved
   `BridgeBackedAssets` (`Sibling{1000, 50, 1337|1984}`). `Here(103)` is free on mainnet (research 07). The
   hand-over to a later binding still works without holders acting: the Kreivo Bridge spec lets an existing
   asset acquire a binding with its identity kept (its `REQ-AS-7`). Because `Here(103)` is not in
   `BridgeBackedAssets`, Kreivo's XCM filter lets it be reserve-transferred out; backing is unaffected (supply
   counts the sovereign account's holding). Blocking that needs a runtime change (form item `br-xcm-usdb`).
-- **Creation:** a Root referendum creates `Here(103)`; the owner is sending it on Monday 2026-10-05. Its parameters
+- **Creation:** a Root referendum creates `Here(103)`; @pandres95 is sending it on Monday 2026-10-05. Its parameters
   (metadata decimals, sufficient, issuer/admin) should be settled before then: form items `br-usdb-params`, `br-issuer`.
-- **Issuer and admin (owner, 2026-10-03): the relayer's account**, minting and burning locally; no XCM is
+- **Issuer and admin (@pandres95, 2026-10-03): the relayer's account**, minting and burning locally; no XCM is
   involved. Mint plus aledgent deposit stays atomic through `utility.batch_all`. This conflicts with
   `REQ-AR-4`, `INV-2` and `INV-3` (caps and one-time references enforced on chain) unless the account sits behind
   a capped proxy; form item `br-issuer` asks which.
-- **Decimals.** Set in the asset metadata, which aledgent registers from (owner). `REQ-AS-4` requires USDB's precision to equal USDC's (6). COPM, MXNB and BRLB use 2. A 2-decimal
+- **Decimals.** Set in the asset metadata, which aledgent registers from (@pandres95). `REQ-AS-4` requires USDB's precision to equal USDC's (6). COPM, MXNB and BRLB use 2. A 2-decimal
   USDB would need an amendment and a rule for the sub-cent remainder (form item `br-usdb-params`).
 - **Fungibility across origins (`OQ-1`) is R0-safe, but not free later.** The Kreivo Bridge spec defers
   "fungibility across bindings" (`DEF-9`): merging backings merges their trust. Under R0 every origin
@@ -326,7 +326,7 @@ Research 02.
   callbacks.
 - **A product consequence, stated plainly.** bezent mints **bridged USDC** on Kreivo. Kreivo's dollar
   today is **DUSD** (Brale, via Asset Hub). Unless the two are converted somewhere, Kreivo will carry two
-  dollars. Which one aledgent and the products hold is the owner's call (`OQ-4`).
+  dollars. Which one aledgent and the products hold is @pandres95's call (`OQ-4`).
 
 ## Venues
 

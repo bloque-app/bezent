@@ -107,7 +107,7 @@ steps</a></li>
     
 <h1 id="bezent--design-overview">bezent — Design overview</h1>
 <p>This document states <strong>how the problem is understood and what
-the specification now says</strong>, in plain language, for the owner
+the specification now says</strong>, in plain language, for @pandres95
 and a reviewer: the problem, the shape, the Kreivo contract, the
 reserves, how value flows, the trust it asks for, and what is ruled and
 what comes next.</p>
@@ -817,7 +817,7 @@ deadline (<code>REQ-RF-5</code>).</li>
 </ul>
 <blockquote>
 <p><code>notes/GENERALISATION.md</code> §9 proposed escrow until the
-payout is final. The owner chose to burn at once (2026-10-11), and
+payout is final. @pandres95 chose to burn at once (2026-10-11), and
 <code>SPEC.md</code> follows that.</p>
 </blockquote>
 <h3 id="41-starting-bounds">4.1 Starting bounds</h3>
@@ -832,7 +832,6 @@ Swaps does today (<code>NFR-10</code>); the figures are kept privately.
 An asset that had no orders in that period takes another asset's figures
 converted at the day's exchange rate when its bounds are configured; the
 rate and its source are recorded with each configuration.</p>
-<hr />
 <h2 id="5-reserves-and-the-reserve-equation">5. Reserves and the reserve
 equation</h2>
 <p>For each bridged asset, at a final point on every network
@@ -1037,7 +1036,7 @@ pesos → COPM on Kreivo, attested by Swaps</h3>
 may report. The contract's mint window and supply ceiling limit a wrong
 report.</li>
 <li><strong>Swaps must not report a payment final before its rail
-guarantees it</strong> (<code>REQ-OB-7</code>). The owner's note:
+guarantees it</strong> (<code>REQ-OB-7</code>). @pandres95's note:
 whether by Bre-B, PSE, a payment link or a bank deposit, the payment
 must clear before issuance is ordered.</li>
 <li><strong>A reversal after that</strong> (a chargeback, a fraud
@@ -1410,7 +1409,7 @@ eligibility.</p>
 <hr />
 <h2 id="10-rulings-and-open-questions">10. Rulings and open
 questions</h2>
-<h3 id="101-ruled-by-the-owner">10.1 Ruled by the owner</h3>
+<h3 id="101-ruled-by-pandres95">10.1 Ruled by @pandres95</h3>
 <p>The last column says whether each ruling still holds and, where it
 changed the spec, which amendment wrote it in (in
 <code>amendments/</code>); a ruling that binds only how bezent is built

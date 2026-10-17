@@ -99,7 +99,7 @@ Traceability</a></li>
       <div class="kicker">PLAN.md</div>
       <h1>bezent</h1>
       
-      <dl class="meta"><div><dt>Version</dt><dd>0.5.0</dd></div><div><dt>Status</dt><dd>approved by the owner (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for</dd></div><div><dt>Date</dt><dd>2026-10-13</dd></div><div><dt>Source</dt><dd><code>bezent/PLAN.md</code> · uncommitted + local changes</dd></div></dl>
+      <dl class="meta"><div><dt>Version</dt><dd>0.5.0</dd></div><div><dt>Status</dt><dd>approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for</dd></div><div><dt>Date</dt><dd>2026-10-13</dd></div><div><dt>Source</dt><dd><code>bezent/PLAN.md</code> · uncommitted + local changes</dd></div></dl>
     </header>
     
 <h1 id="bezent--implementation-plan">bezent — Implementation Plan</h1>
@@ -152,12 +152,12 @@ of Kreivo, the EVM networks, CCTP, evmhot and Swaps come from
 cites (<code>research/01</code>–<code>07</code>). None is invented
 here.</li>
 <li><strong><code>[PENDING pl-…]</code> means not ruled.</strong> The
-decision is an item on the owner's form ("bezent Decisions", kept in
+decision is an item on @pandres95's form ("bezent Decisions", kept in
 Bloque's private companion repository) under that id. The plan writes
 the recommended option as its working assumption and plans against it,
 but does not treat it as decided. Items marked <em>reserved</em> are
-security trade-offs the owner keeps; they carry no default. When the
-owner rules, the plan is revised and the marker goes. A ruling that
+security trade-offs @pandres95 keeps; they carry no default. When
+@pandres95 rules, the plan is revised and the marker goes. A ruling that
 would change the spec goes through an amendment first.</li>
 </ol>
 <h2 id="1-shape-of-the-system">1. Shape of the system</h2>
@@ -337,8 +337,8 @@ module's pace follows the Swaps platform's reviews
 <h3 id="dec-2-runtime-plain-rust-services-for-v0">DEC-2 Runtime: plain
 Rust services for V0</h3>
 <p><strong>bezent V0 runs as plain Rust services with one
-PostgreSQL-backed core, not as a VOS deployment.</strong> Ruled by the
-owner (<code>pl-runtime</code>, 2026-10-13).</p>
+PostgreSQL-backed core, not as a VOS deployment.</strong> Ruled by
+@pandres95 (<code>pl-runtime</code>, 2026-10-13).</p>
 <ul>
 <li>bezent is mostly chain I/O and signing. VOS restricts chain I/O to
 Local roots, so most of bezent would sit outside VOS anyway.</li>
@@ -431,7 +431,7 @@ smoldot until the fix lands upstream (<code>RISK-2</code>).</p>
 <h3 id="dec-6-the-contract">DEC-6 The contract</h3>
 <p><strong>One ink! contract on Kreivo mints, redeems and refund-mints
 every bridged asset, with bounds kept per asset, and holds its authority
-through a community dedicated to it.</strong> Ruled by the owner
+through a community dedicated to it.</strong> Ruled by @pandres95
 (<code>pl-contract-scope</code>, 2026-10-13): one contract for every
 bridged asset, with per-asset bounds.</p>
 <ul>
@@ -471,7 +471,7 @@ governance each.</p>
 <h3 id="dec-7-assets-on-kreivo">DEC-7 Assets on Kreivo</h3>
 <p><strong>bUSDC, bEURC and bBTC are new local assets created by a Root
 referendum, all "not sufficient", with the contract's community as
-Issuer and Admin.</strong> Ruled by the owner
+Issuer and Admin.</strong> Ruled by @pandres95
 (<code>pl-asset-ids</code>, 2026-10-13): bUSDC <code>Here(101)</code>
 with 6 decimals, bEURC <code>Here(102)</code> with 6, bBTC
 <code>Here(103)</code> with 8 and the dust rule; MXNB moves to
@@ -507,7 +507,7 @@ review (<code>REQ-IN-9</code>).</p>
 <h3 id="dec-8-evm-endpoint">DEC-8 EVM endpoint</h3>
 <p><strong>The EVM endpoint is a new Rust service in this repository,
 built on alloy, one instance per network; it shares none of evmhot's
-code; it watches only the reserve vault.</strong> Ruled by the owner
+code; it watches only the reserve vault.</strong> Ruled by @pandres95
 (<code>pl-scope</code>, 2026-10-13; amendment 0007): bezent observes
 arrivals at the vault, conversions there and payouts from it; deposit
 addresses and sweeps are evmhot's, and routing value to the vault is
@@ -543,7 +543,7 @@ already detects deposits.</p>
 <p><strong>bezent issues no deposit addresses. Value reaches a reserve
 by a plain transfer into its vault, from Swaps or from evmhot's sweeps;
 Swaps then requests the deposit by naming the arrival's
-coordinate.</strong> Ruled by the owner (<code>pl-scope</code>,
+coordinate.</strong> Ruled by @pandres95 (<code>pl-scope</code>,
 2026-10-13; amendment 0007 A1).</p>
 <ul>
 <li>A coordinate is consumed once (<code>INV-2</code>), so an arrival
@@ -567,7 +567,7 @@ deposit needs a request after its arrival; a standing-instruction path
 no longer exists.</p>
 <h3 id="dec-10-vault">DEC-10 Vault</h3>
 <p><strong>Each origin network's treasury is a contract vault whose
-outflows are bounded on chain.</strong> Ruled by the owner
+outflows are bounded on chain.</strong> Ruled by @pandres95
 (<code>pl-vault</code>, 2026-10-13): a Safe with a Zodiac Roles v2
 modifier.</p>
 <ul>
@@ -622,7 +622,7 @@ atomic.</p>
 <p><strong>Delivery keys (mint, payout from a reserve, refund) sign
 inside AWS KMS (secp256k1, for EVM keys and ECDSA Kreivo accounts);
 every other key comes from Vault and is loaded only by the signer
-process.</strong> Ruled by the owner (<code>pl-custody</code>,
+process.</strong> Ruled by @pandres95 (<code>pl-custody</code>,
 2026-10-13); amendment 0006 rewrote <code>REQ-CU-1</code> to match.</p>
 <ul>
 <li>Options: (a) AWS KMS secp256k1 for EVM keys and for ECDSA Kreivo
@@ -650,7 +650,7 @@ with its latency and price; (b) and (c) need the amendment first.</p>
 <h3 id="dec-12-rpc-for-evm-networks">DEC-12 RPC for EVM networks</h3>
 <p><strong>Each EVM network is read through two independent paid
 providers, cross-checked at the finalized block; when they disagree, the
-disposition is unknown, never a mint.</strong> Ruled by the owner
+disposition is unknown, never a mint.</strong> Ruled by @pandres95
 (<code>pl-rpc</code>, 2026-10-13).</p>
 <ul>
 <li>There is no light client for these networks in our stack, so a
@@ -670,7 +670,7 @@ conversion role: USDT0 into USDC through Uniswap v3 SwapRouter02,
 exact-input single hop, on the 0.01 % pool. bezent pays every withdrawal
 on the reserve's own network; a bUSDC withdrawal meant for Base is paid
 to Swaps on Polygon, and Swaps bridges it with CCTP from its own
-funds.</strong> Ruled by the owner (<code>pl-scope</code>, 2026-10-13;
+funds.</strong> Ruled by @pandres95 (<code>pl-scope</code>, 2026-10-13;
 <code>pl-cross-network</code>, in chat, 2026-10-13; amendment 0007 A3,
 A5). The only admitted convertible is USDT0 on Polygon for bUSDC
 (<code>pl-convertibles</code>, 2026-10-13); bEURC and bBTC have none, so
@@ -785,7 +785,7 @@ module is reviewed on the Swaps platform's schedule
 statement</h3>
 <p><strong>The core evaluates the reserve equation every minute per
 asset, and publishes a daily JSON statement signed with a dedicated
-ed25519 key.</strong> Ruled by the owner
+ed25519 key.</strong> Ruled by @pandres95
 (<code>pl-statement-host</code>, 2026-10-13): a public, append-only
 bucket with object lock.</p>
 <ul>
@@ -840,16 +840,17 @@ minimum, and a raise delay applies to the contract as a whole
 (<code>REQ-GV-3</code>). They are set when the contract is instantiated
 and raised or lowered only through the contract's own roles;
 <code>config/bounds.example.toml</code> carries the recommended starting
-values, commented. For an asset that had no orders in the measured window
-the figures are converted from another asset's at the day's exchange rate
-when its bounds are configured ("around equivalent exchanges"); the rate
-used and its source are recorded with each configuration. The ten-times
-volume figures that <code>NFR-10</code> asks for are recorded privately
-with the report. <em>Serves:</em> the bounds of §7.F and their on-chain
-enforcement (<code>INV-3</code>), declared route limits
-(<code>REQ-LM-1</code>), and sustained volume with the figures in the
-plan (<code>NFR-10</code>). <em>Cost:</em> reading production data needs
-care to stay read-only; nothing in bezent writes to Swaps' database.</p>
+values, commented. For an asset that had no orders in the measured
+window the figures are converted from another asset's at the day's
+exchange rate when its bounds are configured ("around equivalent
+exchanges"); the rate used and its source are recorded with each
+configuration. The ten-times volume figures that <code>NFR-10</code>
+asks for are recorded privately with the report. <em>Serves:</em> the
+bounds of §7.F and their on-chain enforcement (<code>INV-3</code>),
+declared route limits (<code>REQ-LM-1</code>), and sustained volume with
+the figures in the plan (<code>NFR-10</code>). <em>Cost:</em> reading
+production data needs care to stay read-only; nothing in bezent writes
+to Swaps' database.</p>
 <h3 id="dec-18-deployment">DEC-18 Deployment</h3>
 <p><strong>bezent deploys as a set of container services on a managed
 container platform, as aledgent does, with infrastructure as code and
@@ -898,7 +899,7 @@ sets the threshold to one, and a small relay in the harness signs and
 delivers messages. A burn on one fork then mints on the other with no
 Circle service involved. Real attestation timing comes only from the
 public testnets.</li>
-<li>In the Swaps platform's CI (ruled by the owner,
+<li>In the Swaps platform's CI (ruled by @pandres95,
 <code>pl-pr-e2e</code>, 2026-10-15: both): every PR runs the
 <code>bezent-sidecar</code> image (ingress, core, signer stub) next to
 Postgres with no chain; a test-only driver inside the sidecar injects
@@ -926,6 +927,10 @@ public, by the same process as aledgent: a redacted public tree, an IP
 and licence review, a trademark check, and a public repository whose
 history starts at the import.</strong></p>
 <ul>
+<li>Timing: the repository is public now, before production (@pandres95,
+2026-10-17), and the work that remains (<code>M-1</code> onwards) is
+done in it. It does not wait for the mainnet release
+(<code>M-4</code>).</li>
 <li>The public repository is <code>bezent</code>. Bloque's private
 companion repository keeps everything internal and the deployment
 definitions (<code>DEC-1</code>); the public tree leaves out operational
@@ -937,20 +942,24 @@ aledgent's do.</li>
 Apache-2.0 OR MIT for reusable crates and the EVM contracts; CC-BY-4.0
 for documents; GPL-3.0-only for Kreivo's chain specification, kept
 verbatim. Every file carries an SPDX header and the tree a
-<code>REUSE.toml</code>. Counsel confirms the table.</li>
+<code>REUSE.toml</code>. The services and the contract are GPL rather
+than AGPL: @pandres95's rule is the GPL wherever it is possible. The
+built ink! contract is a GPL-3.0-only combined work
+(<code>docs/oss/LICENSING.md</code> §4.3). @olanod signed the table off
+on 2026-10-17.</li>
 <li>IP: the same review aledgent had (2026-10-12): one chain of title to
-Pagos Cube LLC, AI co-authorship noted for counsel, third-party code and
-pinned forks listed with their licences. A DCO check is required on
-<code>main</code> once public.</li>
-<li>Trademark: a first-pass clearance of "bezent" in the US, Mexico,
-Colombia, the EU and WIPO, as aledgent's, before the name is published
+Pagos Cube LLC, AI co-authorship noted, third-party code and pinned
+forks listed with their licences. A DCO check is required on
+<code>main</code> once public. @olanod signed off the IP review and the
+trademark position on 2026-10-17.</li>
+<li>Trademark: @olanod's sign-off (2026-10-17) covers the name "bezent"
 on the repository.</li>
 </ul>
-<p><em>Serves:</em> nothing in the spec requires it; it is the owner's
+<p><em>Serves:</em> nothing in the spec requires it; it is @pandres95's
 direction, and it adds no behaviour. Being public also lets holders
 check the contract and the statement format themselves
 (<code>REQ-PR-*</code>). <em>Cost:</em> a redaction pass and a review
-per release; the AGPL obliges source for anyone who runs the
+per release; the GPL obliges source for anyone who distributes the
 services.</p>
 <h2 id="3-dependencies-what-we-wait-on">3. Dependencies: what we wait
 on</h2>
@@ -967,7 +976,7 @@ on</h2>
 <tr class="odd">
 <td>Kreivo 0.17.1 on mainnet (kreivo#512)</td>
 <td>Merged and released 2026-10-11; mainnet upgrade on 2026-10-13
-(owner); confirm the runtime version on chain before
+(@pandres95); confirm the runtime version on chain before
 <code>M-4</code></td>
 <td>Production (<code>M-4</code>)</td>
 <td>Everything runs on zombienet with 0.17.1</td>
@@ -1161,7 +1170,7 @@ volume (<code>NFR-10</code>), route budgets (<code>NFR-2</code>)</td>
 <td><code>F-017</code></td>
 <td>Open-source release</td>
 <td>open source, <code>M-5</code></td>
-<td>nothing in the spec; the owner's direction
+<td>nothing in the spec; @pandres95's direction
 (<code>DEC-20</code>)</td>
 <td>production (<code>M-4</code>)</td>
 </tr>
@@ -1287,9 +1296,10 @@ published p99 target and ceiling (<code>NFR-2</code>).</p>
 tree, licence headers and <code>REUSE.toml</code>, the IP review, the
 trademark check, the public repository, and a private companion that
 holds the internal documents and deployment definitions, following
-aledgent's run-book (<code>DEC-20</code>). Done when counsel's items are
-closed, the public tree builds and passes its tests on its own, and the
-public repository is open with the DCO check on <code>main</code>.</p>
+aledgent's run-book (<code>DEC-20</code>). Done when the IP and
+trademark sign-off (@olanod, 2026-10-17) is recorded, the public tree
+builds and passes its tests on its own, and the public repository is
+open with the DCO check on <code>main</code>.</p>
 <h2 id="5-milestones">5. Milestones</h2>
 <div class="scroll"><table>
 <thead>
@@ -1361,10 +1371,10 @@ delivered, refunded, or held with an owner; every runbook exercised</td>
 <td>bezent's code and design are public</td>
 <td><code>F-017</code></td>
 <td>The public tree builds and passes its tests alone. The IP review and
-trademark check are closed. The public repository is open under the
-licences of <code>DEC-20</code>, with the DCO check on
-<code>main</code>. The private companion keeps every internal document
-and deploys from the public code by pinned commit</td>
+trademark sign-off are recorded (@olanod, 2026-10-17). The public
+repository is open under the licences of <code>DEC-20</code>, with the
+DCO check on <code>main</code>. The private companion keeps every
+internal document and deploys from the public code by pinned commit</td>
 </tr>
 </tbody>
 </table></div>

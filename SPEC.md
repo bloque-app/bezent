@@ -44,7 +44,7 @@ Earlier versions applied amendments 0001 to 0006; each amendment records what it
 | §10 Errors and named conditions | Every refusal, and every non-terminal condition | integrating |
 | §11 Non-functional requirements | Latency, durability, observation and custody bounds | implementing or operating |
 | §12–§13 Deferred scope, non-goals | What is out, and why | anyone tempted to add something |
-| §14 Open questions | What is undecided, and what each decision blocks | the owner |
+| §14 Open questions | What is undecided, and what each decision blocks | @pandres95 |
 | §15 Traceability and release scope | How stories, requirements and invariants map, and what the first release contains | planning |
 
 ### Normative language

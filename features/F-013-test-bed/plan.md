@@ -32,4 +32,4 @@ gate (`M-1` onwards); testnet wiring.
 
 CI shows: zombienet up with Kreivo 0.17.1 and the six assets at the right ids, decimals and issuer; the three forks
 up at their pinned blocks; a USDC burn through CCTP on the Polygon fork minted on the Base fork by the local relay.
-Nothing heavy runs on the owner's laptop (16 GB): zombienet runs in CI only.
+Nothing heavy runs on @pandres95's laptop (16 GB): zombienet runs in CI only.

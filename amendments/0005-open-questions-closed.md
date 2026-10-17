@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0005 — open questions closed on 2026-10-13
 
-**Status:** ruled by the owner on the decision form, 2026-10-13 (`oq-2`, `oq-3`, `oq-6`, `oq-7`, `oq-8`, `oq-11`,
+**Status:** ruled by @pandres95 on the decision form, 2026-10-13 (`oq-2`, `oq-3`, `oq-6`, `oq-7`, `oq-8`, `oq-11`,
 `oq-12`). Applied to `SPEC.md` v0.3.3 together with amendment 0004 (`br-dust-rule`).
 **Target:** `SPEC.md` v0.3.2
 **Date:** 2026-10-13

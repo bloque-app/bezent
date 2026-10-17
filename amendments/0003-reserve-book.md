@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0003 — the reserve book
 
-**Status:** ruled by the owner on 2026-10-13, in the bezent session's chat ("Then, we rule for a book"). Applied to
+**Status:** ruled by @pandres95 on 2026-10-13, in the bezent session's chat ("Then, we rule for a book"). Applied to
 `SPEC.md` v0.3.2.
 **Target:** `SPEC.md` v0.3.1
 **Date:** 2026-10-13

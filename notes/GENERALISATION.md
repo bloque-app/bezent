@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ---
 name: One core, many backends
-summary: Can bezent's mechanism be generalised to every backed asset (bUSDC, bEURC, bBTC, bCOP, bMXN, bBRL), with Swaps or the ramp driving the operations? Yes, with one honest change, an assurance class per backend. Answer to the owner's question of 2026-10-07.
+summary: Can bezent's mechanism be generalised to every backed asset (bUSDC, bEURC, bBTC, bCOP, bMXN, bBRL), with Swaps or the ramp driving the operations? Yes, with one honest change, an assurance class per backend. Answer to @pandres95's question of 2026-10-07.
 status: informative design note; nothing here is ruled
 date: 2026-10-07
 ---
@@ -13,7 +13,7 @@ date: 2026-10-07
 # One core, many backends
 
 Basis: bridge repo at `474dbb0` (`SPEC.md` v0.2.0); aledgent `PLAN.md` at `a3cb28b` (`DEC-20`). Claims are
-tagged **[Spec]** (in bridge `SPEC.md`), **[Plan]** (aledgent's plan), **[Ruled]** (an owner ruling),
+tagged **[Spec]** (in bridge `SPEC.md`), **[Plan]** (aledgent's plan), **[Ruled]** (a ruling by @pandres95),
 **[Knowledge]** (general facts about a network or rail, to confirm before relying on them) or
 **[Inference]** (my reasoning).
 
@@ -67,7 +67,7 @@ observations and derives outcomes, as today (`REQ-AR-2`). **[Spec]**
   settle in seconds. That gives each arrival a stable id and a short wait before mint. **[Knowledge]**
 - **Reversals after "final".** A return or chargeback after mint becomes a loss against surplus, never a
   change in supply. The backend must declare its reversal window, and the mint waits past whatever part of
-  it the owner rules. **[Inference]**
+  it @pandres95 rules. **[Inference]**
 - **Independence of evidence.** The core should read bank evidence itself, with read-only API access. If it
   only hears it from the ramp, the ramp effectively asserts arrivals, which the spec forbids
   (`REQ-RQ-7`). **[Spec] [Inference]**
@@ -106,7 +106,7 @@ signs. **[Ruled]** For banks that means:
 
 ## 7. What it changes in the spec
 
-One amendment, after the owner rules:
+One amendment, after @pandres95 rules:
 
 1. §4.4(b) "origin networks" becomes a **backend contract** of capabilities.
 2. A per-backend **assurance class** (public or attested) is declared in the statement, like aledgent's
@@ -120,7 +120,7 @@ One amendment, after the owner rules:
 
 ## 8. Since 2026-10-07: a contract on Kreivo, and BNB Chain for bBTC
 
-Owner, 2026-10-11, after kreivo#512 and a conversation with a Kreivo collaborator.
+@pandres95, 2026-10-11, after kreivo#512 and a conversation with a Kreivo collaborator.
 
 ### 8.1 The Kreivo end is always one contract (kreivo#512)
 
@@ -168,9 +168,9 @@ Reading the collaborator's suggestion as: back bBTC with **BTCB**, Binance's BTC
 - **Moving in and out of Binance is cheap with BTCB**, which suits Swaps' existing Binance flows.
   **[Inference]**
 
-## 9. The Kreivo contract's two operations (owner, 2026-10-11)
+## 9. The Kreivo contract's two operations (@pandres95, 2026-10-11)
 
-The owner's design: fiat-backed assets also live on Kreivo, so that DAOs and other accounts can use them, and
+@pandres95's design: fiat-backed assets also live on Kreivo, so that DAOs and other accounts can use them, and
 the Kreivo end has two operations:
 
 1. **Mint**, then transfer to the destination named in the order on the counterpart backend.

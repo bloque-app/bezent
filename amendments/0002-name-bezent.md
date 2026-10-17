@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0002 — the name: bezent
 
-**Status:** ruled by the owner on 2026-10-12, in the bezent session's chat ("You can update the name and
+**Status:** ruled by @pandres95 on 2026-10-12, in the bezent session's chat ("You can update the name and
 branding in the existing artifacts and documents"). The name was chosen in the aledgent session and relayed
 from there. Applied to `SPEC.md` v0.3.1.
 **Target:** `SPEC.md` v0.3.0

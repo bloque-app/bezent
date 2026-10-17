@@ -8,7 +8,7 @@ SPDX-License-Identifier: CC-BY-4.0
 Informative companion to `SPEC.md`. Not part of the specification. Nothing here binds; where it
 disagrees with `SPEC.md`, `SPEC.md` wins.
 
-## What the owner asked for (2026-09-30)
+## What @pandres95 asked for (2026-09-30)
 
 > A mirrored bridge that talks to Kreivo through a contract. An off-chain service reads our deposits from
 > EVM hot wallets (evmhot), talks to Swaps, and keeps the balance of each asset per origin (Polygon, Base…).

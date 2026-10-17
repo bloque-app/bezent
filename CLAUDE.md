@@ -73,7 +73,7 @@ aledgent requirements note (`BR-*`) to the spec; keep it current when the spec c
 
 ## Decisions
 
-Open questions (`OQ-*`) and the rulings that close them are recorded in `amendments/`; the maintainers keep their
+Open questions (`OQ-*`) and the rulings that close them are recorded in `amendments/`; @pandres95 keeps the
 working decision form outside this repository. A ruling reaches `SPEC.md` or `PLAN.md` only through an amendment that
 cites the decision it applies. Never apply an unruled decision, not even provisionally.
 

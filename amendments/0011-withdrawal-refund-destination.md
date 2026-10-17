@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0011 — a withdrawal's refund always goes to the redeemer
 
-**Status:** ruled by the owner in chat, 2026-10-13 (`sp-refund-dest`: "Yes"). Applied to `SPEC.md` v0.5.1.
+**Status:** ruled by @pandres95 in chat, 2026-10-13 (`sp-refund-dest`: "Yes"). Applied to `SPEC.md` v0.5.1.
 **Target:** `SPEC.md` v0.5.0 (§5.8, §7.A)
 **Date:** 2026-10-13
 **Rationale in one line:** the spec contradicts itself. `REQ-RQ-4` lets a requester add a refund destination to a

@@ -175,7 +175,7 @@ modifier. Neither the plan nor a ruling says which, so it is not built here; see
 Should-fix 1 and 2 are done (see "Pinned pools" and "Deployment"). The rest:
 
 - **Should-fix 3, the owners can move reserve directly** (`Safe.execTransaction` at threshold, outside Roles; guardrail
-  6, `REQ-GV-5`, `INV-14`, `REQ-GV-3`). Not implemented: it waits on the owner's ruling (a Safe guard limiting owner
+  6, `REQ-GV-5`, `INV-14`, `REQ-GV-3`). Not implemented: it waits on @pandres95's ruling (a Safe guard limiting owner
   transactions to Roles administration and a surplus-withdrawal shape, a Delay or timelock, or an explicit statement
   that the owners are trusted). It belongs on the spec-gaps list with the missing `REQ-GV-3` delay below.
 - **Self-transfers, zero transfers and bare emits still emit a reference.** The delivery recipient is `Pass` by

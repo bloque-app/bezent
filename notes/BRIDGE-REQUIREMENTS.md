@@ -8,7 +8,7 @@ SPDX-License-Identifier: CC-BY-4.0
 > Copied from `bloque-app/aledgent` PR #100 (branch `bridge-requirements`, commit `ac85c4a`) on 2026-09-30.
 > Informative source of the `BR-*` identifiers mapped in `notes/TRACEABILITY.md`. The original is authoritative.
 
-**Status:** draft for review · **Date:** 2026-09-29 · **Owner:** the maintainers ·
+**Status:** draft for review · **Date:** 2026-09-29 · **Owner:** @pandres95 ·
 **Audience:** the team designing the bridge
 
 This note says what Bloque's **trusted bridge** must guarantee so that two systems can depend on it:
@@ -248,12 +248,12 @@ parties' legs that can take days.
 | BR-INC-5 | Requesters SHOULD be told once per condition (a route paused, a network stalled), not once per transfer. | SHOULD | Per-transfer alerts bury the cause. |
 | BR-INC-6 | Each incident class in §5 SHOULD have a runbook exercised before the bridge carries value. | SHOULD | The first run of a runbook should not be the real one. |
 
-## 4. Open questions for the owner
+## 4. Open questions for @pandres95
 
 | ID | Question |
 |---|---|
 | Q1 | **Fast path.** Will the bridge deliver before the source leg is final? If so: which routes, what exposure cap, who funds the inventory, and who absorbs a reverted source? (Ramp draft `OQ-2`; BR-FIN-5.) |
-| Q2 | *Answered (owner, 2026-09-29).* aledgent's 30 s / 19 s budget does not apply to the bridge. aledgent's completion ends at the hand-off, when the withdrawal is final on Kreivo and the outcome has been relayed to the requester. The bridge's designers set a budget for each route, and it is measured separately (BR-LAT-1, BR-LAT-2). |
+| Q2 | *Answered (@pandres95, 2026-09-29).* aledgent's 30 s / 19 s budget does not apply to the bridge. aledgent's completion ends at the hand-off, when the withdrawal is final on Kreivo and the outcome has been relayed to the requester. The bridge's designers set a budget for each route, and it is measured separately (BR-LAT-1, BR-LAT-2). |
 | Q3 | **Pass-through or inventory.** Does each ramp order move value through Kreivo, or does the ramp hold inventory and rebalance through the bridge in batches? This decides whether aledgent's "no settlement record per operation" holds for Bloque's own traffic. |
 | Q4 | **Direct delivery into aledgent.** May the bridge call `deposit` on aledgent's contract itself (BR-KR-2), or must it always deliver to the requester's Kreivo account first? |
 | Q5 | **Refund destination.** Where does a refund go: the original source, or the requester's account at aledgent? (Ramp draft `OQ-8`; BR-RF-2 needs an answer either way.) |
@@ -348,10 +348,10 @@ features. Ramp identifiers are from the Swaps draft (`swaps-vos/SPEC.md` v0.0.2)
 | BR-LIQ-5 | `INV-9` | `REQ-DL-4` | — |
 | BR-LIQ-6 | `REQ-PR-3`, `REQ-PR-6` | — | — |
 | BR-LIQ-7 | `REQ-SL-5` | ramp `OQ-2` | — |
-| BR-LAT-1 | Owner's ruling of 2026-09-29: aledgent's budget (amendment 0007) ends at the hand-off | `OQ-11` | — |
+| BR-LAT-1 | @pandres95's ruling of 2026-09-29: aledgent's budget (amendment 0007) ends at the hand-off | `OQ-11` | — |
 | BR-LAT-2 | `REQ-IN-7`, `NFR-11`, `OQ-36` | `REQ-OB-3` | I-12 |
 | BR-LAT-3 | `NFR-11` | `REQ-OB-3` | I-12 |
-| BR-LAT-4 | — (owner's KPI reporting rules) | — | I-12 |
+| BR-LAT-4 | — (@pandres95's KPI reporting rules) | — | I-12 |
 | BR-KEY-1 | `NFR-8`, `REQ-AU-8` | `REQ-PV-9` | I-16 |
 | BR-KEY-2 | `NFR-8`, `REQ-SA-8`, `DEC-18` | — | I-16 |
 | BR-KEY-3 | `NFR-8`, `F-026` (withdrawal bounds) | — | — |

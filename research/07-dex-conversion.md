@@ -49,7 +49,7 @@ L1 data fee). Aerodrome was not quoted; route Base conversions through it or thr
 | `Here(100)` | COPM | 2 | yes | 95 147 535 |
 | `Here(101)` | MXNB | 2 | no | 0 |
 | `Here(102)` | BRLB | 2 | no | 0 |
-| `Here(103)` | — | — | — | does not exist yet (the owner's choice for USDB) |
+| `Here(103)` | — | — | — | does not exist yet (@pandres95's choice for USDB) |
 
 `BridgeBackedAssets` (`runtime/kreivo/src/xcm_config.rs:349-353`) lists only `Sibling{1000,50,1337|1984}`;
 `XcmReserveTransferFilter = NotBridgeBacked` (`:415`) therefore allows reserve transfers of `Here(103)`.

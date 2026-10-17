@@ -21,7 +21,6 @@ the milestones and their exit criteria, and it is authoritative. Dates are inten
 
 - No external audit has been done.
 - The zombienet end-to-end job needs a self-hosted x86-64 pool and is opt-in (`.github/workflows/e2e-zombienet.yml`).
-- The trademark clearance for "bezent" and counsel's review of the licence table are pending (`GOVERNANCE.md`).
 
 Proposals for the roadmap are issues labelled `roadmap`; anything that changes the specification goes through an
 amendment first (`CONTRIBUTING.md`).

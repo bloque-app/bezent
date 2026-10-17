@@ -1,7 +1,7 @@
 ---
 name: bezent
 plan_version: 0.5.0
-status: approved by the owner (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for
+status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for
 date: 2026-10-13
 binds: SPEC.md v0.5.2
 ---
@@ -26,10 +26,10 @@ that serves nothing in the spec is not in this plan.
    is handled the same way: we stop, propose an amendment, and do not fill the gap in code.
 2. **Facts come from the notes.** Numbers and properties of Kreivo, the EVM networks, CCTP, evmhot and Swaps come from
    `notes/CONSTRAINTS-FOR-PLAN.md` and the research notes it cites (`research/01`–`07`). None is invented here.
-3. **`[PENDING pl-…]` means not ruled.** The decision is an item on the owner's form ("bezent Decisions",
+3. **`[PENDING pl-…]` means not ruled.** The decision is an item on @pandres95's form ("bezent Decisions",
    kept in Bloque's private companion repository) under that id. The plan writes the recommended option as its working assumption and
-   plans against it, but does not treat it as decided. Items marked *reserved* are security trade-offs the owner
-   keeps; they carry no default. When the owner rules, the plan is revised and the marker goes. A ruling that would
+   plans against it, but does not treat it as decided. Items marked *reserved* are security trade-offs @pandres95
+   keeps; they carry no default. When @pandres95 rules, the plan is revised and the marker goes. A ruling that would
    change the spec goes through an amendment first.
 
 ## 1. Shape of the system
@@ -122,7 +122,7 @@ TypeScript in another repository). The module's pace follows the Swaps platform'
 ### DEC-2 Runtime: plain Rust services for V0
 
 **bezent V0 runs as plain Rust services with one PostgreSQL-backed core, not as a VOS deployment.**
-Ruled by the owner (`pl-runtime`, 2026-10-13).
+Ruled by @pandres95 (`pl-runtime`, 2026-10-13).
 
 - bezent is mostly chain I/O and signing. VOS restricts chain I/O to Local roots, so most of bezent would sit outside
   VOS anyway.
@@ -190,7 +190,7 @@ patched smoldot until the fix lands upstream (`RISK-2`).
 ### DEC-6 The contract
 
 **One ink! contract on Kreivo mints, redeems and refund-mints every bridged asset, with bounds kept per asset, and
-holds its authority through a community dedicated to it.** Ruled by the owner (`pl-contract-scope`, 2026-10-13): one
+holds its authority through a community dedicated to it.** Ruled by @pandres95 (`pl-contract-scope`, 2026-10-13): one
 contract for every bridged asset, with per-asset bounds.
 
 - It runs on pallet-contracts 49 and needs Kreivo 0.17.1 or later: kreivo#512 (merged 2026-10-11) gives contracts
@@ -215,7 +215,7 @@ per redemption (`REQ-OT-6`, `REQ-RF-4`), and the chain-layer invariants (`INV-2`
 ### DEC-7 Assets on Kreivo
 
 **bUSDC, bEURC and bBTC are new local assets created by a Root referendum, all "not sufficient", with the contract's
-community as Issuer and Admin.** Ruled by the owner (`pl-asset-ids`, 2026-10-13): bUSDC `Here(101)` with 6
+community as Issuer and Admin.** Ruled by @pandres95 (`pl-asset-ids`, 2026-10-13): bUSDC `Here(101)` with 6
 decimals, bEURC `Here(102)` with 6, bBTC `Here(103)` with 8 and the dust rule; MXNB moves to `Here(104)` and BRLB to
 `Here(105)`.
 
@@ -237,7 +237,7 @@ receive the asset is refused by Kreivo. bezent does not check the destination fi
 ### DEC-8 EVM endpoint
 
 **The EVM endpoint is a new Rust service in this repository, built on alloy, one instance per network; it shares
-none of evmhot's code; it watches only the reserve vault.** Ruled by the owner (`pl-scope`, 2026-10-13; amendment 0007):
+none of evmhot's code; it watches only the reserve vault.** Ruled by @pandres95 (`pl-scope`, 2026-10-13; amendment 0007):
 bezent observes arrivals at the vault, conversions there and payouts from it; deposit addresses and sweeps are
 evmhot's, and routing value to the vault is Swaps' (then rutent's).
 
@@ -259,7 +259,7 @@ of reusing code that already detects deposits.
 ### DEC-9 Funding the reserve
 
 **bezent issues no deposit addresses. Value reaches a reserve by a plain transfer into its vault, from Swaps or from
-evmhot's sweeps; Swaps then requests the deposit by naming the arrival's coordinate.** Ruled by the owner
+evmhot's sweeps; Swaps then requests the deposit by naming the arrival's coordinate.** Ruled by @pandres95
 (`pl-scope`, 2026-10-13; amendment 0007 A1).
 
 - A coordinate is consumed once (`INV-2`), so an arrival can back one deposit only. An arrival nobody claims by the
@@ -275,7 +275,7 @@ evmhot's sweeps; Swaps then requests the deposit by naming the arrival's coordin
 
 ### DEC-10 Vault
 
-**Each origin network's treasury is a contract vault whose outflows are bounded on chain.** Ruled by the owner (`pl-vault`, 2026-10-13): a Safe with a Zodiac Roles v2 modifier.
+**Each origin network's treasury is a contract vault whose outflows are bounded on chain.** Ruled by @pandres95 (`pl-vault`, 2026-10-13): a Safe with a Zodiac Roles v2 modifier.
 
 - Allowances refill per period. Two roles:
   - **Delivery** (bezent's signer): the MultiSend of a reserve-token transfer and its reference (below), within the
@@ -306,7 +306,7 @@ addresses (`REQ-VN-4`), named upgrade authority (`REQ-GV-3`), and value leaving 
 ### DEC-11 Custody
 
 **Delivery keys (mint, payout from a reserve, refund) sign inside AWS KMS (secp256k1, for EVM keys and ECDSA Kreivo
-accounts); every other key comes from Vault and is loaded only by the signer process.** Ruled by the owner
+accounts); every other key comes from Vault and is loaded only by the signer process.** Ruled by @pandres95
 (`pl-custody`, 2026-10-13); amendment 0006 rewrote `REQ-CU-1` to match.
 
 - Options: (a) AWS KMS secp256k1 for EVM keys and for ECDSA Kreivo accounts; (b) keys from Vault, loaded only by the
@@ -326,7 +326,7 @@ accounts); every other key comes from Vault and is loaded only by the signer pro
 ### DEC-12 RPC for EVM networks
 
 **Each EVM network is read through two independent paid providers, cross-checked at the finalized block; when they
-disagree, the disposition is unknown, never a mint.** Ruled by the owner (`pl-rpc`, 2026-10-13).
+disagree, the disposition is unknown, never a mint.** Ruled by @pandres95 (`pl-rpc`, 2026-10-13).
 
 - There is no light client for these networks in our stack, so a single provider could lie or fail unseen. A
   disagreement is treated like any other read bezent cannot trust: unknown, not proof.
@@ -341,7 +341,7 @@ network, three networks, and twice the calls.
 **Swaps runs conversions on the Polygon vault under its conversion role: USDT0 into USDC through Uniswap v3
 SwapRouter02, exact-input single hop, on the 0.01 % pool. bezent pays every withdrawal on the reserve's own network;
 a bUSDC withdrawal meant for Base is paid to Swaps on Polygon, and Swaps bridges it with CCTP from its own funds.**
-Ruled by the owner (`pl-scope`, 2026-10-13; `pl-cross-network`, in chat, 2026-10-13; amendment 0007 A3, A5). The only
+Ruled by @pandres95 (`pl-scope`, 2026-10-13; `pl-cross-network`, in chat, 2026-10-13; amendment 0007 A3, A5). The only
 admitted convertible is USDT0 on Polygon for bUSDC (`pl-convertibles`, 2026-10-13); bEURC and bBTC have none, so
 the Base and BNB Chain vaults carry no conversion role.
 
@@ -412,7 +412,7 @@ is reviewed on the Swaps platform's schedule (`RISK-8`).
 ### DEC-16 Reserve check and statement
 
 **The core evaluates the reserve equation every minute per asset, and publishes a daily JSON statement signed with a
-dedicated ed25519 key.** Ruled by the owner (`pl-statement-host`, 2026-10-13): a public, append-only bucket with object
+dedicated ed25519 key.** Ruled by @pandres95 (`pl-statement-host`, 2026-10-13): a public, append-only bucket with object
 lock.
 
 - Each evaluation re-derives every term from the networks and Swaps' reports at final points and compares it with the
@@ -486,7 +486,7 @@ end-to-end suite being green and every runbook exercised.**
   (`anvil_impersonateAccount`), enables a test attester and sets the threshold to one, and a small relay in the
   harness signs and delivers messages. A burn on one fork then mints on the other with no Circle service involved.
   Real attestation timing comes only from the public testnets.
-- In the Swaps platform's CI (ruled by the owner, `pl-pr-e2e`, 2026-10-15: both): every PR runs the `bezent-sidecar`
+- In the Swaps platform's CI (ruled by @pandres95, `pl-pr-e2e`, 2026-10-15: both): every PR runs the `bezent-sidecar`
   image (ingress, core, signer stub) next to Postgres with no chain; a test-only driver inside the sidecar injects
   chain events, and the sidecar refuses it outside test mode. Before a release, a full-chain job runs bezent with
   zombienet and the anvil forks on a self-hosted pool, reusing this harness. aledgent joins that pre-release run on the same
@@ -507,20 +507,22 @@ budgets come from the public testnets.
 public tree, an IP and licence review, a trademark check, and a public repository whose history starts at the
 import.**
 
+- Timing: the repository is public now, before production (@pandres95, 2026-10-17), and the work that remains
+  (`M-1` onwards) is done in it. It does not wait for the mainnet release (`M-4`).
 - The public repository is `bezent`. Bloque's private companion repository keeps everything internal and the
   deployment definitions (`DEC-1`); the public tree leaves out operational addresses beyond the published ones,
   runbook details that would help an attacker, the requester's internal identifiers, volumes, and anything that names
   counterparties. Design documents stay in it, redacted, as aledgent's do.
 - Licence: GPL-3.0-or-later for the services and the ink! contract; Apache-2.0 OR MIT for reusable crates and the
   EVM contracts; CC-BY-4.0 for documents; GPL-3.0-only for Kreivo's chain specification, kept verbatim. Every file
-  carries an SPDX header and the tree a `REUSE.toml`. Counsel confirms the table.
-- IP: the same review aledgent had (2026-10-12): one chain of title to Pagos Cube LLC, AI co-authorship noted for
-  counsel, third-party code and pinned forks listed with their licences. A DCO check is required on `main` once
-  public.
-- Trademark: a first-pass clearance of "bezent" in the US, Mexico, Colombia, the EU and WIPO, as aledgent's, before
-  the name is published on the repository.
+  carries an SPDX header and the tree a `REUSE.toml`. The services and the contract are GPL rather than AGPL: @pandres95's rule is the GPL wherever it is
+  possible. The built ink! contract is a GPL-3.0-only combined work (`docs/oss/LICENSING.md` §4.3). @olanod signed
+  the table off on 2026-10-17.
+- IP: the same review aledgent had (2026-10-12): one chain of title to Pagos Cube LLC, AI co-authorship noted, third-party code and pinned forks listed with their licences. A DCO check is required on `main` once
+  public. @olanod signed off the IP review and the trademark position on 2026-10-17.
+- Trademark: @olanod's sign-off (2026-10-17) covers the name "bezent" on the repository.
 
-*Serves:* nothing in the spec requires it; it is the owner's direction, and it adds no behaviour. Being
+*Serves:* nothing in the spec requires it; it is @pandres95's direction, and it adds no behaviour. Being
 public also lets holders check the contract and the statement format themselves (`REQ-PR-*`). *Cost:* a redaction
 pass and a review per release; the GPL obliges source for anyone who distributes the services.
 
@@ -528,7 +530,7 @@ pass and a review per release; the GPL obliges source for anyone who distributes
 
 | What | State on 2026-10-13 | Blocks | Meanwhile |
 |---|---|---|---|
-| Kreivo 0.17.1 on mainnet (kreivo#512) | Merged and released 2026-10-11; mainnet upgrade on 2026-10-13 (owner); confirm the runtime version on chain before `M-4` | Production (`M-4`) | Everything runs on zombienet with 0.17.1 |
+| Kreivo 0.17.1 on mainnet (kreivo#512) | Merged and released 2026-10-11; mainnet upgrade on 2026-10-13 (@pandres95); confirm the runtime version on chain before `M-4` | Production (`M-4`) | Everything runs on zombienet with 0.17.1 |
 | The smoldot child-trie-root fix (aledgent#121) | Patched fork in aledgent's tree | Reading the contract's storage through the light client (`F-007`) | Use aledgent's patched build |
 | Root referendum for the asset ids, after `pl-asset-ids` | Not sent | Real assets on mainnet (`F-015`, `M-4`) | The working ids in zombienet genesis |
 | Review of the `bezent` module in the Swaps platform | Not started | Swaps driving bezent (`F-012`) | bezent's own suite drives the request surface directly |
@@ -557,7 +559,7 @@ names. A feature depends only on features of its own or an earlier milestone.
 | `F-014` | Operations: deployment, alerts, runbooks | test environment from `M-1`; production in `M-4` | incidents, governance, observer lag, pause latency (`REQ-IC-*`, `REQ-GV-*`, `NFR-5`, `NFR-6`, `NFR-8`) | ingress, core, signer and endpoints (`F-002`–`F-009`) |
 | `F-015` | Assets and governance on Kreivo: referendum, community, roles | genesis in `M-0`; mainnet in `M-4` | asset identity, the dedicated group, upgrade governance (`REQ-AS-*`, `REQ-HN-10`, `REQ-GV-3`) | nothing |
 | `F-016` | Measurements: Swaps volumes, route budgets | before production, `M-4` | bounds sized from volumes (`OQ-6`, closed), ten-times volume (`NFR-10`), route budgets (`NFR-2`) | the endpoints, for route timing (`F-007`, `F-009`) |
-| `F-017` | Open-source release | open source, `M-5` | nothing in the spec; the owner's direction (`DEC-20`) | production (`M-4`) |
+| `F-017` | Open-source release | open source, `M-5` | nothing in the spec; @pandres95's direction (`DEC-20`) | production (`M-4`) |
 
 **`F-001` Repository, workspace and store.** Sets up the repository and CI. Creates the Rust workspace of `DEC-1` and the PostgreSQL schema of `DEC-4`. Triggers
 refuse UPDATE and DELETE on observations and on the reserve book, and refuse any change to a terminal state, since
@@ -635,7 +637,7 @@ published p99 target and ceiling (`NFR-2`).
 
 **`F-017` Open-source release.** The public tree, licence headers and `REUSE.toml`, the IP review, the trademark
 check, the public repository, and a private companion that holds the internal documents and deployment definitions,
-following aledgent's run-book (`DEC-20`). Done when counsel's items are closed, the public tree builds and passes
+following aledgent's run-book (`DEC-20`). Done when the IP and trademark sign-off (@olanod, 2026-10-17) is recorded, the public tree builds and passes
 its tests on its own, and the public repository is open with the DCO check on `main`.
 
 ## 5. Milestones
@@ -647,7 +649,7 @@ its tests on its own, and the public repository is open with the DCO check on `m
 | `M-2` More assets and venues | bEURC and bBTC work, and Swaps' USDT0 conversions run on the Polygon vault | `F-009` (Base, BNB Chain), `F-010` | bEURC on Base Sepolia and bBTC on BNB Chain testnet pass the `M-1` criteria. A bBTC deposit's remainder lands in surplus and a payout scales exactly (`REQ-AS-9`, `REQ-AS-10`). A convertible deposit reports both amounts |
 | `M-3` Attested fiat | COPM, MXNB and BRLB move through Swaps' reports and commitments | `F-011`, `F-012` (reports) | A reversal is exercised end to end (`REQ-BE-6`). Reports become observations with Swaps' ids. Relayed instructions match their commitment. The statement says the reserve is attested and names Swaps |
 | `M-4` Production | bezent carries value on Kreivo mainnet | `F-013` (gate), `F-014`, `F-015` (mainnet), `F-016` | Bounds and budgets measured and recorded (`DEC-17`). Every runbook exercised (`NFR-9`). Kreivo 0.17.1 or later enacted on mainnet. The asset referendum passed. Every `[PENDING]` decision in this plan ruled. The §15 criteria hold on the test bed: zero divergence, sustained; every final source leg delivered, refunded, or held with an owner; every runbook exercised |
-| `M-5` Open source | bezent's code and design are public | `F-017` | The public tree builds and passes its tests alone. The IP review and trademark check are closed. The public repository is open under the licences of `DEC-20`, with the DCO check on `main`. The private companion keeps every internal document and deploys from the public code by pinned commit |
+| `M-5` Open source | bezent's code and design are public | `F-017` | The public tree builds and passes its tests alone. The IP review and trademark sign-off are recorded (@olanod, 2026-10-17). The public repository is open under the licences of `DEC-20`, with the DCO check on `main`. The private companion keeps every internal document and deploys from the public code by pinned commit |
 
 ## 6. Risks
 

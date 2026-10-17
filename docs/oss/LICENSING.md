@@ -7,8 +7,8 @@ SPDX-License-Identifier: CC-BY-4.0
 
 Which licence covers which part of bezent, and why. Every tracked file carries an SPDX header
 (`tools/oss/spdx.py --check`) or, where its format takes no comment, an annotation in `REUSE.toml` (`reuse lint`). The
-copyright holder is Pagos Cube LLC, Bloque's operating company, as in aledgent. **Status: DEC-20's default, to be
-confirmed by counsel.**
+copyright holder is Pagos Cube LLC, Bloque's operating company, as in aledgent. **Status: DEC-20's table, signed off
+by @olanod on 2026-10-17.**
 
 ## 1. The table
 
@@ -37,7 +37,7 @@ agreement.
 
 The files in `crates/store/migrations/` must not be edited once any deployment has applied them: sqlx records each
 file's checksum and refuses a database that applied a file whose bytes later changed. They were re-headered from
-AGPL-3.0-or-later to GPL-3.0-or-later once, before any production deployment (the owner accepted re-running them
+AGPL-3.0-or-later to GPL-3.0-or-later once, before any production deployment (@pandres95 accepted re-running them
 on test databases). `REUSE.toml` adds the copyright line; `tools/oss/spdx.py` skips the directory.
 
 ## 4. Third-party code
@@ -57,7 +57,7 @@ each under its own licence (MIT or LGPL-3.0 for Safe's contracts). They are used
 
 `contracts/bezent` depends on `ink` 5.1.1, which pulls in `staging-xcm`, `xcm-procedural` (both GPL-3.0-only) and
 `array-bytes` (GPL-3.0). The compiled contract (`.wasm`, `.contract`) is therefore a combined work: its source is
-GPL-3.0-or-later, the combination is distributed under GPL-3.0-only, the narrower of the terms involved. `contracts/bezent/deny.toml` names the exceptions. Counsel confirms.
+GPL-3.0-or-later, the combination is distributed under GPL-3.0-only, the narrower of the terms involved. `contracts/bezent/deny.toml` names the exceptions. 
 
 ## 5. Obligations of whoever distributes the services
 

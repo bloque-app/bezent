@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0006 — key custody: the property, with KMS for delivery keys
 
-**Status:** ruled by the owner on the decision form, 2026-10-13 (`pl-custody`: "KMS for delivery keys, Vault
+**Status:** ruled by @pandres95 on the decision form, 2026-10-13 (`pl-custody`: "KMS for delivery keys, Vault
 otherwise"). Applied to `SPEC.md` v0.3.4.
 **Target:** `SPEC.md` v0.3.3
 **Date:** 2026-10-13

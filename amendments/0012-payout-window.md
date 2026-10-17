@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0012 — a payout waits when the reserve's outflow allowance is spent
 
-**Status:** ruled by the owner on the decision form, 2026-10-15 (`sp-payout-window`). Applied to `SPEC.md` v0.5.2.
+**Status:** ruled by @pandres95 on the decision form, 2026-10-15 (`sp-payout-window`). Applied to `SPEC.md` v0.5.2.
 **Target:** `SPEC.md` v0.5.1 (§10)
 **Date:** 2026-10-14
 **Rationale in one line:** every reserve's outflows are bounded per window by the network (`REQ-RN-4`, `REQ-KY-3`). When
