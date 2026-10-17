@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Review of PR #56, M1b (issues #35, #46): who may create a transfer, and which.
 -- Additive: one guard on `transfers`; no table changes.
 --

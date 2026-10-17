@@ -1,11 +1,11 @@
 # Copyright (c) 2026 Pagos Cube LLC
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "bezent-sidecar"
 description = "bezent for other repositories' e2e harnesses: ingress, core and a test signer in one process, on an external PostgreSQL, with a test-only chain-event driver; TEST networks only"
 edition.workspace = true
 version.workspace = true
-license = "AGPL-3.0-or-later"
+license = "GPL-3.0-or-later"
 repository.workspace = true
 publish.workspace = true
 

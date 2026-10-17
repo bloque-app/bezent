@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Issue #42, migration 0039: the readings the endpoints record at final heads for the reserve
 //! check (`REQ-BK-8`, `REQ-OB-5`, `REQ-OB-6`, `INV-8`), the shape of a statement intent (`REQ-PR-1`;
 //! PLAN `DEC-16`), and the lag bound held to the route budgets when a network's role changes

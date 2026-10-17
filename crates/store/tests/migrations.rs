@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-001-03: the migrations apply on an empty database and are reversible, in tests only (the
 //! down migrations live under `tests/migrations/`; no service binary carries them).
 //!

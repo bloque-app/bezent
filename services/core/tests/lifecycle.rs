@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-003 T-003-02, T-003-03, T-003-04, T-003-07: the core's cycle over durable state, deposits to
 //! the mint, withdrawals to the payout and the refund mint, and the signatures the core verifies.
 //! Each test is named after the acceptance criterion or invariant it verifies, at the service

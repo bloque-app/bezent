@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Verifying a signature against the exact bytes the core recorded (`INV-9`, `AC-I1.2`; review M1).
 //!
 //! Who wrote a row in `signatures` proves nothing: the signer writes them, and the signer is what

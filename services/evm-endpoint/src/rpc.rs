@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! One provider of an EVM network: what the endpoint reads and sends (PLAN `DEC-8`, `DEC-12`).
 //!
 //! [`Rpc`] is the provider interface; [`Http`] is a JSON-RPC provider over HTTP through alloy's

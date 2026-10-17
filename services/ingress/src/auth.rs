@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Requester authentication and grants (`REQ-PN-1`, `REQ-PN-2`; PLAN `DEC-15`).
 //!
 //! A credential is `<credential id>.<secret>`, sent as `Authorization: Bearer …`. The store keeps

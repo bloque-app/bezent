@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-009-04: payout preparation in two steps, the full decode-and-compare before any signature,
 //! the persisted bytes and the nonce lane (`DEC-3`, `REQ-EO-1`, `REQ-EO-4`, `INV-9`, `INV-14`,
 //! `AC-D2.1`).

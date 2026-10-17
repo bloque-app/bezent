@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Unit tests: every refusal of every message, and the acceptance criteria and invariants F-006
 //! serves. They run in ink!'s off-chain environment with `crate::mock` standing in for Kreivo's
 //! assets API. Each test is named after the `AC-*`, `INV-*` or `REQ-*` id it verifies.

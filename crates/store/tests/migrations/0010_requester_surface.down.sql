@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (T-002-02 to T-002-05).
 DROP INDEX transfers_route_created;
 DROP INDEX transfers_source_coordinate;

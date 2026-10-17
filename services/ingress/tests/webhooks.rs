@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Webhooks to requesters (issue #2): registration, signing, at-least-once delivery with a
 //! dead-letter, conditions once per (condition, route), and scoping (`REQ-ST-5`, `REQ-IC-5`,
 //! `REQ-ID-4`; PLAN `DEC-15`).

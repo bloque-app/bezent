@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Numbered 0036, after main's 0034 and F-009's 0035.
 -- PR #39 second review MF1 and issue #38: the two steps of a delivery are paired in the store
 -- (SPEC §9 INV-9, §8.3 REQ-EO-1, AC-I1.2; PLAN DEC-3, two-step delivery).

@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (T-001-03): the write-path audit of PR #56.
 REVOKE SELECT (seq) ON event_log FROM bezent_signer;
 REVOKE SELECT (id, intent_id) ON signed_transactions FROM bezent_signer;

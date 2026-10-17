@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The state machine (`F-003`, T-003-02 to T-003-07).
 //!
 //! [`Core::cycle`] reads durable state and nothing else (`REQ-AR-1`, `REQ-ST-7`), and moves each

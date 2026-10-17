@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Whether a destination is well formed for its network (`ERR-InvalidDestination`).
 //!
 //! The check is of form only. Whether the issuing network will accept a mint to it is never

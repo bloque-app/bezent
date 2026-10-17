@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! An in-memory provider for tests: blocks, logs, nonces, transactions and receipts that a test
 //! writes, and the faults it injects. Nothing executes: a test states what the chain holds. Two
 //! providers that disagree are two [`MockChain`]s, one [`MockChain::fork`]ed from the other.

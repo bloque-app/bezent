@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (T-001-03): the third review fixes of F-004 (refunds never bind a
 -- funding arrival, the lag bound from the finality time, the budget rule on insert).
 DROP TRIGGER routes_budget_covers_lag_bound ON routes;

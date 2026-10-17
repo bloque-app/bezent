@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! # bezent-signer
 //!
 //! The signer of PLAN `DEC-3` (`F-005`, the `M-0` stub): a process apart from the one that holds

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-002-01: the service starts against the store, answers, and shuts down gracefully; the
 //! committed OpenAPI document is the one the code generates.
 

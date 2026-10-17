@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-001 (review S1): the role the services use is not the role that owns the schema (SPEC §9: the
 -- store layer survives any application change; REQ-AR-5).
 --

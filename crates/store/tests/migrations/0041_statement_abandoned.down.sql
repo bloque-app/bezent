@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (T-001-03): PR #50 re-check S-1, S-3's abandoned statement places.
 DROP FUNCTION statement_place_refusal(TEXT, BIGINT, BYTEA, JSONB);
 CREATE OR REPLACE FUNCTION reserve_statements_guard_insert() RETURNS trigger

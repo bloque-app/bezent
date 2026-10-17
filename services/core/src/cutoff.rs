@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Route cut-offs (`REQ-LM-1`, `CND-CutOff`, amendment 0010 A2).
 //!
 //! A route declares, in `routes.cutoffs`, the windows in which it is closed: an array of

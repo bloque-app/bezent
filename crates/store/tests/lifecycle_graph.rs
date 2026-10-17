@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-003 T-003-01: the store's state graph is the §5.4 transition table of amendment 0009
 //! (`REQ-TR-6`), every allowed edge applied and every other refused, at the store layer; numbered
 //! attempts with one signature per (reference, attempt) and the proof gate (`REQ-EO-6`, issue #24);

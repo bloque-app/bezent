@@ -3,7 +3,7 @@
 #
 # bezent: one Rust workspace for the core and the four services (PLAN.md `DEC-1`).
 #
-# Licences (DEC-20, docs/oss/LICENSING.md): crates/ are Apache-2.0 OR MIT, services/ AGPL-3.0-or-later;
+# Licences (DEC-20, docs/oss/LICENSING.md): crates/ are Apache-2.0 OR MIT, services/ GPL-3.0-or-later;
 # each package declares its own, so the workspace sets none.
 #
 #   crates/core              F-001   types: amounts, asset and network ids, references, coordinates

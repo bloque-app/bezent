@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-002 T-002-02 to T-002-05: what the request and query surfaces read and record (SPEC §3, §5.1,
 -- §7.A, §7.B, §8.3, §8.4; PLAN DEC-15).
 --

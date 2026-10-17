@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The signer's configuration: a JSON file whose path is the process's only argument.
 //!
 //! It names where keys come from, never a key (`REQ-KY-1`): the file backend's key file is a path.

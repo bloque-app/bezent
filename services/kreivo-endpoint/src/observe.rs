@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Following the finalized head and recording the contract's events as observations (`T-007-02`;
 //! `REQ-OB-1` to `REQ-OB-5`, `AC-D2.3`, `INV-10`; PLAN `DEC-5`).
 //!

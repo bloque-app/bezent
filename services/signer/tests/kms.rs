@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-005 / issue #5 (DEC-11): the AWS KMS backend against a local KMS stand-in that implements
 //! `GetPublicKey`, `ListResourceTags` and `Sign` (digest) with a real secp256k1 key. No test calls
 //! AWS. The signatures are checked on both chains' formats (`REQ-CU-1`); the environment and tag

@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (F-003 T-003-01). The roles are shared by every database on the server and stay.
 REVOKE ALL ON manual_actions, manual_approvals, reviews, unassociated_arrivals FROM bezent_operator;
 REVOKE USAGE ON SCHEMA public FROM bezent_operator;

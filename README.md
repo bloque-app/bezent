@@ -70,7 +70,7 @@ each. Clone with `--recurse-submodules` for `contracts/evm` (Foundry libraries).
 
 ## Licences
 
-AGPL-3.0-or-later for the services, the store and the ink! contract; Apache-2.0 OR MIT for `crates/core`, the EVM
+GPL-3.0-or-later for the services, the store and the ink! contract; Apache-2.0 OR MIT for `crates/core`, the EVM
 contracts, the test bed and tooling; CC-BY-4.0 for documents; GPL-3.0-only for Kreivo's chain specification, kept
 verbatim. The marks in `brand/` are not licensed with the code. Every file carries its licence (`REUSE.toml`,
 `docs/oss/LICENSING.md`).

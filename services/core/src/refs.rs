@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! References the core derives, and the issuing network's account encoding.
 //!
 //! Every derivation is SHA-256 over a domain tag and length-prefixed fields, as the ingress derives

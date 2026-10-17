@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What became of each signed transaction, from chain data (`T-007-04`; `REQ-NX-1`, `REQ-NX-2`,
 //! `REQ-NX-3`, `REQ-OB-6`, `AC-C2.1`, `AC-I1.2`, `INV-8`).
 //!

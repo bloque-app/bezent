@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Issue #42 (F-004 follow-up): the reserve check and the daily statement in the running core.
 -- Additive.
 --

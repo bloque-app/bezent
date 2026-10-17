@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Pagos Cube LLC
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 # AC-I4.1 (review S-d): Kreivo and its relay chain, with another parachain id declared than the chain
 # spec names. The endpoint must refuse to start (exit status 1) before it reads, builds or submits
 # anything.

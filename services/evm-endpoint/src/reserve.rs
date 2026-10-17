@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The vault's balances at each final head the endpoint records (issue #42; `REQ-BK-8`, `NFR-5`,
 //! `INV-1`, `REQ-CV-4`, `REQ-OB-5`; PLAN `DEC-12`, `DEC-16`).
 //!

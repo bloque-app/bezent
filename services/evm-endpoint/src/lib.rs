@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `bezent-evm-endpoint` (`F-009`): one instance per EVM origin network. It observes the reserve
 //! vault, prepares and submits payouts, and proves non-execution; it decides nothing: it writes
 //! observations, prepared bytes, signed bytes and proofs, never a transfer state (PLAN `DEC-3`,

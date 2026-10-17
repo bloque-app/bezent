@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (T-001-03). The role, and its membership, are shared by every database
 -- on the server and stay.
 DELETE FROM endpoint_scopes WHERE endpoint_role = 'bezent_evm_endpoint';

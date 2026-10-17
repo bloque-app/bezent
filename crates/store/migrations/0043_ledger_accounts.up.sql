@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Issue #49 (F-002 follow-up): the declared list of ledger contract accounts (REQ-IN-5; PLAN
 -- DEC-15, 2026-10-15).
 --

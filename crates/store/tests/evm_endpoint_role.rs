@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-009, migration 0035: the EVM endpoint's role writes the records of EVM networks only
 //! (`REQ-OB-6`, `INV-8`). Each check runs under `SET LOCAL ROLE` inside its own transaction, so no
 //! pooled connection keeps a role it was switched to (#27).

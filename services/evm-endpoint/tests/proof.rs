@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-009-06: the outcome of every signed transaction from chain data; non-execution proven only
 //! by an identified consumer of the nonce, cross-checked; re-signed and wrapped copies never prove
 //! (`REQ-NX-1` to `REQ-NX-4`, `REQ-OB-6`, `AC-C2.1`, `INV-8`; PLAN `DEC-8`, `DEC-12`).

@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-004 T-004-01 to T-004-05: the reserve book's movements, the one-minute reserve check and the
 -- daily signed statement (SPEC §5.3 REQ-BK-1 to REQ-BK-10, §4.6 REQ-PR-1/2, REQ-BE-3, REQ-BE-6,
 -- REQ-CV-4, §8.7 REQ-IC-2, INV-1, INV-17; PLAN DEC-4, DEC-16).

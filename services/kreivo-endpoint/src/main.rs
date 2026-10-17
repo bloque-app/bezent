@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `bezent-kreivo-endpoint`: observes the issuing network and reports observations at coordinates;
 //! decides nothing (DEC-3, DEC-5).
 //!

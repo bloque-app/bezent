@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-003 T-003-05: the named conditions of SPEC §10, one test each. A condition is held in the
 //! transfer's state and is never a failure; it clears by itself or by evidence; past its deadline
 //! it sends a transfer to review only where the §5.4 table allows (`Source-Final` with

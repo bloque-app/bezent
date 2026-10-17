@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (F-003, review of PR #32). The roles are shared by every database on the
 -- server and stay.
 REVOKE INSERT ON final_heads FROM bezent_endpoint;

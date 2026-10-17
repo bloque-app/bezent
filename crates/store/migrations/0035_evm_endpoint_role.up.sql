@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-009 T-009-01 to T-009-06: the EVM endpoint's own role (SPEC §8.1 REQ-OB-6, §8.2 REQ-NX-1/2,
 -- §8.3 REQ-EO-1; §9 INV-8; PLAN DEC-3, DEC-8; F-007 NOTES 27, issue #33).
 --

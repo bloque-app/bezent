@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Kreivo in memory, for tests: blocks, finality, the contract's events, mortal eras, nonces and
 //! signatures, checked the way Kreivo checks them, with the endpoint's own encoding
 //! ([`crate::kreivo`]).

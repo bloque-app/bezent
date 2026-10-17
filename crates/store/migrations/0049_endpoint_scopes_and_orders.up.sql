@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- The exhaustive write-path audit of PR #56 (issues #35, #46, #23). Additive: new guards, one
 -- column on `signatures`, read grants for the signer; no row is touched.
 --

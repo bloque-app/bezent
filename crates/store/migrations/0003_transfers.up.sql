@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-001 T-001-03/04: transfers and their state transitions (SPEC §5.4, PLAN DEC-4).
 --
 -- Store rules:

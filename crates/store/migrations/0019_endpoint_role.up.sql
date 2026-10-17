@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-007 review S1, S2, M1: who may write what the endpoint proves (SPEC §8.2 REQ-NX-1/2, §8.3
 -- REQ-EO-1/6, §9 INV-8; PLAN DEC-3).
 --

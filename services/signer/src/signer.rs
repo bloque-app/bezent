@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Signing a recorded intent, behind the guards (`T-005-04`, `T-005-05`; `INV-9`, `REQ-AR-3`,
 //! `REQ-EO-1`, `AC-D2.1`, `AC-I4.2`; PLAN `DEC-3`).
 //!

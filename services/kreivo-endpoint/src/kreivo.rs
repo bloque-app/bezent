@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Kreivo, as the endpoint speaks to it: plain SCALE, written from Kreivo's source at the pin of
 //! `DEC-5` and `DEC-6` (Kreivo `0.17.1`, `87f8728`, the merge of kreivo#512; spec 134, transaction
 //! version 13), and from bezent's contract (`contracts/bezent`, F-006).

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Store tests for T-001-04: one test per refusal, each named after the spec id it verifies, at
 //! the store layer SPEC §9 names (`REQ-AR-5`). Each statement here is one the triggers or
 //! constraints refuse; a positive control beside it shows the refusal is the rule, not a typo.

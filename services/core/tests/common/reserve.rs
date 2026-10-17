@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The reserve check's world (`F-004`): fake readings of the networks, a pager that remembers, a
 //! clock the test moves, and helpers that make the observations the endpoints would.
 //!

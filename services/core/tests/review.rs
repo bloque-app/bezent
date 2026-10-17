@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-003 T-003-06: review (`REQ-RV-1`, `REQ-RV-2`, `REQ-GV-5`, `AC-C1.1`, `AC-C1.2`).
 //!
 //! A transfer in review has an owner and a service level; it leaves review only by a recorded

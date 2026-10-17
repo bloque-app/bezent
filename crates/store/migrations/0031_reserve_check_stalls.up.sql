@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-004, review of PR #40: the reserve check never stops running without anyone knowing (INV-1,
 -- NFR-5, REQ-IC-2), and surplus contributions are derived from chain data and the operator's
 -- declarations, never from the book alone (REQ-BK-5, REQ-BK-8). Additive to 0030.

@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-003, verification review of PR #32 (F1, F2). Additive: 0014_lifecycle and 0015_lifecycle_review
 -- are left as they were. Numbered 0017 because 0016 is taken by PR #31's branch (F-007), so neither
 -- PR renumbers the other.

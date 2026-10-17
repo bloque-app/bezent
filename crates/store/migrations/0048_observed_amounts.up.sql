@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Review of PR #56, M1c, S7 and S8 (issues #35, #46): what a transfer's amount rests on, when the
 -- core may refund a withdrawal, and who draws a transfer's identifier.
 -- Additive: two triggers on `transfers` (one function); `transfers_guard_writer` (0047) is replaced.

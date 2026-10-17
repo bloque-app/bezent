@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-005 T-005-01: the signer's role and its signature table (`REQ-AR-3`, `INV-9`, `INV-2`,
 //! `REQ-EO-1`). The signer reads intents and records signatures, append-only, and nothing else.
 

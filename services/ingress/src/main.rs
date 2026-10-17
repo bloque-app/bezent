@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `bezent-ingress`: the request and query surfaces (DEC-3, DEC-15; F-002).
 //!
 //! - `bezent-ingress <config-path>` serves until SIGINT or SIGTERM, then finishes the requests in

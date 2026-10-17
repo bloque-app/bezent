@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Two independent providers, cross-checked (PLAN `DEC-12`).
 //!
 //! There is no light client for these networks in bezent's stack, so one provider could lie or

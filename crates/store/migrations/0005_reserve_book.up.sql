@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-001 T-001-03/04: the reserve book (SPEC §5.3 REQ-BK-7; PLAN DEC-4).
 --
 -- Double entry, append-only. An entry is one movement, with its reference (REQ-BK-4, REQ-BK-5);

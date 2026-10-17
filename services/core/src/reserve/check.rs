@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The reserve check (`T-004-03`, `T-004-04`; `REQ-BK-1`, `REQ-BK-2`, `REQ-BK-3`, `REQ-BK-8`,
 //! `REQ-BK-10`, `REQ-BE-6`, `REQ-IC-2`, `NFR-5`, `INV-1`).
 //!

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What the core reads from the store, and the one way it changes a transfer: appending a
 //! transition (`REQ-TR-2`, `REQ-TR-6`). Every query runs on one connection of the core's own pool,
 //! which logs in as the core's login (a member of `bezent_core` only, F-005 review S5, #46); no role is

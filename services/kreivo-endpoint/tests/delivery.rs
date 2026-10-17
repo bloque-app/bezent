@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-003 with F-007: the two-step delivery of PLAN `DEC-3`, end to end, with every step taken by
 //! the process that owns it, each on its own role (`INV-9`, `AC-I1.2`, `REQ-AR-3`).
 //!

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Issue #27: roles are never switched on pooled connections.
 //!
 //! The flaky test of #27 (`ac_i1_2_core_refuses_a_returned_signature_over_other_bytes`) ran

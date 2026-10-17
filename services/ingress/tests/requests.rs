@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-002-02 and T-002-03: requester credentials and grants, and the deposit, withdrawal-extras and
 //! refund requests, against PostgreSQL (`REQ-PN-1`, `REQ-PN-2`, `REQ-RQ-1`, `REQ-RQ-3`,
 //! `REQ-RQ-4`, `REQ-RQ-6`, `REQ-RQ-7`, `REQ-RQ-9`, `REQ-ID-1`, `REQ-ID-3`, `REQ-ID-4`,

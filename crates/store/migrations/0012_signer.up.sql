@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-005 T-005-01: the signer's own role and its signature table (SPEC §4.1 REQ-AR-3, §9 INV-9;
 -- PLAN DEC-3).
 --

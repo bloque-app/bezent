@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-004 T-004-05: the daily signed statement (`REQ-PR-1`, `REQ-PR-2`, `REQ-BE-3`, `REQ-BK-9`,
 //! `REQ-CV-4`, `AC-E1.1`, `AC-E1.2`, `AC-A5.3`). The statement key is a test file key behind the
 //! signer's key trait; the store is a directory.

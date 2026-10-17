@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The authenticated link between the core and the signer (`T-005-02`; `REQ-AR-3`, `REQ-CU-1`).
 //!
 //! A Unix socket, as aledgent's `F-035` built it: the core and the signer run on one host (or in

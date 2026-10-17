@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (T-001-03): issue #42's readings, book snapshot and statement intents.
 DROP TRIGGER networks_reserve_point_lag_within_budget ON networks;
 CREATE TRIGGER networks_reserve_point_lag_within_budget

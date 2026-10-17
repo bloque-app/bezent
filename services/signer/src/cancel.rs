@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What an EVM `cancel` may be (PR #39 review S6 and second review SF2; `REQ-NX-4`, `INV-9`,
 //! `REQ-KY-3`).
 //!

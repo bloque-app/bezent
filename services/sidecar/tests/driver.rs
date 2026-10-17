@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The chain-event driver (PLAN `DEC-19`, `pl-pr-e2e` ruling, 2026-10-15): one test per call, the
 //! deposit and withdrawal walk-throughs of `deploy/e2e/README.md`, and the refusals that keep it
 //! test only.

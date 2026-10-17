@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The network's identity, checked at start-up (`T-007-01`; `AC-I4.1`, `REQ-IC-1`; PLAN `DEC-5`).
 //!
 //! A network is identified by its genesis hash. The endpoint starts only when three agree: the

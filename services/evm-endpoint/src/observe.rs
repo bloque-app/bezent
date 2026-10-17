@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Following the finalized head and recording what reaches and leaves the vault (`T-009-02`,
 //! `T-009-03`, `T-009-05`; `REQ-OB-1` to `REQ-OB-5`, `REQ-IN-1`, `REQ-IN-3`, `REQ-IN-6`,
 //! `REQ-CV-2`, `REQ-CV-4`, `AC-D2.3`, `AC-C1.3`, `INV-10`, `INV-14`; PLAN `DEC-8`, `DEC-12`).

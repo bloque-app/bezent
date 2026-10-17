@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-007 T-007-02 to T-007-04: what the Kreivo endpoint records besides observations and signed
 -- bytes (SPEC §8.1 REQ-OB-3, §8.2 REQ-NX-1/2, §8.3 REQ-EO-1/4; PLAN DEC-5).
 --

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The driver's chains: blocks it makes up, final heads it records, observations at its blocks.
 //!
 //! There is no chain behind the sidecar, so the driver stands in for one per network. A block is

@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-007 second review, should-fix S-a and S-b: who may write the signals and the issuing
 -- network's observations (SPEC §8.2 REQ-NX-1/3, REQ-OB-6, REQ-IC-4, AC-I1.2, INV-8).
 --

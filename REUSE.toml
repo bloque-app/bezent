@@ -22,20 +22,19 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (c) 2026 Pagos Cube LLC"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"
 
-# The store's migrations: they keep the AGPL header they were applied with (sqlx checks each file's
-# checksum), so only the copyright is added here.
+# The store's migrations carry only an SPDX tag (sqlx checksums forbid more edits): the copyright is added here.
 [[annotations]]
 path = "crates/store/migrations/*.sql"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (c) 2026 Pagos Cube LLC"
-SPDX-License-Identifier = "AGPL-3.0-or-later"
+SPDX-License-Identifier = "GPL-3.0-or-later"
 
 # The ink! contract's lock file, and the services' fixtures (published test values, never a deployment's).
 [[annotations]]
 path = ["contracts/bezent/Cargo.lock", "services/**/*.json"]
 precedence = "override"
 SPDX-FileCopyrightText = "Copyright (c) 2026 Pagos Cube LLC"
-SPDX-License-Identifier = "AGPL-3.0-or-later"
+SPDX-License-Identifier = "GPL-3.0-or-later"
 
 # Kreivo's chain specification, as published by Kreivo.
 [[annotations]]

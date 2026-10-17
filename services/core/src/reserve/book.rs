@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The reserve book (`T-004-01`; `REQ-BK-7`, `INV-17`, `REQ-AS-9`, `REQ-BK-4`, `REQ-BE-6`).
 //!
 //! # Movements and their postings

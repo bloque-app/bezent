@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The OpenAPI document of the request and query surfaces, generated from the code (T-002-01). It
 //! is committed as `services/ingress/openapi.json`; a test fails when the two differ.
 
@@ -54,7 +54,7 @@ impl Modify for Bearer {
             Delivery is at-least-once: answer 2xx to acknowledge; anything else is retried with back-off and dead-lettered after a bound. \
             Rotating the secret (POST /v0/webhooks/secret) takes effect at once, retries included: accept either the old or the new secret until your receiver holds the new one; a delivery you reject meanwhile is retried, and counts toward the bound. \
             Then re-read the status or the log from your last position; no notification is needed to stay current.",
-        license(name = "AGPL-3.0-or-later")
+        license(name = "GPL-3.0-or-later")
     ),
     paths(
         crate::query::health,

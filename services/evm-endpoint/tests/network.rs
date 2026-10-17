@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-009-01: the network's identity at start-up, on both providers (`AC-I4.1`, `REQ-IC-1`;
 //! PLAN `DEC-8`, `DEC-12`). Any mismatch fails closed.
 

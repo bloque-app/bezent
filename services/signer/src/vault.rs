@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The Vault loader for the keys that are not delivery keys (`T-005-03`, issue #5; PLAN `DEC-11`):
 //! the statement key (`REQ-PR-1`) and the pause key. They are read once at start, by the signer
 //! process only, and held by a [`FileBackend`], so they sit behind the same [`KeyBackend`] trait.

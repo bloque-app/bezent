@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The webhook dispatcher (`REQ-ST-5`, `REQ-IC-5`): fans the sequenced log out into the outbox,
 //! then posts what is due.
 //!

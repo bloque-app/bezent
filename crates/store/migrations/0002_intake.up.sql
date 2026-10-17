@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-001 T-001-03: durable intake (REQ-RQ-1). Every request is written here before it is answered.
 --
 -- A repeat of a request reference is answered from the original row (REQ-ID-1), so the reference

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The reserve book, the reserve check and the statement (`F-004`; SPEC §5.3, §4.6; PLAN `DEC-16`).
 //!
 //! For a bridged asset *A*, at one final point per network:

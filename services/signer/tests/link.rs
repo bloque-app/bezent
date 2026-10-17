@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-005-02: the core↔signer link is authenticated both ways (`REQ-AR-3`, `REQ-CU-1`). An
 //! unauthenticated caller is refused before any request is read, and the core refuses a socket
 //! the signer's user does not serve.

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Issues #35, #33 (migration 0045): every role holds exactly its rows of the grant matrix
 //! ([`bezent_store::grants::MATRIX`], explained in `crates/store/README.md`), and nothing else. A
 //! migration that widens any grant (a table, a column, a sequence or a function, to any of the

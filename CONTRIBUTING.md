@@ -71,7 +71,7 @@ A pull request:
 - names its tests after the `AC-*`, `INV-*`, `REQ-*` or `ERR-*` they verify, at the layer `SPEC.md` §9 names;
 - adds no `unsafe` code and no floating point anywhere near an amount (`INV-11`);
 - puts an SPDX header on every new file (`docs/oss/LICENSING.md`): services, the store and the ink! contract are
-  AGPL-3.0-or-later, the other code Apache-2.0 OR MIT, documents CC-BY-4.0;
+  GPL-3.0-or-later, the other code Apache-2.0 OR MIT, documents CC-BY-4.0;
 - is signed off (below).
 
 A maintainer reviews it. `CODEOWNERS` routes reviews: changes to `SPEC.md` and `amendments/` need the spec owner's

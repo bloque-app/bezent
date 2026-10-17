@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The grant matrix: what each role may do in the store, and all it may do (issues #35, #33;
 //! `REQ-AR-3`, `REQ-OB-6`, `INV-8`, `INV-9`, `REQ-GV-5`).
 //!

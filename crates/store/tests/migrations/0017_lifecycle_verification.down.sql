@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (F-003, verification review of PR #32): the functions of 0014 and 0015
 -- back to PostgreSQL's default grant, and the proof rules back to 0014's.
 REVOKE EXECUTE ON FUNCTION one_business_day_after(TIMESTAMPTZ) FROM bezent_service, bezent_operator;

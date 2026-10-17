@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-007-04: a signed transaction proven not executed from chain data anyone can check
 //! (`REQ-NX-1`, `REQ-NX-2`, `REQ-NX-3`, `AC-C2.1`), an on-chain refusal counted once final, a
 //! transaction of the delivery key bezent did not record caught (`AC-I1.2`), and no proof unless

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-004 T-004-02 to T-004-04: the reserve check, every minute per asset at zero tolerance, on a
 //! clock the test moves (`INV-1`, `NFR-5`, `REQ-BK-1`, `REQ-BK-2`, `REQ-BK-3`, `REQ-BK-8`,
 //! `REQ-BK-10`, `REQ-BE-6`, `REQ-IC-2`, `AC-E2.1`). The networks are fakes of the reading

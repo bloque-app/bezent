@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What the endpoint reads from and writes to the store besides observations: the network's
 //! watermark and gaps (`REQ-OB-3`, `AC-D2.3`), and the final heads it reads under (`REQ-OB-2`,
 //! `INV-16`). Every write is append-only (`F-007`'s tables, migration 0018; `final_heads`, 0014).

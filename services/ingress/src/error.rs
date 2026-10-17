@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Answers that are not a recorded request: refusals made before a request is taken in, and
 //! failures. A refusal recorded with a request (a route limit, a destination, a source) is a
 //! status, not one of these (`api::TransferStatus`).

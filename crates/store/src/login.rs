@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Store logins and their pools (issues #46, #27; `REQ-AR-3`, `REQ-GV-5`).
 //!
 //! Every service logs in as a login of its own: a member of its service's role and of nothing

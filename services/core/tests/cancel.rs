@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Issue #41 (F-003 follow-up): `REQ-RV-1` and `REQ-NX-4` together. A payout unknown at its
 //! deadline on an origin network goes to review at that moment, with its owner and service level
 //! (`AC-B1.4`), and at the same time the core orders the cancel that forces its non-execution,

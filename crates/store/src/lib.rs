@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! # bezent-store
 //!
 //! bezent's PostgreSQL schema (`F-001`, T-001-03 to T-001-05; PLAN `DEC-4`), as `sqlx` migrations

@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Issue #30 (F-002 follow-up), amendments 0010 and 0011, with the review of PR #44. Additive.
 --
 --   * refusal_error gains `ERR-Malformed` and `ERR-CommitmentMismatch` (SPEC §10), which the

@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (T-001-03): issue #2's webhooks. The dispatcher's role is shared by every
 -- database on the server and stays; its grants here go.
 REVOKE SELECT ON event_log, event_log_head, transfers, intake, intake_answers, requester_grants

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Issue #42: each bridged asset's supply recorded at each final head the endpoint records, with
 //! the on-chain component's count and the asset's issuance, for the reserve check (`REQ-BK-8`,
 //! `NFR-5`, `INV-1`, `REQ-OB-5`).

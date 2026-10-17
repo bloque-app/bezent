@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-007-02: the finalized head followed in contiguous ranges, the contract's events recorded as
 //! observations by coordinate, and a range that cannot be read made a visible gap that is filled
 //! before anything after it (`REQ-OB-1` to `REQ-OB-5`, `AC-D2.3`, `INV-10`, `REQ-RQ-9`).

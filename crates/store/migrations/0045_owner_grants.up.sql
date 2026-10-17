@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Issues #35, #33, #46, #27: each service role holds only what its service needs; the shared
 -- roles hold nothing (SPEC §4.1 REQ-AR-3, §8.1 REQ-OB-6, §8.3 REQ-EO-1, §9 INV-8, INV-9;
 -- REQ-GV-5). Additive: no table, trigger or function changes.

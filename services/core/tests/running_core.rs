@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Issue #42: the reserve check and the daily statement as the running core wires them. The check
 //! reads what the endpoints recorded at final heads (`reserve_readings`), never a fake (`REQ-BK-8`,
 //! `NFR-5`, `INV-1`, `REQ-IC-2`); the book and the statement are cut by commit order (PR #40 second

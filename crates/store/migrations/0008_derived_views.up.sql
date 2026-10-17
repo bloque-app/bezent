@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-001 T-001-05: views derived from durable records only (NFR-7, REQ-ST-7).
 --
 -- The restore drill compares these between a database and its restored copy. They read nothing

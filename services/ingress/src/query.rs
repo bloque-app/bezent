@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The query surface (`CTR-QRY`, SPEC §7.B; `REQ-RQ-8`, `REQ-ST-2`, `REQ-ST-4`).
 //!
 //! A requester reads only what it asked for: a transfer is visible to a requester when one of its

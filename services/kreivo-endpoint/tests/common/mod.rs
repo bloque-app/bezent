@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Shared by the endpoint's tests. Every test runs in a fresh database that `#[sqlx::test]`
 //! creates on the server `DATABASE_URL` names, with bezent's migrations applied, against the
 //! in-memory chain: no test reaches a network. The signer runs in process, over its real link,

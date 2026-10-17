@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- PR #50 review M1 (issue #42; INV-4, REQ-IC-2, REQ-IC-4; PLAN DEC-16, 2026-10-15): a difference
 -- between the on-chain component's own supply count and the asset's issuance on the issuing
 -- network is a breach of INV-4 (value minted or destroyed outside the component). The chain's

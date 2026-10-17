@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Pagos Cube LLC
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 # F-006: bezent's contract on Kreivo (PLAN.md `DEC-6`, `DEC-7`; SPEC §7.F `CTR-HOME`).
 #
 # A Cargo workspace of its own, excluded from any root workspace: ink! and its WASM build have
@@ -16,7 +16,7 @@ name = "bezent-contract"
 version = "0.1.0"
 authors = ["Bloque <engineering@bloque.team>"]
 edition = "2021"
-license = "AGPL-3.0-or-later"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/bloque-app/bezent"
 description = "bezent's on-chain component on Kreivo: mints, redeems and refund-mints bridged assets within per-asset bounds, with pauses, delayed raises and ordered events."
 publish = false

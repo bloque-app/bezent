@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (F-002, review of PR #22).
 DROP FUNCTION route_usage_locked(TEXT, TEXT, TEXT, BIGINT);
 DROP INDEX transfers_route_in_flight;

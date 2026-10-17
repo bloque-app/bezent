@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The request surface (`CTR-REQ`, SPEC §7.A).
 //!
 //! Every request runs in one store transaction that records it (`intake`), decides it against the

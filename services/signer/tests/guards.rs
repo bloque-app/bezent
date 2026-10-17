@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-005-03, T-005-04, T-005-05: the signer signs only recorded intents, behind its guards
 //! (`INV-9`, PLAN `DEC-3`); a test key holds no production authority (`AC-I4.2`); a restart
 //! returns the recorded signature (`AC-D2.1`); an unrecorded signature starts the compromise path

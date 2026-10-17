@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The endpoint's configuration, read from a TOML file named on the command line.
 //!
 //! No key and no secret lives here (`REQ-AR-3`, `REQ-KY-1`): the store's URL and the signer link's

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The AWS KMS key backend (`T-005-03`, issue #5; `REQ-CU-1`, `REQ-KY-1`, `REQ-KY-3`, `REQ-KY-4`,
 //! `REQ-KY-6`; PLAN `DEC-11`).
 //!

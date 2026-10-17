@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Mints and refund mints: from the core's order to submitted bytes (`T-007-03`; `REQ-EO-1`,
 //! `REQ-EO-4`, `REQ-HN-3`, `AC-I1.2`, `INV-9`; PLAN `DEC-3`, `DEC-5`).
 //!

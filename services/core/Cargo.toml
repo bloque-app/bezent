@@ -1,11 +1,11 @@
 # Copyright (c) 2026 Pagos Cube LLC
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "bezent-core-service"
 description = "bezent core: the state machine, conditions, deadlines and review; the one process that decides (DEC-3; F-003)"
 edition.workspace = true
 version.workspace = true
-license = "AGPL-3.0-or-later"
+license = "GPL-3.0-or-later"
 repository.workspace = true
 publish.workspace = true
 

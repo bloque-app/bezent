@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `bezent-signer`: signs only intents the core recorded and holds no state (DEC-3, REQ-AR-3).
 //!
 //! `bezent-signer <config-path>` serves the link; `bezent-signer --check <config-path>` loads and

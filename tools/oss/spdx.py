@@ -12,7 +12,7 @@ Files that cannot carry a comment (JSON, lock files, SVG, patches, checksums) ar
 
 The licence a path requires is `policy()` below, and docs/oss/LICENSING.md says why:
 
-- the services, the ink! contract and the store are AGPL-3.0-or-later (`AGPL_PREFIXES`);
+- the services, the ink! contract and the store are GPL-3.0-or-later (`GPL_PREFIXES`);
 - prose (Markdown, HTML) is CC-BY-4.0, wherever it lives;
 - everything else (the reusable crates, the EVM contracts, the test bed, tooling) is Apache-2.0 OR MIT.
 
@@ -31,7 +31,7 @@ HOLDER = "Pagos Cube LLC"  # Bloque's operating company (docs/oss/LICENSING.md �
 YEAR = "2026"
 COPYRIGHT = f"Copyright (c) {YEAR} {HOLDER}"
 
-AGPL = "AGPL-3.0-or-later"
+GPL = "GPL-3.0-or-later"
 PERMISSIVE = "Apache-2.0 OR MIT"
 PROSE = "CC-BY-4.0"
 
@@ -52,8 +52,8 @@ NAMED_HASH = {"Dockerfile", ".gitignore", ".dockerignore", "env.example", "CODEO
 SKIP_PREFIXES = (
     "LICENSES/",
     # The store's migrations: sqlx records each file's checksum and refuses to start on a database
-    # that applied a file whose bytes changed, so a header added here would break every deployment
-    # that applied it. Covered by REUSE.toml.
+    # that applied a file whose bytes changed. They carry their GPL-3.0-or-later header (re-headered once,
+    # before any production deployment; docs/oss/LICENSING.md §3); do not touch them with --fix.
     "crates/store/migrations/",
     # trybuild's expected output names lines of these files (`tests/ui/*.stderr`); a second header
     # line would move them. They keep their one-line SPDX tag; REUSE.toml adds the copyright.
@@ -68,13 +68,12 @@ SKIP_FILES = {
 HEAD_LINES = 12  # a header must start within the first lines of the file
 
 
-# Services, the ink! contract and the store (its migrations carry an AGPL header and may not be edited:
-# docs/oss/LICENSING.md §3): AGPL-3.0-or-later.
-AGPL_PREFIXES = ("services/", "contracts/bezent/", "crates/store/")
+# Services, the ink! contract and the store (docs/oss/LICENSING.md): GPL-3.0-or-later.
+GPL_PREFIXES = ("services/", "contracts/bezent/", "crates/store/")
 
 
 def code_policy(path: str) -> str:
-    return AGPL if path.startswith(AGPL_PREFIXES) else PERMISSIVE
+    return GPL if path.startswith(GPL_PREFIXES) else PERMISSIVE
 
 
 def policy(path: str) -> str:

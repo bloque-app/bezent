@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-003 T-003-01: the store's state graph made the §5.4 transition table (amendment 0009), numbered
 -- delivery attempts with their own milestones, one signature per (reference, attempt) behind the
 -- proof of non-execution (REQ-EO-6, issue #24), and the records review and the core read (§5.9,

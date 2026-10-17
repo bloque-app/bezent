@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The exhaustive write-path audit of PR #56 (migration 0049), each finding reproduced through a
 //! real service login (a member of one role, as the services log in) and refused.
 //!

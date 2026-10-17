@@ -70,7 +70,7 @@ FROM ${RUNTIME_IMAGE} AS ingress
 LABEL org.opencontainers.image.title="bezent-ingress" \
       org.opencontainers.image.description="bezent ingress: the request and query surfaces" \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-ingress /usr/local/bin/bezent-ingress
 USER 65532:65532
 EXPOSE 8080
@@ -81,7 +81,7 @@ FROM ${RUNTIME_IMAGE} AS core
 LABEL org.opencontainers.image.title="bezent-core" \
       org.opencontainers.image.description="bezent core: the state machine, conditions, deadlines and review" \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-core /usr/local/bin/bezent-core
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/bezent-core"]
@@ -91,7 +91,7 @@ FROM ${RUNTIME_IMAGE} AS signer
 LABEL org.opencontainers.image.title="bezent-signer" \
       org.opencontainers.image.description="bezent signer: signs only intents the core recorded; test keys from a mounted file" \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-signer /usr/local/bin/bezent-signer
 # Its own user, apart from every caller's: callers are told apart by the socket's peer credentials.
 USER 65533:65533
@@ -102,7 +102,7 @@ FROM ${RUNTIME_IMAGE} AS kreivo-endpoint
 LABEL org.opencontainers.image.title="bezent-kreivo-endpoint" \
       org.opencontainers.image.description="bezent Kreivo endpoint: observes the issuing network through a light client" \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-kreivo-endpoint /usr/local/bin/bezent-kreivo-endpoint
 # The pinned chain spec (public data): name it as `chain_spec` in the mounted configuration.
 COPY services/kreivo-endpoint/chain-specs/kreivo.json /usr/share/bezent/chain-specs/kreivo.json
@@ -114,7 +114,7 @@ FROM ${RUNTIME_IMAGE} AS evm-endpoint
 LABEL org.opencontainers.image.title="bezent-evm-endpoint" \
       org.opencontainers.image.description="bezent EVM endpoint: observes the reserve vault on an EVM origin network; decides nothing, holds no key" \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-evm-endpoint /usr/local/bin/bezent-evm-endpoint
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/bezent-evm-endpoint"]
@@ -126,7 +126,7 @@ FROM ${SIDECAR_IMAGE} AS sidecar
 LABEL org.opencontainers.image.title="bezent-sidecar" \
       org.opencontainers.image.description="bezent for CI service containers: ingress, core and a test signer on an external PostgreSQL, TEST networks only. Never for production." \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-sidecar /usr/local/bin/bezent-sidecar
 # A health check's shell form (`--health-cmd`) always runs through /bin/sh, whatever the image's
 # SHELL: give the debug image's busybox that name. Exec-form RUNs, so no shell is needed to do it.

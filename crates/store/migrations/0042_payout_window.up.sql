@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Issue #41 (F-003 follow-up): CND-PayoutWindow joins the named conditions (amendment 0012, SPEC
 -- v0.5.2 §10). A withdrawal whose payout the reserve's outflow allowance cannot take this window
 -- holds it in its current state, by a self-transition, and resumes by itself when the allowance

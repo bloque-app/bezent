@@ -33,7 +33,7 @@ allow = [
 ]
 exceptions = [
   # The Kreivo endpoint's light client (services/kreivo-endpoint): GPL with the Classpath exception,
-  # linked into AGPL code (docs/oss/LICENSING.md §4).
+  # linked into GPL code (docs/oss/LICENSING.md §4).
   { allow = ["GPL-3.0-or-later WITH Classpath-exception-2.0"], crate = "smoldot" },
   { allow = ["GPL-3.0-or-later WITH Classpath-exception-2.0"], crate = "smoldot-light" },
 ]

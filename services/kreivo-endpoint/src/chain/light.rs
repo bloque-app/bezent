@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Kreivo through subxt over the embedded smoldot light client (feature `light-client`; PLAN
 //! `DEC-5`).
 //!

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-002-04: the route table, its limits, and backpressure (`REQ-LM-1`, `REQ-LM-2`, `REQ-LM-4`,
 //! §8.4; `AC-G1.1`, `AC-G1.2`, `AC-G1.3`).
 

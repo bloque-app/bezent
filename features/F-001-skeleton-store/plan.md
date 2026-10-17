@@ -11,7 +11,7 @@ Milestone `M-0`. Serves `INV-5`, `INV-10`, `INV-11`, `INV-17`, `REQ-TR-2`, `NFR-
 
 - The Rust workspace of `DEC-1`: `crates/core`, `services/{ingress,kreivo-endpoint,evm-endpoint,signer}` (each a
   binary that starts, reads its config, and exits cleanly; no behaviour yet), `tools/`. Pinned toolchain, `rustfmt`,
-  `clippy -D warnings`. SPDX headers from the first file: `AGPL-3.0-or-later` for `services/` and `crates/core`,
+  `clippy -D warnings`. SPDX headers from the first file: `GPL-3.0-or-later` for `services/` and `crates/core`,
   `Apache-2.0 OR MIT` for any reusable crate (`DEC-20`).
 - `crates/core` types only: exact integer amounts (a `u128` newtype with checked arithmetic and no float
   conversions, `INV-11`); asset ids; network ids; the three reference kinds as distinct newtypes that never convert

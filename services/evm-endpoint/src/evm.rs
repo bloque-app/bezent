@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The EVM side's encoding: the vault's delivery call, EIP-1559 transactions, and the events the
 //! endpoint reads (PLAN `DEC-3`, `DEC-10`; F-008 NOTES, "The two roles").
 //!

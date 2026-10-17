@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Issue #46: every service checks its own store login at start-up, with one shared check
 //! ([`bezent_store::login::check_login`]). A login that is a member of its role and of nothing
 //! else passes; any other is refused with a message that says why (`REQ-AR-3`, `REQ-GV-5`).

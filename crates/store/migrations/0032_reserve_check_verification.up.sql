@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-004, verification of the review fixes of PR #40 (MF1, SF2, SF3, SF5). Additive to 0031.
 --
 --   * funding_arrival(): whether an arrival is from an address the operator declared it funds the

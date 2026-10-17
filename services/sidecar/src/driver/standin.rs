@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The endpoints' own half of a delivery, which runs by itself (PLAN `DEC-3`): for every order the
 //! core recorded on a network, a prepared transaction whose dry run passes (or fails, once, when
 //! the harness asked for it: [`super::Driver::fail_next_dry_run`]); for every signing intent the

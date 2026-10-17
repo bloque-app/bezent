@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-004 (migration 0030): what the store itself holds of the reserve book, the reserve check and
 //! the statements (`INV-17`, `REQ-BK-1`, `REQ-IC-2`, `NFR-5`, `REQ-PR-2`). Role checks run under
 //! `SET LOCAL ROLE` inside a transaction that is rolled back, so no pooled connection keeps a role

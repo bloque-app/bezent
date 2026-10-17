@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- PR #39 third review MF-A and SF-A (issue #38; SPEC §9 INV-9, AC-I1.2; PLAN DEC-3).
 --
 -- 0036 checked a signing intent only when it named a prepared transaction, and never compared

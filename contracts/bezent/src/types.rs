@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The types the contract stores, takes, returns and emits.
 
 // `parity-scale-codec`'s derive casts each enum variant's index to `u8` with the variant's own

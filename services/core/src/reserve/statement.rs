@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The daily statement (`T-004-05`; `REQ-PR-1`, `REQ-PR-2`, `REQ-BE-3`, `REQ-BK-9`, `REQ-CV-4`,
 //! `AC-E1.1`, `AC-E1.2`; PLAN `DEC-16`).
 //!

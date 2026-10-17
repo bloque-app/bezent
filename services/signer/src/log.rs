@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The signer's log: one line per signature and per refusal, each with the intent id (`REQ-AR-3`:
 //! the signer logs every signature). Nothing written here carries key material (`REQ-KY-1`).
 

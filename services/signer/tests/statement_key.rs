@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-004 T-004-05: the statement key is ed25519 and used for nothing else (`REQ-PR-1`). The signer
 //! signs only intents bound to a network by its configuration; an ed25519 key bound to any
 //! network refuses the configuration, so the statement key can never sign a transaction.

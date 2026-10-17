@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-001 T-001-03/04: shared domains and guard functions (PLAN DEC-4).
 --
 -- Every rule below is enforced by the store, not by application code: that is the layer SPEC §9

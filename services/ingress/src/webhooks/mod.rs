@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Webhooks to requesters (`REQ-ST-5`, `REQ-IC-5`, `REQ-ID-4`; PLAN `DEC-15`; issue #2).
 //!
 //! The sequenced log is the source of truth (`REQ-ST-4`). A notification only says "look at

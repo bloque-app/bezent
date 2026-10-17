@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The chain-event driver: **TEST only** (PLAN `DEC-19`, `pl-pr-e2e` ruling, 2026-10-15).
 //!
 //! The sidecar has no chain behind it. The driver is an HTTP surface, on a port of its own, through

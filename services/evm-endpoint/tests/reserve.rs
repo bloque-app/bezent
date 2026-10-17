@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Issue #42: the vault's balance of each admitted token, and of each convertible, recorded at each
 //! final head the endpoint records, from both providers; providers that disagree make the reading
 //! unknown (`REQ-BK-8`, `REQ-CV-4`, `NFR-5`, `INV-1`; PLAN `DEC-12`).

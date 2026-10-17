@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Issue #30 (migration 0034) and the review of PR #44: what an observation is, who says so, and
 //! what a request may bind (`REQ-OB-6`, `REQ-RQ-3`, `REQ-RQ-6`, `REQ-IN-3`, `REQ-IN-6`,
 //! `REQ-CV-1`, `REQ-CV-2`, `INV-2`, `INV-8`).

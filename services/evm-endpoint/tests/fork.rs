@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-009's fork tests: the endpoint against an anvil fork of Polygon at the block `e2e/evm/forks.env`
 //! pins, with the vault of `F-008` deployed by its own script (`contracts/evm/script/DeployVault.s.sol`)
 //! and Foundry's test keys only. Nothing is sent to a real network: anvil reads the pinned state

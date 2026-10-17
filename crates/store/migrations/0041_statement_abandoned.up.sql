@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- PR #50 re-check S-1 and S-3 (issue #42; REQ-PR-1, REQ-PR-2; PLAN DEC-16): a statement the
 -- statement key signed that never reached the store, and that cannot be stored as it is (it no
 -- longer re-derives, or it was signed under a key that is no longer the statement key), is

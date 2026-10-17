@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-002-05: status by the three keys, reserves and the reserve equation, and the sequenced log
 //! from a position (`REQ-RQ-8`, `REQ-ST-2`, `REQ-ST-4`, `REQ-ID-4`; `AC-H1.1`, `AC-H1.2`,
 //! `AC-H1.3`).

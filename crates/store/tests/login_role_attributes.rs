@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Review S1 of PR #56: the start-up check looked at the login's own attributes only, and let the
 //! login `SET ROLE` into its role. With `ALTER ROLE bezent_core CREATEROLE`, the core's login passed
 //! its check and then ran `SET ROLE bezent_core; CREATE ROLE …`.

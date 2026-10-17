@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The findings of the review of PR #32 (F-003), each reproduced as the reviewer described it:
 //! M1 (`REQ-OT-2`, `INV-2`), M2 (`INV-8`, `REQ-RF-1`, `REQ-EO-6`), S1 (`REQ-OT-5`), S2
 //! (`REQ-RQ-9`), S3 (`REQ-TR-3`), S4, S6 (PLAN `DEC-3`) and S7 (`REQ-TR-2`). M3 and S5 are in

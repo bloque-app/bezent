@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The intent as the core recorded it (`intents`, F-001), read through the signer's role.
 //!
 //! The signer reads the payload fields below and nothing else. The core writes them; the signer

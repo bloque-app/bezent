@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Each bridged asset's supply at each final head the endpoint records (issue #42; `REQ-BK-8`,
 //! `NFR-5`, `INV-1`, `REQ-OB-5`; PLAN `DEC-16`).
 //!

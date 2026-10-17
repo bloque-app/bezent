@@ -1,11 +1,11 @@
 # Copyright (c) 2026 Pagos Cube LLC
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "bezent-store"
 description = "bezent's PostgreSQL store (PLAN DEC-4): sqlx migrations whose triggers enforce the store-layer invariants"
 edition.workspace = true
 version.workspace = true
-license = "AGPL-3.0-or-later"
+license = "GPL-3.0-or-later"
 repository.workspace = true
 publish.workspace = true
 

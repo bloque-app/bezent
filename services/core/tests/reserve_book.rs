@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-004 T-004-01: the reserve book. One test per movement the core records, each named after the
 //! requirement or invariant it verifies (`REQ-BK-7`, `INV-17`, `REQ-AS-9`, `REQ-BK-4`, `REQ-BK-5`,
 //! `REQ-CV-2`, `AC-E2.2`). Balances are read as the book holds them: debits minus credits, so a

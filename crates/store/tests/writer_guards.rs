@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The review of PR #56 (migration 0046): who may record what a transfer's state and the log rest
 //! on, checked through real service logins (a member of one role each, as the services log in).
 //!

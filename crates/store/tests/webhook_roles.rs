@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Migration 0044: who may write what in the webhook tables (issue #2; PR #55 re-check S-a, S-c).
 //! Every check logs in as a login of its own, so the session's login (`session_user`) is the
 //! role under test, as in production.

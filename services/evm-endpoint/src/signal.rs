@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Signals the endpoint must never lose (F-007 review S3, kept for F-009; `AC-I1.2`, `REQ-IC-4`).
 //!
 //! A compromise signal (the delivery key used for something bezent did not record) and an anomaly

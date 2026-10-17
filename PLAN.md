@@ -515,7 +515,7 @@ import.**
   deployment definitions (`DEC-1`); the public tree leaves out operational addresses beyond the published ones,
   runbook details that would help an attacker, the requester's internal identifiers, volumes, and anything that names
   counterparties. Design documents stay in it, redacted, as aledgent's do.
-- Licence: AGPL-3.0-or-later for the services and the ink! contract; Apache-2.0 OR MIT for reusable crates and the
+- Licence: GPL-3.0-or-later for the services and the ink! contract; Apache-2.0 OR MIT for reusable crates and the
   EVM contracts; CC-BY-4.0 for documents; GPL-3.0-only for Kreivo's chain specification, kept verbatim. Every file
   carries an SPDX header and the tree a `REUSE.toml`. Counsel confirms the table.
 - IP: the same review aledgent had (2026-10-12): one chain of title to Pagos Cube LLC, AI co-authorship noted for
@@ -526,7 +526,7 @@ import.**
 
 *Serves:* nothing in the spec requires it; it is the owner's direction, and it adds no behaviour. Being
 public also lets holders check the contract and the statement format themselves (`REQ-PR-*`). *Cost:* a redaction
-pass and a review per release; the AGPL obliges source for anyone who runs the services.
+pass and a review per release; the GPL obliges source for anyone who distributes the services.
 
 ## 3. Dependencies: what we wait on
 

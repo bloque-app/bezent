@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Helpers shared by the ingress tests. Every test runs in a fresh database that `#[sqlx::test]`
 //! creates on the server `DATABASE_URL` names, with the store's migrations applied by the
 //! migration owner. The ingress itself runs as the service role (`bezent_service`), as deployed

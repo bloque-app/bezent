@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `bezent-core`: the core of PLAN `DEC-3` (`F-003`).
 //!
 //! - `bezent-core <config-path>` runs a cycle every `cycle_seconds` until SIGINT or SIGTERM, then

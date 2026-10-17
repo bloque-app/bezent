@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (T-001-03): the verification fixes of F-004 (funding arrivals never
 -- bound, declarations from their block, the lag bound's ceiling, the evaluation's book cut).
 ALTER TABLE reserve_evaluations DROP COLUMN book_entry_cut;

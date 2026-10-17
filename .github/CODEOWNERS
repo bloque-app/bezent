@@ -10,7 +10,7 @@
 /amendments/            @bloque-app/bezent-spec-owner
 /GOVERNANCE.md          @bloque-app/bezent-spec-owner
 
-# Licensing: the boundary between the AGPL parts and the permissive parts.
+# Licensing: the boundary between the GPL parts and the permissive parts.
 /docs/oss/              @bloque-app/bezent-spec-owner
 /REUSE.toml             @bloque-app/bezent-maintainers
 /LICENSES/              @bloque-app/bezent-spec-owner

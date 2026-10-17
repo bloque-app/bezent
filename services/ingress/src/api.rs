@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The JSON shapes of the request and query surfaces (§7.A, §7.B).
 //!
 //! Every request type refuses a field it does not define (`deny_unknown_fields`), so a request

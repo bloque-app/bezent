@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-007 second review, S-a and S-b: the ingress cannot write the signals the endpoint treats as
 //! already raised, nor the issuing network's observations that tell the prover a transaction
 //! executed (`AC-I1.2`, `REQ-IC-4`, `REQ-OB-6`, `INV-8`). Each check runs under `SET LOCAL ROLE`

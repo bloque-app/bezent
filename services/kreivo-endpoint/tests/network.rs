@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-007-01: the endpoint refuses the wrong network at start-up (`AC-I4.1`, `REQ-IC-1`; PLAN
 //! `DEC-5`). Against the in-memory chain and the committed fixtures; no network is reached.
 

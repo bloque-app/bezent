@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What the sidecar sets up before it serves: the test-network rule, the declarations, the logins
 //! and the test signer's configuration. Moved out of `main.rs` so the chain-event driver
 //! ([`crate::driver`]) and its tests share them.

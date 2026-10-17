@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (T-001-03): the review fixes of F-004 (quarantine, lag bound, REQ-IC-2
 -- pauses, operator funding addresses).
 REVOKE INSERT (quarantine_id) ON pauses FROM bezent_core;

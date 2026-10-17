@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The exact bytes the signer is asked to sign, decoded by the signer itself (the audit of PR #56,
 //! must-fix 2; `REQ-AR-3`, `INV-9`, `DEC-3`, issue #23).
 //!

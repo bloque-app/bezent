@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (T-001-03): the review of PR #56.
 DROP FUNCTION bezent_applied_migrations();
 DROP TRIGGER event_log_guard_writer ON event_log;

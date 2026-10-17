@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What the reserve check reads from the networks and from an attesting party's reports
 //! (`T-004-02`; `REQ-BK-8`, `REQ-BE-4`, `REQ-CV-4`).
 //!

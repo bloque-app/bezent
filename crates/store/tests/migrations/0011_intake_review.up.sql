@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-002, review of PR #22: three additive changes to what the ingress records and reads.
 --
 --   * intake_answers: a transfer is answered to at most one request (REQ-ID-4, REQ-RQ-4). A repeat

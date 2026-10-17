@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! F-007 review S1, S2, M1: only an endpoint's role records what an endpoint proves
 //! (`REQ-NX-1`, `REQ-NX-2`, `INV-8`). Each check runs under `SET LOCAL ROLE` inside its own
 //! transaction, so no pooled connection keeps a role it was switched to (#27).

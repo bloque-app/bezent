@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Whether a store is a test one, from the networks it declares (`REQ-KY-6`: a test key never
 //! meets a production network; PR #50 re-check M-1).
 //!

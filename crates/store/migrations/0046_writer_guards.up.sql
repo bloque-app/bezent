@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Review of PR #56 (issues #35, #46): who may record what a transfer's state and the log rest on.
 -- Additive: new guards and one function; no table changes.
 --

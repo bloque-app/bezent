@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-004, third review round of PR #40 (SF-A, SF-B, SF-C). Additive to 0032.
 --
 --   * transfers_refuse_funding_source(): a refund of an unassociated arrival (REQ-RQ-6) never

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The endpoint's configuration (`T-009-01`): one instance per EVM network (PLAN `DEC-8`).
 //!
 //! A TOML file. No secret is in it: the database URL, the providers' URLs (which may carry a

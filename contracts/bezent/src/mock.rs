@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! A model of the parts of Kreivo the contract uses, for the off-chain unit tests.
 //!
 //! ink!'s off-chain environment knows nothing of Kreivo's chain extension. This module stands in

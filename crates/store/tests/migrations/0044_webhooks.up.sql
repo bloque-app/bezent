@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-002, M-1 part (issue #2): webhooks to requesters (SPEC §7.C REQ-ST-5, REQ-IC-5; REQ-ID-4;
 -- PLAN DEC-15). Additive: no earlier table changes.
 --

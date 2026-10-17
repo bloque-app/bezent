@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Pagos Cube LLC
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reversal for tests only (T-001-03): PR #50 review M1's INV-4 pause.
 ALTER TABLE pauses
     DROP CONSTRAINT pauses_cause_names_its_reason,

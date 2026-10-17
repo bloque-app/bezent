@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-005-06: no key material in any log, error or configuration dump (`REQ-KY-1`).
 //!
 //! The signer is driven through every path that writes a line or returns an error: a signature,

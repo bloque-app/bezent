@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The custody the signer runs on, chosen by configuration (`DEC-11`): test keys from a file, or
 //! delivery keys in AWS KMS with the other keys (statement, pause) from Vault, behind one
 //! [`KeyBackend`].

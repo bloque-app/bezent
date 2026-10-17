@@ -14,18 +14,18 @@ confirmed by counsel.**
 
 | Part | Path | Licence | Why |
 |---|---|---|---|
-| Services | `services/**` | **AGPL-3.0-or-later** | DEC-20: whoever runs the bridge as a network service owes its source to its users. They link smoldot (GPL with the Classpath exception, §4) |
-| The store | `crates/store/**` | **AGPL-3.0-or-later** | bezent's own schema and triggers, not a reusable library. Its migrations carry an AGPL header they were applied with: sqlx records each file's checksum and refuses a database that applied a file whose bytes later changed, so the header cannot be edited. Counsel or the owner may decide to re-header them with a database migration plan |
-| The Kreivo contract (source) | `contracts/bezent/**` | **AGPL-3.0-or-later** (source) | DEC-20. The *built* contract is a GPL-3.0-only combined work: §4.3 |
-| Reusable crate | `crates/core/**` | **Apache-2.0 OR MIT** | Types for amounts, ids, references and coordinates; depends on no AGPL code |
+| Services | `services/**` | **GPL-3.0-or-later** | DEC-20: whoever distributes the bridge, or an image of it, owes its source. They link smoldot (GPL with the Classpath exception, §4) |
+| The store | `crates/store/**` | **GPL-3.0-or-later** | bezent's own schema and triggers, not a reusable library. Its migrations carry the same header (§3) |
+| The Kreivo contract (source) | `contracts/bezent/**` | **GPL-3.0-or-later** (source) | DEC-20. The *built* contract is a GPL-3.0-only combined work: §4.3 |
+| Reusable crate | `crates/core/**` | **Apache-2.0 OR MIT** | Types for amounts, ids, references and coordinates; depends on no GPL code |
 | EVM contracts | `contracts/evm/{src,script,test}/**` | **Apache-2.0 OR MIT** | Reusable vault glue; the libraries under `lib/` are submodules with their own licences |
-| Test bed, tooling, workflows, research scripts | `e2e/**`, `tools/**`, `.github/**`, `deploy/**`, `research/**-scripts` | **Apache-2.0 OR MIT** | Nothing in them links AGPL code |
+| Test bed, tooling, workflows, research scripts | `e2e/**`, `tools/**`, `.github/**`, `deploy/**`, `research/**-scripts` | **Apache-2.0 OR MIT** | Nothing in them links GPL code |
 | Documents | `*.md`, `docs/*.html` | **CC-BY-4.0** | Prose, wherever it lives |
 | Kreivo's chain specification | `services/kreivo-endpoint/chain-specs/kreivo.json` | **GPL-3.0-only** (Kreivo's) | Published by Kreivo, kept verbatim |
 | Marks | `brand/*.svg` | `LicenseRef-Trademark-Marks` | Pagos Cube LLC's; not licensed with the code |
 | Test fixtures | `services/*/fixtures`, `crates/core/tests/ui` | as the code beside them | Published test values, never a deployment's |
 
-No crate outside `services/`, `crates/store` and `contracts/bezent` depends on AGPL code, so the permissive licences
+No crate outside `services/`, `crates/store` and `contracts/bezent` depends on GPL code, so the permissive licences
 are real; `cargo deny check licenses` (the `licensing` job of CI) keeps every dependency on an allow list.
 
 ## 2. Contributions
@@ -35,8 +35,10 @@ agreement.
 
 ## 3. The migrations
 
-The files in `crates/store/migrations/` must not be edited once any deployment has applied them. They keep their
-AGPL-3.0-or-later header; `REUSE.toml` adds the copyright line. `tools/oss/spdx.py` skips the directory.
+The files in `crates/store/migrations/` must not be edited once any deployment has applied them: sqlx records each
+file's checksum and refuses a database that applied a file whose bytes later changed. They were re-headered from
+AGPL-3.0-or-later to GPL-3.0-or-later once, before any production deployment (the owner accepted re-running them
+on test databases). `REUSE.toml` adds the copyright line; `tools/oss/spdx.py` skips the directory.
 
 ## 4. Third-party code
 
@@ -44,7 +46,7 @@ AGPL-3.0-or-later header; `REUSE.toml` adds the copyright line. `tools/oss/spdx.
 
 `smoldot` and `smoldot-light` (GPL-3.0-or-later WITH Classpath-exception-2.0), from `bloque-app/smoldot` pinned by
 commit (`Cargo.toml`), link into `services/kreivo-endpoint`. The exception allows linking into an independent module
-under any licence; the services are AGPL-3.0-or-later, which is compatible.
+under any licence; the services are GPL-3.0-or-later, which is compatible.
 
 ### 4.2 Foundry libraries
 
@@ -55,11 +57,10 @@ each under its own licence (MIT or LGPL-3.0 for Safe's contracts). They are used
 
 `contracts/bezent` depends on `ink` 5.1.1, which pulls in `staging-xcm`, `xcm-procedural` (both GPL-3.0-only) and
 `array-bytes` (GPL-3.0). The compiled contract (`.wasm`, `.contract`) is therefore a combined work: its source is
-AGPL-3.0-or-later, GPLv3 section 13 lets it be combined with the GPL parts, and the artefact is distributed with the
-GPL-3.0-only terms of those parts. `contracts/bezent/deny.toml` names the exceptions. Counsel confirms.
+GPL-3.0-or-later, the combination is distributed under GPL-3.0-only, the narrower of the terms involved. `contracts/bezent/deny.toml` names the exceptions. Counsel confirms.
 
-## 5. Obligations of whoever runs the services
+## 5. Obligations of whoever distributes the services
 
-Offer the source of the AGPL programs to the users who interact with them (AGPL section 13). The public repository
+Whoever distributes the GPL programs (or an image of them) offers the corresponding source (GPL section 6). The public repository
 is that source; a deployment that runs a modified version offers the modified source. Container images are built
 only from this repository's workflows and carry the revision label `org.opencontainers.image.revision`.

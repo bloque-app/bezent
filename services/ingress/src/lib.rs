@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! # bezent-ingress
 //!
 //! The request surface (`CTR-REQ`, SPEC §7.A) and the query surface (`CTR-QRY`, §7.B) over HTTP

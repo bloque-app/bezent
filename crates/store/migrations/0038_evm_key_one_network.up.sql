@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- PR #39 third review SF-B (SPEC REQ-KY-4, INV-9): one EVM key binds to exactly one network.
 --
 -- An EVM key is the same key on every EVM chain, and its address the same lane. Bound to two

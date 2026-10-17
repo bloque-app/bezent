@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Review S3, #46: the signer's start-up check (the store's shared one, which every service runs)
 //! proves that the store login it actually uses is a member of `bezent_signer` and of nothing
 //! else, and can act as nothing else (`REQ-AR-3`). A login that owns the schema, can become

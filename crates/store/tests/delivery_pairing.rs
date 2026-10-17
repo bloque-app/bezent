@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Migration 0036: the two steps of a delivery are paired in the store (`INV-9`; PLAN `DEC-3`).
 //! PR #39 second review MF1, and issue #38. Every check logs in as a role of its own: one pool,
 //! one login, no role switched on a pooled connection (#27).

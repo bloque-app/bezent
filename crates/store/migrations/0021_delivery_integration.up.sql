@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-003 and F-007 together: the two-step delivery of PLAN DEC-3 on the endpoint's real tables, and
 -- each role narrowed to what it writes (issues #33, #35; SPEC §8.2 REQ-NX-1/2, §8.3 REQ-EO-6, §9
 -- INV-8, INV-9, REQ-AR-3).

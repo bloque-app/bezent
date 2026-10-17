@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Pagos Cube LLC
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 # The endpoint's configuration shape, for `--check` in CI and the tests (T-007-01). It declares
 # Kreivo, whose light chain spec is pinned in ../chain-specs/kreivo.json. No secret is here: the
 # files it names hold them, and they need not exist for --check.

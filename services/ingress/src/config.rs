@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The ingress configuration, read from a TOML file named on the command line.
 //!
 //! The database URL may carry the service login's password, so the configuration never prints it:

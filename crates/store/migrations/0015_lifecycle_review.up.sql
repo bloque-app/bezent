@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-003, review of PR #32. Additive: 0014 is left as it is; the functions that change get new
 -- names and their triggers are pointed at them, so the down migration points them back.
 --

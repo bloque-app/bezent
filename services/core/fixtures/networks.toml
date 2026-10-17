@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Pagos Cube LLC
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Per-network finality times, for `networks.finality_seconds` (migration 0033; NFR-5, REQ-IC-2).
 # Not read by the core: the operator sets the value on the network's row when declaring it. The
 # reserve check's lag bound defaults to this plus 60 s, at most one hour, so a network that

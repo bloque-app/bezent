@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-001 T-001-03/04: the sequenced event log (SPEC §7.C REQ-ST-4; PLAN DEC-4).
 --
 -- Every state change and condition is appended here, gapless and readable by position. Positions

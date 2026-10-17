@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-001-05: the restore drill (`NFR-7`).
 //!
 //! A populated database is dumped with `pg_dump`, restored with `psql` into a fresh database, and

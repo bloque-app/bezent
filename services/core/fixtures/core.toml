@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Pagos Cube LLC
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 # A configuration for `bezent-core --check` in CI. Not a deployment file: no real login.
 database_url = "postgres://bezent_core_login@localhost:5432/bezent"
 cycle_seconds = 5

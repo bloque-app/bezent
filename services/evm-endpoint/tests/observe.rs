@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-009-02, T-009-03, T-009-05: the finalized-range follower, gaps and reorgs; arrivals,
 //! convertibles and conversions at the vault; payout legs and reference pairing (`REQ-OB-*`,
 //! `REQ-IN-*`, `REQ-CV-2`, `REQ-CV-4`, `AC-A2.1`–`AC-A2.3`, `AC-D2.3`, `AC-C1.3`, `INV-10`,

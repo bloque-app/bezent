@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-007-03: mints and refund mints, from the core's order to submitted bytes: an era born at the
 //! finalized head, a dry run before any signature, the exact bytes recorded, the signature from
 //! the signer over its link and checked, persisted before submission, one declared lane

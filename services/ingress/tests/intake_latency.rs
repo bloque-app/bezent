@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T-002-06: intake latency, measured inside bezent and reported against `NFR-1` (250 ms at p99).
 //! Reported, not gated: the figure depends on the machine and its store. Run with
 //! `cargo test -p bezent-ingress --test intake_latency -- --nocapture` to see it.

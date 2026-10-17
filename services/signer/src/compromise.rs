@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Pagos Cube LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The compromise path (`T-005-05`; `AC-I1.2`, `REQ-IC-4`, `REQ-IC-2`).
 //!
 //! An endpoint that observes a transaction signed by one of bezent's keys hands the signature to
