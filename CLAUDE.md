@@ -92,15 +92,26 @@ cites the decision it applies. Never apply an unruled decision, not even provisi
 - **Scope.** Never edit `SPEC.md` or `PLAN.md` unless the task says so. On a spec gap, stop and propose an amendment.
   Work inside one feature directory at a time.
 - **Merging.** Only when the task says so, with CI green, after rebasing on the current base.
-- **Tracking.** One GitHub issue per feature (issue number = feature number, title `F-NNN · name`), milestones
+- **Tracking.** One GitHub issue per feature (title `F-NNN · name`; issue numbers do not equal feature numbers), milestones
   `M-0`…`M-5` as in `PLAN.md` §5. Every pull request names its issue (`Closes #N` or `Part of #N`) and carries the
   milestone.
 - **Secrets.** Never commit a secret, a token or a key. Workflows reference secrets only as `${{ secrets.NAME }}`;
   pull requests from forks do not receive them, so tests must pass on the public fallbacks. The signer's published
   test keys (`services/signer/fixtures/`) are test values and say so.
 - **No durable work in `/tmp`.**
-- **Private matters stay out.** Do not put private hostnames, account identifiers, credentials, people's names or
-  counterparties' terms in commits, issues, pull requests or documents.
+- **Private matters stay out.** Do not put private hostnames, account identifiers, credentials, people's real names
+  (GitHub usernames are fine) or counterparties' terms in commits, issues, pull requests or documents.
+
+## Agents and models
+
+- **Opus on call as the advisor** (@pandres95, 2026-10-17). Run the main session on Sonnet with Claude Code's
+  advisor on (`/advisor opus`, `--advisor opus`, or `advisorModel` in settings; experimental, Anthropic API only).
+  The advisor sees the whole conversation and is consulted on its own; ask it explicitly before a plan or
+  architecture locks (missing invariants, auth or contracts?), when the same test or error fails twice (root cause
+  or rabbit hole?), and before calling work done or committing (did the diff break a rule or regress something?).
+- Every spawned agent names its model: Sonnet by default (`CLAUDE_CODE_SUBAGENT_MODEL=sonnet` as the fallback),
+  Haiku for mechanical lookups, Opus only for design, open-ended code and incidents. Only the maintainer switches
+  a session's model or edits settings files.
 
 ## Scratch space
 
