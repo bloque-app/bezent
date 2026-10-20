@@ -9,6 +9,8 @@
 //!   moves exactly what it carries (`INV-6`, `INV-7`); no login chooses a transition's id; a
 //!   key-compromise alert is its detector's, deduplicated by detection key (`AC-I1.2`); the
 //!   destination-network rules hold in the store (`REQ-RQ-3`, `REQ-IN-6`).
+//! - Issue #36 (migration 0050): a payout order's asset and token are its transfer's, and a mint
+//!   order's recipient is its deposit's destination (`INV-6`, `INV-7`, `REQ-AS-2`, `REQ-AS-3`).
 
 mod common;
 
@@ -343,12 +345,13 @@ async fn should_fix_a_mint_order_rests_on_a_final_bound_arrival_and_its_amount(p
         "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
              destination_network, destination, state, source_network, source_block_number, \
              source_block_hash, source_position_kind, source_position_index, on_chain_reference) \
-         VALUES ('bz-d-1', 'req-1', 'deposit', 'usd', 1000000, 'kreivo', '0xdest', 'Received', \
+         VALUES ('bz-d-1', 'req-1', 'deposit', 'usd', 1000000, 'kreivo', \
+             '0x0202020202020202020202020202020202020202020202020202020202020202', 'Received', \
              'polygon', 10, '\\xaa', 'log', 0, '\\x11')",
     )
     .await;
     let core = login(&pool, "audit_core_for_tests", bezent_store::CORE_ROLE).await;
-    let to = r#"{"asset": "Here(101)", "to": "0x0202"}"#;
+    let to = r#"{"asset": "Here(101)", "to": "0x0202020202020202020202020202020202020202020202020202020202020202"}"#;
     let mint = |order_json: &str, network: &str, amount: &str| {
         order("bz-d-1", network, "mint", "11", order_json, amount)
     };
@@ -366,7 +369,11 @@ async fn should_fix_a_mint_order_rests_on_a_final_bound_arrival_and_its_amount(p
         ("ten thousand times it", mint(to, "kreivo", "1000000")),
         (
             "another asset",
-            mint(r#"{"asset": "Here(102)", "to": "0x0202"}"#, "kreivo", "100"),
+            mint(
+                r#"{"asset": "Here(102)", "to": "0x0202020202020202020202020202020202020202020202020202020202020202"}"#,
+                "kreivo",
+                "100",
+            ),
         ),
         ("an origin network", mint(to, "polygon", "100")),
     ] {
@@ -439,6 +446,269 @@ async fn should_fix_a_payout_order_rests_on_a_final_redemption_and_its_amount(po
     attempt(&core, &payout(to, "1000000"))
         .await
         .expect("the payout the redemption carries");
+}
+
+/// Issue #36 (`INV-6`, `REQ-IN-4`, `REQ-RQ-7`): with only the core compromised, a mint order's
+/// recipient was not tied to the deposit's destination, so the core could mint a real, final
+/// arrival to an account of its own. The order's `to` is the 32-byte account the deposit's
+/// destination decodes to: written as `0x` and 64 hex digits, or as an SS58 address of a one- or
+/// two-byte network prefix, the form the ingress checked.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_36_a_mint_orders_the_deposits_destination_and_no_other_recipient(pool: PgPool) {
+    delivery_declarations(&pool).await;
+    // Deposit 0 names the account 0x02… in hex, deposit 1 the same account in SS58 (one-byte
+    // network prefix), deposit 2 the account 0x03… in SS58 (two-byte prefix).
+    let ss58_one_byte_prefix = "5C7LYpP2ZH3tpKbvVvwiVe54AapxErdPBbvkYhe6y9ZBkqWt";
+    let ss58_two_byte_prefix = "a3aH71MptGVJWsn1bUN9oWEAV6zVWcVMRcRVJxCXxSiibATrs";
+    let account = |byte: &str| format!("0x{}", byte.repeat(32));
+    let destinations = [
+        account("02"),
+        ss58_one_byte_prefix.to_owned(),
+        ss58_two_byte_prefix.to_owned(),
+    ];
+    for (index, destination) in destinations.iter().enumerate() {
+        exec(
+            &pool,
+            &format!(
+                "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, \
+                     amount, destination_network, destination, state, source_network, \
+                     source_block_number, source_block_hash, source_position_kind, \
+                     source_position_index, on_chain_reference) \
+                 VALUES ('bz-d-{index}', 'req-{index}', 'deposit', 'usd', 1000000, 'kreivo', \
+                     '{destination}', 'Received', 'polygon', 10, '\\xaa', 'log', {index}, \
+                     '\\x1{index}')"
+            ),
+        )
+        .await;
+    }
+    make_final(&pool, "polygon", 10, "bb").await;
+    let core = login(&pool, "issue_36_core_for_tests", bezent_store::CORE_ROLE).await;
+    let mint = |index: usize, to: Option<&str>| {
+        let order_json = match to {
+            Some(to) => format!(r#"{{"asset": "Here(101)", "to": "{to}"}}"#),
+            None => r#"{"asset": "Here(101)"}"#.to_owned(),
+        };
+        order(
+            &format!("bz-d-{index}"),
+            "kreivo",
+            "mint",
+            &format!("1{index}"),
+            &order_json,
+            "100",
+        )
+    };
+
+    // Another account than the deposit's, whichever way the deposit's destination was written.
+    for index in 0..3 {
+        for (what, to) in [
+            ("an account of the core's own", Some(account("0a"))),
+            ("the account next to it", Some(account("04"))),
+            ("no recipient", None),
+        ] {
+            let err = attempt(&core, &mint(index, to.as_deref()))
+                .await
+                .expect_err(&format!("a mint order to {what}, deposit {index}"));
+            assert_refusal(&err, "INV-6", what);
+        }
+    }
+    // Deposit 2 names the account 0x03…, not the 0x02… of deposits 0 and 1.
+    let err = attempt(&core, &mint(2, Some(&account("02"))))
+        .await
+        .expect_err("a mint order to another deposit's account");
+    assert_refusal(&err, "INV-6", "another deposit's account");
+    // Its own destination, as the core writes it (lower-case hex of the 32-byte account).
+    for (index, bytes) in [(0, "02"), (1, "02"), (2, "03")] {
+        attempt(&core, &mint(index, Some(&account(bytes))))
+            .await
+            .unwrap_or_else(|e| panic!("the mint to the deposit's own destination {index}: {e}"));
+    }
+}
+
+/// Issue #36 (`INV-7`, `REQ-AS-2`, `REQ-AS-3`, `REQ-OT-4`): a payout order's asset and token were
+/// not tied to the transfer's asset in the store, so a compromised core could order the payout in
+/// the token of another asset (the amount is scaled for the transfer's own) and multiply the value
+/// paid out. The order's asset is the transfer's, and its token, when it names one, the one
+/// admitted for that asset on the destination network.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_36_a_payout_orders_its_transfers_asset_and_token_and_no_other(pool: PgPool) {
+    delivery_declarations(&pool).await;
+    // A second asset, whose token has 18 decimals on the same network.
+    exec(
+        &pool,
+        "INSERT INTO assets (asset, precision, assurance_class, issuing_asset) \
+           VALUES ('eur', 2, 'public', 'Here(102)'); \
+         INSERT INTO admitted_tokens (network, token, asset, precision) \
+           VALUES ('polygon', '0xother', 'eur', 18); \
+         INSERT INTO reserves (asset, network, address) VALUES ('eur', 'polygon', '0xreserve2'); \
+         INSERT INTO observations (network, block_number, block_hash, block_time, position_kind, \
+             position_index, token, amount, sender, executed, kind, on_chain_reference) \
+           VALUES ('kreivo', 50, '\\xcc', now(), 'log', 0, 'Here(101)', 100, '0xredeemer', TRUE, \
+             'redemption', '\\x22'); \
+         INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+             destination_network, destination, state, source_network, source_block_number, \
+             source_block_hash, source_position_kind, source_position_index, on_chain_reference, \
+             redeemer, destination_reference) \
+           VALUES ('bz-w-1', 'redemption-1', 'withdrawal', 'usd', 1000000, 'polygon', \
+             '0xbeneficiary', 'Received', 'kreivo', 50, '\\xcc', 'log', 0, '\\x22', '0xredeemer', \
+             '\\x3333333333333333333333333333333333333333333333333333333333333333')",
+    )
+    .await;
+    make_final(&pool, "kreivo", 50, "dd").await;
+    let core = login(&pool, "issue_36_core_for_tests", bezent_store::CORE_ROLE).await;
+    let payout = |order_json: &str| {
+        order(
+            "bz-w-1",
+            "polygon",
+            "payout",
+            "3333333333333333333333333333333333333333333333333333333333333333",
+            order_json,
+            "1000000",
+        )
+    };
+
+    for (what, order_json) in [
+        (
+            "another asset",
+            r#"{"to": "0xbeneficiary", "asset": "eur", "token": null}"#,
+        ),
+        (
+            "another asset, its own token",
+            r#"{"to": "0xbeneficiary", "asset": "eur", "token": "0xother"}"#,
+        ),
+        (
+            "the asset, another asset's token",
+            r#"{"to": "0xbeneficiary", "asset": "usd", "token": "0xother"}"#,
+        ),
+        (
+            "a token and no asset",
+            r#"{"to": "0xbeneficiary", "token": "0xtoken"}"#,
+        ),
+        ("no asset", r#"{"to": "0xbeneficiary", "token": null}"#),
+    ] {
+        let err = attempt(&core, &payout(order_json))
+            .await
+            .expect_err(&format!("a payout order of {what}"));
+        assert_refusal(&err, "INV-7", what);
+    }
+    for (what, order_json) in [
+        (
+            "the asset, no token (as the core writes it)",
+            r#"{"to": "0xbeneficiary", "asset": "usd", "token": null}"#,
+        ),
+        (
+            "the asset, its token",
+            r#"{"to": "0xbeneficiary", "asset": "usd", "token": "0xtoken"}"#,
+        ),
+        (
+            "the asset, its token in another case",
+            r#"{"to": "0xbeneficiary", "asset": "usd", "token": "0xTOKEN"}"#,
+        ),
+    ] {
+        attempt(&core, &payout(order_json))
+            .await
+            .unwrap_or_else(|e| panic!("a payout order of {what}: {e}"));
+    }
+}
+
+/// Issue #36 (`INV-7`, `REQ-IN-6`, `REQ-AS-3`): and the refund of an unassociated arrival, paid
+/// out in the arrival's own minor units, is ordered in that arrival's token only: the asset the
+/// refund names (or, when its token is not admitted, no asset and that token itself).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_36_an_unassociated_refund_pays_out_in_the_arrivals_own_token(pool: PgPool) {
+    delivery_declarations(&pool).await;
+    exec(
+        &pool,
+        "INSERT INTO assets (asset, precision, assurance_class, issuing_asset) \
+           VALUES ('eur', 2, 'public', 'Here(102)'); \
+         INSERT INTO admitted_tokens (network, token, asset, precision) \
+           VALUES ('polygon', '0xother', 'eur', 18); \
+         INSERT INTO reserves (asset, network, address) VALUES ('eur', 'polygon', '0xreserve2'); \
+         INSERT INTO observations (network, block_number, block_hash, block_time, position_kind, \
+             position_index, token, amount, sender, recipient, executed, kind) \
+           VALUES ('polygon', 10, '\\xaa', now(), 'log', 7, '0xstray', 777, '0xsender', \
+             '0xreserve', TRUE, 'other_arrival'); \
+         INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+             destination_network, destination, state, source_network, source_block_number, \
+             source_block_hash, source_position_kind, source_position_index, on_chain_reference) \
+           VALUES ('bz-u-1', 'req-u-1', 'refund', 'usd', 1000000, 'polygon', '0xback', 'Received', \
+             'polygon', 10, '\\xaa', 'log', 0, '\\x44'); \
+         INSERT INTO transfers (bridge_reference, request_reference, kind, token, amount, \
+             destination_network, destination, state, source_network, source_block_number, \
+             source_block_hash, source_position_kind, source_position_index, on_chain_reference) \
+           VALUES ('bz-u-2', 'req-u-2', 'refund', '0xstray', 777, 'polygon', '0xback', \
+             'Received', 'polygon', 10, '\\xaa', 'log', 7, '\\x55')",
+    )
+    .await;
+    make_final(&pool, "polygon", 10, "bb").await;
+    let core = login(&pool, "issue_36_core_for_tests", bezent_store::CORE_ROLE).await;
+    let payout = |reference: &str, on_chain: &str, order_json: &str, amount: &str| {
+        order(reference, "polygon", "payout", on_chain, order_json, amount)
+    };
+
+    // The refund naming the arrival's asset.
+    for (what, order_json) in [
+        (
+            "another asset",
+            r#"{"to": "0xback", "asset": "eur", "token": null}"#,
+        ),
+        (
+            "another asset's token",
+            r#"{"to": "0xback", "asset": "usd", "token": "0xother"}"#,
+        ),
+        (
+            "a token, no asset",
+            r#"{"to": "0xback", "token": "0xtoken"}"#,
+        ),
+    ] {
+        let err = attempt(&core, &payout("bz-u-1", "44", order_json, "1000000"))
+            .await
+            .expect_err(&format!("a refund payout of {what}"));
+        assert_refusal(&err, "REQ-IN-6", what);
+    }
+    attempt(
+        &core,
+        &payout(
+            "bz-u-1",
+            "44",
+            r#"{"to": "0xback", "asset": "usd", "token": null}"#,
+            "1000000",
+        ),
+    )
+    .await
+    .expect("the refund in the arrival's asset");
+
+    // The refund of a token that is not admitted names that token and no asset.
+    for (what, order_json) in [
+        (
+            "an admitted asset in place of the stray token",
+            r#"{"to": "0xback", "asset": "usd", "token": null}"#,
+        ),
+        (
+            "an admitted token in place of the stray one",
+            r#"{"to": "0xback", "token": "0xtoken"}"#,
+        ),
+        (
+            "the stray token and an asset besides",
+            r#"{"to": "0xback", "asset": "usd", "token": "0xstray"}"#,
+        ),
+        ("no token", r#"{"to": "0xback"}"#),
+    ] {
+        let err = attempt(&core, &payout("bz-u-2", "55", order_json, "777"))
+            .await
+            .expect_err(&format!("a refund payout of {what}"));
+        assert_refusal(&err, "REQ-IN-6", what);
+    }
+    attempt(
+        &core,
+        &payout(
+            "bz-u-2",
+            "55",
+            r#"{"to": "0xback", "asset": null, "token": "0xstray"}"#,
+            "777",
+        ),
+    )
+    .await
+    .expect("the refund in the stray token");
 }
 
 /// Should-fix (`REQ-TR-6`, `REQ-RQ-7`): the ingress could insert a transition under an id of its
