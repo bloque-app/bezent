@@ -141,8 +141,10 @@ soon as the modifiers exist, and `createProxyWithNonce` is open to everyone. Som
 at its address while the deployer is still configuring the modifiers. It is the same Safe (the address commits to the
 initializer, so its owners, modules and guard are the configured ones), but it means the modifiers can be live while
 the deployer still owns them, which the order of steps is meant to prevent. The script refuses to go on if a Safe
-already exists at the address, before it configures anything and again just before it creates the Safe
-(`test_REQ_KY_4_scriptRefusesAPreCreatedSafe`), and the run is abandoned and started again with a new salt. The
+already exists at the address, when it computes the address and again just before it creates the Safe
+(`test_REQ_KY_4_scriptRefusesAPreCreatedSafe`), and the run is abandoned and started again with a new salt. Those checks
+run while forge simulates the script; a Safe created between the simulation and the broadcast is stopped only by the
+CREATE2 collision when the script creates it, and then by the verifier. The
 configuration cannot be made atomic with the Safe's creation without a one-shot factory contract (see below), so
 what proves that nothing else happened in that window is the verifier's replay, which a vault must pass before it is
 funded. Treat a vault whose verifier has not passed as not deployed.
@@ -188,7 +190,9 @@ Fork tests: `test_REQ_KY_4_verifierAcceptsTheDeployment`, `test_REQ_KY_4_verifie
 `test_REQ_GV_2_verifierChecksTheGuardianModule`. The
 scripts themselves (the deployment with `--broadcast`, the verifier fetching logs over RPC) were run against a local
 anvil fork of Polygon at the pinned block: the verifier passed on a fresh deployment (T-008-03, again with the guard
-and the Delay for T-008-07) and, in T-008-03, failed after a role was widened. Nothing was sent to a real network.
+and the Delay for T-008-07) and, in T-008-03, failed after a role was widened. That run predates the guardian: the
+guardian's `VAULT_GUARDIAN_ROLES` input and second log fetch of `run()` are covered by `check`, which the tests call
+with recorded logs, and not yet by a script run against an anvil fork. Nothing was sent to a real network.
 
 **Salt nonce.** The default is `keccak256("bezent.vault", network, chainId, deployer, deployer's nonce)`, so it is
 derived per network and per deployment: a second run with the same parameters no longer collides with the first.
@@ -230,7 +234,10 @@ queue call (`test_REQ_GV_5_theQueueCannotQueueAgain`) would run as the Safe, a m
 unseen. The simplest fix that the tests prove (`test_REQ_GV_3_queuedCallsThatLockTheOwnersOutAreRefused`) is the
 refusal at queueing time, rather than a recovery path a guardian could abuse. For the same reason a queued
 `Safe.disableModule(prev, delay)` is refused: with the Delay gone nothing can be queued, so a paused vault could never
-be unpaused. The cost is that the Delay can never be replaced or removed (a new Delay needs a new vault), which is the
+be unpaused. The guard compares the module as an address, not as a word: Safe 1.4.1 is compiled with solc 0.7.6 (ABI
+coder v1), which masks the high bits of an address argument instead of rejecting them, so a word with dirty high bits
+still names the Delay to the Safe (`test_REQ_GV_3_removingTheDelayWithDirtyAddressBitsIsRefused` shows the Safe
+disabling the Delay on such a call, with the guard off). The cost is that the Delay can never be replaced or removed (a new Delay needs a new vault), which is the
 safe direction. A call to a
 token, a router or MultiSend, and any delegatecall, is refused when the owners try to queue it. So the Delay is not a
 way to move the vault's tokens: moving them takes a widening of the vault's configuration first (a role, a module, the

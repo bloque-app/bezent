@@ -384,6 +384,28 @@ abstract contract GuardianTest is GovernanceBase {
         mustQueue(d.roles, lowered());
     }
 
+    /// REQ-GV-3: the same refusal holds for a non-canonical encoding of the call. Safe 1.4.1 is compiled with
+    /// solc 0.7.6 (ABI coder v1), which masks the high bits of an address argument instead of reverting, so a
+    /// module word with dirty high bits still names the Delay to the Safe. The guard compares the address, not the word.
+    function test_REQ_GV_3_removingTheDelayWithDirtyAddressBitsIsRefused() public {
+        bytes memory dirty = abi.encodePacked(
+            ISafe.disableModule.selector,
+            bytes32(uint256(uint160(prevOf(d.delay)))),
+            bytes32(uint256(uint160(d.delay)) | (uint256(1) << 255))
+        );
+        (bool ok, bytes memory ret) = queue(d.safe, dirty);
+        assertFalse(ok);
+        assertEq(ret, reason("VaultGuard: queued call disables the Delay"));
+        assertEq(delayMod.queueNonce(), 0, "nothing was queued");
+
+        // The control: with no guard, the dirty encoding does take the Delay off the Safe.
+        vm.store(d.safe, bytes32(GUARD_SLOT), bytes32(0));
+        mustQueue(d.safe, dirty);
+        vm.warp(block.timestamp + cooldown);
+        mustRun(d.safe, dirty);
+        assertFalse(safe.isModuleEnabled(d.delay), "the Safe read the dirty word as the Delay");
+    }
+
     /// REQ-GV-3, review findings 2 and 3: a queued change of the cooldown or the expiration is accepted only
     /// within the bounds the deployment also enforces: no zero, no cooldown below the floor, none above the cap,
     /// and no expiration of 0 (a queue that never clears).

@@ -175,7 +175,10 @@ contract VaultGuard is BaseGuard {
         // forge-lint: disable-next-line(unsafe-typecast)
         if (bytes4(queued) != ISafe.disableModule.selector) return;
         require(queued.length == 68, "VaultGuard: malformed disableModule");
-        require(_word(queued, 36) != uint256(uint160(delay)), "VaultGuard: queued call disables the Delay");
+        // The address, not the word: Safe 1.4.1 (solc 0.7.6, ABI coder v1) masks an address argument's high bits
+        // instead of rejecting them, so a dirty word still names the Delay to the Safe.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        require(address(uint160(_word(queued, 36))) != delay, "VaultGuard: queued call disables the Delay");
     }
 
     /// The 32-byte word of `data` at byte offset `at`.
