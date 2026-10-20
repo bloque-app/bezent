@@ -245,6 +245,9 @@ fn deploy(anvil: &Anvil, lane: Address) -> Vault {
         .env("VAULT_THRESHOLD", "2")
         .env("DELIVERY_MEMBER", lane.to_string())
         .env("CONVERSION_MEMBER", CONVERSION_MEMBER)
+        // The Delay's cooldown and expiration (seconds): contracts/evm/config/vault.example.env.
+        .env("VAULT_DELAY_COOLDOWN", "86400")
+        .env("VAULT_DELAY_EXPIRATION", "604800")
         .output()
         .expect("forge is on the PATH");
     let stdout = String::from_utf8_lossy(&out.stdout);

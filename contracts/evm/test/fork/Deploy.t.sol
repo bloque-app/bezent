@@ -297,15 +297,15 @@ abstract contract DeployTest is VaultFork {
         verifier.check(script, cfg, other, e, logs);
 
         // A guard that is not this repository's (here: one for another pair of modifiers).
-        DeployVault.Deployment memory wrongGuard = DeployVault.Deployment(
-            e.safe,
-            e.roles,
-            e.delay,
-            address(new VaultGuard(address(0xBEEF), address(0xCAFE))),
-            e.emitter,
-            e.unwrapper,
-            e.moduleSetup
-        );
+        DeployVault.Deployment memory wrongGuard = DeployVault.Deployment({
+            safe: e.safe,
+            roles: e.roles,
+            emitter: e.emitter,
+            unwrapper: e.unwrapper,
+            moduleSetup: e.moduleSetup,
+            delay: e.delay,
+            guard: address(new VaultGuard(address(0xBEEF), address(0xCAFE)))
+        });
         vm.expectRevert(bytes("VerifyVault: Safe guard"));
         verifier.check(script, cfg, g, wrongGuard, logs);
         // The right guard address, but the Safe has none.

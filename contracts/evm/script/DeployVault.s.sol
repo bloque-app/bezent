@@ -93,13 +93,14 @@ contract DeployVault is Script {
     }
 
     struct Deployment {
+        // The first three are read by index by services/evm-endpoint/tests/fork.rs: new fields go last.
         address safe;
         address roles;
-        address delay;
-        address guard;
         address emitter;
         address unwrapper;
         address moduleSetup;
+        address delay;
+        address guard;
     }
 
     function run() external returns (Deployment memory d) {
