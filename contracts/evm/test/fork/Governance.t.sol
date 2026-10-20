@@ -5,131 +5,16 @@ pragma solidity 0.8.28;
 import {Enum} from "@gnosis.pm/safe-contracts/contracts/common/Enum.sol";
 import {ExecutionOptions} from "zodiac-roles/Types.sol";
 
-import {VaultGuard} from "../../src/VaultGuard.sol";
+import {VaultGuard, MIN_COOLDOWN} from "../../src/VaultGuard.sol";
 import {VaultRoles} from "../../src/VaultRoles.sol";
 import {ISafe, IRoles, IDelay, IERC20} from "../../src/interfaces/External.sol";
 import {Batches} from "../Batches.sol";
-import {VaultFork} from "./VaultFork.sol";
+import {GovernanceBase} from "./GovernanceBase.sol";
 
 /// T-008-07: the Safe guard and the Delay modifier (plan DEC-10; REQ-GV-3, REQ-GV-5, REQ-KY-3). The owners
 /// cannot move the vault's tokens; everything that widens what the vault can do passes the Delay's cooldown;
 /// narrowing is immediate; the delivery role pays within its bounds without any delay.
-abstract contract GovernanceTest is VaultFork {
-    address internal constant SENTINEL = address(0x1);
-    // Safe 1.4.1's CompatibilityFallbackHandler: with it, owners' signatures answer EIP-1271 for the Safe.
-    address internal constant FALLBACK_HANDLER_141 = 0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99;
-    bytes32 internal constant SAFE_MSG_TYPEHASH =
-        0x60b3cbf8b4a223d68d641b3b6ddf9a298e7f33710cf3d3a9d1146b5a6150fbca;
-    bytes4 internal constant EIP1271_MAGIC = 0x1626ba7e;
-    uint256 internal constant GUARD_SLOT = 0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8;
-    uint256 internal constant FALLBACK_SLOT =
-        0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5;
-
-    address internal constant BENEFICIARY = address(0xB0B);
-
-    bytes32 internal allowanceKey;
-    uint256 internal cooldown;
-    uint256 internal expiration;
-
-    function setUp() public virtual override {
-        super.setUp();
-        fund(cfg.originToken, uint256(cfg.deliveryBalance) * 3);
-        vm.deal(d.safe, 1 ether);
-        allowanceKey = VaultRoles.deliveryAllowanceKey(cfg.originToken);
-        cooldown = delayMod.txCooldown();
-        expiration = delayMod.txExpiration();
-    }
-
-    // ------------------------------------------------------------------ helpers
-
-    function reason(string memory why) internal pure returns (bytes memory) {
-        return abi.encodeWithSignature("Error(string)", why);
-    }
-
-    /// The owners (at the threshold) sign a direct Safe transaction; the guard refuses it for `why`.
-    function assertGuardRefuses(address to, bytes memory data, string memory why) internal {
-        (bool ok, bytes memory ret) = ownersTry(to, data, Enum.Operation.Call, 2);
-        assertFalse(ok, "the guard should refuse");
-        assertEq(ret, reason(why), "the guard's reason");
-    }
-
-    function lowered() internal view returns (bytes memory) {
-        return abi.encodeCall(
-            IRoles.setAllowance,
-            (
-                allowanceKey,
-                cfg.deliveryBalance / 2,
-                cfg.deliveryMaxRefill / 2,
-                cfg.deliveryRefill / 2,
-                cfg.deliveryPeriod * 2,
-                0
-            )
-        );
-    }
-
-    function raised() internal view returns (bytes memory) {
-        return abi.encodeCall(
-            IRoles.setAllowance,
-            (
-                allowanceKey,
-                cfg.deliveryBalance * 2,
-                cfg.deliveryMaxRefill * 2,
-                cfg.deliveryRefill,
-                cfg.deliveryPeriod,
-                0
-            )
-        );
-    }
-
-    function allowanceBalance() internal view returns (uint128 bal) {
-        (,,, bal,) = roles.allowances(allowanceKey);
-    }
-
-    /// The owners queue `data` for `to` in the Delay, through the guard.
-    function queue(address to, bytes memory data) internal returns (bool, bytes memory) {
-        return ownersTry(
-            d.delay,
-            abi.encodeCall(IDelay.execTransactionFromModule, (to, 0, data, Enum.Operation.Call)),
-            Enum.Operation.Call,
-            2
-        );
-    }
-
-    function mustQueue(address to, bytes memory data) internal {
-        (bool ok, bytes memory ret) = queue(to, data);
-        assertTrue(ok, string(ret));
-    }
-
-    /// Anyone runs the oldest queued transaction; returns the Delay's answer.
-    function runQueued(address to, bytes memory data) internal returns (bool, bytes memory) {
-        vm.prank(outsider);
-        return d.delay.call(abi.encodeCall(IDelay.executeNextTx, (to, 0, data, Enum.Operation.Call)));
-    }
-
-    function mustRun(address to, bytes memory data) internal {
-        (bool ok, bytes memory ret) = runQueued(to, data);
-        assertTrue(ok, string(ret));
-    }
-
-    function prevOf(address module) internal view returns (address) {
-        (address[] memory modules,) = safe.getModulesPaginated(SENTINEL, 10);
-        address prev = SENTINEL;
-        for (uint256 i; i < modules.length; ++i) {
-            if (modules[i] == module) return prev;
-            prev = modules[i];
-        }
-        revert("not a module");
-    }
-
-    function guardSlot() internal view returns (address) {
-        return address(uint160(uint256(bytes32(safe.getStorageAt(GUARD_SLOT, 1)))));
-    }
-
-    function modulesOfTheSafe() internal view returns (uint256) {
-        (address[] memory modules,) = safe.getModulesPaginated(SENTINEL, 10);
-        return modules.length;
-    }
-
+abstract contract GovernanceTest is GovernanceBase {
     // ------------------------------------------------------------------ REQ-GV-5: no owner path moves value
 
     /// REQ-GV-5, REQ-KY-3: the owners, at the threshold, cannot transfer or approve the vault's tokens, by a
@@ -221,10 +106,10 @@ abstract contract GovernanceTest is VaultFork {
         );
         (bool ok, bytes memory ret) = queue(d.delay, again);
         assertFalse(ok);
-        assertEq(ret, reason("VaultGuard: queued call queues again"));
+        assertEq(ret, reason("VaultGuard: queued Delay call not offered"));
         (ok, ret) = queue(d.delay, againWithData);
         assertFalse(ok);
-        assertEq(ret, reason("VaultGuard: queued call queues again"));
+        assertEq(ret, reason("VaultGuard: queued Delay call not offered"));
         assertEq(delayMod.queueNonce(), 0, "nothing was queued");
         // The Delay's own configuration can still be queued.
         mustQueue(d.delay, abi.encodeCall(IDelay.setTxExpiration, (expiration * 2)));
@@ -418,7 +303,7 @@ abstract contract GovernanceTest is VaultFork {
 
         // Nothing changed.
         assertEq(guardSlot(), d.guard);
-        assertEq(modulesOfTheSafe(), 2);
+        assertEq(modulesOfTheSafe(), 3);
         assertEq(safe.getOwners().length, 3);
         assertEq(safe.getThreshold(), 2);
         assertEq(roles.owner(), d.safe);
@@ -566,36 +451,30 @@ abstract contract GovernanceTest is VaultFork {
         assertTrue(ownersExec(cfg.originToken, Batches.transferData(BENEFICIARY, 1), Enum.Operation.Call, 2));
     }
 
-    /// REQ-GV-3, REQ-GV-5: removing the Delay module is itself delayed.
-    function test_REQ_GV_3_removingTheDelayIsDelayed() public {
+    /// REQ-GV-3, REQ-GV-5: the Delay module is not removable, directly or through the queue. Nothing could be
+    /// queued once it is gone, so a vault paused by then could never be unpaused (the lock-out of the review's
+    /// finding 2): the guard refuses the entry when it is queued.
+    function test_REQ_GV_3_theDelayCannotBeRemoved() public {
         bytes memory remove = abi.encodeCall(ISafe.disableModule, (prevOf(d.delay), d.delay));
         assertGuardRefuses(d.safe, remove, "VaultGuard: only the Roles modifier may be disabled at once");
-        assertTrue(safe.isModuleEnabled(d.delay));
-
-        mustQueue(d.safe, remove);
-        (bool ok, bytes memory ret) = runQueued(d.safe, remove);
+        (bool ok, bytes memory ret) = queue(d.safe, remove);
         assertFalse(ok);
-        assertEq(ret, reason("Transaction is still in cooldown"));
-        assertTrue(safe.isModuleEnabled(d.delay), "still a module during the cooldown");
-
-        vm.warp(block.timestamp + cooldown);
-        mustRun(d.safe, remove);
-        assertFalse(safe.isModuleEnabled(d.delay), "Delay removed after the cooldown");
-        assertEq(modulesOfTheSafe(), 1);
+        assertEq(ret, reason("VaultGuard: queued call disables the Delay"));
+        assertEq(delayMod.queueNonce(), 0, "nothing was queued");
+        assertTrue(safe.isModuleEnabled(d.delay));
     }
 
-    /// REQ-GV-3: lowering the cooldown, or adding a module to the Delay, is itself delayed.
+    /// REQ-GV-3: lowering the cooldown (within the floor) is itself delayed: it runs after the old cooldown.
     function test_REQ_GV_3_changingTheDelayIsDelayed() public {
-        bytes memory shorter = abi.encodeCall(IDelay.setTxCooldown, (0));
+        bytes memory shorter = abi.encodeCall(IDelay.setTxCooldown, (MIN_COOLDOWN));
         mustQueue(d.delay, shorter);
+        (bool ok, bytes memory ret) = runQueued(d.delay, shorter);
+        assertFalse(ok);
+        assertEq(ret, reason("Transaction is still in cooldown"));
         vm.warp(block.timestamp + cooldown);
         mustRun(d.delay, shorter);
-        assertEq(delayMod.txCooldown(), 0, "lowered after the old cooldown");
-
-        bytes memory extra = abi.encodeCall(IDelay.enableModule, (outsider));
-        mustQueue(d.delay, extra);
-        mustRun(d.delay, extra); // no cooldown any more: the change is the one just made
-        assertTrue(delayMod.isModuleEnabled(outsider));
+        assertEq(delayMod.txCooldown(), MIN_COOLDOWN, "lowered after the old cooldown");
+        assertEq(delayMod.txExpiration(), expiration, "expiration untouched");
     }
 
     // ------------------------------------------------------------------ narrowing is immediate
@@ -857,16 +736,6 @@ abstract contract GovernanceTest is VaultFork {
         vm.warp(block.timestamp + cfg.deliveryPeriod);
         (ok, ret) = deliver(BENEFICIARY, uint256(cfg.deliveryBalance), keccak256("refilled"));
         assertTrue(ok, string(ret));
-    }
-
-    function _one(bytes32 x) internal pure returns (bytes32[] memory a) {
-        a = new bytes32[](1);
-        a[0] = x;
-    }
-
-    function _one(bool x) internal pure returns (bool[] memory a) {
-        a = new bool[](1);
-        a[0] = x;
     }
 }
 

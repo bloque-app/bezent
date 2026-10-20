@@ -7,6 +7,15 @@ import {Enum} from "@gnosis.pm/safe-contracts/contracts/common/Enum.sol";
 
 import {IDelay, IRoles, ISafe} from "./interfaces/External.sol";
 
+// Bounds on the Delay's cooldown and expiration, at deployment (script/DeployVault.s.sol reads these) and
+// whenever a change is queued. Below the floor the delay is not one; above the cap a queued change would
+// be out of reach of a pause or a veto for longer than anyone watches; an expiration of 0 would make
+// queued changes never expire.
+uint256 constant MIN_COOLDOWN = 1 hours;
+uint256 constant MAX_COOLDOWN = 30 days;
+uint256 constant MIN_EXPIRATION = 1 days;
+uint256 constant MAX_EXPIRATION = 90 days;
+
 /// @title VaultGuard (plan DEC-10; REQ-GV-5, REQ-GV-3, REQ-KY-3)
 /// @notice The Safe guard of a reserve vault: an allowlist for the owners' direct transactions. Safe 1.4.1 runs
 /// a guard on `execTransaction` only, never on a module's transaction, so the guard has two jobs. It decides
@@ -22,13 +31,24 @@ import {IDelay, IRoles, ISafe} from "./interfaces/External.sol";
 ///   directly or through a second queue entry, is refused when it is queued, so the delay cannot be used to move
 ///   the vault's tokens without first widening the vault's configuration, in public, for a cooldown. And `setTxNonce`, which skips queued transactions (the owners'
 ///   veto). Setting the cooldown or expiration, enabling a module and handing over ownership are not
-///   offered: they reach the Delay only through the queue.
+///   offered: they reach the Delay only through the queue, and of those only the cooldown and the expiration,
+///   within the bounds below, may be queued at all (a queued `setAvatar`, `setTarget`, `transferOwnership`,
+///   `enableModule` or `disableModule` on the Delay would either lock the owners out for good, the guard
+///   refusing every owner transaction once the Delay's avatar is not the Safe, or add a module that queues
+///   without the guard seeing it).
+/// - **The guardian's Roles instance** (`guardianRoles`): no direct call at all, not even a narrowing one. The
+///   guardian is the independent defender (a key that is neither an owner nor the delivery key, REQ-GV-2,
+///   REQ-KY-4): a second Roles modifier, enabled as a Safe module and owned by the Safe, scoped to `Delay.setTxNonce`
+///   (veto a queued change) and `Safe.disableModule(prev, roles)` (pause). Its powers cannot be changed or
+///   removed by the owners at once: rotating, rescoping or removing it (a call to it, or `Safe.disableModule` of
+///   it) is queued like any widening, and the guardian can veto that entry.
 /// - **Roles**: only changes that narrow what a role may do, which are pauses. Revoking a member (`assignRoles`
 ///   with every flag false, for a module that is already enabled), disabling a module, revoking a target or a
 ///   function, and lowering an allowance. Adding a member, a scope, a function, a target, an unwrapper, a default
 ///   role, or raising an allowance, is not offered; it goes through the queue.
 /// - **Safe**: `disableModule(prev, roles)` only, which pauses the vault's outflows. Every other change to the
-///   Safe (owners, threshold, modules, guard, fallback handler) goes through the queue.
+///   Safe (owners, threshold, modules, guard, fallback handler) goes through the queue, except disabling the Delay,
+///   which the queue refuses too (nothing could be queued again, so a pause could never be undone).
 ///
 /// A queued call is held for the Delay's cooldown and expires after its expiration; anyone may execute it in
 /// that window. After that the call runs as a module transaction, which no guard sees: what it may do is what
@@ -42,12 +62,21 @@ contract VaultGuard is BaseGuard {
     /// Delay's avatar.
     address public immutable roles;
     address public immutable delay;
+    /// The guardian's Roles instance, a second module of the Safe (see above).
+    address public immutable guardianRoles;
 
-    constructor(address roles_, address delay_) {
-        require(roles_ != address(0) && delay_ != address(0), "VaultGuard: zero address");
-        require(roles_ != delay_, "VaultGuard: one modifier twice");
+    constructor(address roles_, address delay_, address guardianRoles_) {
+        require(
+            roles_ != address(0) && delay_ != address(0) && guardianRoles_ != address(0),
+            "VaultGuard: zero address"
+        );
+        require(
+            roles_ != delay_ && roles_ != guardianRoles_ && delay_ != guardianRoles_,
+            "VaultGuard: one modifier twice"
+        );
         roles = roles_;
         delay = delay_;
+        guardianRoles = guardianRoles_;
     }
 
     /// Called by the Safe before an owners' transaction. Reverts unless the transaction is on the allowlist.
@@ -72,10 +101,17 @@ contract VaultGuard is BaseGuard {
         require(gasPrice == 0, "VaultGuard: gas refund");
         require(data.length >= 4, "VaultGuard: no selector");
 
-        if (to == delay) _checkDelay(safe, data);
-        else if (to == roles) _checkRoles(data);
-        else if (to == safe) _checkSafe(data);
-        else revert("VaultGuard: not an administrative target");
+        if (to == delay) {
+            _checkDelay(safe, data);
+        } else if (to == roles) {
+            _checkRoles(data);
+        } else if (to == safe) {
+            _checkSafe(data);
+        } else if (to == guardianRoles) {
+            revert("VaultGuard: the guardian's powers change through the queue only");
+        } else {
+            revert("VaultGuard: not an administrative target");
+        }
     }
 
     /// Nothing to check after the fact: the allowlist above is the whole policy.
@@ -100,21 +136,53 @@ contract VaultGuard is BaseGuard {
         require(queuedOp == Enum.Operation.Call, "VaultGuard: queued delegatecall");
         require(queuedValue == 0, "VaultGuard: queued value");
         require(queuedData.length >= 4, "VaultGuard: queued call without selector");
-        require(
-            queuedTo == delay || queuedTo == roles || queuedTo == safe,
-            "VaultGuard: queued call to a non-administrative target"
-        );
         if (queuedTo == delay) {
-            // A queued call that queues again would reach the Delay as the Safe, a module, and the guard would not
-            // see what it carries: the second queue entry could be a token transfer. The Delay's configuration
-            // (cooldown, expiration, modules, owner) may be queued; queueing through the queue may not.
-            // forge-lint: disable-next-line(unsafe-typecast)
-            bytes4 inner = bytes4(queuedData);
+            _checkQueuedDelay(queuedData);
+        } else if (queuedTo == safe) {
+            _checkQueuedSafe(queuedData);
+        } else {
             require(
-                inner != IDelay.execTransactionFromModule.selector
-                    && inner != IDelay.execTransactionFromModuleReturnData.selector,
-                "VaultGuard: queued call queues again"
+                queuedTo == roles || queuedTo == guardianRoles,
+                "VaultGuard: queued call to a non-administrative target"
             );
+        }
+    }
+
+    /// What may be queued for the Delay itself: its cooldown and its expiration, within the bounds. Nothing else
+    /// (a queued queue call would reach the Delay as the Safe, a module, and its payload, a token transfer,
+    /// would enter the queue unseen by the guard; a queued `setAvatar`, `setTarget`, `transferOwnership`,
+    /// `disableModule` of the Safe or `enableModule` would lock the owners out or add a module that queues
+    /// unseen).
+    function _checkQueuedDelay(bytes memory queued) internal pure {
+        // forge-lint: disable-next-line(unsafe-typecast)
+        bytes4 inner = bytes4(queued);
+        require(queued.length == 36, "VaultGuard: queued Delay call not offered");
+        uint256 value = _word(queued, 4);
+        if (inner == IDelay.setTxCooldown.selector) {
+            require(value >= MIN_COOLDOWN && value <= MAX_COOLDOWN, "VaultGuard: cooldown out of bounds");
+        } else if (inner == IDelay.setTxExpiration.selector) {
+            require(
+                value >= MIN_EXPIRATION && value <= MAX_EXPIRATION, "VaultGuard: expiration out of bounds"
+            );
+        } else {
+            revert("VaultGuard: queued Delay call not offered");
+        }
+    }
+
+    /// What may be queued for the Safe: anything but taking the Delay away, which nothing could undo (the guard
+    /// refuses every other widening to the owners, and the Delay is how they are queued).
+    function _checkQueuedSafe(bytes memory queued) internal view {
+        // forge-lint: disable-next-line(unsafe-typecast)
+        if (bytes4(queued) != ISafe.disableModule.selector) return;
+        require(queued.length == 68, "VaultGuard: malformed disableModule");
+        require(_word(queued, 36) != uint256(uint160(delay)), "VaultGuard: queued call disables the Delay");
+    }
+
+    /// The 32-byte word of `data` at byte offset `at`.
+    function _word(bytes memory data, uint256 at) internal pure returns (uint256 w) {
+        require(data.length >= at + 32, "VaultGuard: short calldata");
+        assembly ("memory-safe") {
+            w := mload(add(add(data, 32), at))
         }
     }
 

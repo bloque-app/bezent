@@ -99,9 +99,9 @@ abstract contract NegativeTest is VaultFork {
                 );
             assertFalse(ok5);
         }
-        // The Roles modifier and the Delay, and no other.
+        // The Roles modifier, the Delay and the guardian's Roles modifier, and no other.
         (address[] memory modules,) = safe.getModulesPaginated(address(0x1), 10);
-        assertEq(modules.length, 2);
+        assertEq(modules.length, 3);
         assertEq(safe.getOwners().length, owners.length);
     }
 

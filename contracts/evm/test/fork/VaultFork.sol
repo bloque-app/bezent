@@ -15,7 +15,7 @@ import {Batches} from "../Batches.sol";
 ///
 /// Upstream RPC: POLYGON_RPC_URL, BASE_RPC_URL, BSC_RPC_URL, else the same public archive endpoints as
 /// e2e/evm/up.sh. Keys: Foundry's default test mnemonic only (index 0 deployer, 1–3 owners, 4 delivery,
-/// 5 conversion, 6 outsider). Nothing is sent to a real network.
+/// 5 conversion, 6 outsider, 7 guardian). Nothing is sent to a real network.
 abstract contract VaultFork is Test {
     // e2e/evm/forks.env (F-013, PR #19).
     uint256 internal constant POLYGON_BLOCK = 95_400_000;
@@ -43,6 +43,7 @@ abstract contract VaultFork is Test {
     ISafe internal safe;
     IRoles internal roles;
     IDelay internal delayMod;
+    IRoles internal guardianMod;
 
     address internal deployer;
     address[] internal owners;
@@ -50,6 +51,7 @@ abstract contract VaultFork is Test {
     address internal delivery;
     address internal conversion;
     address internal outsider;
+    address internal guardian;
 
     /// The network this suite forks: "polygon", "base" or "bsc".
     function network() internal pure virtual returns (string memory);
@@ -64,6 +66,7 @@ abstract contract VaultFork is Test {
         safe = ISafe(d.safe);
         roles = IRoles(d.roles);
         delayMod = IDelay(d.delay);
+        guardianMod = IRoles(d.guardianRoles);
     }
 
     /// Field-by-field copy (the legacy pipeline cannot copy a memory struct array to storage at once).
@@ -125,6 +128,7 @@ abstract contract VaultFork is Test {
         delivery = vm.addr(vm.deriveKey(MNEMONIC, 4));
         conversion = vm.addr(vm.deriveKey(MNEMONIC, 5));
         outsider = vm.addr(vm.deriveKey(MNEMONIC, 6));
+        guardian = vm.addr(vm.deriveKey(MNEMONIC, 7));
     }
 
     /// Governance parameters of the fork vault: 2 of 3 owners, and the Delay's cooldown and expiration as
@@ -135,6 +139,7 @@ abstract contract VaultFork is Test {
             threshold: 2,
             deliveryMember: delivery,
             conversionMember: cfg.venue == DeployVault.Venue.None ? address(0) : conversion,
+            guardian: guardian,
             cooldown: exampleValue("VAULT_DELAY_COOLDOWN"),
             expiration: exampleValue("VAULT_DELAY_EXPIRATION"),
             saltNonce: uint256(keccak256(bytes(string.concat("bezent.vault.test.", network()))))
@@ -198,6 +203,27 @@ abstract contract VaultFork is Test {
         assertFalse(ok, "expected a revert");
         assertGe(ret.length, 4, "revert data");
         assertEq(bytes4(ret), selector, "revert selector");
+    }
+
+    /// The guardian calls `to` through its own Roles instance; returns the raw result.
+    function guardianCall(address to, uint256 value, bytes memory data, Enum.Operation op)
+        internal
+        returns (bool ok, bytes memory ret)
+    {
+        return guardianAs(guardian, VaultRoles.GUARDIAN, to, value, data, op);
+    }
+
+    function guardianAs(
+        address who,
+        bytes32 role,
+        address to,
+        uint256 value,
+        bytes memory data,
+        Enum.Operation op
+    ) internal returns (bool ok, bytes memory ret) {
+        vm.prank(who);
+        (ok, ret) = address(guardianMod)
+            .call(abi.encodeCall(IRoles.execTransactionWithRole, (to, value, data, op, role, true)));
     }
 
     // ------------------------------------------------------------------ acting as governance

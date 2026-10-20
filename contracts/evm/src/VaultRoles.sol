@@ -13,6 +13,10 @@ import {ConditionFlat, ParameterType, Operator} from "zodiac-roles/Types.sol";
 ///   `ReferenceEmitter.emitReference(any)`, reachable only as the pair that ReferencedTransferUnwrapper
 ///   admits. No value, no delegatecall but the MultiSendCallOnly batch, no other target.
 ///
+/// Guardian (an independent key, held in a second Roles instance; REQ-GV-2, REQ-KY-4): on the Delay,
+///   `setTxNonce(any)` (veto a queued change), and on the Safe `disableModule(any prev, the delivery Roles
+///   instance)` (pause the vault). No value, no delegatecall, no other target or function, and no unwrapper.
+///
 /// Conversion (the requester's key; REQ-CV-7, REQ-VN-4):
 ///   per admitted convertible token, `approve(router, any)`, and on the router `exactInputSingle` with
 ///   tokenIn that convertible, tokenOut the origin token, the pool pinned (the fee tier of the Uniswap v3
@@ -24,6 +28,9 @@ library VaultRoles {
     bytes32 internal constant DELIVERY = bytes32("bezent.delivery");
     // forge-lint: disable-next-line(unsafe-typecast)
     bytes32 internal constant CONVERSION = bytes32("bezent.conversion");
+
+    // forge-lint: disable-next-line(unsafe-typecast)
+    bytes32 internal constant GUARDIAN = bytes32("bezent.guardian");
 
     bytes4 internal constant TRANSFER = 0xa9059cbb; // transfer(address,uint256)
     bytes4 internal constant APPROVE = 0x095ea7b3; // approve(address,uint256)
@@ -54,6 +61,16 @@ library VaultRoles {
         c[0] = ConditionFlat(0, ParameterType.Calldata, Operator.Matches, "");
         c[1] = ConditionFlat(0, ParameterType.Static, Operator.EqualTo, abi.encode(router));
         c[2] = ConditionFlat(0, ParameterType.Static, Operator.Pass, "");
+    }
+
+    /// disableModule(address prevModule, address module): any `prevModule` (the Safe checks it is the real
+    /// predecessor), `module` the delivery Roles instance and nothing else, so the guardian can switch the
+    /// delivery role off and cannot remove the Delay, itself, or any other module.
+    function pauseConditions(address deliveryRoles) internal pure returns (ConditionFlat[] memory c) {
+        c = new ConditionFlat[](3);
+        c[0] = ConditionFlat(0, ParameterType.Calldata, Operator.Matches, "");
+        c[1] = ConditionFlat(0, ParameterType.Static, Operator.Pass, "");
+        c[2] = ConditionFlat(0, ParameterType.Static, Operator.EqualTo, abi.encode(deliveryRoles));
     }
 
     /// Field positions of an exact-input single-hop params struct (all fields static, so the tuple is inline).

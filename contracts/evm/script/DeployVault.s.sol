@@ -9,31 +9,39 @@ import {ITransactionUnwrapper} from "zodiac-roles/adapters/Types.sol";
 
 import {ReferenceEmitter} from "../src/ReferenceEmitter.sol";
 import {ReferencedTransferUnwrapper} from "../src/ReferencedTransferUnwrapper.sol";
-import {VaultGuard} from "../src/VaultGuard.sol";
+import {VaultGuard, MIN_COOLDOWN, MAX_COOLDOWN, MIN_EXPIRATION, MAX_EXPIRATION} from "../src/VaultGuard.sol";
 import {VaultModuleSetup} from "../src/VaultModuleSetup.sol";
 import {VaultRoles} from "../src/VaultRoles.sol";
 import {ISafe, ISafeProxyFactory, IModuleProxyFactory, IRoles, IDelay} from "../src/interfaces/External.sol";
 
 /// @title DeployVault (T-008-03)
 /// @notice Deploys one origin network's reserve vault (plan DEC-10): a Safe v1.4.1 with two modules, a Zodiac
-/// Roles v2 modifier (the delivery role, and on Polygon the conversion role, of `VaultRoles`) and a Zodiac Delay
-/// modifier, both owned by the Safe, and `VaultGuard` as the Safe's guard. The owners cannot move value, and
+/// Roles v2 modifier (the delivery role, and on Polygon the conversion role, of `VaultRoles`), a Zodiac Delay
+/// modifier and a second Roles modifier held by the guardian (the independent defender: it can veto a queued
+/// change and pause the vault, and do nothing else), all three owned by the Safe, and `VaultGuard` as the
+/// Safe's guard. The owners cannot move value, and
 /// everything that widens what the vault can do passes the Delay's cooldown (REQ-GV-3, REQ-GV-5).
 ///
 ///   NETWORK=polygon VAULT_OWNERS=0x..,0x..,0x.. VAULT_THRESHOLD=2 \
-///   DELIVERY_MEMBER=0x.. CONVERSION_MEMBER=0x.. \
+///   DELIVERY_MEMBER=0x.. CONVERSION_MEMBER=0x.. GUARDIAN=0x.. \
 ///   VAULT_DELAY_COOLDOWN=86400 VAULT_DELAY_EXPIRATION=604800 [VAULT_SALT_NONCE=..] \
 ///   forge script script/DeployVault.s.sol --rpc-url <fork> --sender <deployer> [--broadcast]
 ///
 /// `config/vault.example.env` lists every parameter with the recommended values. Network constants come from
 /// config/<NETWORK>.json; owners, threshold, members and the Delay's cooldown and expiration (seconds) are
-/// parameters (governance's; REQ-KY-5, REQ-GV-3). The default salt nonce is derived from the network, the
+/// parameters (governance's; REQ-KY-5, REQ-GV-3). The cooldown and the expiration must lie within the bounds
+/// `VaultGuard` also enforces on a queued change. The guardian is a different key custody from the owners and
+/// from the delivery key (REQ-KY-4); the script can only refuse the same address. The default salt nonce is derived from the network, the
 /// deployer and the deployer's nonce at the start of the run, so no two deployments share one.
 ///
 /// The deployer never owns an enabled modifier. The Safe's address is computed before the Safe exists
 /// (CREATE2), so the Roles and Delay modifiers are configured and handed to that address first, and only then
-/// is the Safe created, born with both as its only modules and the guard set. A run that stops midway leaves
-/// modifiers that no Safe has enabled. What the deployer did while it owned them is checked afterwards by
+/// is the Safe created, born with the three as its only modules and the guard set. A run that stops midway leaves
+/// modifiers that no Safe has enabled, so a run that stops is abandoned and started again with a new salt, never
+/// resumed. The Safe's address is derivable from the modifiers' as soon as they exist, and anyone may create it
+/// there (the Safe is the same, since its address commits to its initializer); the script refuses to go on if
+/// one already exists, and VerifyVault, which replays what the deployer did while it owned the modifiers, is what
+/// proves that nothing else happened in that window. What the deployer did while it owned them is checked afterwards by
 /// script/VerifyVault.s.sol, which must pass before the vault is funded.
 contract DeployVault is Script {
     using stdJson for string;
@@ -85,6 +93,8 @@ contract DeployVault is Script {
         uint256 threshold;
         address deliveryMember;
         address conversionMember;
+        // The independent defender (see VaultGuard): holds the guardian role of a Roles instance of its own.
+        address guardian;
         // The Delay's cooldown and expiration in seconds (REQ-GV-3). A queued change can run once the cooldown
         // has passed, and until the expiration has passed after that.
         uint256 cooldown;
@@ -101,6 +111,7 @@ contract DeployVault is Script {
         address moduleSetup;
         address delay;
         address guard;
+        address guardianRoles;
     }
 
     function run() external returns (Deployment memory d) {
@@ -111,6 +122,7 @@ contract DeployVault is Script {
             threshold: vm.envUint("VAULT_THRESHOLD"),
             deliveryMember: vm.envAddress("DELIVERY_MEMBER"),
             conversionMember: vm.envOr("CONVERSION_MEMBER", address(0)),
+            guardian: vm.envAddress("GUARDIAN"),
             cooldown: vm.envUint("VAULT_DELAY_COOLDOWN"),
             expiration: vm.envUint("VAULT_DELAY_EXPIRATION"),
             saltNonce: 0
@@ -192,18 +204,26 @@ contract DeployVault is Script {
         require(gov.owners.length >= gov.threshold, "DeployVault: fewer owners than threshold");
         // REQ-KY-4: the role keys are separate from each other and from governance.
         require(gov.deliveryMember != address(0), "DeployVault: no delivery member");
-        // REQ-GV-3: the delay is a delay. The Delay itself needs an expiration of 0 (never) or at least 60 s; a
-        // queued change that never expires would sit in the queue for ever, so it is never allowed here.
-        require(gov.cooldown > 0, "DeployVault: no cooldown");
-        require(gov.expiration >= 60, "DeployVault: expiration below 60 s");
+        // REQ-GV-3: the delay is a delay, and a bounded one. The same bounds apply to a change of the cooldown or
+        // the expiration queued later (VaultGuard). An expiration of 0 would make a queued change never expire.
+        require(gov.cooldown >= MIN_COOLDOWN, "DeployVault: cooldown below the floor");
+        require(gov.cooldown <= MAX_COOLDOWN, "DeployVault: cooldown above the cap");
+        require(gov.expiration >= MIN_EXPIRATION, "DeployVault: expiration below the floor");
+        require(gov.expiration <= MAX_EXPIRATION, "DeployVault: expiration above the cap");
         require(cfg.delayMastercopy != address(0), "DeployVault: no Delay mastercopy");
         // The deployer holds a key for the length of the run only: it is neither governance nor a role.
+        // REQ-GV-2, REQ-KY-4: the guardian is its own key, none of the others.
+        require(gov.guardian != address(0), "DeployVault: no guardian");
+        require(gov.guardian != deployer, "DeployVault: deployer is the guardian");
+        require(gov.guardian != gov.deliveryMember, "DeployVault: guardian is the delivery member");
+        require(gov.guardian != gov.conversionMember, "DeployVault: guardian is the conversion member");
         require(deployer != gov.deliveryMember, "DeployVault: deployer is the delivery member");
         require(deployer != gov.conversionMember, "DeployVault: deployer is the conversion member");
         for (uint256 i; i < gov.owners.length; ++i) {
             require(gov.owners[i] != deployer, "DeployVault: deployer is an owner");
             require(gov.owners[i] != gov.deliveryMember, "DeployVault: delivery member is an owner");
             require(gov.owners[i] != gov.conversionMember, "DeployVault: conversion member is an owner");
+            require(gov.owners[i] != gov.guardian, "DeployVault: guardian is an owner");
         }
         if (cfg.venue == Venue.None) {
             require(cfg.convertibles.length == 0, "DeployVault: convertibles without a venue");
@@ -254,10 +274,18 @@ contract DeployVault is Script {
                 ),
                 gov.saltNonce
             );
-        // The guard names both modifiers and nothing else; the Safe it serves is the one that calls it.
-        d.guard = address(new VaultGuard(d.roles, d.delay));
+        // The guardian's own Roles instance: the same mastercopy and initializer as the delivery one, so a salt of
+        // its own.
+        d.guardianRoles = IModuleProxyFactory(cfg.moduleProxyFactory)
+            .deployModule(
+                cfg.rolesMastercopy,
+                abi.encodeCall(IRoles.setUp, (abi.encode(deployer, deployer, deployer))),
+                uint256(keccak256(abi.encode("bezent.guardian", gov.saltNonce)))
+            );
+        // The guard names the three modifiers and nothing else; the Safe it serves is the one that calls it.
+        d.guard = address(new VaultGuard(d.roles, d.delay, d.guardianRoles));
 
-        // The Safe's initializer: born with the Roles and Delay modifiers as its only modules and the guard
+        // The Safe's initializer: born with the three modifiers as its only modules and the guard
         // set (VaultModuleSetup), and no fallback handler. Its address follows from the initializer and the
         // salt, so it is known before it exists.
         bytes memory setup = abi.encodeCall(
@@ -266,7 +294,7 @@ contract DeployVault is Script {
                 gov.owners,
                 gov.threshold,
                 d.moduleSetup,
-                abi.encodeCall(VaultModuleSetup.setUpVault, (d.roles, d.delay, d.guard)),
+                abi.encodeCall(VaultModuleSetup.setUpVault, (d.roles, d.delay, d.guardianRoles, d.guard)),
                 address(0), // no fallback handler: the Safe answers no EIP-1271 signature (see NOTES.md)
                 address(0),
                 0,
@@ -274,6 +302,7 @@ contract DeployVault is Script {
             )
         );
         d.safe = predictSafe(cfg, setup, gov.saltNonce);
+        require(d.safe.code.length == 0, "DeployVault: a Safe already exists at the predicted address");
 
         IRoles roles = IRoles(d.roles);
         roles.setAvatar(d.safe);
@@ -283,6 +312,15 @@ contract DeployVault is Script {
         for (uint256 i; i < calls.length; ++i) {
             (bool ok,) = d.roles.call(calls[i]);
             require(ok, "DeployVault: Roles call failed");
+        }
+
+        IRoles guardianRoles = IRoles(d.guardianRoles);
+        guardianRoles.setAvatar(d.safe);
+        guardianRoles.setTarget(d.safe);
+        calls = guardianCalls(gov, d);
+        for (uint256 i; i < calls.length; ++i) {
+            (bool ok,) = d.guardianRoles.call(calls[i]);
+            require(ok, "DeployVault: guardian Roles call failed");
         }
 
         IDelay delay = IDelay(d.delay);
@@ -296,7 +334,11 @@ contract DeployVault is Script {
         // and the delay only through itself. The Safe does not exist yet, so neither modifier is enabled anywhere
         // while the deployer owns it.
         roles.transferOwnership(d.safe);
+        guardianRoles.transferOwnership(d.safe);
         delay.transferOwnership(d.safe);
+        // A Safe created by someone else while the modifiers were being configured is refused as well: the vault
+        // is deployed again with a new salt.
+        require(d.safe.code.length == 0, "DeployVault: a Safe already exists at the predicted address");
         address safe = ISafeProxyFactory(cfg.safeProxyFactory)
             .createProxyWithNonce(cfg.safeSingleton, setup, gov.saltNonce);
         require(safe == d.safe, "DeployVault: Safe not at its predicted address");
@@ -325,6 +367,34 @@ contract DeployVault is Script {
         return address(
             uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), cfg.safeProxyFactory, salt, codeHash))))
         );
+    }
+
+    /// Every call that sets the guardian's powers on its Roles instance, in order: exactly `setTxNonce` on the
+    /// Delay and `disableModule(any, the delivery Roles instance)` on the Safe, and its membership. VerifyVault
+    /// expects exactly the events they emit and nothing else.
+    function guardianCalls(Governance memory gov, Deployment memory d)
+        public
+        pure
+        returns (bytes[] memory calls)
+    {
+        calls = new bytes[](5);
+        calls[0] = abi.encodeCall(IRoles.scopeTarget, (VaultRoles.GUARDIAN, d.delay));
+        calls[1] = abi.encodeCall(
+            IRoles.allowFunction,
+            (VaultRoles.GUARDIAN, d.delay, IDelay.setTxNonce.selector, ExecutionOptions.None)
+        );
+        calls[2] = abi.encodeCall(IRoles.scopeTarget, (VaultRoles.GUARDIAN, d.safe));
+        calls[3] = abi.encodeCall(
+            IRoles.scopeFunction,
+            (
+                VaultRoles.GUARDIAN,
+                d.safe,
+                ISafe.disableModule.selector,
+                VaultRoles.pauseConditions(d.roles),
+                ExecutionOptions.None
+            )
+        );
+        calls[4] = _assign(gov.guardian, VaultRoles.GUARDIAN);
     }
 
     /// Every call that sets the vault's permissions on the Roles modifier, in order: the scopes, allowances
