@@ -196,10 +196,12 @@ removed, and refused with it). Then, by target:
 | Delay | queue a call (`execTransactionFromModule`), skip queued calls (`setTxNonce`, the veto) | change the cooldown or expiration, enable or disable a module, hand over ownership |
 | anything else (a token, a router, MultiSend) | nothing | nothing: it cannot even be queued |
 
-**What can be queued** is a plain call, with no value, to the Delay, the Roles modifier or the Safe itself. A call to
-a token, a router or MultiSend, and any delegatecall, is refused when the owners try to queue it, so the Delay cannot
-be the way to move the vault's tokens. The rest of what a queued call may do is what the owners may do to the vault's
-configuration after the cooldown, which is what the cooldown is for.
+**What can be queued** is a plain call, with no value, to the Delay, the Roles modifier or the Safe itself, and a call
+to the Delay may not queue again (`test_REQ_GV_5_theQueueCannotQueueAgain`: a queued queue call would run as the
+Safe, a module of the Delay, and its payload, a token transfer, would enter the queue unseen by the guard). A call to a
+token, a router or MultiSend, and any delegatecall, is refused when the owners try to queue it. So the Delay is not a
+way to move the vault's tokens: moving them takes a widening of the vault's configuration first (a role, a module, the
+guard), which sits in the queue in public for a whole cooldown. That configuration is what the cooldown is for.
 
 **Lowering an allowance** is monotone in every field, so the new allowance can never release more than the old one
 would have, at any later time: the balance is at most the stored balance, the cap (`maxRefill`) is at most the old
@@ -235,9 +237,9 @@ by the owners (`setTxNonce`, at once and at the threshold, the veto) or expired 
 
 **What this does not do, stated plainly.**
 
-- *The residual of `DEC-10`.* After the cooldown, a queued `setGuard(0)`, `enableModule(x)` or an `allowTarget` on the
-  origin token runs, and the owners are then no longer limited by the guard, or a role can move tokens the guard
-  would have refused. The guard removes every path that moves value at once; it does not make the owners unable ever
+- *The residual of `DEC-10`.* After the cooldown, a queued `setGuard(0)`, an `enableModule(x)` on the Safe or on the
+  Delay (a Delay module queues without passing the guard), or an `allowTarget` on the origin token runs, and the owners
+  are then no longer limited by the guard, or a key can move tokens the guard would have refused. The guard removes every path that moves value at once; it does not make the owners unable ever
   to change the vault. What the owners cannot do is do it unseen: the change sits in the queue for the whole
   cooldown, in public, and can be vetoed. `test_REQ_GV_3_removingTheGuardIsDelayed` ends by showing the owners
   moving tokens after the guard is gone. The monitoring that turns the cooldown into a veto is not built here.
@@ -245,6 +247,10 @@ by the owners (`setTxNonce`, at once and at the threshold, the veto) or expired 
   module) is immediate but is still a Safe transaction at the threshold. `REQ-GV-2` says pausing SHOULD need one
   authorised party; this is not that. Unpausing is delayed, which is the intended direction.
 - *Disabling the Roles module on the Safe* is allowed at once (a full stop). Re-enabling it is a delayed change.
+- *Remove the guard first, then the Delay, never the other way.* Both removals are delayed changes. A queued change runs
+  as the Delay's module transaction, so once the Delay is gone nothing can be queued, and the guard, which then
+  allows only narrowing, freezes administration for good: a vault paused by disabling the Roles module could never be
+  unpaused. If both are to go, queue the guard's removal, let it run, and only then queue the Delay's.
 
 Tests: `test/fork/Governance.t.sol` on Polygon, Base and BNB Chain. The Delay modifier itself (cooldown, expiry, order,
 anyone may run) is exercised as deployed; nothing of it is mocked.

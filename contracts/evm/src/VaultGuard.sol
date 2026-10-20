@@ -18,8 +18,9 @@ import {IDelay, IRoles, ISafe} from "./interfaces/External.sol";
 ///
 /// - **Delay**: `execTransactionFromModule`, which queues a transaction (the Safe is a module of the Delay).
 ///   What is queued must itself be a plain call, with no value, to the Delay, the Roles modifier or the Safe
-///   itself: a queued call to a token, to a router or to MultiSend is refused when it is queued, so the delay
-///   cannot be used to move the vault's tokens. And `setTxNonce`, which skips queued transactions (the owners'
+///   itself, and a call to the Delay may not queue again: a queued call to a token, to a router or to MultiSend,
+///   directly or through a second queue entry, is refused when it is queued, so the delay cannot be used to move
+///   the vault's tokens without first widening the vault's configuration, in public, for a cooldown. And `setTxNonce`, which skips queued transactions (the owners'
 ///   veto). Setting the cooldown or expiration, enabling a module and handing over ownership are not
 ///   offered: they reach the Delay only through the queue.
 /// - **Roles**: only changes that narrow what a role may do, which are pauses. Revoking a member (`assignRoles`
@@ -103,6 +104,18 @@ contract VaultGuard is BaseGuard {
             queuedTo == delay || queuedTo == roles || queuedTo == safe,
             "VaultGuard: queued call to a non-administrative target"
         );
+        if (queuedTo == delay) {
+            // A queued call that queues again would reach the Delay as the Safe, a module, and the guard would not
+            // see what it carries: the second queue entry could be a token transfer. The Delay's configuration
+            // (cooldown, expiration, modules, owner) may be queued; queueing through the queue may not.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            bytes4 inner = bytes4(queuedData);
+            require(
+                inner != IDelay.execTransactionFromModule.selector
+                    && inner != IDelay.execTransactionFromModuleReturnData.selector,
+                "VaultGuard: queued call queues again"
+            );
+        }
     }
 
     // ------------------------------------------------------------------ Roles

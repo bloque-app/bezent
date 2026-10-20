@@ -208,6 +208,39 @@ abstract contract GovernanceTest is VaultFork {
         assertEq(delayMod.queueNonce(), 0, "nothing was queued");
     }
 
+    /// REQ-GV-5: nor can the queue queue again. A queued call to the Delay that is itself a queue call would run
+    /// as the Safe (a module of the Delay) and enter the queue unseen by the guard, carrying a token transfer.
+    /// The guard refuses it when it is queued; without the guard, two cooldowns move the tokens (the control).
+    function test_REQ_GV_5_theQueueCannotQueueAgain() public {
+        bytes memory transfer = Batches.transferData(BENEFICIARY, 1);
+        bytes memory again = abi.encodeCall(
+            IDelay.execTransactionFromModule, (cfg.originToken, 0, transfer, Enum.Operation.Call)
+        );
+        bytes memory againWithData = abi.encodeCall(
+            IDelay.execTransactionFromModuleReturnData, (cfg.originToken, 0, transfer, Enum.Operation.Call)
+        );
+        (bool ok, bytes memory ret) = queue(d.delay, again);
+        assertFalse(ok);
+        assertEq(ret, reason("VaultGuard: queued call queues again"));
+        (ok, ret) = queue(d.delay, againWithData);
+        assertFalse(ok);
+        assertEq(ret, reason("VaultGuard: queued call queues again"));
+        assertEq(delayMod.queueNonce(), 0, "nothing was queued");
+        // The Delay's own configuration can still be queued.
+        mustQueue(d.delay, abi.encodeCall(IDelay.setTxExpiration, (expiration * 2)));
+
+        // The control: with no guard, the nested queue reaches the token after two cooldowns.
+        vm.store(d.safe, bytes32(GUARD_SLOT), bytes32(0));
+        mustQueue(d.delay, again);
+        vm.warp(block.timestamp + cooldown);
+        mustRun(d.delay, abi.encodeCall(IDelay.setTxExpiration, (expiration * 2)));
+        mustRun(d.delay, again);
+        assertEq(delayMod.queueNonce(), 3, "the second entry was queued by the first");
+        vm.warp(block.timestamp + cooldown);
+        mustRun(cfg.originToken, transfer);
+        assertEq(balance(cfg.originToken, BENEFICIARY), 1, "the tokens moved without the guard");
+    }
+
     /// REQ-GV-5: the guard reads calldata the way its target does: a non-canonical encoding of an otherwise
     /// admitted call is refused. (Here a revocation, with the arrays at offsets Roles would also accept.)
     function test_REQ_GV_5_nonCanonicalCalldataIsRefused() public {

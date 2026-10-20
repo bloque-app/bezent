@@ -177,6 +177,12 @@ interface IDelay {
         bytes calldata data,
         Enum.Operation operation
     ) external returns (bool success);
+    function execTransactionFromModuleReturnData(
+        address to,
+        uint256 value,
+        bytes calldata data,
+        Enum.Operation operation
+    ) external returns (bool success, bytes memory returnData);
     /// Executes the oldest queued transaction once its cooldown has passed and before it expires. Anyone may call.
     function executeNextTx(address to, uint256 value, bytes calldata data, Enum.Operation operation) external;
     function skipExpired() external;
