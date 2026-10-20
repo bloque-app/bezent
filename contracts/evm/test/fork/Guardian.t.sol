@@ -429,8 +429,9 @@ abstract contract GuardianTest is GovernanceBase {
         }
         assertEq(delayMod.queueNonce(), 0);
 
-        // The bounds themselves are fine.
-        mustQueue(d.delay, abi.encodeCall(IDelay.setTxCooldown, (MIN_COOLDOWN)));
+        // The bounds themselves are fine, from the current cooldown up (the cap, and the floor when the
+        // deployment's cooldown is at it; a lower cooldown is test_REQ_GV_3_aQueuedCooldownCannotBeLowered).
+        mustQueue(d.delay, abi.encodeCall(IDelay.setTxCooldown, (cooldown)));
         mustQueue(d.delay, abi.encodeCall(IDelay.setTxCooldown, (MAX_COOLDOWN)));
         mustQueue(d.delay, abi.encodeCall(IDelay.setTxExpiration, (MIN_EXPIRATION)));
         mustQueue(d.delay, abi.encodeCall(IDelay.setTxExpiration, (MAX_EXPIRATION)));
@@ -441,6 +442,110 @@ abstract contract GuardianTest is GovernanceBase {
         assertLe(cooldown, MAX_COOLDOWN);
         assertGe(expiration, MIN_EXPIRATION);
         assertLe(expiration, MAX_EXPIRATION);
+    }
+
+    /// REQ-GV-3, re-review of PR 41 (finding A): a queued cooldown may keep or raise the review window, never
+    /// shorten it. The Delay reads the cooldown current when an entry runs, so a queued reduction would also
+    /// shorten the window of every entry queued after it. Lower: refused (the floor and the cap still apply).
+    /// Equal or higher: accepted.
+    function test_REQ_GV_3_aQueuedCooldownCannotBeLowered() public {
+        string memory below = "VaultGuard: cooldown below the current one";
+        uint256[4] memory lower = [MIN_COOLDOWN, cooldown / 2, cooldown - 1, uint256(MIN_COOLDOWN + 1)];
+        for (uint256 i; i < lower.length; ++i) {
+            if (lower[i] >= cooldown) continue; // a deployment that already sits at the floor
+            (bool ok, bytes memory ret) = queue(d.delay, abi.encodeCall(IDelay.setTxCooldown, (lower[i])));
+            assertFalse(ok, "a lower cooldown is refused");
+            assertEq(ret, reason(below));
+        }
+        assertEq(delayMod.queueNonce(), 0, "nothing was queued");
+
+        // Equal and higher are accepted; the cap still holds.
+        mustQueue(d.delay, abi.encodeCall(IDelay.setTxCooldown, (cooldown)));
+        mustQueue(d.delay, abi.encodeCall(IDelay.setTxCooldown, (cooldown + 1)));
+        mustQueue(d.delay, abi.encodeCall(IDelay.setTxCooldown, (MAX_COOLDOWN)));
+        assertEq(delayMod.queueNonce(), 3);
+        (bool capped, bytes memory why) =
+            queue(d.delay, abi.encodeCall(IDelay.setTxCooldown, (MAX_COOLDOWN + 1)));
+        assertFalse(capped);
+        assertEq(why, reason("VaultGuard: cooldown out of bounds"));
+
+        // The comparison is with the Delay's cooldown *now*: once a raise has run, the raised value is the floor.
+        vm.warp(block.timestamp + cooldown);
+        mustRun(d.delay, abi.encodeCall(IDelay.setTxCooldown, (cooldown)));
+        mustRun(d.delay, abi.encodeCall(IDelay.setTxCooldown, (cooldown + 1)));
+        assertEq(delayMod.txCooldown(), cooldown + 1);
+        (bool ok2, bytes memory ret2) = queue(d.delay, abi.encodeCall(IDelay.setTxCooldown, (cooldown)));
+        assertFalse(ok2, "the old value is now a reduction");
+        assertEq(ret2, reason(below));
+    }
+
+    /// REQ-GV-3, re-review of PR 41 (finding A): the attack the refusal closes. A hostile entry queued behind a
+    /// "harmless" reduction cannot run any earlier than its own cooldown. Entries queued before a raise keep
+    /// the readiness they had, or a later one, never an earlier one: nothing queued becomes ready sooner than
+    /// `createdAt + cooldown` as it stood when the entry was queued.
+    function test_REQ_GV_3_noQueuedEntryBecomesReadySoonerThanItsOwnCooldown() public {
+        bytes memory reduction = abi.encodeCall(IDelay.setTxCooldown, (MIN_COOLDOWN));
+        (bool ok,) = queue(d.delay, reduction);
+        assertFalse(ok, "the reduction cannot be the first move of the attack");
+
+        // An entry queued before the cooldown change, and one queued behind it.
+        bytes memory raise = abi.encodeCall(IDelay.setTxCooldown, (cooldown * 2));
+        bytes memory hostile = abi.encodeCall(ISafe.enableModule, (outsider));
+        uint256 t0 = block.timestamp;
+        mustQueue(d.delay, raise);
+        uint256 t1 = t0 + cooldown - 1 hours;
+        vm.warp(t1);
+        mustQueue(d.safe, hostile);
+        assertGe(t1 + cooldown, t0 + cooldown, "its original readiness is not before the raise's");
+
+        // The raise is ready at t0 + cooldown, and the hostile entry behind it is not ready right after it.
+        vm.warp(t0 + cooldown);
+        mustRun(d.delay, raise);
+        assertEq(delayMod.txCooldown(), cooldown * 2);
+        (ok,) = runQueued(d.safe, hostile);
+        assertFalse(ok, "the entry behind the raise is not ready the moment the raise has run");
+        vm.warp(t1 + cooldown * 2 - 1);
+        (ok,) = runQueued(d.safe, hostile);
+        assertFalse(ok, "the longer cooldown applies to it: never sooner than the window it was queued under");
+        vm.warp(t1 + cooldown * 2);
+        mustRun(d.safe, hostile);
+        assertTrue(safe.isModuleEnabled(outsider), "it runs once the longer window is over");
+    }
+
+    /// REQ-GV-3 (a guard rail, not the boundary): the queue-time checks look at the queued call's target and
+    /// selector, not at what a wrapped call does when it runs. `enableModule(safe)` followed by a wrapped
+    /// `execTransactionFromModule(token.transfer)` both queue; the guardian's veto is what stops them, so its
+    /// monitoring has to decode nested payloads. With no veto, the two run and the vault's tokens move.
+    function test_REQ_GV_3_wrappedCallsStillQueueAndTheVetoStopsThem() public {
+        uint256 amount = uint256(cfg.deliveryBalance);
+        bytes memory selfModule = abi.encodeCall(ISafe.enableModule, (d.safe));
+        bytes memory wrapped = abi.encodeWithSignature(
+            "execTransactionFromModule(address,uint256,bytes,uint8)",
+            cfg.originToken,
+            uint256(0),
+            Batches.transferData(BENEFICIARY, amount),
+            uint8(Enum.Operation.Call)
+        );
+        mustQueue(d.safe, selfModule);
+        mustQueue(d.safe, wrapped);
+        assertEq(delayMod.queueNonce(), 2, "both queue: the guard sees a call to the Safe, not its payload");
+
+        (bool vetoed,) = _veto();
+        assertTrue(vetoed, "the guardian vetoes both");
+        vm.warp(block.timestamp + cooldown);
+        (bool ok,) = runQueued(d.safe, selfModule);
+        assertFalse(ok, "the vetoed entries do not run");
+        assertEq(balance(cfg.originToken, BENEFICIARY), 0);
+
+        // The control: queued again, and not vetoed, they run and the tokens move.
+        mustQueue(d.safe, selfModule);
+        mustQueue(d.safe, wrapped);
+        vm.warp(block.timestamp + cooldown);
+        mustRun(d.safe, selfModule);
+        mustRun(d.safe, wrapped);
+        assertEq(
+            balance(cfg.originToken, BENEFICIARY), amount, "without the veto the wrapped call moves tokens"
+        );
     }
 
     /// The guard's address constructor: three different modifiers.

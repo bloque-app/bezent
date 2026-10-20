@@ -469,6 +469,50 @@ abstract contract DeployTest is VaultFork {
         verifier.check(script, cfg, g, e, logs, glogs);
     }
 
+    /// REQ-GV-2, REQ-KY-4, review of PR 41 (INFO): the verifier also asserts key separation. The guardian is set,
+    /// and is none of the Safe's owners, the delivery key or the conversion key; and the Safe's actual owners, read
+    /// from the chain, do not include it. (DeployVault refuses the same overlaps before deploying.)
+    function test_REQ_GV_2_verifierChecksTheGuardianIsAKeyOfItsOwn() public {
+        (
+            DeployVault.Deployment memory e,
+            DeployVault.Governance memory g,
+            VerifyVault.Log[] memory logs,
+            VerifyVault.Log[] memory glogs
+        ) = _recordedDeployment(script);
+        VerifyVault verifier = new VerifyVault();
+        verifier.check(script, cfg, g, e, logs, glogs);
+
+        DeployVault.Governance memory other = governance();
+        other.guardian = address(0);
+        vm.expectRevert(bytes("VerifyVault: no guardian"));
+        verifier.check(script, cfg, other, e, logs, glogs);
+
+        for (uint256 i; i < g.owners.length; ++i) {
+            other = governance();
+            other.guardian = g.owners[i];
+            vm.expectRevert(bytes("VerifyVault: guardian is an owner"));
+            verifier.check(script, cfg, other, e, logs, glogs);
+        }
+
+        other = governance();
+        other.guardian = g.deliveryMember;
+        vm.expectRevert(bytes("VerifyVault: guardian is the delivery key"));
+        verifier.check(script, cfg, other, e, logs, glogs);
+
+        if (g.conversionMember != address(0)) {
+            other = governance();
+            other.guardian = g.conversionMember;
+            vm.expectRevert(bytes("VerifyVault: guardian is the conversion key"));
+            verifier.check(script, cfg, other, e, logs, glogs);
+        }
+
+        // On the chain: the configured guardian has been made an owner of the Safe after the fact.
+        vm.prank(e.safe);
+        ISafeLike(e.safe).addOwnerWithThreshold(g.guardian, g.threshold);
+        vm.expectRevert(bytes("VerifyVault: guardian is an owner"));
+        verifier.check(script, cfg, g, e, logs, glogs);
+    }
+
     /// REQ-GV-2: the verifier needs the guardian module enabled on the Safe, with exactly its configured events
     /// (a missing one fails), as the configured guardian and with no module guard on the Safe.
     function test_REQ_GV_2_verifierChecksTheGuardianModule() public {

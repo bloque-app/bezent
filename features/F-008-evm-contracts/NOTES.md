@@ -169,7 +169,7 @@ clone of the pinned mastercopy, owned by the Safe, with avatar and target the Sa
 members. **The guardian's Roles modifier** is replayed the same way against `guardianCalls` (so its scope is exactly
 `setTxNonce` on the Delay and `disableModule(any, the delivery Roles modifier)` on the Safe, and its one member the
 guardian; widening its scope or adding a member fails the check), is a clone of the same mastercopy, owned by the Safe,
-with avatar and target the Safe, and is enabled as a Safe module (`VAULT_GUARDIAN_ROLES` names it). **The Delay** (T-008-07) has no permission mapping to replay, so state is enough: a clone of the pinned
+with avatar and target the Safe, and is enabled as a Safe module (`VAULT_GUARDIAN_ROLES` names it). **Key separation** is asserted too: the guardian is set and differs from every Safe owner (the configured ones and the ones read from the Safe), from the delivery key and from the conversion key, and the verifier fails otherwise (`test_REQ_GV_2_verifierChecksTheGuardianIsAKeyOfItsOwn`). **The Delay** (T-008-07) has no permission mapping to replay, so state is enough: a clone of the pinned
 Delay mastercopy, owned by the Safe, avatar and target the Safe, the Safe its only module, the configured cooldown and
 expiration, and an empty queue (`queueNonce` 0, which is what catches a transaction queued by the deployer). **The
 Safe** has the configured owners and threshold, the pinned singleton, the guard slot holding `d.guard`, no fallback
@@ -221,7 +221,7 @@ removed, and refused with it). Then, by target:
 | Roles (the delivery one) | revoke a member (`assignRoles` with every flag false, for a module already enabled), `disableModule`, `revokeTarget`, `revokeFunction`, lower an allowance | add a member, scope or allow a target or function, set an unwrapper or default role, enable a module, raise an allowance, change owner or avatar |
 | Guardian's Roles | nothing, not even a narrowing call | any change (rotate, rescope, remove): queued only |
 | Safe | `disableModule(prev, roles)`, which stops every outflow | enable a module, change owners or threshold, set the guard or the fallback handler, remove the guardian (never: the Delay) |
-| Delay | queue a call (`execTransactionFromModule`), skip queued calls (`setTxNonce`, the veto) | change the cooldown or expiration, within the bounds (the rest of the Delay's configuration: never) |
+| Delay | queue a call (`execTransactionFromModule`), skip queued calls (`setTxNonce`, the veto) | keep or raise the cooldown, change the expiration, within the bounds (lower the cooldown, or touch the rest of the Delay's configuration: never) |
 | anything else (a token, a router, MultiSend) | nothing | nothing: it cannot even be queued |
 
 **What can be queued** is a plain call, with no value, to the Delay, the two Roles modifiers or the Safe itself. A call
@@ -242,6 +242,25 @@ safe direction. A call to a
 token, a router or MultiSend, and any delegatecall, is refused when the owners try to queue it. So the Delay is not a
 way to move the vault's tokens: moving them takes a widening of the vault's configuration first (a role, a module, the
 guard), which sits in the queue in public for a whole cooldown. That configuration is what the cooldown is for.
+
+**A queued cooldown may keep or raise the review window, never shorten it** (re-review of PR #41, finding A). The
+Delay checks the cooldown that is current when an entry runs, not the one when it was queued. If the queue accepted a
+lower cooldown, a quorum could queue `setTxCooldown(1 h)` (it looks harmless) and, 23 hours later, a hostile entry:
+when the first runs at 24 hours the second runs right after it, and every later change has a 1-hour window. So the
+guard reads `Delay.txCooldown()` when a `setTxCooldown` is queued and refuses a value below it (the 1-hour floor and
+the 30-day cap still apply); entries queued before keep their original readiness
+(`test_REQ_GV_3_aQueuedCooldownCannotBeLowered`, `test_REQ_GV_3_noQueuedEntryBecomesReadySoonerThanItsOwnCooldown`). Lowering the cooldown is therefore not a queue
+operation at all. It takes a deliberate recovery path: redeploy the vault with the new cooldown and move the
+reserve, which is what a vault whose review window must change is. This is the same stance as for the rest of the
+Delay's configuration (it can never be replaced or removed): no path an honest quorum can use to weaken the window is
+one a compromised quorum cannot use.
+
+**The queue-time checks are a guard rail, not the boundary.** The guard sees a queued call's target and selector, not
+what a wrapped call will do when it runs. `Safe.execTransactionFromModule(...)` or a nested `Safe.execTransaction(...)`
+queued to the Safe itself passes the queue check, and so can `enableModule(safe)` followed by a module transaction that
+moves tokens, in one window. The refusals above remove the foot-guns (the lock-outs and the unseen queue); what stops a
+wrapped call that is hostile is the guardian's veto, within the cooldown. A guardian's monitoring therefore has to
+decode nested payloads, not only the outer selector (`test_REQ_GV_3_wrappedCallsStillQueueAndTheVetoStopsThem`).
 
 **Lowering an allowance** is monotone in every field, so the new allowance can never release more than the old one
 would have, at any later time: the balance is at most the stored balance, the cap (`maxRefill`) is at most the old
@@ -287,6 +306,13 @@ or change a Roles modifier (`test_REQ_GV_2_guardianCannotMoveValueOrWiden`). Pau
   owners have no path out: a paused vault stays paused as long as the guardian keeps pausing or vetoing. It is a
   defender with a veto, not a co-owner, and the price is that a hostile or lost guardian freezes governance (never
   value). Make it a hardware key or a 2-of-N account, and write down how it is rotated, before the vault is funded.
+- *A lost guardian.* A lost or unreachable guardian vetoes nothing, so queued changes simply run after the cooldown,
+  and it pauses nothing, so only the owners can stop deliveries (by lowering the allowance, which is immediate). If
+  the vault was paused by the guardian before it was lost, the pause cannot be lifted by anyone but the owners:
+  re-enabling the delivery Roles modifier takes the owners' quorum plus the Delay's cooldown, as for any widening,
+  and nothing else, because the guardian never had that power. Replacing a lost guardian is a rotation, which is also
+  a queued change. Hold the guardian by a party independent of the owners and of the delivery key, as a 2-of-N
+  account or a hardware key where possible, so that a lost guardian and a hostile one are both unlikely.
 - *Still open.* A queued `Safe.setGuard(x)` with an `x` that refuses everything is a lock-out the guard does not
   classify away (removing the guard is the point of that call being queueable); it is stopped by the veto.
 

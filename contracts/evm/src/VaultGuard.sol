@@ -32,7 +32,7 @@ uint256 constant MAX_EXPIRATION = 90 days;
 ///   the vault's tokens without first widening the vault's configuration, in public, for a cooldown. And `setTxNonce`, which skips queued transactions (the owners'
 ///   veto). Setting the cooldown or expiration, enabling a module and handing over ownership are not
 ///   offered: they reach the Delay only through the queue, and of those only the cooldown and the expiration,
-///   within the bounds below, may be queued at all (a queued `setAvatar`, `setTarget`, `transferOwnership`,
+///   within the bounds below, may be queued at all, and a cooldown only at or above the current one (a queued `setAvatar`, `setTarget`, `transferOwnership`,
 ///   `enableModule` or `disableModule` on the Delay would either lock the owners out for good, the guard
 ///   refusing every owner transaction once the Delay's avatar is not the Safe, or add a module that queues
 ///   without the guard seeing it).
@@ -148,18 +148,24 @@ contract VaultGuard is BaseGuard {
         }
     }
 
-    /// What may be queued for the Delay itself: its cooldown and its expiration, within the bounds. Nothing else
+    /// What may be queued for the Delay itself: its cooldown (kept or raised, never lowered) and its expiration,
+    /// within the bounds. Nothing else
     /// (a queued queue call would reach the Delay as the Safe, a module, and its payload, a token transfer,
     /// would enter the queue unseen by the guard; a queued `setAvatar`, `setTarget`, `transferOwnership`,
     /// `disableModule` of the Safe or `enableModule` would lock the owners out or add a module that queues
     /// unseen).
-    function _checkQueuedDelay(bytes memory queued) internal pure {
+    function _checkQueuedDelay(bytes memory queued) internal view {
         // forge-lint: disable-next-line(unsafe-typecast)
         bytes4 inner = bytes4(queued);
         require(queued.length == 36, "VaultGuard: queued Delay call not offered");
         uint256 value = _word(queued, 4);
         if (inner == IDelay.setTxCooldown.selector) {
             require(value >= MIN_COOLDOWN && value <= MAX_COOLDOWN, "VaultGuard: cooldown out of bounds");
+            // A queued cooldown may keep the review window or raise it, never shorten it. The Delay reads the
+            // cooldown current when an entry runs, so a queued reduction would also shorten the window of every
+            // entry queued after it (a reduction queued now and a hostile entry 23 h later run back to back).
+            // Lowering it takes a redeploy or the recovery path in features/F-008-evm-contracts/NOTES.md, not the queue.
+            require(value >= IDelay(delay).txCooldown(), "VaultGuard: cooldown below the current one");
         } else if (inner == IDelay.setTxExpiration.selector) {
             require(
                 value >= MIN_EXPIRATION && value <= MAX_EXPIRATION, "VaultGuard: expiration out of bounds"

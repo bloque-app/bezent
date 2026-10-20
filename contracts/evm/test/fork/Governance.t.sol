@@ -5,7 +5,7 @@ pragma solidity 0.8.28;
 import {Enum} from "@gnosis.pm/safe-contracts/contracts/common/Enum.sol";
 import {ExecutionOptions} from "zodiac-roles/Types.sol";
 
-import {VaultGuard, MIN_COOLDOWN} from "../../src/VaultGuard.sol";
+import {VaultGuard} from "../../src/VaultGuard.sol";
 import {VaultRoles} from "../../src/VaultRoles.sol";
 import {ISafe, IRoles, IDelay, IERC20} from "../../src/interfaces/External.sol";
 import {Batches} from "../Batches.sol";
@@ -464,16 +464,17 @@ abstract contract GovernanceTest is GovernanceBase {
         assertTrue(safe.isModuleEnabled(d.delay));
     }
 
-    /// REQ-GV-3: lowering the cooldown (within the floor) is itself delayed: it runs after the old cooldown.
+    /// REQ-GV-3: raising the cooldown is itself delayed: it runs after the old cooldown. (Lowering it is not a
+    /// queue operation at all: Guardian.t.sol, test_REQ_GV_3_aQueuedCooldownCannotBeLowered.)
     function test_REQ_GV_3_changingTheDelayIsDelayed() public {
-        bytes memory shorter = abi.encodeCall(IDelay.setTxCooldown, (MIN_COOLDOWN));
-        mustQueue(d.delay, shorter);
-        (bool ok, bytes memory ret) = runQueued(d.delay, shorter);
+        bytes memory longer = abi.encodeCall(IDelay.setTxCooldown, (cooldown * 2));
+        mustQueue(d.delay, longer);
+        (bool ok, bytes memory ret) = runQueued(d.delay, longer);
         assertFalse(ok);
         assertEq(ret, reason("Transaction is still in cooldown"));
         vm.warp(block.timestamp + cooldown);
-        mustRun(d.delay, shorter);
-        assertEq(delayMod.txCooldown(), MIN_COOLDOWN, "lowered after the old cooldown");
+        mustRun(d.delay, longer);
+        assertEq(delayMod.txCooldown(), cooldown * 2, "raised after the old cooldown");
         assertEq(delayMod.txExpiration(), expiration, "expiration untouched");
     }
 

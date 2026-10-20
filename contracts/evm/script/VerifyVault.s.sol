@@ -133,6 +133,7 @@ contract VerifyVault is Script {
         Log[] memory logs,
         Log[] memory guardianLogs
     ) public {
+        _checkKeySeparation(gov);
         _checkPermissions(deploy.permissionCalls(cfg, gov, d), logs);
         _checkPermissions(deploy.guardianCalls(gov, d), guardianLogs);
         _checkRoles(cfg, gov, d);
@@ -140,6 +141,21 @@ contract VerifyVault is Script {
         _checkDelay(cfg, gov, d);
         _checkSafe(cfg, gov, d);
         _checkOwnCode(cfg, d);
+    }
+
+    /// REQ-GV-2, REQ-KY-4: the guardian is a key of its own. It is set, and it is none of the Safe's owners, the
+    /// delivery key or the conversion key (the members of the vault's Roles modifier). `DeployVault` refuses the
+    /// same overlaps before it deploys; this fails a vault that was configured, or later changed, to have one.
+    function _checkKeySeparation(DeployVault.Governance memory gov) internal pure {
+        require(gov.guardian != address(0), "VerifyVault: no guardian");
+        for (uint256 i; i < gov.owners.length; ++i) {
+            require(gov.owners[i] != gov.guardian, "VerifyVault: guardian is an owner");
+        }
+        require(gov.guardian != gov.deliveryMember, "VerifyVault: guardian is the delivery key");
+        require(
+            gov.conversionMember == address(0) || gov.guardian != gov.conversionMember,
+            "VerifyVault: guardian is the conversion key"
+        );
     }
 
     // ------------------------------------------------------------------ permissions, from the events
@@ -325,6 +341,11 @@ contract VerifyVault is Script {
             "VerifyVault: guardian Roles members"
         );
         require(ISafe(d.safe).isModuleEnabled(d.guardianRoles), "VerifyVault: guardian module not enabled");
+        // And on the chain, not only in the configuration: the guardian is none of the Safe's actual owners.
+        address[] memory owners = ISafe(d.safe).getOwners();
+        for (uint256 i; i < owners.length; ++i) {
+            require(owners[i] != gov.guardian, "VerifyVault: guardian is an owner");
+        }
     }
 
     /// REQ-GV-3: the Delay is a clone of the pinned mastercopy, owned by the Safe, with the Safe as avatar,
