@@ -18,9 +18,9 @@ use chrono::Duration;
 use common::*;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
-/// A refusal the core names no condition for: the contract refuses as paused when bezent declares no
-/// pause, and it is retried (`dry_run_condition`).
-const UNNAMED: &str = "ReferenceUsed";
+/// A refusal the core names no condition for (`dry_run_condition`): it is retried, and holds
+/// nothing.
+const UNNAMED: &str = "Unspecified";
 
 /// A withdrawal of 700 whose redemption is at `block` (final two blocks later), accepted.
 async fn withdrawal(w: &World, block: i64, reference: [u8; 32]) -> i64 {
