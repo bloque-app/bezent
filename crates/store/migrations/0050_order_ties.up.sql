@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- Issue #36 (from the final review of the #25 work): with only the core compromised, two things an
--- order carries were still the core's to choose. Additive: one helper, and 0049's
--- `intents_guard_order` replaced by itself with two more ties; no row is touched.
+-- order carries were still the core's to choose. Additive: one helper, one unique index, and
+-- 0049's `intents_guard_order` replaced by itself with two more ties; no row is touched.
 --
 --   * A payout order's asset and token (INV-7, REQ-AS-2, REQ-AS-3, REQ-OT-4). 0049 tied a payout's
 --     amount, network and beneficiary to its redemption, but not the `asset` and `token` the order
@@ -51,6 +51,11 @@ END
 $$;
 
 REVOKE EXECUTE ON FUNCTION issuing_account(TEXT) FROM PUBLIC;
+
+-- The payout order's scaling and its token check read the same row (the finding above). Any
+-- database that already declares two tokens for one asset on a network fails here, loudly, and
+-- its owner picks the one to keep.
+CREATE UNIQUE INDEX admitted_tokens_one_per_asset ON admitted_tokens (network, asset);
 
 -- 0049's guard, with the two ties above. SECURITY DEFINER as before: it reads the final heads and
 -- the declarations; the writer is the session's login.

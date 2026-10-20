@@ -610,6 +610,167 @@ async fn issue_36_a_payout_orders_its_transfers_asset_and_token_and_no_other(poo
     }
 }
 
+/// Issue #36 (`INV-6`, `REQ-IN-4`; review of PR #42, nit): a destination that does not decode to
+/// a 32-byte account (a 20-byte address, an SS58 address with a trailing byte) has no mint order
+/// at all, whatever recipient the order names; and the recipient is read without regard to case on
+/// both sides (the core writes lower-case hex; the destination may be upper-case hex).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_36_a_mint_to_an_undecodable_destination_is_refused_and_hex_case_is_folded(
+    pool: PgPool,
+) {
+    delivery_declarations(&pool).await;
+    let ss58 = "5C7LYpP2ZH3tpKbvVvwiVe54AapxErdPBbvkYhe6y9ZBkqWt";
+    let destinations = [
+        // A 20-byte address (an EVM address is not an issuing-network account).
+        format!("0x{}", "02".repeat(20)),
+        // A well-formed SS58 address with one more base58 digit: a trailing byte.
+        format!("{ss58}1"),
+        // Upper-case hex.
+        format!("0x{}", "AB".repeat(32)),
+        // Lower-case hex.
+        format!("0x{}", "cd".repeat(32)),
+    ];
+    for (index, destination) in destinations.iter().enumerate() {
+        exec(
+            &pool,
+            &format!(
+                "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, \
+                     amount, destination_network, destination, state, source_network, \
+                     source_block_number, source_block_hash, source_position_kind, \
+                     source_position_index, on_chain_reference) \
+                 VALUES ('bz-d-{index}', 'req-{index}', 'deposit', 'usd', 1000000, 'kreivo', \
+                     '{destination}', 'Received', 'polygon', 10, '\\xaa', 'log', {index}, \
+                     '\\x1{index}')"
+            ),
+        )
+        .await;
+    }
+    make_final(&pool, "polygon", 10, "bb").await;
+    let core = login(&pool, "issue_36_core_for_tests", bezent_store::CORE_ROLE).await;
+    let mint = |index: usize, to: &str| {
+        order(
+            &format!("bz-d-{index}"),
+            "kreivo",
+            "mint",
+            &format!("1{index}"),
+            &format!(r#"{{"asset": "Here(101)", "to": "{to}"}}"#),
+            "100",
+        )
+    };
+
+    // Undecodable: refused for every recipient the order could name, among them the 32 bytes the
+    // destination would be padded to or cut down to.
+    for (index, what) in [
+        (0, "a 20-byte address"),
+        (1, "an SS58 address with a trailing byte"),
+    ] {
+        for to in [
+            format!("0x{}", "02".repeat(20)),
+            format!("0x{}", "02".repeat(32)),
+            format!("0x{}", "00".repeat(12) + &"02".repeat(20)),
+        ] {
+            let err = attempt(&core, &mint(index, &to))
+                .await
+                .expect_err(&format!("a mint order to {to} for {what}"));
+            assert_refusal(&err, "INV-6", what);
+        }
+    }
+    // Decodable, in either case: the recipient is the account, however it is spelled.
+    for (index, bytes) in [(2, "ab"), (3, "cd")] {
+        for to in [
+            format!("0x{}", bytes.repeat(32)),
+            format!("0x{}", bytes.to_uppercase().repeat(32)),
+        ] {
+            attempt(&core, &mint(index, &to))
+                .await
+                .unwrap_or_else(|e| panic!("the mint of deposit {index} to {to}: {e}"));
+        }
+    }
+}
+
+/// Issue #36 (`INV-7`, `REQ-AS-2`, `REQ-AS-3`; review of PR #42, finding 1): the payout's scaling
+/// reads the precision of the one token admitted for the asset on the destination network, so the
+/// store admits only one: a second token for the same asset on a network is refused, whatever its
+/// precision, and a payout order naming it is refused as a token that is not admitted. The same
+/// token on another network, and another asset's token on the network, are not affected.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_36_a_network_admits_one_token_per_asset_and_the_payout_uses_it(pool: PgPool) {
+    delivery_declarations(&pool).await;
+    exec(
+        &pool,
+        "INSERT INTO networks (network, role, address_format, backend) VALUES \
+           ('base', 'origin', 'evm', 'evm:8453'); \
+         INSERT INTO assets (asset, precision, assurance_class, issuing_asset) \
+           VALUES ('eur', 2, 'public', 'Here(102)'); \
+         INSERT INTO observations (network, block_number, block_hash, block_time, position_kind, \
+             position_index, token, amount, sender, executed, kind, on_chain_reference) \
+           VALUES ('kreivo', 50, '\\xcc', now(), 'log', 0, 'Here(101)', 100, '0xredeemer', TRUE, \
+             'redemption', '\\x22'); \
+         INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+             destination_network, destination, state, source_network, source_block_number, \
+             source_block_hash, source_position_kind, source_position_index, on_chain_reference, \
+             redeemer, destination_reference) \
+           VALUES ('bz-w-1', 'redemption-1', 'withdrawal', 'usd', 1000000, 'polygon', \
+             '0xbeneficiary', 'Received', 'kreivo', 50, '\\xcc', 'log', 0, '\\x22', '0xredeemer', \
+             '\\x3333333333333333333333333333333333333333333333333333333333333333')",
+    )
+    .await;
+
+    // A second token for `usd` on polygon, of the same precision and of another (18): refused. The
+    // first stays the only one.
+    for (token, precision) in [("0xsecond", 6), ("0xsecond", 18), ("0xTOKEN2", 18)] {
+        assert_sqlstate(
+            &pool,
+            &format!(
+                "INSERT INTO admitted_tokens (network, token, asset, precision) \
+                 VALUES ('polygon', '{token}', 'usd', {precision})"
+            ),
+            "23505",
+        )
+        .await;
+    }
+    let admitted: Vec<String> = sqlx::query_scalar(
+        "SELECT token FROM admitted_tokens WHERE network = 'polygon' AND asset = 'usd'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(admitted, ["0xtoken"]);
+    // The same asset's token on another network, and another asset's on this one, are admitted.
+    exec(
+        &pool,
+        "INSERT INTO admitted_tokens (network, token, asset, precision) VALUES \
+           ('base', '0xtoken', 'usd', 6), ('polygon', '0xother', 'eur', 18)",
+    )
+    .await;
+
+    make_final(&pool, "kreivo", 50, "dd").await;
+    let core = login(&pool, "issue_36_core_for_tests", bezent_store::CORE_ROLE).await;
+    let payout = |order_json: &str| {
+        order(
+            "bz-w-1",
+            "polygon",
+            "payout",
+            "3333333333333333333333333333333333333333333333333333333333333333",
+            order_json,
+            "1000000",
+        )
+    };
+    let err = attempt(
+        &core,
+        &payout(r#"{"to": "0xbeneficiary", "asset": "usd", "token": "0xsecond"}"#),
+    )
+    .await
+    .expect_err("a payout order in a token that was never admitted for the asset");
+    assert_refusal(&err, "INV-7", "a second token");
+    attempt(
+        &core,
+        &payout(r#"{"to": "0xbeneficiary", "asset": "usd", "token": "0xtoken"}"#),
+    )
+    .await
+    .expect("the payout order in the one admitted token");
+}
+
 /// Issue #36 (`INV-7`, `REQ-IN-6`, `REQ-AS-3`): and the refund of an unassociated arrival, paid
 /// out in the arrival's own minor units, is ordered in that arrival's token only: the asset the
 /// refund names (or, when its token is not admitted, no asset and that token itself).

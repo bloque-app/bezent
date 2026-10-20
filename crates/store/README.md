@@ -154,6 +154,8 @@ The audit of PR #56 added these (0049), for every login but the owner:
   and its `token`, when it names one, the token admitted for that asset on the destination network (an
   unassociated arrival's refund: the arrival's own token, or, its token not being admitted, that token and
   no asset).
+  Since 0050 too, a network admits one token per asset (a unique index on `admitted_tokens (network,
+  asset)`): the payout's scaling and its token check read the same row.
 - A transition's id, like a transfer's, is the one the store's sequence drew for the session.
 - A `key-compromise` alert carries the detector and detection key the store stamps on it; a detector
   looks only for its own, so a row another role wrote never suppresses it.

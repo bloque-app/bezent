@@ -104,3 +104,4 @@ END
 $$;
 
 DROP FUNCTION issuing_account(TEXT);
+DROP INDEX admitted_tokens_one_per_asset;
