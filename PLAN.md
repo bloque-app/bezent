@@ -1,8 +1,8 @@
 ---
 name: bezent
-plan_version: 0.5.0
-status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for
-date: 2026-10-13
+plan_version: 0.6.0
+status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20
+date: 2026-10-20
 binds: SPEC.md v0.5.2
 ---
 
@@ -31,6 +31,13 @@ that serves nothing in the spec is not in this plan.
    plans against it, but does not treat it as decided. Items marked *reserved* are security trade-offs @pandres95
    keeps; they carry no default. When @pandres95 rules, the plan is revised and the marker goes. A ruling that would
    change the spec goes through an amendment first.
+
+### Change history
+
+| Version | Date | Change |
+|---|---|---|
+| 0.6.0 | 2026-10-20 | @pandres95's rulings of 2026-10-15 to 2026-10-20; `SPEC.md` is unchanged. The repository is public now, and one mainnet instance serves Bloque Test and Bloque: the separate test environment is gone, the test bed stays, and a 48-hour soak runs on mainnet before bUSDC goes live (`DEC-15`, `DEC-18`, `DEC-19`, `DEC-20`, `F-014`, `F-017`, `M-1`, `M-4`, `M-5`). Kreivo is set up with no Root referendum: community 4243, the contract's roles and the hand-over of the asset roles (`DEC-6`, `DEC-7`, `F-015`; `RISK-6` closed). The vault gains a guardian (`DEC-10`). Polygon conversions move before the bUSDC launch gate (`DEC-13`, `F-010`, `M-2`, `M-4`). The delivery account carries a KSM float (`DEC-18`, `F-014`). Block-denominated constants use 41,739 blocks a day (`DEC-6`). New `RISK-9` and `RISK-10` |
+| 0.1.0 to 0.5.0 | 2026-10-13 | The first draft (0.1.0), the plan rulings (0.2.0), the sign-off, the EVM test harness and the open-source release (0.3.0), the scope narrowed to the reserves and Kreivo (0.4.0), and the bounds, the vault guard and delay, and USDT0 only (0.5.0). `git log -- PLAN.md` has each |
 
 ## 1. Shape of the system
 
@@ -79,7 +86,7 @@ is the core, the observers are the endpoints, and the signer is the signer (`DEC
 | Spec capability | Realisation in V0 |
 |---|---|
 | The issuing network, §4.4(a) | Kreivo, runtime 0.17.1 or later, which lets a contract mint and destroy local assets its community administers (kreivo#512, merged 2026-10-11; `DEC-5`, `DEC-6`, `DEC-7`) |
-| The on-chain component, §7.F | One ink! contract on pallet-contracts 49, deployed through ContractsStore by a community dedicated to it (`DEC-6`) |
+| The on-chain component, §7.F | One ink! contract on pallet-contracts 49, deployed through ContractsStore by a community dedicated to it (community 4243, contract app 5, set up on 2026-10-20; `DEC-6`) |
 | Network backends, §4.4(b), all public | Polygon (bUSDC, native USDC), Base (bEURC, EURC), BNB Chain (bBTC, BTCB). Each has one reserve vault; value reaches it from Swaps and from evmhot's sweeps, never through bezent (`DEC-8`, `DEC-9`, `DEC-10`, `DEC-12`) |
 | The attested backend, §4.4(b) | Swaps' bank rails, for COPM, MXNB and BRLB; Swaps' signed reports are the observations (`DEC-14`) |
 | Custody, §4.4(c) | AWS KMS for delivery keys, Vault for the others, behind the signer process (`DEC-11`) |
@@ -113,7 +120,7 @@ contracts sit in workspaces of their own, and the Swaps module lives in the Swap
   store tests, the contract and EVM suites, and the image builds.
 - Bloque keeps a separate private repository for its internal working documents and for the deployment definitions
   (infrastructure wiring, key custody configuration, environment configuration, release intake). It deploys from
-  the public code by pinned commit; nothing private is built into a public image (`DEC-20`).
+  the public code by the pinned digest of a public release's images; nothing private is built into a public image (`DEC-20`).
 
 *Serves:* the component split of §4.1, keys outside the stateful process (`REQ-AR-3`), mint authority only in on-chain
 code (`REQ-AR-4`), and exact integer amounts (`INV-11`). *Cost:* four toolchains (Rust, cargo-contract, Foundry, and
@@ -200,8 +207,22 @@ contract for every bridged asset, with per-asset bounds.
 - Redeem pulls the amount from the caller into the contract, checks the contract's balance, and destroys only from
   itself. Admin on Kreivo can destroy from any account, and `call_runtime` reports only success or failure, so this
   order matters (constraints note).
-- It is deployed through ContractsStore by a dedicated community, whose governance is the upgrade authority (on
-  mainnet: about 0.5 KSM for the community, 0.02 to publish, 0.1 to instantiate).
+- It is deployed through ContractsStore by a dedicated community, whose governance is the upgrade authority.
+- **Mainnet setup** (ruled by @pandres95, 2026-10-15 to 2026-10-20; done on 2026-10-20). There is no Root referendum.
+  - Community 4243, "bezent", was registered with a dedicated first-admin account, made for the purpose. While that
+    account could still sign, the contract was published (ContractsStore app 5) and instantiated on Kreivo mainnet, from
+    the build that the public repository's CI produces (code hash `0xe89943fb…24ad`), so that anyone can rebuild it and
+    compare. Bloque's production escrow account was then added as the community's only member, and the community was set
+    as its own admin, so the first-admin account kept no control. Last, the roles of `Here(101)`–`Here(103)` were handed
+    to the community account by signed calls from the Bloque account that held them (`DEC-7`).
+  - Roles on the contract: delivery is the Kreivo delivery account, whose key lives in KMS (`DEC-11`); pause is
+    @pandres95's account for now; governance is the community account. The raise delay is 24 hours, 41,739 blocks.
+  - Launch mints bUSDC only: the ceilings for bEURC and bBTC start at 0 (`DEC-17`).
+- **Block time.** Kreivo makes a block about every 2.07 s, as measured; the first draft of the contract assumed 6 s (fixed;
+  issue #37). Every block-denominated constant in the contract uses `BLOCKS_PER_DAY` = 41,739.
+- **Voting speed.** With one member on the default voting track, a community vote can pass within a few blocks.
+  @pandres95 accepted this risk (2026-10-20; `RISK-9`). A second voting member, Bloque Test in a separate cloud account, is an
+  optional hardening for later.
 
 *Serves:* the on-chain component's surface (§7.F), mint authority only in the component (`REQ-AR-4`, `REQ-HN-1`,
 `REQ-HN-5`), ordered events (`REQ-HN-7`), destroying only its own holdings (`REQ-HN-8`), separate roles (`REQ-HN-9`),
@@ -214,18 +235,20 @@ per redemption (`REQ-OT-6`, `REQ-RF-4`), and the chain-layer invariants (`INV-2`
 
 ### DEC-7 Assets on Kreivo
 
-**bUSDC, bEURC and bBTC are new local assets created by a Root referendum, all "not sufficient", with the contract's
-community as Issuer and Admin.** Ruled by @pandres95 (`pl-asset-ids`, 2026-10-13): bUSDC `Here(101)` with 6
-decimals, bEURC `Here(102)` with 6, bBTC `Here(103)` with 8 and the dust rule; MXNB moves to `Here(104)` and BRLB to
-`Here(105)`.
+**bUSDC, bEURC and bBTC are local assets at `Here(101)`–`Here(103)`, all "not sufficient", whose roles (Owner, Issuer,
+Admin and Freezer) belong to the contract's community account.** Ruled by @pandres95 (`pl-asset-ids`, 2026-10-13): bUSDC
+`Here(101)` with 6 decimals, bEURC `Here(102)` with 6, bBTC `Here(103)` with 8 and the dust rule; MXNB moves to
+`Here(104)` and BRLB to `Here(105)`. The roles reach the community with no Root referendum (@pandres95, 2026-10-19 and
+2026-10-20).
 
-- Only Root creates assets on Kreivo. The referendum runs `force_create`, `force_set_metadata` and
-  `force_asset_status` to make the community account Issuer and Admin.
-- COPM `Here(100)` already exists; its issuer moves to the community when its attested backend goes live (`M-3`).
-- Read from Kreivo mainnet on 2026-10-13 (spec 133, by the `F-013` helper): `Here(101)`–`Here(103)` already carry
-  bUSDC, bEURC and bBTC metadata, with a Bloque account as Issuer and Admin; MXNB and BRLB do not yet exist at
-  `Here(104)` and `Here(105)`. What the referendum still does: move Issuer and Admin of 101–103 to the dedicated
-  community (`REQ-HN-10`), and create MXNB and BRLB at 104 and 105 when their attested backend goes live (`M-3`).
+- The three assets already existed on mainnet. Read on 2026-10-13 (spec 133, by the `F-013` helper): `Here(101)`–`Here(103)`
+  carried bUSDC, bEURC and bBTC metadata, with a Bloque account as their Owner, Issuer, Admin and Freezer.
+- That account moved the four roles of each asset to the community account by signed calls (`REQ-HN-10`), as the last
+  step of the setup in `DEC-6`: the community was already its own admin and the contract was live, so no other account
+  kept the power to mint these assets outside the contract. The supply was zero before and after.
+- Only Root creates assets on Kreivo. MXNB and BRLB do not yet exist at `Here(104)` and `Here(105)`; they are created
+  when their attested backend goes live (`M-3`). COPM `Here(100)` already exists; its issuer moves to the community when
+  its attested backend goes live (`M-3`).
 - New identities encode neither an origin network nor bezent.
 
 *Serves:* one fixed identity per bridged asset (`REQ-AS-1`), precision equal or greater on the origin (`REQ-AS-4`),
@@ -287,13 +310,22 @@ evmhot's sweeps; Swaps then requests the deposit by naming the arrival's coordin
   transaction that transfers or approves the vault's tokens, so no administrative path moves value (`REQ-GV-5`).
   Widening changes (adding a role or a member, raising an allowance, adding a module, changing owners or threshold)
   go through a Zodiac Delay module and take effect only after its cooldown (`REQ-GV-3`). Narrowing changes (revoking
-  a role, lowering an allowance) stay immediate: they are pauses. No vault is funded before both are in place.
+  a role, lowering an allowance) stay immediate: they are pauses. No vault is funded before the guard, the delay and the
+  guardian are in place.
+- **The guardian** (ruled by @pandres95, 2026-10-20). One more key, independent: neither an owner nor the delivery key. It
+  holds a second Roles instance scoped to two calls: `Delay.setTxNonce` (the veto: it skips the queue of pending
+  widening changes) and `Safe.disableModule` on the main Roles module (the pause: the delivery role stops working).
+  Either call stops value moving, and one party suffices (`REQ-GV-2`). The owner quorum cannot remove the guardian
+  instantly. The delay's cooldown and expiration are deployment parameters, and the deployment accepts a cooldown from
+  1 hour to 30 days and an expiration from 1 day to 90 days: decided at plan level in pull request #41 (the author's
+  choice), **to be confirmed by @pandres95**. The starting guardian is a software key held by @pandres95; before real funds it is replaced by
+  a key held by an independent party, a 2-of-N multisig or a hardware key (`RISK-10`).
 - An externally owned account cannot bound its own outflows, so a contract is needed whichever option is chosen.
 - The alternative is a small custom vault, which needs its own audit.
 
 *Serves:* outflows restricted by on-chain code (`REQ-RN-4`), every key bounded on chain (`REQ-KY-3`), separate roles
 (`REQ-KY-4`), several signers for large or administrative actions (`REQ-KY-5`), value sent only to declared venue
-addresses (`REQ-VN-4`), named upgrade authority (`REQ-GV-3`), and value leaving only by referenced movements
+addresses (`REQ-VN-4`), named upgrade authority (`REQ-GV-3`), a pause by one party (`REQ-GV-2`), and value leaving only by referenced movements
 (`INV-14`).
 
 > **Trade-off, stated plainly.** Safe and Roles are widely used and audited, but a role configuration is itself code,
@@ -349,6 +381,9 @@ the Base and BNB Chain vaults carry no conversion role.
 - CCTP stays Swaps' own: no Circle account is needed, standard transfers carry no Circle fee, and Polygon to Base
   takes seconds (constraints note). bezent observes only the Polygon payout to Swaps.
 - In V0, bEURC pays out only on Base and bBTC only on BNB Chain.
+- Polygon conversions are built, and pass their tests, before the bUSDC launch gate (@pandres95, `pl-busdc-first`, 2026-10-15:
+  "Build Polygon conversions before launch"): `US-A5` stays in V0, and the Polygon vault carries Swaps' conversion role
+  at launch (`F-010`, `M-4`). Base and BNB Chain, with bEURC and bBTC, come after the launch (`M-2`).
 
 *Serves:* conversions at protocol venues by the requester (`REQ-CV-2`, `REQ-CV-7`), price and slippage left to the requester
 (`REQ-CV-5`), venue properties (`REQ-VN-1`, `REQ-VN-2`, `REQ-VN-3`), declared venue addresses (`REQ-VN-4`), payouts on the
@@ -383,7 +418,11 @@ HMAC-signed webhooks; Swaps uses them through a `bezent` instruction module.**
 
 - A request reference is scoped to its requester: idempotency (`REQ-ID-1`) keys on (requester, reference), so one
   requester never learns, or collides with, another's references (`REQ-ID-4`). Decided at plan level, 2026-10-13
-  (review of `F-001`); with Swaps the only requester in V0 it changes nothing observable.
+  (review of `F-001`); with Swaps the only requester in V0 it changes nothing observable until Bloque Test and Bloque both use the one mainnet instance (next).
+- One mainnet instance takes requesters from both of Swaps' environments, Bloque Test and Bloque (@pandres95, 2026-10-16;
+  decided at plan level, 2026-10-20). Their request references stay apart as above, and each is granted only what it
+  needs (`REQ-PN-2`). Bloque Test's access is a grant on the production instance, not a key from a test environment, so
+  `REQ-KY-6` holds (`DEC-18`).
 - Grants are per kind: requesting deposits, attesting. The module pauses with a callback token and
   hands the callback URL over only in `afterPersist()`. bezent's notifications resolve it. It joins Swaps'
   stall-alarm list.
@@ -450,6 +489,10 @@ roles; `config/bounds.example.toml` carries the recommended starting values, com
 orders in the measured window the figures are converted from another asset's at the day's exchange rate when its
 bounds are configured ("around equivalent exchanges"); the rate used and its source are recorded with each
 configuration. The ten-times volume figures that `NFR-10` asks for are recorded privately with the report.
+At launch only bUSDC mints (@pandres95, `dec-launch-assets`, 2026-10-20): the supply ceilings of bEURC and bBTC start at 0,
+since their reserves do not exist yet and their exchange rates would be invented numbers in a production limit. They are
+set when their reserves exist (`M-2`).
+
 *Serves:* the bounds of §7.F and their on-chain enforcement (`INV-3`), declared route limits (`REQ-LM-1`), and
 sustained volume with the figures in the plan (`NFR-10`). *Cost:* reading production data needs care to stay
 read-only; nothing in bezent writes to Swaps' database.
@@ -457,14 +500,20 @@ read-only; nothing in bezent writes to Swaps' database.
 ### DEC-18 Deployment
 
 **bezent deploys as a set of container services on a managed container platform, as aledgent does, with infrastructure
-as code and secrets in a secret manager; the test environment comes first. The deployment definitions are private to
-the operator and are not part of this repository.**
+as code and secrets in a secret manager, as one instance on mainnet. The deployment definitions are private to the
+operator and are not part of this repository.** Ruled by @pandres95 (2026-10-16): Kreivo exists only as a mainnet, so there is
+one bezent, in the operator's production cloud account, serving both Bloque Test and Bloque. The separate test
+environment is not built; a testnet instance comes later.
 
 - Infrastructure changes are reviewed by the operator before they are applied.
-- The test environment has its own keys and accounts, with no authority in production.
+- Test keys never reach production: the signer's published fixtures and the keys of the test bed (`DEC-19`) exist only
+  there and hold no authority on mainnet (`REQ-KY-6`). Bloque Test reaches the instance as a requester (`DEC-15`).
+- The Kreivo delivery account needs a KSM float. Kreivo charges a storage deposit: 0.0133 KSM on the first mint and about
+  0.0067 KSM for each new reference after it. Topping the float up is a runbook item (`F-014`), and its balance has an
+  alert floor, set in configuration and not in this plan (ruled by @pandres95, 2026-10-20).
 
 *Serves:* no test key with production power (`REQ-KY-6`), upgrades that lose nothing in flight (`REQ-GV-4`), and
-restore without loss (`NFR-7`). *Cost:* every infrastructure change waits for the operator's review.
+restore without loss (`NFR-7`). *Cost:* every infrastructure change waits for the operator's review; and Bloque Test's flows run on mainnet with real assets, under the same bounds.
 
 ### DEC-19 Test bed and release gate
 
@@ -496,6 +545,16 @@ end-to-end suite being green and every runbook exercised.**
 - The gate also carries the spec's three exit criteria for V0 (§15): the reserve equation at exactly zero divergence,
   sustained; every final source leg delivered, refunded, or held in a named condition with an owner; and every runbook
   exercised.
+- **The soak** (@pandres95, `pl-soak`, 2026-10-15). Before bUSDC goes live, bezent runs for 48 hours on mainnet, as the single
+  instance ruled on 2026-10-16 (`DEC-18`), with the bounds as ceilings and no real user flow. Zero reserve divergence
+  holds throughout, with at least two daily statements published and verified; a divergence restarts the clock. The
+  soak is a gate on top of the test bed, not instead of it: the criteria of §15 and the runbook exercises of `NFR-9` are
+  proven on the test bed above, on a test network, as the spec says.
+
+> **NOTE for @pandres95.** What does the soak exercise? With no real user flow, the reserve check and the statements run on
+> an idle bezent. Not ruled: whether anything is minted or moved during the 48 hours (the spec puts "before any value"
+> on a test network), which transfers if any, and whether the soak is meant to stand in for part of §15 or `NFR-9`, which
+> it cannot without an amendment to the spec. The plan assumes none of these.
 
 *Serves:* route budgets measured on a test network first (`NFR-2`), runbooks exercised before value (`NFR-9`,
 `REQ-IC-6`), and the release scope (§15). *Cost:* a fork does not reproduce a network's real finality timing, so
@@ -532,34 +591,34 @@ pass and a review per release; the GPL obliges source for anyone who distributes
 |---|---|---|---|
 | Kreivo 0.17.1 on mainnet (kreivo#512) | Merged and released 2026-10-11; mainnet upgrade on 2026-10-13 (@pandres95); confirm the runtime version on chain before `M-4` | Production (`M-4`) | Everything runs on zombienet with 0.17.1 |
 | The smoldot child-trie-root fix (aledgent#121) | Patched fork in aledgent's tree | Reading the contract's storage through the light client (`F-007`) | Use aledgent's patched build |
-| Root referendum for the asset ids, after `pl-asset-ids` | Not sent | Real assets on mainnet (`F-015`, `M-4`) | The working ids in zombienet genesis |
+| Community, contract and asset roles on Kreivo mainnet (`F-015`) | Done on 2026-10-20, with no referendum (`DEC-6`, `DEC-7`) | Nothing | — |
 | Review of the `bezent` module in the Swaps platform | Not started | Swaps driving bezent (`F-012`) | bezent's own suite drives the request surface directly |
 | evmhot revamped to sweep into the vaults (outside this plan) | Not started | Deposits from evmhot's addresses (`M-1`) | Swaps funds the vault directly in tests |
 
 ## 4. Features
 
 Each feature is done when its tests pass and name the acceptance criteria or invariants they verify, at the layer §9
-names. A feature depends only on features of its own or an earlier milestone.
+names. A feature depends only on features of its own or an earlier milestone, in the order under the table of §5.
 
 | F | Name | Milestone | Spec it serves | Depends on |
 |---|---|---|---|---|
 | `F-001` | Repository, workspace, store schema, append-only enforcement | skeleton, `M-0` | append-only observations and book, no loss on restore (`INV-10`, `INV-17`, `NFR-7`) | nothing |
 | `F-002` | Ingress and requester API, sequenced log, webhooks | skeleton, `M-0`; webhooks by `M-1` | request, query and event surfaces (`REQ-RQ-*`, `REQ-ST-*`, `REQ-ID-*`, `REQ-PN-*`) | the store (`F-001`) |
 | `F-003` | Core lifecycle, conditions, review | skeleton, `M-0`; complete by `M-1` | transfer states (§5.4, `REQ-TR-*`), review (`REQ-RV-*`), named conditions (`CND-*`) | the store (`F-001`) |
-| `F-004` | Reserve book, reserve check, statement | bUSDC on test, `M-1` | the reserve equation and statement (`REQ-BK-*`, `REQ-PR-*`, `INV-1`) | lifecycle (`F-003`), both endpoints (`F-007`, `F-009`) |
+| `F-004` | Reserve book, reserve check, statement | bUSDC on the test bed, `M-1` | the reserve equation and statement (`REQ-BK-*`, `REQ-PR-*`, `INV-1`) | lifecycle (`F-003`), both endpoints (`F-007`, `F-009`) |
 | `F-005` | Signer and guards | stub in `M-0`; complete by `M-1` | isolated signer, keys and their bounds (`REQ-AR-3`, `REQ-KY-*`, `INV-9`) | the store and lifecycle (`F-001`, `F-003`) |
 | `F-006` | Kreivo contract | skeleton, `M-0` | the on-chain component (§7.F, `REQ-HN-*`, `INV-2`, `INV-3`, `INV-4`, `INV-8`) | the test bed and genesis assets (`F-013`, `F-015`) |
-| `F-007` | Kreivo endpoint | bUSDC on test, `M-1` | observation, non-execution, exactly once (`REQ-OB-*`, `REQ-NX-*`, `REQ-EO-*`) | the signer and the contract (`F-005`, `F-006`) |
-| `F-008` | EVM contracts: vault, roles, reference emitter | bUSDC on test, `M-1` | bounded outflows, the requester's conversion role, references on outflows (`REQ-RN-4`, `REQ-RN-5`, `REQ-KY-3`, `REQ-CV-7`, `INV-14`) | nothing |
+| `F-007` | Kreivo endpoint | bUSDC on the test bed, `M-1` | observation, non-execution, exactly once (`REQ-OB-*`, `REQ-NX-*`, `REQ-EO-*`) | the signer and the contract (`F-005`, `F-006`) |
+| `F-008` | EVM contracts: vault, roles, reference emitter | bUSDC on the test bed, `M-1` | bounded outflows, the requester's conversion role, references on outflows (`REQ-RN-4`, `REQ-RN-5`, `REQ-KY-3`, `REQ-CV-7`, `INV-14`) | nothing |
 | `F-009` | EVM endpoint | Polygon in `M-1`; Base and BNB Chain in `M-2` | arrivals, payouts, observation, non-execution (`REQ-IN-*`, `REQ-OT-*`, `REQ-OB-*`, `REQ-NX-*`) | the signer and the EVM contracts (`F-005`, `F-008`) |
-| `F-010` | Venues: Swaps' conversions on the vault | more assets and venues, `M-2` | conversions and protocol venues (`REQ-CV-*`, `REQ-VN-*`) | the EVM endpoint (`F-009`) |
+| `F-010` | Venues: Swaps' conversions on the vault | Polygon conversions before the bUSDC launch, `M-4` | conversions and protocol venues (`REQ-CV-*`, `REQ-VN-*`) | the EVM endpoint (`F-009`) |
 | `F-011` | Attested backend: Swaps reports, commitments | attested fiat, `M-3` | the attested class and commitments (`REQ-BE-*`, `REQ-RQ-9`) | ingress and lifecycle (`F-002`, `F-003`) |
 | `F-012` | Swaps integration in the Swaps platform | first module in `M-1`; reports in `M-3` | the requester's side (§3, `REQ-RQ-*`) | ingress (`F-002`) |
 | `F-013` | Test bed, end-to-end suite, release gate | zombienet and anvil forks in `M-0`; gate in `M-4` | runbooks before value, release scope (`NFR-9`, §15) | nothing |
-| `F-014` | Operations: deployment, alerts, runbooks | test environment from `M-1`; production in `M-4` | incidents, governance, observer lag, pause latency (`REQ-IC-*`, `REQ-GV-*`, `NFR-5`, `NFR-6`, `NFR-8`) | ingress, core, signer and endpoints (`F-002`–`F-009`) |
-| `F-015` | Assets and governance on Kreivo: referendum, community, roles | genesis in `M-0`; mainnet in `M-4` | asset identity, the dedicated group, upgrade governance (`REQ-AS-*`, `REQ-HN-10`, `REQ-GV-3`) | nothing |
+| `F-014` | Operations: deployment, alerts, runbooks | runbooks and alerts on the test bed from `M-1`; the one mainnet instance in `M-4` | incidents, governance, observer lag, pause latency (`REQ-IC-*`, `REQ-GV-*`, `NFR-5`, `NFR-6`, `NFR-8`) | ingress, core, signer and endpoints (`F-002`–`F-009`) |
+| `F-015` | Assets and governance on Kreivo: community, contract, roles | genesis in `M-0`; mainnet done 2026-10-20 | asset identity, the dedicated group, upgrade governance (`REQ-AS-*`, `REQ-HN-10`, `REQ-GV-3`) | nothing |
 | `F-016` | Measurements: Swaps volumes, route budgets | before production, `M-4` | bounds sized from volumes (`OQ-6`, closed), ten-times volume (`NFR-10`), route budgets (`NFR-2`) | the endpoints, for route timing (`F-007`, `F-009`) |
-| `F-017` | Open-source release | open source, `M-5` | nothing in the spec; @pandres95's direction (`DEC-20`) | production (`M-4`) |
+| `F-017` | Open-source release | done 2026-10-17 (`M-5`) | nothing in the spec; @pandres95's direction (`DEC-20`) | nothing |
 
 **`F-001` Repository, workspace and store.** Sets up the repository and CI. Creates the Rust workspace of `DEC-1` and the PostgreSQL schema of `DEC-4`. Triggers
 refuse UPDATE and DELETE on observations and on the reserve book, and refuse any change to a terminal state, since
@@ -607,7 +666,7 @@ coordinate (`REQ-IN-3`), arrivals are minted only after finality (`AC-A2.1`–`A
 
 **`F-010` Venues.** Swaps' conversions on the vault: the role configuration, observing them, and minting against
 the output
-(`DEC-13`). Done when a convertible deposit is minted for what Swaps' swap delivered into the vault (`AC-A5.1`–`AC-A5.3`).
+(`DEC-13`). A gate of the bUSDC launch (`M-4`), by ruling (`pl-busdc-first`). Done when a convertible deposit is minted for what Swaps' swap delivered into the vault (`AC-A5.1`–`AC-A5.3`).
 
 **`F-011` Attested backend.** Swaps' reports as observations, the instruction commitment, and the statement's attested
 wording (`DEC-14`). Done when a report without the attesting grant is refused, a report becomes an observation with
@@ -616,20 +675,22 @@ a reversal follows `REQ-BE-6`: charged against surplus, mints paused under the f
 
 **`F-012` Swaps integration.** The `bezent` module in the Swaps platform (`DEC-15`): pause with a callback token, resume on
 bezent's notification, read the log when a callback is lost, and later relay fiat instructions and post reports. Done
-when Swaps drives a bUSDC deposit and withdrawal on test, and the module is merged under the Swaps platform's own review.
+when Swaps drives a bUSDC deposit and withdrawal on the test bed, and the module is merged under the Swaps platform's own review.
 
 **`F-013` Test bed and release gate.** The zombienet fork, the anvil forks (local CCTP for Swaps' flows), the testnet wiring, the anvil fault scenarios, and the
 end-to-end suite that names every V0 acceptance criterion (`DEC-19`). Done when the suite is green and the gate of §15
 holds.
 
 **`F-014` Operations.** Deployment (`DEC-18`), the observables of `REQ-ST-6`, alerts and pages, the operator surface
-with its append-only record, and one runbook per incident class and named condition. Done when `AC-H3.1`, `AC-I2.1`,
-`AC-I3.1`, `AC-I3.2` and `AC-I4.1` pass in the test environment, observer lag stays within 60 s (`NFR-6`), a pause
+with its append-only record, and one runbook per incident class and named condition, among them the top-up of the Kreivo
+delivery account's KSM float, with an alert floor on its balance (`DEC-18`). Done when `AC-H3.1`, `AC-I2.1`,
+`AC-I3.1`, `AC-I3.2` and `AC-I4.1` pass on the test bed, observer lag stays within 60 s (`NFR-6`), a pause
 takes effect within its bound (`NFR-8`), and every runbook has been exercised (`NFR-9`).
 
-**`F-015` Assets and governance on Kreivo.** The referendum text for the new assets and the issuer move, the dedicated
-community, and its published governance with a delay (`DEC-6`, `DEC-7`). Done when the assets exist in zombienet
-genesis with the community as Issuer and Admin, and, for `M-4`, the referendum has passed on mainnet.
+**`F-015` Assets and governance on Kreivo.** The dedicated community, the contract's setup and the hand-over of the asset
+roles, with no referendum, and the community's published governance with its 24-hour raise delay (`DEC-6`, `DEC-7`). Done
+when the assets exist in zombienet genesis with the community as Issuer and Admin and, for `M-4`, the mainnet setup has
+run: done on 2026-10-20 (community 4243, contract app 5, the roles of `Here(101)`–`Here(103)` handed over, supply zero).
 
 **`F-016` Measurements.** A read-only pass over Swaps' production volumes per asset class, and the completion budget
 of each route measured on the test networks. Done when the figures of `DEC-17` are recorded and every route has a
@@ -638,18 +699,24 @@ published p99 target and ceiling (`NFR-2`).
 **`F-017` Open-source release.** The public tree, licence headers and `REUSE.toml`, the IP review, the trademark
 check, the public repository, and a private companion that holds the internal documents and deployment definitions,
 following aledgent's run-book (`DEC-20`). Done when the IP and trademark sign-off (@olanod, 2026-10-17) is recorded, the public tree builds and passes
-its tests on its own, and the public repository is open with the DCO check on `main`.
+its tests on its own, and the public repository is open with the DCO check on `main`. **Done on 2026-10-17.** What continues is ordinary work in the
+public repository, and the private repository's deployment from the pinned digest of a public release (`DEC-1`).
 
 ## 5. Milestones
 
 | Milestone | Claim that becomes true | Features | Exit criteria |
 |---|---|---|---|
 | `M-0` Skeleton | bezent's parts exist and the contract works on a local Kreivo | `F-001`, `F-002`, `F-003` (core state machine), `F-005` (stub), `F-006`, `F-013` (zombienet), `F-015` (genesis) | Requests are taken in durably and appear in the log. Every state transition has a test. On zombienet the contract mints, redeems and refund-mints, and refuses a reused reference and a mint above its bounds. The stub signer signs only recorded intents |
-| `M-1` bUSDC end to end on test | A bUSDC deposit and withdrawal work between Polygon Amoy and zombienet | `F-004`, `F-007`, `F-008`, `F-009` (Polygon), `F-012` (first module), `F-014` (test environment) | An arrival at the vault, claimed by its coordinate, is minted only after Polygon's finality. A redemption is paid out from the vault. A payout proven not executed ends in one refund mint. The reserve check runs every minute at zero divergence, and a daily statement is produced and kept |
-| `M-2` More assets and venues | bEURC and bBTC work, and Swaps' USDT0 conversions run on the Polygon vault | `F-009` (Base, BNB Chain), `F-010` | bEURC on Base Sepolia and bBTC on BNB Chain testnet pass the `M-1` criteria. A bBTC deposit's remainder lands in surplus and a payout scales exactly (`REQ-AS-9`, `REQ-AS-10`). A convertible deposit reports both amounts |
+| `M-1` bUSDC end to end on the test bed | A bUSDC deposit and withdrawal work between Polygon Amoy and zombienet | `F-004`, `F-007`, `F-008`, `F-009` (Polygon), `F-012` (first module), `F-014` (runbooks and alerts on the test bed) | An arrival at the vault, claimed by its coordinate, is minted only after Polygon's finality. A redemption is paid out from the vault. A payout proven not executed ends in one refund mint. The reserve check runs every minute at zero divergence, and a daily statement is produced and kept |
+| `M-2` More assets, after the bUSDC launch | bEURC and bBTC work | `F-009` (Base, BNB Chain) | bEURC on Base Sepolia and bBTC on BNB Chain testnet pass the `M-1` criteria. A bBTC deposit's remainder lands in surplus and a payout scales exactly (`REQ-AS-9`, `REQ-AS-10`) |
 | `M-3` Attested fiat | COPM, MXNB and BRLB move through Swaps' reports and commitments | `F-011`, `F-012` (reports) | A reversal is exercised end to end (`REQ-BE-6`). Reports become observations with Swaps' ids. Relayed instructions match their commitment. The statement says the reserve is attested and names Swaps |
-| `M-4` Production | bezent carries value on Kreivo mainnet | `F-013` (gate), `F-014`, `F-015` (mainnet), `F-016` | Bounds and budgets measured and recorded (`DEC-17`). Every runbook exercised (`NFR-9`). Kreivo 0.17.1 or later enacted on mainnet. The asset referendum passed. Every `[PENDING]` decision in this plan ruled. The §15 criteria hold on the test bed: zero divergence, sustained; every final source leg delivered, refunded, or held with an owner; every runbook exercised |
-| `M-5` Open source | bezent's code and design are public | `F-017` | The public tree builds and passes its tests alone. The IP review and trademark sign-off are recorded (@olanod, 2026-10-17). The public repository is open under the licences of `DEC-20`, with the DCO check on `main`. The private companion keeps every internal document and deploys from the public code by pinned commit |
+| `M-4` Production | bezent carries value on Kreivo mainnet, bUSDC first | `F-010` (Polygon conversions), `F-013` (gate), `F-014`, `F-015` (mainnet, done), `F-016` | Bounds and budgets measured and recorded (`DEC-17`). Every runbook exercised (`NFR-9`). Kreivo 0.17.1 or later enacted on mainnet. The community owns the asset roles (done 2026-10-20). Every `[PENDING]` decision in this plan ruled. The §15 criteria hold on the test bed: zero divergence, sustained; every final source leg delivered, refunded, or held with an owner; every runbook exercised. A convertible deposit reports both amounts and is minted for what Swaps' swap delivered (`AC-A5.1`–`AC-A5.3`). Only bUSDC mints at launch (`DEC-17`). The 48-hour soak of `DEC-19` has passed on mainnet |
+| `M-5` Open source | bezent's code and design are public (reached 2026-10-17) | `F-017` | The public tree builds and passes its tests alone. The IP review and trademark sign-off are recorded (@olanod, 2026-10-17). The public repository is open under the licences of `DEC-20`, with the DCO check on `main`. The private companion keeps every internal document and deploys from the public code by pinned commit |
+
+**Order in time** (@pandres95, `pl-busdc-first`, 2026-10-15; the milestones keep their numbers): `M-0`, `M-1`, then `M-4` with bUSDC
+alone, then `M-2` and `M-3`. `M-4` depends on the Polygon part of `F-009` and on `F-010`, and on nothing in `M-2` or `M-3`.
+`M-5` was reached on 2026-10-17, when the repository opened (`DEC-20`): open source is how the remaining work is done, no
+longer a gate that waits for production.
 
 ## 6. Risks
 
@@ -660,9 +727,11 @@ its tests on its own, and the public repository is open with the DCO check on `m
 | `RISK-3` | *Withdrawn (amendment 0007 A5):* bezent no longer pays through CCTP; Circle's attestation delays are Swaps' | — |
 | `RISK-4` | BTCB's issuer (Binance) freezes, depegs or changes the token | bBTC is backed only by BTCB (`REQ-AS-3`), and the statement names the backend and the token (`REQ-BE-3`). The asset's own bounds cap the exposure |
 | `RISK-5` | The fiat assets rest on Swaps' reports | The mint window and supply ceiling bound what a wrong report can mint (`REQ-BE-5`). The statement says the reserve is attested (`REQ-BE-4`). A reversal is Swaps' to cover, with mints paused under the floor (`REQ-BE-6`) |
-| `RISK-6` | Issuer and Admin of `Here(101)`–`Here(103)` sit with a Bloque account until the referendum moves them to the community | Until then that account could mint outside bezent; the reserve check sees any such supply as divergence and pauses (`INV-1`). Supply stays zero until bezent goes live, and the referendum is a precondition of `M-4` |
+| `RISK-6` | *Closed 2026-10-20 (no referendum):* Issuer and Admin of `Here(101)`–`Here(103)` sat with a Bloque account | That account handed the four roles of each asset to the community account by signed calls, once the community was its own admin and the contract was live; the supply was zero. The reserve check still sees any supply minted outside the contract as divergence and pauses (`INV-1`) |
 | `RISK-7` | The key custody choice is still open, and two of its options need an amendment | The signer is the only process that touches keys under every option. If (b) or (c) is ruled, the amendment to `REQ-CU-1` comes before `F-005` is complete |
 | `RISK-8` | Changes to the Swaps platform land on someone else's review schedule | Keep the module small and put it up for review early. bezent's own suite drives the request surface directly, so `M-0` to `M-2` do not wait on it |
+| `RISK-9` | A community with one member on the default voting track can pass a vote, for example a contract upgrade, within a few blocks. | Accepted by @pandres95 (2026-10-20). Optional hardening for later: a second voting member, Bloque Test, in a separate cloud account. The raise delay holds any raise of a bound for 24 hours (`REQ-GV-3`) |
+| `RISK-10` | The starting guardian of the vaults is a hot key held by @pandres95, so one stolen key could veto a pending change or pause a vault | A guardian can only veto a queued change or pause; it cannot move value (`DEC-10`). It is replaced by a key held by an independent party, a 2-of-N multisig or a hardware key, before real funds |
 
 ## 7. What to do first
 
