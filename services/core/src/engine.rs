@@ -1374,20 +1374,27 @@ impl Core {
             return Ok(Did::default());
         }
         if !passed {
-            if prepared_order != order_id {
-                // A new order waits for its preparation.
-                return Ok(Did::default());
-            }
             // A refusal that is not the allowance's does not keep a payout window hold (S-2).
             let allowance = self.delivery_allowance(conn, t).await?;
             let held = dry_run_condition(&dry_run, allowance.as_ref())
                 .or(t.condition().filter(|c| *c != Condition::PayoutWindow));
+            if prepared_order != order_id {
+                // A new order waits for its preparation; a refusal that keeps coming back still
+                // has its deadline (issue #25).
+                return self.unprepared_deadline(conn, t, held, from, attempt).await;
+            }
             let mut did = self.hold(conn, t, held).await?;
             // A failed dry run is not prepared again: a new order, after a while (F-007 NOTES 5).
             if retry_due {
                 self.record_intent(conn, t, purpose, &reference, scope, attempt, &order)
                     .await?;
                 did.intents += 1;
+            }
+            if !did.moved {
+                let due = self
+                    .unprepared_deadline(conn, t, held, from, attempt)
+                    .await?;
+                did.moved |= due.moved;
             }
             return Ok(did);
         }
@@ -1717,6 +1724,61 @@ impl Core {
             did.intents += self.order_cancels(conn, t, attempt).await?;
         }
         Ok(did)
+    }
+
+    /// An attempt whose preparation never passes has a deadline like any other leg (issue #25;
+    /// `REQ-RV-1`, `REQ-EO-3`, F-003 review note N7): the last dry run of its orders was refused,
+    /// nothing is signed for it, no named condition explains the wait, and the route's deadline is
+    /// past on the destination network's final head. The transfer then goes to `Needs-Review`
+    /// from the state it is in, from where an operator may resolve it (a new order, or, for a
+    /// withdrawal, the refund: the cancellation in [`Core::refund`]). It is never refunded or failed on its
+    /// own (`REQ-RF-1`).
+    ///
+    /// The clock is the attempt's: the source leg's finality for the first attempt, the previous
+    /// attempt's proof of non-execution for a later one, restarted where the transfer last left
+    /// `CND-PayoutWindow` (amendment 0012). Time under the other conditions counts, since only a
+    /// refusal that names nothing is measured: `CND-FeeShort`, `CND-MintWindow` and the gates
+    /// resume by themselves (§10), and `CND-DestinationRefused` has its own deadline.
+    ///
+    /// Not for a delivery a review resolution runs: the transfer is in review already.
+    async fn unprepared_deadline(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        held: Option<Condition>,
+        from: State,
+        attempt: i32,
+    ) -> sqlx::Result<Did> {
+        if from == State::NeedsReview || held.is_some() || t.condition().is_some() {
+            return Ok(Did::default());
+        }
+        let start = if attempt <= 1 {
+            t.source_final_block_time
+        } else {
+            match store::proof_of(conn, t.id, attempt - 1).await? {
+                Some(ProofPoint::Final(p)) => Some(p.block_time),
+                _ => None,
+            }
+        };
+        let Some(start) = start else {
+            return Ok(Did::default());
+        };
+        let released: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT max(x.block_time) FROM ( \
+                 SELECT block_time, condition, lag(condition) OVER (ORDER BY id) AS before \
+                 FROM transitions WHERE transfer_id = $1) x \
+             WHERE x.before = 'CND-PayoutWindow' AND x.condition IS DISTINCT FROM 'CND-PayoutWindow'",
+        )
+        .bind(t.id)
+        .fetch_one(&mut *conn)
+        .await?;
+        let start = released.map_or(start, |r| r.max(start));
+        let deadline = self.deadline(conn, t, start).await?;
+        let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
+            return Ok(Did::default());
+        };
+        tracing::info!(transfer = %t.bridge_reference, attempt, "REQ-RV-1: the attempt's preparation never passed by its deadline; review");
+        self.deadline_review(conn, t, t.state(), None, &head).await
     }
 
     /// Whether a transaction on `network` never expires, so that its non-execution is proven only
@@ -2105,6 +2167,16 @@ impl Core {
         proof: &Point,
         manual: Option<i64>,
     ) -> sqlx::Result<Did> {
+        // An attempt that was ordered and never signed has nothing to be proven (issue #25): under
+        // the approved resolution that runs this refund, it is cancelled, recorded, and the store
+        // refuses to sign it from then on. Nothing else is cancelled: a signed attempt is proven
+        // not executed or it blocks the refund (INV-8).
+        if let Some(action) = manual
+            && let Some(unsigned) = store::unsigned_next_attempt(conn, t.id).await?
+        {
+            store::cancel_unsigned_attempt(conn, t.id, unsigned, action).await?;
+            tracing::info!(transfer = %t.bridge_reference, attempt = unsigned, action, "INV-8, REQ-RF-1: an attempt ordered and never signed is cancelled under the approved resolution");
+        }
         let unproven = store::attempts_unproven(conn, t.id).await?;
         if !unproven.is_empty() {
             tracing::error!(transfer = %t.bridge_reference, attempts = ?unproven, "INV-8: an attempt is not proven not executed; no refund");
@@ -2563,10 +2635,17 @@ impl Core {
                 // A refund needs every attempt ordered, prepared or signed proven not executed,
                 // not only the one the evidence names (INV-8; review M2); only a withdrawal has
                 // one (REQ-RF-4).
+                // The one attempt ordered and never signed is cancelled by the refund itself
+                // (issue #25), so it does not count here.
                 proven
                     && (to != State::Refunding
-                        || (t.kind == "withdrawal"
-                            && store::attempts_unproven(conn, t.id).await?.is_empty()))
+                        || (t.kind == "withdrawal" && {
+                            let unsigned = store::unsigned_next_attempt(conn, t.id).await?;
+                            store::attempts_unproven(conn, t.id)
+                                .await?
+                                .iter()
+                                .all(|a| Some(*a) == unsigned)
+                        }))
             }
             _ => false,
         })

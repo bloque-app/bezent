@@ -75,8 +75,10 @@ Each choice below is a reading of the spec and plan, not a ruling.
 
 Still open from the review: N1 (the compromise path runs on its own connection), N4 (withdrawals with no declared
 route), N6, N7 (a transfer whose next attempt is never prepared or signed has no deadline edge, now including one
-committed to attempt n+1), N8–N10. The service role may still write observations, outcomes and signed bytes (S6
-beyond final heads and proofs): a follow-up with #31's endpoint role.
+committed to attempt n+1; closed by item 24, issue #25), N8–N10. The service role may still write observations, outcomes and signed bytes (S6
+beyond final heads and proofs): a follow-up with #31's endpoint role. (Done, issues #35 and #46: migration 0045 left
+`bezent_service` with nothing, and each service role holds what its service needs; the store test `grant_matrix`
+asserts every role's grants, so only the endpoints' roles insert observations, outcomes and signed bytes.)
 
 ## Verification review of PR #32 (migration `0017_lifecycle_verification`, additive)
 
@@ -92,7 +94,7 @@ Numbered **0017**: `0016` is taken by PR #31's branch, so neither PR renumbers t
     `bezent_signer`, `one_business_day_after` to `bezent_service` and `bezent_operator` (the review views call it).
     `transfer_attempts_closed` (a row lock as the owner) and the trigger functions go to no role.
 
-Still open from the verification: F3 (an attempt ordered but never signed blocks the refund for good; for #35), F4
+Still open from the verification: F3 (an attempt ordered but never signed blocks the refund for good; closed by 0051, issue #25), F4
 (a leg's token and sender unchecked; for #9), N-a to N-e.
 
 ## Forced non-execution and the payout window (issue #41, migration `0042_payout_window`, additive)
@@ -153,12 +155,42 @@ Still open from the verification: F3 (an attempt ordered but never signed blocks
     at the leg's coordinate); the cancel's own proof of non-execution belongs to the cancel's signed transaction, so
     no proof is read for the payout, a refund is refused, and the review closes on a Delivered resolution. The
     evidence of a cancel that won now carries `kind: "not-executed"`.
+24. **An attempt whose preparation never passes has a deadline** (issue #25, review note N7; `REQ-RV-1`, `REQ-EO-3`).
+    When the last dry run of an attempt's orders was refused, nothing is signed for it, no named condition explains
+    the wait and the route's deadline is past on the destination network's final head, the transfer goes to
+    `Needs-Review` from the state it is in: `Source-Final` for the first attempt, `Delivering` (or `Delivered`) for a
+    later one. The clock is the attempt's: the source leg's finality for the first attempt, the previous attempt's
+    proof for a later one, restarted where the transfer last left `CND-PayoutWindow` (item 22). Only a refusal that
+    names nothing is measured: `CND-FeeShort`, `CND-MintWindow` and the gates resume by themselves, `CND-PayoutWindow`
+    waits for the allowance (no review, amendment 0012) and `CND-DestinationRefused` has its own deadline. Time spent
+    under a gate counts, since §10 gives it no restart. It is never a refund or a retry on its own (`REQ-RF-1`).
+    **Pending a ruling:** the §5.4 row `Source-Final -> Needs-Review` names only `CND-AwaitingConversion` and
+    `CND-DestinationRefused` as its occasion, and `Delivering -> Needs-Review` a leg unknown past its deadline; an
+    attempt that was never signed has no leg. `REQ-EO-3` requires such a transfer to reach review eventually, so this
+    is built on that and on the edge the store already has; the row's "When" needs an amendment (proposed text in
+    the pull request of issue #25).
+25. **An attempt ordered and never signed is cancelled by the refund that needs it gone** (issue #25, the
+    verification's F3; `INV-8`, `REQ-RF-1`, `REQ-GV-5`, `REQ-RV-2`; migration `0051`). Attempt n+1, ordered after
+    attempt n was proven not executed and then never signed, has an intent and nothing to prove, so
+    `attempts_unproven()` listed it for good and the refund was closed to everyone, an approved resolution
+    included. Now, running the operator's approved resolution into `Refunding`, the core records the cancellation of
+    that attempt (`unsigned_attempt_cancellations`, one row, naming the resolution) and then refunds on the proof of
+    the last attempt that was signed. The store accepts the row only in review, under that approved and unrun
+    resolution of that transfer, for the transfer's next attempt after one proven not executed at finality, and only
+    while no signature and no signed transaction exists for it, under the transfer's row lock the signer's inserts
+    share; from then on no intent, signature or signed transaction is recorded for that attempt, whoever writes, so
+    a signature cannot land after the refund decision. A signed attempt is never cancelled: it is proven not executed
+    or it blocks the refund as before. The evidence check of a resolution into `Refunding` leaves that one attempt
+    out of "every attempt proven". **Pending a ruling:** `INV-8` says "every payout attempt proven not executed";
+    this reads an attempt that never produced a transaction as having nothing to prove, recorded and made
+    irreversible by the store. Who authorises it is the refund's own approver pair (`REQ-GV-5`).
 
 Tests: `services/core/tests/cancel.rs` (named after `REQ-NX-4`, `REQ-RV-1`, `REQ-RV-2`, `REQ-GV-5`, `REQ-NX-1`,
 `AC-I1.2`, `CND-PayoutWindow`, and the PR #52 review finding each covers: `m1`, `s2`, `s3`, `s4`); the unit tests of
 `engine.rs` and `evm.rs`, and `services/evm-endpoint/tests/submit.rs` (`cnd_payout_window_s2_*`); `ac_b1_4`,
 `ac_c1_2` and `s7` keep their original expectation, review at the deadline. The core tests' `TOKEN` is now an EVM
-address, as the EVM endpoint requires of an admitted token there.
+address, as the EVM endpoint requires of an admitted token there. Items 24 and 25: `services/core/tests/unsigned_attempts.rs` (`REQ-RV-1`, `INV-8`,
+`CND-PayoutWindow`) and, in the store, `crates/store/tests/lifecycle_graph.rs` (`issue_25_*`).
 
 Not done here (review S-5): transfers already in `Needs-Review` from `Delivering` on an origin network before this
 ships get no cancel ordered; the cancel is ordered only on the deadline transition.

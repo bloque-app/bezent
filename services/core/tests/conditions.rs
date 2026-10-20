@@ -3,7 +3,9 @@
 //! F-003 T-003-05: the named conditions of SPEC §10, one test each. A condition is held in the
 //! transfer's state and is never a failure; it clears by itself or by evidence; past its deadline
 //! it sends a transfer to review only where the §5.4 table allows (`Source-Final` with
-//! `CND-AwaitingConversion` or `CND-DestinationRefused`; `Delivering` and `Delivered`).
+//! `CND-AwaitingConversion` or `CND-DestinationRefused`; `Delivering` and `Delivered`); the one
+//! addition, an attempt whose preparation never passes and names no condition, is
+//! `unsigned_attempts.rs` (issue #25).
 //! `CND-Unassociated` is `ac_a4_1_…` and `CND-AmountMismatch` is `req_tr_5_…` in `lifecycle.rs`.
 
 mod common;

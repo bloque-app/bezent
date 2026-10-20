@@ -1447,3 +1447,239 @@ async fn f1_an_unrelated_login_cannot_call_the_lifecycle_functions(pool: PgPool)
         assert_eq!(may_execute(&pool, role, f).await, held, "{role} on {f}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Issue #25 (migration 0051): an attempt that was ordered and never signed.
+
+/// The order of transfer `id`'s attempt `attempt`, with no preparation and no signature: the next
+/// attempt the core ordered after the previous one was proven not executed, and nothing came of it.
+async fn order_only(pool: &PgPool, id: i64, attempt: i32) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO intents (transfer_id, network, purpose, on_chain_reference, reference_scope, \
+             attempt, payload) \
+         SELECT id, destination_network, 'mint', on_chain_reference, redeemer, $2, \
+             '{\"order\": {}, \"amount\": \"1\"}' FROM transfers WHERE id = $1 RETURNING id",
+    )
+    .bind(id)
+    .bind(attempt)
+    .fetch_one(pool)
+    .await
+    .expect("record the order")
+}
+
+/// The signing intent over a preparation of transfer `id`'s attempt-2 order, recorded and not
+/// signed.
+async fn signing_intent_of_attempt_2(pool: &PgPool, id: i64) -> i64 {
+    let order = order_of(pool, id, 2).await;
+    let prepared = prepare_order(pool, order).await;
+    sqlx::query_scalar(
+        "INSERT INTO intents (transfer_id, network, purpose, on_chain_reference, reference_scope, \
+             attempt, payload) \
+         SELECT id, destination_network, 'mint', on_chain_reference, redeemer, 2, \
+             jsonb_build_object('message', '0x01', 'amount', '1', 'prepared', $2::bigint) \
+         FROM transfers WHERE id = $1 RETURNING id",
+    )
+    .bind(id)
+    .bind(prepared)
+    .fetch_one(pool)
+    .await
+    .expect("record the signing intent")
+}
+
+/// A transfer in review that was `Delivering` at attempt 1, proven not executed at finality, with
+/// attempt 2 ordered and nothing signed for it, and the resolution into `Refunding` that an operator
+/// recorded and the other approved. Returns (transfer, resolution).
+async fn unsigned_next_attempt_in_review(pool: &PgPool, ops: &[PgPool; 2], n: i64) -> (i64, i64) {
+    let id = at(pool, n, "Delivering").await;
+    prove_not_executed(pool, id).await;
+    order_only(pool, id, 2).await;
+    bare_transition(pool, id, "Delivering", "Needs-Review")
+        .await
+        .unwrap();
+    let action = resolution(&ops[0], id, "Refunding", "issuing").await;
+    approve(&ops[1], action).await.unwrap();
+    (id, action)
+}
+
+async fn cancel_unsigned(
+    pool: &PgPool,
+    id: i64,
+    attempt: i32,
+    action: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO unsigned_attempt_cancellations (transfer_id, attempt, manual_action_id) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(id)
+    .bind(attempt)
+    .bind(action)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+async fn unproven_attempts(pool: &PgPool, id: i64) -> Vec<i32> {
+    sqlx::query_scalar("SELECT attempts_unproven($1)")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("attempts_unproven")
+}
+
+/// `INV-8`, `REQ-RF-1`, `REQ-RV-2`: a withdrawal whose next attempt was ordered and never signed
+/// could not be refunded, not even by an approved resolution: the attempt has an intent and, there
+/// being nothing signed, no proof to record. It is cancelled, recorded, under that resolution, and
+/// the refund opens; the refund still rests on the proof of the attempt that was signed.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_25_an_order_nothing_was_signed_for_is_cancelled_and_the_refund_opens(pool: PgPool) {
+    let ops = ops(&pool).await;
+    let (id, action) = unsigned_next_attempt_in_review(&pool, &ops, 1).await;
+    assert_eq!(unproven_attempts(&pool, id).await, vec![2]);
+    // Without the cancellation the refund stays closed (INV-8): attempt 2 is not proven.
+    refund_of(&pool, id, "g-1-refund").await;
+    let err = resolve(&pool, id, "Refunding", Some("issuing"), Some(action), None)
+        .await
+        .expect_err("a refund over an attempt that is neither proven nor cancelled");
+    assert_refusal(&err, "INV-8", "refund over an unsigned order");
+    // Cancelled under the resolution, it is no longer unproven, and the refund runs on the proof
+    // of attempt 1.
+    cancel_unsigned(&pool, id, 2, action).await.unwrap();
+    assert_eq!(unproven_attempts(&pool, id).await, Vec::<i32>::new());
+    resolve(&pool, id, "Refunding", Some("issuing"), Some(action), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        text(
+            &pool,
+            &format!("SELECT state::text FROM transfers WHERE id = {id}")
+        )
+        .await,
+        "Refunding"
+    );
+}
+
+/// `INV-8`, `REQ-EO-6`, `REQ-NX-1`, `REQ-GV-5`: what the cancellation needs. Only an attempt nothing
+/// was signed for; only the next one, after one proven not executed; only in review, under an
+/// approved resolution of that transfer into `Refunding` that has not run; once; and never edited.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_25_the_cancellation_needs_the_evidence_and_the_approved_resolution(pool: PgPool) {
+    let ops = ops(&pool).await;
+    let (id, action) = unsigned_next_attempt_in_review(&pool, &ops, 1).await;
+
+    // Not approved, or into another state, or of another transfer: not this authority.
+    let unapproved = resolution(&ops[0], id, "Refunding", "issuing").await;
+    let err = cancel_unsigned(&pool, id, 2, unapproved)
+        .await
+        .expect_err("an unapproved resolution");
+    assert_refusal(&err, "REQ-GV-5", "no second approver");
+    let elsewhere = resolution(&ops[0], id, "Delivering", "issuing").await;
+    approve(&ops[1], elsewhere).await.unwrap();
+    let err = cancel_unsigned(&pool, id, 2, elsewhere)
+        .await
+        .expect_err("a resolution into another state");
+    assert_refusal(&err, "REQ-GV-5", "a resolution into Delivering");
+    let other = in_review(&pool, 2, "Delivering").await;
+    let theirs = resolution(&ops[0], other, "Refunding", "issuing").await;
+    approve(&ops[1], theirs).await.unwrap();
+    let err = cancel_unsigned(&pool, id, 2, theirs)
+        .await
+        .expect_err("another transfer's resolution");
+    assert_refusal(&err, "REQ-GV-5", "another transfer's resolution");
+    let err = cancel_unsigned(&pool, id, 2, action + 1000)
+        .await
+        .expect_err("no such resolution");
+    assert_refusal(&err, "REQ-GV-5", "no such resolution");
+
+    // Not the next attempt: attempt 3 was never ordered.
+    let err = cancel_unsigned(&pool, id, 3, action)
+        .await
+        .expect_err("an attempt that was never ordered");
+    assert_refusal(&err, "INV-8", "attempt 3");
+    // Attempt 1 is signed and proven, never cancelled (the column refuses it outright).
+    assert!(cancel_unsigned(&pool, id, 1, action).await.is_err());
+
+    // Not outside review.
+    let delivering = at(&pool, 3, "Delivering").await;
+    prove_not_executed(&pool, delivering).await;
+    order_only(&pool, delivering, 2).await;
+    let err = cancel_unsigned(&pool, delivering, 2, action)
+        .await
+        .expect_err("a transfer that is not in review");
+    assert_refusal(&err, "INV-8", "not in review");
+
+    // Once, and never edited.
+    cancel_unsigned(&pool, id, 2, action).await.unwrap();
+    assert!(cancel_unsigned(&pool, id, 2, action).await.is_err());
+    for sql in [
+        "UPDATE unsigned_attempt_cancellations SET attempt = 3",
+        "DELETE FROM unsigned_attempt_cancellations",
+        "TRUNCATE unsigned_attempt_cancellations",
+    ] {
+        assert_refused(&pool, sql, "INV-8").await;
+    }
+}
+
+/// `INV-8`, `REQ-EO-6`, `REQ-NX-1`: an attempt with a signature, or signed bytes, is proven not
+/// executed and never cancelled: it may have moved value. And once an attempt is cancelled, nothing
+/// is recorded for it, not an order, a signing intent, a signature or signed bytes, whoever writes
+/// (a signature landing after the refund's decision would pay the redeemer twice).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_25_a_signed_attempt_is_never_cancelled_and_a_cancelled_one_is_never_signed(
+    pool: PgPool,
+) {
+    let ops = ops(&pool).await;
+
+    // Signed: refused, with the signature alone and with its bytes.
+    let (signed, action) = unsigned_next_attempt_in_review(&pool, &ops, 1).await;
+    let signing = signing_intent_of_attempt_2(&pool, signed).await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO signatures (intent_id, key_id, scheme, public_key, signature) \
+             VALUES ({signing}, 'mint-key', 'sr25519', '\\x01', '\\x02')"
+        ),
+    )
+    .await;
+    let err = cancel_unsigned(&pool, signed, 2, action)
+        .await
+        .expect_err("a signed attempt");
+    assert_refusal(&err, "INV-8", "a signature");
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO signed_transactions (intent_id, attempt, bytes) \
+             VALUES ({signing}, 1, '\\xbeef')"
+        ),
+    )
+    .await;
+    let err = cancel_unsigned(&pool, signed, 2, action)
+        .await
+        .expect_err("an attempt with signed bytes");
+    assert_refusal(&err, "INV-8", "signed bytes");
+    assert_eq!(unproven_attempts(&pool, signed).await, vec![2]);
+
+    // Cancelled: a signing intent recorded before, its signature and its bytes are refused; so is
+    // a new order for the attempt.
+    let (id, action) = unsigned_next_attempt_in_review(&pool, &ops, 2).await;
+    let signing = signing_intent_of_attempt_2(&pool, id).await;
+    cancel_unsigned(&pool, id, 2, action).await.unwrap();
+    for sql in [
+        format!(
+            "INSERT INTO signatures (intent_id, key_id, scheme, public_key, signature) \
+             VALUES ({signing}, 'mint-key', 'sr25519', '\\x01', '\\x02')"
+        ),
+        format!(
+            "INSERT INTO signed_transactions (intent_id, attempt, bytes) \
+             VALUES ({signing}, 1, '\\xbeef')"
+        ),
+        format!(
+            "INSERT INTO intents (transfer_id, network, purpose, on_chain_reference, \
+                 reference_scope, attempt, payload) \
+             SELECT id, destination_network, 'mint', on_chain_reference, redeemer, 2, \
+                 '{{\"order\": {{}}, \"amount\": \"1\"}}' FROM transfers WHERE id = {id}"
+        ),
+    ] {
+        assert_refused(&pool, &sql, "INV-8").await;
+    }
+}
