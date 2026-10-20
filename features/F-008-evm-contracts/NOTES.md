@@ -110,20 +110,22 @@ mainnet (`F-014`).
 
 `script/DeployVault.s.sol`, configured by `config/<network>.json` (network constants, allowances, venue,
 convertibles and their pools, pinned addresses) and by parameters: owners, threshold, delivery and conversion members,
-the Delay's cooldown and expiration, and a salt nonce. `config/vault.example.env` lists every parameter with the
+the guardian, the Delay's cooldown and expiration, and a salt nonce. `config/vault.example.env` lists every parameter with the
 recommended values. In order:
 
 1. Deploy `ReferenceEmitter`, `ReferencedTransferUnwrapper`, `VaultModuleSetup`.
-2. Deploy the Roles proxy and the Delay proxy (both clones of the pinned mastercopies, by the module proxy factory),
-   with the deployer as temporary owner of each, and deploy `VaultGuard` for the pair. No Safe has any of them yet.
+2. Deploy the Roles proxy, the Delay proxy and the guardian's Roles proxy (clones of the pinned mastercopies, by the
+   module proxy factory; the guardian's has a salt of its own), with the deployer as temporary owner of each, and
+   deploy `VaultGuard` for the three. No Safe has any of them yet.
 3. Compute the Safe's address before it exists: CREATE2 by SafeProxyFactory 1.4.1 over the Safe's initializer
-   (owners, threshold, no fallback handler, and a delegatecall to `VaultModuleSetup` that enables the Roles proxy and
-   the Delay proxy as modules and sets the guard) and the salt.
+   (owners, threshold, no fallback handler, and a delegatecall to `VaultModuleSetup` that enables the three proxies as
+   modules and sets the guard) and the salt.
 4. Point Roles' avatar and target, and the Delay's, at that address; make every call of
-   `DeployVault.permissionCalls` (scopes, allowances, unwrappers, members); enable the Safe as the Delay's only
-   module; hand both modifiers' ownership to that address.
-5. Create the Safe. It is born with both modifiers, already configured and already its own, as its only modules, and
-   with the guard set. The script checks it landed at the computed address.
+`DeployVault.permissionCalls` (scopes, allowances, unwrappers, members) and of `DeployVault.guardianCalls` (the
+   guardian's scope, below); enable the Safe as the Delay's only module; hand the three modifiers' ownership to that
+   address.
+5. Create the Safe. It is born with the three modifiers, already configured and already its own, as its only modules,
+   and with the guard set. The script checks it landed at the computed address.
 
 The deployer therefore never owns an enabled modifier (review of PR #28, should-fix 2;
 `test_REQ_KY_4_deployerNeverOwnsAnEnabledModifier` checks the order of the handovers and the enabling in the logs). A
@@ -131,7 +133,19 @@ run that stops midway leaves at most modifiers that no Safe has enabled, or owne
 yet and that only that initializer can create. The Safe never has the deployer as owner or module. The script refuses
 a threshold below 2 (`REQ-KY-5`), a role key that is an owner or holds both roles (`REQ-KY-4`), a deployer that is an
 owner or a role member, the origin token as a convertible (`REQ-CV-7`), a convertible without a declared pool
-(`REQ-VN-4`), a cooldown of 0, and an expiration of 0 or below 60 seconds (`REQ-GV-3`).
+(`REQ-VN-4`), a guardian that is missing or is the deployer, an owner or a role member (`REQ-KY-4`), and a cooldown
+or an expiration outside the bounds of "Cooldown and expiration" (`REQ-GV-3`).
+
+**A Safe created early.** The Safe's address follows from its initializer and the salt, which anyone can compute as
+soon as the modifiers exist, and `createProxyWithNonce` is open to everyone. Someone can therefore create the Safe
+at its address while the deployer is still configuring the modifiers. It is the same Safe (the address commits to the
+initializer, so its owners, modules and guard are the configured ones), but it means the modifiers can be live while
+the deployer still owns them, which the order of steps is meant to prevent. The script refuses to go on if a Safe
+already exists at the address, before it configures anything and again just before it creates the Safe
+(`test_REQ_KY_4_scriptRefusesAPreCreatedSafe`), and the run is abandoned and started again with a new salt. The
+configuration cannot be made atomic with the Safe's creation without a one-shot factory contract (see below), so
+what proves that nothing else happened in that window is the verifier's replay, which a vault must pass before it is
+funded. Treat a vault whose verifier has not passed as not deployed.
 
 **What the deployer could still do** while it owned the modifiers, between steps 2 and 4. On Roles: add a member of
 its own, or widen a role (for example `allowTarget(delivery, originToken, Both)`); either survives the handover, and
@@ -150,12 +164,18 @@ it). An event the mastercopy does not emit fails it, and so does a log range tha
 For the permission events the log data is the call's arguments byte for byte (no argument is indexed); the one
 exception is `SetAllowance`, whose timestamp is the block's when the call passes 0. It also reads state: Roles is a
 clone of the pinned mastercopy, owned by the Safe, with avatar and target the Safe, and its modules are exactly the
-members. **The Delay** (T-008-07) has no permission mapping to replay, so state is enough: a clone of the pinned
+members. **The guardian's Roles modifier** is replayed the same way against `guardianCalls` (so its scope is exactly
+`setTxNonce` on the Delay and `disableModule(any, the delivery Roles modifier)` on the Safe, and its one member the
+guardian; widening its scope or adding a member fails the check), is a clone of the same mastercopy, owned by the Safe,
+with avatar and target the Safe, and is enabled as a Safe module (`VAULT_GUARDIAN_ROLES` names it). **The Delay** (T-008-07) has no permission mapping to replay, so state is enough: a clone of the pinned
 Delay mastercopy, owned by the Safe, avatar and target the Safe, the Safe its only module, the configured cooldown and
 expiration, and an empty queue (`queueNonce` 0, which is what catches a transaction queued by the deployer). **The
 Safe** has the configured owners and threshold, the pinned singleton, the guard slot holding `d.guard`, no fallback
-handler, and exactly the two modules. The emitter, the unwrapper and the guard have the code this repository builds
-(the guard's two immutables are part of its code). It fails closed: a permission granted and revoked again during
+handler, an empty module-guard slot, and exactly the three modules. (Safe 1.4.1, which this vault pins, never reads the
+module-guard slot: module guards arrived in 1.5.0. The check keeps a future Safe from being deployed with one, which
+would stop every module transaction, the guardian's included.) The cooldown and expiration must lie in the bounds. The
+emitter, the unwrapper and the guard have the code this repository builds (the guard's three immutables are part of
+its code). It fails closed: a permission granted and revoked again during
 deployment fails it too. After an owners' role change the configuration has to change with it before the verifier
 passes again, and a vault whose Delay has queued anything is no longer in the state the verifier checks: it is for
 the vault's first state, before funding.
@@ -163,7 +183,9 @@ the vault's first state, before funding.
 Fork tests: `test_REQ_KY_4_verifierAcceptsTheDeployment`, `test_REQ_KY_4_verifierDetectsAPlantedMember` and
 `test_REQ_KY_4_verifierDetectsAWidenedRole` (a deployer that plants either before the handover),
 `test_REQ_KY_4_verifierRefusesPartialHistory`, `test_REQ_GV_3_verifierDetectsAPlantedDelayModule`,
-`test_REQ_GV_3_verifierDetectsAQueuedTransaction` and `test_REQ_GV_5_verifierChecksDelayGuardModulesAndHandler`. The
+`test_REQ_GV_3_verifierDetectsAQueuedTransaction`, `test_REQ_GV_5_verifierChecksDelayGuardModulesAndHandler`,
+`test_REQ_GV_2_verifierDetectsAPlantedGuardianMember`, `test_REQ_GV_2_verifierDetectsAWidenedGuardianScope` and
+`test_REQ_GV_2_verifierChecksTheGuardianModule`. The
 scripts themselves (the deployment with `--broadcast`, the verifier fetching logs over RPC) were run against a local
 anvil fork of Polygon at the pinned block: the verifier passed on a fresh deployment (T-008-03, again with the guard
 and the Delay for T-008-07) and, in T-008-03, failed after a role was widened. Nothing was sent to a real network.
@@ -179,8 +201,9 @@ only: `DEC-13` names no venue on either.
 
 `REQ-GV-3`, `REQ-GV-5`, `REQ-KY-3`; `DEC-10` (`pl-vault-delay`, ruled 2026-10-13); T-008-07. Three pieces, all owned by
 the Safe: `VaultGuard` (`src/VaultGuard.sol`, the Safe's guard), a Zodiac Delay modifier (a clone of the pinned 1.1.1
-mastercopy, a module of the Safe, with the Safe as its only module), and the Roles modifier. Owners no longer act on
-the vault directly except to pause it; everything that widens what the vault can do waits out the Delay's cooldown.
+mastercopy, a module of the Safe, with the Safe as its only module), and the Roles modifier. A fourth piece, the
+guardian's Roles modifier ("The guardian"), is the independent defender. Owners no longer act on the vault directly
+except to pause it; everything that widens what the vault can do waits out the Delay's cooldown.
 
 **The guard is an allowlist.** Safe 1.4.1 runs a guard on `execTransaction` only, never on a module's transaction.
 So the guard decides what the owners may do at once and what they may queue, and a queued call, once it runs, is
@@ -191,14 +214,24 @@ removed, and refused with it). Then, by target:
 
 | Direct owner transaction to | At once (narrowing, a pause) | Only through the Delay (widening) |
 |---|---|---|
-| Roles | revoke a member (`assignRoles` with every flag false, for a module already enabled), `disableModule`, `revokeTarget`, `revokeFunction`, lower an allowance | add a member, scope or allow a target or function, set an unwrapper or default role, enable a module, raise an allowance, change owner or avatar |
-| Safe | `disableModule(prev, roles)`, which stops every outflow | enable a module, change owners or threshold, set the guard or the fallback handler, remove the Delay |
-| Delay | queue a call (`execTransactionFromModule`), skip queued calls (`setTxNonce`, the veto) | change the cooldown or expiration, enable or disable a module, hand over ownership |
+| Roles (the delivery one) | revoke a member (`assignRoles` with every flag false, for a module already enabled), `disableModule`, `revokeTarget`, `revokeFunction`, lower an allowance | add a member, scope or allow a target or function, set an unwrapper or default role, enable a module, raise an allowance, change owner or avatar |
+| Guardian's Roles | nothing, not even a narrowing call | any change (rotate, rescope, remove): queued only |
+| Safe | `disableModule(prev, roles)`, which stops every outflow | enable a module, change owners or threshold, set the guard or the fallback handler, remove the guardian (never: the Delay) |
+| Delay | queue a call (`execTransactionFromModule`), skip queued calls (`setTxNonce`, the veto) | change the cooldown or expiration, within the bounds (the rest of the Delay's configuration: never) |
 | anything else (a token, a router, MultiSend) | nothing | nothing: it cannot even be queued |
 
-**What can be queued** is a plain call, with no value, to the Delay, the Roles modifier or the Safe itself, and a call
-to the Delay may not queue again (`test_REQ_GV_5_theQueueCannotQueueAgain`: a queued queue call would run as the
-Safe, a module of the Delay, and its payload, a token transfer, would enter the queue unseen by the guard). A call to a
+**What can be queued** is a plain call, with no value, to the Delay, the two Roles modifiers or the Safe itself. A call
+to the Delay may be only `setTxCooldown` or `setTxExpiration`, within the bounds below. The review of PR #41 (finding
+2) showed why the rest of the Delay's configuration is not queueable: a queued `Delay.setAvatar` makes the guard
+refuse every owner transaction from then on (it checks that the Delay's avatar is the Safe), pause and veto included,
+with no recovery, and `setTarget`, `transferOwnership` and `Delay.disableModule(prev, safe)` break governance the
+same way. A queued `Delay.enableModule(x)` makes `x` a module that queues without the guard seeing it, and a queued
+queue call (`test_REQ_GV_5_theQueueCannotQueueAgain`) would run as the Safe, a module of the Delay, and enter the queue
+unseen. The simplest fix that the tests prove (`test_REQ_GV_3_queuedCallsThatLockTheOwnersOutAreRefused`) is the
+refusal at queueing time, rather than a recovery path a guardian could abuse. For the same reason a queued
+`Safe.disableModule(prev, delay)` is refused: with the Delay gone nothing can be queued, so a paused vault could never
+be unpaused. The cost is that the Delay can never be replaced or removed (a new Delay needs a new vault), which is the
+safe direction. A call to a
 token, a router or MultiSend, and any delegatecall, is refused when the owners try to queue it. So the Delay is not a
 way to move the vault's tokens: moving them takes a widening of the vault's configuration first (a role, a module, the
 guard), which sits in the queue in public for a whole cooldown. That configuration is what the cooldown is for.
@@ -225,12 +258,40 @@ verifier checks the slot), and `test_REQ_GV_5_theSafeSignsNothingOffChain` and `
 show each path open with the handler and closed without it. Setting a handler later is a Safe change, so it
 is delayed. The cost: the Safe cannot receive ERC-721 or ERC-1155 tokens, which a reserve vault does not hold.
 
+**The guardian** (review of PR #41, finding 1; `REQ-GV-2`, `REQ-KY-4`). Without it the veto and the pause belong to
+the same quorum that attacks: a compromised quorum queues `setGuard(0)`, waits a cooldown, and nobody else can skip it
+or pause the vault. The guardian is one key, supplied as the `GUARDIAN` parameter, that is neither an owner nor the
+delivery or conversion key (the script refuses the same address; whether the custody is different is for whoever picks
+it). It is a member of a role in a *second* Roles modifier, enabled as a Safe module and owned by the Safe, scoped to
+exactly two things (`DeployVault.guardianCalls`, `VaultRoles.pauseConditions`): `Delay.setTxNonce` (veto a queued
+change) and `Safe.disableModule(prev, rolesMain)` with `module` equal to the delivery Roles modifier (pause). It has no
+other target or function, no value, no delegatecall and no unwrapper, so it cannot move value, queue, widen, unpause,
+or change a Roles modifier (`test_REQ_GV_2_guardianCannotMoveValueOrWiden`). Pausing by the guardian alone satisfies
+`REQ-GV-2` ("one party suffices"); unpausing stays the owners' quorum plus the delay.
+
+- *Why a second instance.* The guardian's role is not in the delivery Roles modifier: the owners can revoke a member
+  there at once, and pausing disables the module that carries it. A second instance is not in the guard's set of
+  immediate changes, so the owners reach it only through the queue, where the guardian can veto the entry
+  (`test_REQ_GV_2_ownersCannotRemoveTheGuardianAtOnce`, `test_REQ_GV_2_removingTheGuardianIsDelayedAndVetoable`).
+  Rotating the guardian, rescoping it and removing it are delayed changes, which the guard classifies as widening
+  (`test_REQ_GV_2_rotatingAndRescopingTheGuardianIsDelayed`). A direct owner transaction to the guardian's Roles
+  modifier is refused whatever it says.
+- *Cost, stated plainly.* The guardian can veto everything, including its own rotation and every unpause, and the
+  owners have no path out: a paused vault stays paused as long as the guardian keeps pausing or vetoing. It is a
+  defender with a veto, not a co-owner, and the price is that a hostile or lost guardian freezes governance (never
+  value). Make it a hardware key or a 2-of-N account, and write down how it is rotated, before the vault is funded.
+- *Still open.* A queued `Safe.setGuard(x)` with an `x` that refuses everything is a lock-out the guard does not
+  classify away (removing the guard is the point of that call being queueable); it is stopped by the veto.
+
 **Cooldown and expiration.** 24 hours and 7 days are the recommended values (`config/vault.example.env`, which the
 fork tests deploy with): the brief for this task set them. `PLAN.md` `DEC-10` says only "its cooldown" and gives no
 figure, and no ruling does. They are parameters (`VAULT_DELAY_COOLDOWN`, `VAULT_DELAY_EXPIRATION`, seconds), not
 constants. Expiration counts from the end of the cooldown; a queued change nobody ran in that window is dead and has to
-be queued again, so a stale change cannot be run months later. The script refuses a cooldown of 0 and an expiration of
-0 (a change that never expires) or below 60 s (the Delay's own floor).
+be queued again, so a stale change cannot be run months later. Both are bounded, at deployment and whenever a change of
+them is queued (the same constants in `src/VaultGuard.sol`): a cooldown from 1 hour to 30 days, an expiration from 1
+day to 90 days. Below the floor the delay is not one; above the cap a queued change would sit out of reach of a
+pause or a veto for longer than anyone watches; an expiration of 0 would make queued changes never expire (review of
+PR #41, finding 3). The bounds are this change's choice, not a ruling.
 
 **The queue** is first in, first out. A queued change nobody wants blocks the ones behind it until it is run, skipped
 by the owners (`setTxNonce`, at once and at the threshold, the veto) or expired (`skipExpired`, by anyone).
@@ -243,16 +304,15 @@ by the owners (`setTxNonce`, at once and at the threshold, the veto) or expired 
   to change the vault. What the owners cannot do is do it unseen: the change sits in the queue for the whole
   cooldown, in public, and can be vetoed. `test_REQ_GV_3_removingTheGuardIsDelayed` ends by showing the owners
   moving tokens after the guard is gone. The monitoring that turns the cooldown into a veto is not built here.
-- *Pausing needs the threshold.* Pausing the vault (lowering an allowance, revoking a member, disabling the Roles
-  module) is immediate but is still a Safe transaction at the threshold. `REQ-GV-2` says pausing SHOULD need one
-  authorised party; this is not that. Unpausing is delayed, which is the intended direction.
+- *Pausing by the owners needs the threshold.* Pausing the vault (lowering an allowance, revoking a member, disabling
+  the Roles module) is immediate but is still a Safe transaction at the threshold. The guardian is the one party who
+  can pause alone. Unpausing is delayed, which is the intended direction.
 - *Disabling the Roles module on the Safe* is allowed at once (a full stop). Re-enabling it is a delayed change.
-- *Remove the guard first, then the Delay, never the other way.* Both removals are delayed changes. A queued change runs
-  as the Delay's module transaction, so once the Delay is gone nothing can be queued, and the guard, which then
-  allows only narrowing, freezes administration for good: a vault paused by disabling the Roles module could never be
-  unpaused. If both are to go, queue the guard's removal, let it run, and only then queue the Delay's.
+- *The Delay cannot be removed.* A queued `Safe.disableModule(prev, delay)` is refused (see "What can be queued").
+  Removing the guard is a delayed change; the Delay stays.
 
-Tests: `test/fork/Governance.t.sol` on Polygon, Base and BNB Chain. The Delay modifier itself (cooldown, expiry, order,
+Tests: `test/fork/Governance.t.sol` and `test/fork/Guardian.t.sol` on Polygon, Base and BNB Chain, and
+`test/fork/Adversarial.t.sol` (the review's scenarios and a fuzz run on allowance lowering) on Polygon. The Delay modifier itself (cooldown, expiry, order,
 anyone may run) is exercised as deployed; nothing of it is mocked.
 
 ## Review of PR #28: notes and what stays open

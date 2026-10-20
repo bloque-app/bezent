@@ -14,14 +14,19 @@ A Foundry project in `contracts/evm/`:
 
 - **ReferenceEmitter:** a stateless contract whose only function emits `Reference(bytes32)`.
 - **Vault setup:** a deployment script and its configuration for a Safe (v1.4.1) with a Zodiac Roles v2 modifier, a
-  Zodiac Delay modifier and a Safe guard, per network (Polygon for USDC, Base for EURC, BNB Chain for BTCB). Owners,
-  threshold and the Delay's cooldown and expiration are parameters (the owners are governance; several signers,
+  Zodiac Delay modifier, the guardian's own Roles modifier and a Safe guard, per network (Polygon for USDC, Base for EURC, BNB Chain for BTCB). Owners,
+  threshold, the guardian and the Delay's cooldown and expiration (within bounds) are parameters (the owners are governance; several signers,
   `REQ-KY-5`); `config/vault.example.env` lists them with the recommended values.
 - **Guard and Delay** (`pl-vault-delay`, issue #22): the guard refuses any owner transaction that is not on its
   allowlist, so no owner transaction transfers or approves the vault's tokens (`REQ-GV-5`). Widening changes (a role or
   member added, an allowance raised, a module added, owners or threshold changed, the guard or the Delay removed) go
   through the Delay and take effect only after its cooldown (`REQ-GV-3`); narrowing changes (revoke, lower, pause) stay
-  immediate. The post-deployment verifier checks both.
+  immediate. A queued call may not change the Delay's avatar, target, owner or modules, or take the Delay off the Safe
+  (it would lock the owners out); only its cooldown and expiration, within bounds. The post-deployment verifier checks
+  all of it.
+- **Guardian** (review of PR #41): one independent key that can veto a queued change (`Delay.setTxNonce`) and pause the
+  vault (`Safe.disableModule` of the delivery Roles modifier), and nothing else, through a second Roles modifier the
+  owners can change only through the Delay (`REQ-GV-2`, `REQ-KY-4`).
 - **Delivery role** (bezent's signer key): exactly one allowed call shape — a MultiSend of (origin-token `transfer`
   to any address, `ReferenceEmitter.emit(ref)`), the transfer bounded by a Roles allowance that refills per period.
   Nothing else: no swaps, no CCTP, no other token, no delegatecall but MultiSend's.
