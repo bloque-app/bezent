@@ -461,21 +461,123 @@ impl Core {
         let Some(t) = store::lock_transfer(&mut tx, id).await? else {
             return Ok(Did::default());
         };
-        let did = match t.state() {
-            State::Received => self.received(&mut tx, &t).await?,
-            State::Accepted => self.accepted(&mut tx, &t).await?,
-            State::SourceFinal => self.source_final(&mut tx, &t, now).await?,
-            State::Delivering => self.delivering(&mut tx, &t, now).await?,
-            State::Delivered => self.delivered(&mut tx, &t, now).await?,
-            State::Refunding => self.refunding(&mut tx, &t).await?,
-            State::NeedsReview => self.review(&mut tx, &t, now).await?,
-            _ => Did::default(),
+        // Issue #24: an endpoint's delivery anomaly for this transfer is surfaced before anything
+        // else is decided about it.
+        let surfaced = self.surface_anomalies(&mut tx, &t).await?;
+        let did = match surfaced {
+            Some(did) => did,
+            None => match t.state() {
+                State::Received => self.received(&mut tx, &t).await?,
+                State::Accepted => self.accepted(&mut tx, &t).await?,
+                State::SourceFinal => self.source_final(&mut tx, &t, now).await?,
+                State::Delivering => self.delivering(&mut tx, &t, now).await?,
+                State::Delivered => self.delivered(&mut tx, &t, now).await?,
+                State::Refunding => self.refunding(&mut tx, &t).await?,
+                State::NeedsReview => self.review(&mut tx, &t, now).await?,
+                _ => Did::default(),
+            },
         };
         if t.condition() == Some(Condition::PayoutWindow) {
             self.payout_window_alert(&mut tx, &t).await?;
         }
         tx.commit().await?;
         Ok(did)
+    }
+
+    /// Surfaces the delivery anomalies the endpoints recorded for `t` (issue #24; F-007 review;
+    /// `INV-8`, `REQ-NX-3`, `REQ-RV-1`). An endpoint records a `delivery-anomaly` when what it
+    /// reads contradicts itself: bytes that do not answer their rows, a nonce consumed by another
+    /// payload for the same reference, a reference the contract says was used though the chain
+    /// shows the transaction not executed. It proves nothing then, and the transfer's leg is
+    /// unknown; so a transfer being delivered goes to `Needs-Review` at once, with its owner and
+    /// service level, instead of waiting for its deadline, and the anomaly is attached to the
+    /// review as an event. A transfer already in review gets the event only. Nothing is refunded or
+    /// retried because of it (`REQ-RF-1`), and a review ends only by evidence (`REQ-RV-2`).
+    ///
+    /// An anomaly is the transfer's only if it is of the transfer's destination network and names
+    /// one of the transfer's intents, signed transactions or its leg's on-chain reference: an
+    /// endpoint cannot send another network's transfer to review. Each is surfaced once (the
+    /// event names it), so a resolved review is not reopened by the anomaly that caused it.
+    /// `Some` when the transfer moved.
+    async fn surface_anomalies(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+    ) -> sqlx::Result<Option<Did>> {
+        let from = t.state();
+        if !matches!(
+            from,
+            State::SourceFinal | State::Delivering | State::Delivered | State::NeedsReview
+        ) {
+            return Ok(None);
+        }
+        let leg = Self::leg_reference(t).map(hex0x);
+        // A number in a payload is cast only when it is a whole one that fits.
+        let id = |key: &str| {
+            format!(
+                "CASE WHEN (e.payload ->> '{key}') ~ '^[0-9]{{1,15}}$' \
+                      THEN (e.payload ->> '{key}')::bigint END"
+            )
+        };
+        let sql = format!(
+            "SELECT e.seq, e.payload ->> 'reason' FROM event_log e \
+             WHERE e.kind = 'delivery-anomaly' \
+               AND e.payload ->> 'network' = $2 \
+               AND ( \
+                 EXISTS (SELECT 1 FROM signed_transactions st \
+                         JOIN intents i ON i.id = st.intent_id \
+                         WHERE i.transfer_id = $1 AND i.network = $2 \
+                           AND st.id IN ({signed_transaction}, {signed})) \
+                 OR EXISTS (SELECT 1 FROM intents i \
+                            WHERE i.transfer_id = $1 AND i.network = $2 AND i.id = {intent}) \
+                 OR (lower(e.payload ->> 'on_chain_reference') = $3 \
+                     OR lower(e.payload ->> 'reference') = $3)) \
+               AND NOT EXISTS (SELECT 1 FROM event_log s \
+                               WHERE s.kind = 'delivery-anomaly-surfaced' AND s.transfer_id = $1 \
+                                 AND s.payload ->> 'anomaly' = e.seq::text) \
+             ORDER BY e.seq",
+            signed_transaction = id("signed_transaction"),
+            signed = id("signed"),
+            intent = id("intent"),
+        );
+        let anomalies: Vec<(i64, Option<String>)> = sqlx::query_as(&sql)
+            .bind(t.id)
+            .bind(&t.destination_network)
+            .bind(leg)
+            .fetch_all(&mut *conn)
+            .await?;
+        if anomalies.is_empty() {
+            return Ok(None);
+        }
+        for (seq, reason) in &anomalies {
+            store::event(
+                conn,
+                "delivery-anomaly-surfaced",
+                Some(t.id),
+                &json!({"spec": "INV-8, REQ-NX-3, REQ-RV-1", "anomaly": seq.to_string(),
+                        "bridge_reference": t.bridge_reference, "state": from.as_str(),
+                        "reason": reason}),
+            )
+            .await?;
+            tracing::error!(transfer = %t.bridge_reference, anomaly = seq, ?reason, "INV-8: an endpoint recorded a delivery anomaly for this transfer");
+        }
+        if from == State::NeedsReview {
+            return Ok(None);
+        }
+        store::append(
+            conn,
+            t.id,
+            &Move {
+                from,
+                to: State::NeedsReview,
+                condition: None,
+                point: None,
+                attempt: None,
+                manual_action: None,
+            },
+        )
+        .await?;
+        Ok(Some(Did::moved()))
     }
 
     /// `Received`: a deposit is the ingress's; a refund of a withdrawal is accepted at once; the

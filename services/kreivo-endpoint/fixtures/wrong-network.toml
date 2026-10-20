@@ -6,6 +6,8 @@ network = "kreivo"
 genesis = "0x0101010101010101010101010101010101010101010101010101010101010101"
 chain_spec = "../chain-specs/kreivo.json"
 contract = "0x0000000000000000000000000000000000000000000000000000000000000001"
+# A test value: a deployment names the code hash of the build deployed at `contract`.
+contract_code_hash = "0x00000000000000000000000000000000000000000000000000000000000000c0"
 start_block = 0
 database_url_file = "/run/secrets/bezent-kreivo-endpoint-db"
 

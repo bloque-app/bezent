@@ -149,6 +149,14 @@ pub trait Chain: Send + Sync {
         asset: u32,
     ) -> impl Future<Output = ChainResult<Option<u128>>> + Send;
 
+    /// The code hash of the contract instantiated at `contract` (`Contracts::ContractInfoOf`), at
+    /// `at`; `None` when no contract is instantiated there (issue #24).
+    fn contract_code_hash(
+        &self,
+        at: &BlockRef,
+        contract: &AccountId32,
+    ) -> impl Future<Output = ChainResult<Option<[u8; 32]>>> + Send;
+
     /// The runtime API `ContractsApi_call` with SCALE-encoded `args`, at `at`: a dry run.
     fn contracts_api_call(
         &self,

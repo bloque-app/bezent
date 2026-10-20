@@ -10,6 +10,8 @@ relay_chain_spec = "ksmcc3-identity.json"
 relay_genesis = "0xb0a8d493285c2df73290dfb7e61f870f17b41801197a149ca93654499ea3dafe"
 para_id = 2000
 contract = "0x0000000000000000000000000000000000000000000000000000000000000001"
+# A test value: a deployment names the code hash of the build deployed at `contract`.
+contract_code_hash = "0x00000000000000000000000000000000000000000000000000000000000000c0"
 start_block = 0
 database_url_file = "/run/secrets/bezent-kreivo-endpoint-db"
 

@@ -15,6 +15,7 @@
 //! relay_checkpoint = "0x…"             # BLAKE2b-256 of the relay spec's checkpoint, if it has one
 //! para_id = 2281                       # Kreivo's parachain id, as its chain spec must say
 //! contract = "0x…"                     # the bezent contract's account
+//! contract_code_hash = "0x…"           # the code hash of the build deployed there (AC-I4.1)
 //! start_block = 7000000                # the block the contract was instantiated in
 //! database_url_file = "/run/secrets/bezent-kreivo-endpoint-db"
 //!
@@ -66,6 +67,12 @@ pub struct Config {
     pub para_id: Option<u32>,
     /// The bezent contract's account, `0x` hex.
     pub contract: String,
+    /// The code hash of the contract build deployed at `contract`, `0x` hex (issue #24;
+    /// `AC-I4.1`): the endpoint reads it from the chain at start-up and refuses to start on any
+    /// other, or on none. Required, like the genesis: a deployment pins the build it was
+    /// audited against (the contract job of CI prints it), and an upgraded contract is a change
+    /// of configuration.
+    pub contract_code_hash: String,
     /// The block the contract was instantiated in: observation starts there.
     pub start_block: u64,
     /// The contract's first event sequence number (zero at instantiation).
@@ -176,6 +183,7 @@ impl Config {
         self.declared_genesis()?;
         self.declared_relay()?;
         self.contract_account()?;
+        self.declared_code_hash()?;
         self.lane_account()?;
         if self.max_range == 0 || self.max_walk == 0 {
             return Err("max_range and max_walk must be positive".into());
@@ -217,6 +225,11 @@ impl Config {
         hex_bytes(&self.contract, "contract")
     }
 
+    /// The declared code hash of the contract.
+    pub fn declared_code_hash(&self) -> Result<[u8; 32], String> {
+        hex_bytes(&self.contract_code_hash, "contract_code_hash")
+    }
+
     /// The lane's scheme, public key and account.
     pub fn lane_account(&self) -> Result<(Scheme, Vec<u8>, AccountId32), String> {
         let scheme = Scheme::parse(&self.lane.scheme)
@@ -245,6 +258,7 @@ impl fmt::Debug for Config {
             .field("relay_checkpoint", &self.relay_checkpoint)
             .field("para_id", &self.para_id)
             .field("contract", &self.contract)
+            .field("contract_code_hash", &self.contract_code_hash)
             .field("start_block", &self.start_block)
             .field("first_seq", &self.first_seq)
             .field("database_url_file", &self.database_url_file)

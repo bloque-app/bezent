@@ -232,3 +232,70 @@ fn s_d_kreivos_para_id_is_pinned() {
         );
     }
 }
+
+#[tokio::test]
+async fn ac_i4_1_a_contract_of_another_build_or_none_fails_closed() {
+    // Issue #24: the right network can still hold other code at the contract's account, or none.
+    let contract = [7; 32];
+    let declared = [0xc0; 32];
+    let chain = FakeChain::new([1; 32], contract);
+
+    // No contract instantiated there.
+    let err = network::check_contract(&chain, &contract, declared)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        IdentityError::ContractMismatch {
+            declared,
+            chain: None
+        }
+    );
+    assert!(
+        err.to_string().starts_with("AC-I4.1") && err.to_string().contains("refusing to start"),
+        "{err}"
+    );
+
+    // Another build.
+    chain.set_code_hash(Some([0xc1; 32]));
+    assert_eq!(
+        network::check_contract(&chain, &contract, declared).await,
+        Err(IdentityError::ContractMismatch {
+            declared,
+            chain: Some([0xc1; 32])
+        })
+    );
+    // The declared build, at another account than the one declared: none there.
+    chain.set_code_hash(Some(declared));
+    assert!(matches!(
+        network::check_contract(&chain, &[8; 32], declared).await,
+        Err(IdentityError::ContractMismatch { chain: None, .. })
+    ));
+
+    // A chain that cannot say is unknown, and unknown is not the declared build.
+    chain.set_unavailable(true);
+    assert!(matches!(
+        network::check_contract(&chain, &contract, declared).await,
+        Err(IdentityError::Unknown(_))
+    ));
+
+    chain.set_unavailable(false);
+    assert_eq!(
+        network::check_contract(&chain, &contract, declared).await,
+        Ok(())
+    );
+}
+
+#[test]
+fn ac_i4_1_the_binary_refuses_a_configuration_that_pins_no_code_hash() {
+    // Required like the genesis: a configuration without it is refused, with or without --check.
+    for args in [
+        vec!["--check".to_owned(), fixture("no-code-hash.toml")],
+        vec![fixture("no-code-hash.toml")],
+    ] {
+        let out = Command::new(BIN).args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("contract_code_hash"), "{stderr}");
+    }
+}

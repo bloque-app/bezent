@@ -11,7 +11,8 @@
 //! At start-up, before anything is read or built (`AC-I4.1`): the pinned chain spec must describe
 //! the declared network, its relay chain spec the declared relay chain with the declared
 //! checkpoint, and its `para_id` the declared one (a parachain's identity is pinned with its relay
-//! chain's), then the chain the light client follows must be it. Any
+//! chain's), then the chain the light client follows must be it, and the contract at the declared
+//! account must have the declared code hash (`contract_code_hash`, issue #24). Any
 //! mismatch exits with status 1.
 
 use std::process::ExitCode;
@@ -148,6 +149,11 @@ mod run {
         network::check_chain(&chain, declared)
             .await
             .map_err(|e| e.to_string())?;
+        // Issue #24: the account holds the declared build of the contract, or nothing starts.
+        let contract = config.contract_account()?;
+        network::check_contract(&chain, &contract, config.declared_code_hash()?)
+            .await
+            .map_err(|e| e.to_string())?;
         let (scheme, public_key, account) = config.lane_account()?;
         let lane = Lane {
             key: config.lane.key.clone(),
@@ -161,7 +167,6 @@ mod run {
             uid: config.signer.uid,
             token: read_secret(&config.signer.token_file, "signer token")?,
         };
-        let contract = config.contract_account()?;
         let follower = Follower {
             chain: &chain,
             pool: &pool,

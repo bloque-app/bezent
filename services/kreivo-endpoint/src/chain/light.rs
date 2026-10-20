@@ -356,6 +356,26 @@ fn number(v: &Value<u32>) -> Option<u128> {
     }
 }
 
+/// The bytes a value holds, however its newtypes nest: a hash decodes as a composite of numbers,
+/// or of a composite of numbers. Exactly 32 of them, each a byte, or nothing.
+fn bytes32(v: &Value<u32>) -> Option<[u8; 32]> {
+    fn leaves(v: &Value<u32>, out: &mut Vec<u8>) -> Option<()> {
+        match &v.value {
+            ValueDef::Primitive(Primitive::U128(n)) => out.push(u8::try_from(*n).ok()?),
+            ValueDef::Composite(c) => {
+                for x in c.values() {
+                    leaves(x, out)?;
+                }
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+    let mut out = Vec::new();
+    leaves(v, &mut out)?;
+    out.try_into().ok()
+}
+
 /// Kreivo over the light client. See the module documentation.
 pub struct LightChain {
     client: OnlineClient<PolkadotConfig>,
@@ -538,6 +558,30 @@ impl Chain for LightChain {
             .and_then(number)
             .map(Some)
             .ok_or_else(|| invalid("an asset without a supply"))
+    }
+
+    async fn contract_code_hash(
+        &self,
+        at: &BlockRef,
+        contract: &AccountId32,
+    ) -> ChainResult<Option<[u8; 32]>> {
+        // `ContractInfo { trie_id, code_hash, .. }`: read by field name, so a layout that moves
+        // other fields does not matter, and one without a code hash is refused, not guessed at.
+        let Some(v) = self
+            .fetch(
+                at,
+                "Contracts",
+                "ContractInfoOf",
+                vec![Value::from_bytes(contract)],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        field(&v, "code_hash")
+            .and_then(bytes32)
+            .map(Some)
+            .ok_or_else(|| invalid("a contract without a 32-byte code hash"))
     }
 
     async fn contracts_api_call(&self, at: &BlockRef, args: &[u8]) -> ChainResult<Vec<u8>> {

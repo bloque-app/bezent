@@ -19,7 +19,7 @@
 use std::fmt;
 
 use crate::chain::Chain;
-use crate::kreivo::blake2_256;
+use crate::kreivo::{AccountId32, blake2_256};
 
 /// Why the endpoint refuses to start on a network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +61,14 @@ pub enum IdentityError {
         /// The chain's.
         chain: [u8; 32],
     },
+    /// The contract at the declared account has another code than the declared one, or there is
+    /// none (issue #24).
+    ContractMismatch {
+        /// The declared code hash.
+        declared: [u8; 32],
+        /// The contract's, if one is instantiated.
+        chain: Option<[u8; 32]>,
+    },
     /// The chain did not say what it is: unknown, so the start stops (`REQ-NX-3`).
     Unknown(String),
 }
@@ -100,6 +108,15 @@ impl fmt::Display for IdentityError {
                 f,
                 "AC-I4.1: the chain's genesis 0x{} is not the declared network's 0x{}; refusing to start",
                 hex::encode(chain),
+                hex::encode(declared)
+            ),
+            IdentityError::ContractMismatch { declared, chain } => write!(
+                f,
+                "AC-I4.1: the contract's code hash is {} where 0x{} is declared (contract_code_hash); refusing to start",
+                chain.map_or_else(
+                    || "none (no contract is instantiated there)".to_owned(),
+                    |h| format!("0x{}", hex::encode(h))
+                ),
                 hex::encode(declared)
             ),
             IdentityError::Unknown(e) => write!(
@@ -278,6 +295,33 @@ pub async fn check_chain<C: Chain>(chain: &C, declared: [u8; 32]) -> Result<(), 
         return Err(IdentityError::ChainMismatch {
             declared,
             chain: genesis,
+        });
+    }
+    Ok(())
+}
+
+/// The contract the endpoint observes and calls is the declared build (issue #24; `AC-I4.1`,
+/// `REQ-IC-1`): its code hash, read at the finalized head, is the one the configuration pins. A
+/// network can be the right one while the account holds other code, or none; the endpoint would
+/// decode events and sign calls against a contract it has not seen. A chain that cannot say is
+/// unknown, so the start stops like any other mismatch.
+pub async fn check_contract<C: Chain>(
+    chain: &C,
+    contract: &AccountId32,
+    declared: [u8; 32],
+) -> Result<(), IdentityError> {
+    let finalized = chain
+        .finalized()
+        .await
+        .map_err(|e| IdentityError::Unknown(e.to_string()))?;
+    let code = chain
+        .contract_code_hash(&finalized, contract)
+        .await
+        .map_err(|e| IdentityError::Unknown(e.to_string()))?;
+    if code != Some(declared) {
+        return Err(IdentityError::ContractMismatch {
+            declared,
+            chain: code,
         });
     }
     Ok(())
