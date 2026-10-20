@@ -170,8 +170,10 @@ ships get no cancel ordered; the cancel is ordered only on the deadline transiti
     consumed by another payload for the reference, a reference the contract says was used though the chain shows
     the transaction not executed); it proves nothing then. The core reads them per transfer, at the start of every
     step: an anomaly is the transfer's if it is of the transfer's destination network and names one of its intents,
-    one of its signed transactions or its leg's on-chain reference (an endpoint cannot send another network's
-    transfer to review; a payload that does not have the shape is ignored, never an error). A transfer in
+    one of its signed transactions, or carries its leg's `reference` (an EVM payout's own, derived per transfer; a
+    refund mint's reference is scoped by its redeemer and is never matched alone, the Kreivo endpoint's anomalies
+    name the signed transaction too). An endpoint cannot send another network's transfer to review, and a payload
+    that does not have the shape is ignored, never an error. A transfer in
     `Source-Final`, `Delivering` or `Delivered` goes to `Needs-Review` at once, from its state, with no coordinate
     (the store's edge needs none), instead of at its deadline; one already in review gets the event only. Either way
     a `delivery-anomaly-surfaced` event names the anomaly (once: a resolved review is not reopened by the anomaly

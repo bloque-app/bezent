@@ -179,13 +179,19 @@ async fn inv_8_an_anomaly_of_the_legs_reference_reaches_its_transfer(
     .await;
     w.cycle(t0()).await;
     assert_eq!(w.state(id).await.0, "Needs-Review");
-    // Another reference is not this transfer's.
+    // Another reference is not this transfer's, and an `on_chain_reference` alone is no match
+    // (a refund mint's is scoped by its redeemer, amendment 0008).
     let (other, _) = delivering(&w, [5; 32], 40).await;
+    let theirs = format!(
+        "0x{}",
+        hex::encode(payout_reference_of(&w.admin, other).await)
+    );
     anomaly(
         &w,
         json!({"network": ORIGIN, "reference": format!("0x{}", "ab".repeat(32))}),
     )
     .await;
+    anomaly(&w, json!({"network": ORIGIN, "on_chain_reference": theirs})).await;
     w.settle(t0()).await;
     assert_eq!(w.state(other).await.0, "Delivering");
 }

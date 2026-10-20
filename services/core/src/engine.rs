@@ -495,9 +495,12 @@ impl Core {
     /// retried because of it (`REQ-RF-1`), and a review ends only by evidence (`REQ-RV-2`).
     ///
     /// An anomaly is the transfer's only if it is of the transfer's destination network and names
-    /// one of the transfer's intents, signed transactions or its leg's on-chain reference: an
-    /// endpoint cannot send another network's transfer to review. Each is surfaced once (the
-    /// event names it), so a resolved review is not reopened by the anomaly that caused it.
+    /// one of the transfer's intents or signed transactions, or its leg's `reference`: an
+    /// endpoint cannot send another network's transfer to review. The `reference` an EVM
+    /// endpoint writes is a payout's own (derived per transfer, so one transfer's); a refund
+    /// mint's reference is scoped by its redeemer (amendment 0008) and is not matched on its own:
+    /// the Kreivo endpoint's anomalies name the signed transaction as well. Each is surfaced once
+    /// (the event names it), so a resolved review is not reopened by the anomaly that caused it.
     /// `Some` when the transfer moved.
     async fn surface_anomalies(
         &self,
@@ -530,8 +533,7 @@ impl Core {
                            AND st.id IN ({signed_transaction}, {signed})) \
                  OR EXISTS (SELECT 1 FROM intents i \
                             WHERE i.transfer_id = $1 AND i.network = $2 AND i.id = {intent}) \
-                 OR (lower(e.payload ->> 'on_chain_reference') = $3 \
-                     OR lower(e.payload ->> 'reference') = $3)) \
+                 OR lower(e.payload ->> 'reference') = $3) \
                AND NOT EXISTS (SELECT 1 FROM event_log s \
                                WHERE s.kind = 'delivery-anomaly-surfaced' AND s.transfer_id = $1 \
                                  AND s.payload ->> 'anomaly' = e.seq::text) \
