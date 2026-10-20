@@ -8,19 +8,26 @@ import {Vm} from "forge-std/Vm.sol";
 import {DeployVault} from "./DeployVault.s.sol";
 import {ReferenceEmitter} from "../src/ReferenceEmitter.sol";
 import {ReferencedTransferUnwrapper} from "../src/ReferencedTransferUnwrapper.sol";
+import {VaultGuard} from "../src/VaultGuard.sol";
 import {VaultRoles} from "../src/VaultRoles.sol";
-import {ISafe, IRoles, IRolesEvents} from "../src/interfaces/External.sol";
+import {ISafe, IRoles, IRolesEvents, IDelay} from "../src/interfaces/External.sol";
 
-/// @title VerifyVault (T-008-03; REQ-KY-4, REQ-KY-3, REQ-GV-3)
+/// @title VerifyVault (T-008-03, T-008-07; REQ-KY-4, REQ-KY-3, REQ-GV-3, REQ-GV-5)
 /// @notice Checks a deployed vault against its configuration before it is funded. Fails if any role, target,
 /// function scope, allowance, unwrapper or member of the Roles modifier differs from what
 /// `DeployVault.permissionCalls` sets for config/<NETWORK>.json and the governance parameters, or if the Safe,
-/// the modifier or the vault's own contracts are not what the deployment makes.
+/// the Roles modifier, the Delay modifier, the guard or the vault's own contracts are not what the deployment
+/// makes (the guard set, the two modules and no others, the Delay's cooldown and expiration as configured,
+/// nothing queued, no fallback handler).
 ///
 ///   NETWORK=polygon VAULT_OWNERS=0x..,0x.. VAULT_THRESHOLD=2 DELIVERY_MEMBER=0x.. CONVERSION_MEMBER=0x.. \
-///   VAULT_SAFE=0x.. VAULT_ROLES=0x.. VAULT_EMITTER=0x.. VAULT_UNWRAPPER=0x.. VAULT_FROM_BLOCK=<creation> \
-///   [VAULT_TO_BLOCK=..] [VAULT_LOG_RANGE=10000] \
+///   VAULT_DELAY_COOLDOWN=86400 VAULT_DELAY_EXPIRATION=604800 \
+///   VAULT_SAFE=0x.. VAULT_ROLES=0x.. VAULT_DELAY=0x.. VAULT_GUARD=0x.. VAULT_EMITTER=0x.. VAULT_UNWRAPPER=0x.. \
+///   VAULT_FROM_BLOCK=<creation> [VAULT_TO_BLOCK=..] [VAULT_LOG_RANGE=10000] \
 ///   forge script script/VerifyVault.s.sol --rpc-url <network>
+///
+/// The first parameters are the ones the deployment took (config/vault.example.env); the addresses are the
+/// deployment's output.
 ///
 /// Roles keeps its permissions in mappings that cannot be listed, so the check replays every event the
 /// modifier has emitted since its creation (VAULT_FROM_BLOCK must be at or before the block that created it;
@@ -54,11 +61,15 @@ contract VerifyVault is Script {
             threshold: vm.envUint("VAULT_THRESHOLD"),
             deliveryMember: vm.envAddress("DELIVERY_MEMBER"),
             conversionMember: vm.envOr("CONVERSION_MEMBER", address(0)),
+            cooldown: vm.envUint("VAULT_DELAY_COOLDOWN"),
+            expiration: vm.envUint("VAULT_DELAY_EXPIRATION"),
             saltNonce: 0
         });
         DeployVault.Deployment memory d = DeployVault.Deployment({
             safe: vm.envAddress("VAULT_SAFE"),
             roles: vm.envAddress("VAULT_ROLES"),
+            delay: vm.envAddress("VAULT_DELAY"),
+            guard: vm.envAddress("VAULT_GUARD"),
             emitter: vm.envAddress("VAULT_EMITTER"),
             unwrapper: vm.envAddress("VAULT_UNWRAPPER"),
             moduleSetup: address(0)
@@ -106,6 +117,7 @@ contract VerifyVault is Script {
     ) public {
         _checkPermissions(deploy.permissionCalls(cfg, gov, d), logs);
         _checkRoles(cfg, gov, d);
+        _checkDelay(cfg, gov, d);
         _checkSafe(cfg, gov, d);
         _checkOwnCode(cfg, d);
     }
@@ -267,6 +279,39 @@ contract VerifyVault is Script {
         );
     }
 
+    /// REQ-GV-3: the Delay is a clone of the pinned mastercopy, owned by the Safe, with the Safe as avatar,
+    /// target and its only module, the configured cooldown and expiration, and nothing queued. Unlike Roles'
+    /// permissions, all of this is state that can be read. A module the deployer enabled and disabled again,
+    /// or a transaction it queued while it owned the Delay, would leave the list clean but the queue not: a
+    /// Delay with `queueNonce` above zero fails, so this check is for the vault's first state (before funding).
+    function _checkDelay(
+        DeployVault.NetworkConfig memory cfg,
+        DeployVault.Governance memory gov,
+        DeployVault.Deployment memory d
+    ) internal view {
+        IDelay delay = IDelay(d.delay);
+        require(
+            keccak256(d.delay.code)
+                == keccak256(
+                    abi.encodePacked(
+                        hex"363d3d373d3d3d363d73", cfg.delayMastercopy, hex"5af43d82803e903d91602b57fd5bf3"
+                    )
+                ),
+            "VerifyVault: Delay is not a clone of the mastercopy"
+        );
+        require(delay.owner() == d.safe, "VerifyVault: Delay not owned by the Safe");
+        require(delay.avatar() == d.safe, "VerifyVault: Delay avatar is not the Safe");
+        require(delay.target() == d.safe, "VerifyVault: Delay target is not the Safe");
+        (address[] memory modules, address next) = delay.getModulesPaginated(SENTINEL, 10);
+        require(next == SENTINEL, "VerifyVault: too many Delay modules");
+        require(
+            modules.length == 1 && modules[0] == d.safe, "VerifyVault: Delay modules are not the Safe alone"
+        );
+        require(delay.txCooldown() == gov.cooldown, "VerifyVault: Delay cooldown");
+        require(delay.txExpiration() == gov.expiration, "VerifyVault: Delay expiration");
+        require(delay.queueNonce() == 0 && delay.txNonce() == 0, "VerifyVault: Delay has queued transactions");
+    }
+
     function _checkSafe(
         DeployVault.NetworkConfig memory cfg,
         DeployVault.Governance memory gov,
@@ -287,12 +332,23 @@ contract VerifyVault is Script {
             }
             require(found, "VerifyVault: Safe owners");
         }
+        // Two modules: the Roles modifier (outflows) and the Delay (the owners' administration), and no others.
         (address[] memory modules, address next) = safe.getModulesPaginated(SENTINEL, 10);
-        require(next == SENTINEL && modules.length == 1 && modules[0] == d.roles, "VerifyVault: Safe modules");
-        require(uint256(bytes32(safe.getStorageAt(GUARD_SLOT, 1))) == 0, "VerifyVault: Safe has a guard");
+        require(next == SENTINEL && modules.length == 2, "VerifyVault: Safe modules");
         require(
-            address(uint160(uint256(bytes32(safe.getStorageAt(FALLBACK_SLOT, 1))))) == cfg.fallbackHandler,
-            "VerifyVault: Safe fallback handler"
+            (modules[0] == d.roles && modules[1] == d.delay)
+                || (modules[0] == d.delay && modules[1] == d.roles),
+            "VerifyVault: Safe modules"
+        );
+        // REQ-GV-5: the guard is ours; owners' direct transactions pass it.
+        require(
+            address(uint160(uint256(bytes32(safe.getStorageAt(GUARD_SLOT, 1))))) == d.guard,
+            "VerifyVault: Safe guard"
+        );
+        // No fallback handler: the Safe answers no EIP-1271 signature, so the owners' signatures cannot stand in
+        // for a Safe transaction (a permit on a token the vault holds, a signed module transaction on the Delay).
+        require(
+            uint256(bytes32(safe.getStorageAt(FALLBACK_SLOT, 1))) == 0, "VerifyVault: Safe fallback handler"
         );
     }
 
@@ -303,6 +359,10 @@ contract VerifyVault is Script {
             d.unwrapper.codehash
                 == address(new ReferencedTransferUnwrapper(cfg.multiSendCallOnly, d.emitter)).codehash,
             "VerifyVault: unwrapper code"
+        );
+        // The guard's two immutables are part of its code, so this pins its policy and the modifiers it serves.
+        require(
+            d.guard.codehash == address(new VaultGuard(d.roles, d.delay)).codehash, "VerifyVault: guard code"
         );
     }
 

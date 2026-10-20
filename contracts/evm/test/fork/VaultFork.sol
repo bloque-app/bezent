@@ -7,7 +7,7 @@ import {Enum} from "@gnosis.pm/safe-contracts/contracts/common/Enum.sol";
 
 import {DeployVault} from "../../script/DeployVault.s.sol";
 import {VaultRoles} from "../../src/VaultRoles.sol";
-import {ISafe, IRoles, IERC20} from "../../src/interfaces/External.sol";
+import {ISafe, IRoles, IDelay, IERC20} from "../../src/interfaces/External.sol";
 import {Batches} from "../Batches.sol";
 
 /// Fork harness for T-008-03 to T-008-06: a fork at the block PR #19 pins (e2e/evm/forks.env), the vault
@@ -42,6 +42,7 @@ abstract contract VaultFork is Test {
     DeployVault.Deployment internal d;
     ISafe internal safe;
     IRoles internal roles;
+    IDelay internal delayMod;
 
     address internal deployer;
     address[] internal owners;
@@ -62,6 +63,7 @@ abstract contract VaultFork is Test {
         d = script.deployAs(cfg, governance(), deployer);
         safe = ISafe(d.safe);
         roles = IRoles(d.roles);
+        delayMod = IDelay(d.delay);
     }
 
     /// Field-by-field copy (the legacy pipeline cannot copy a memory struct array to storage at once).
@@ -82,9 +84,9 @@ abstract contract VaultFork is Test {
         cfg.router = c.router;
         cfg.safeSingleton = c.safeSingleton;
         cfg.safeProxyFactory = c.safeProxyFactory;
-        cfg.fallbackHandler = c.fallbackHandler;
         cfg.multiSendCallOnly = c.multiSendCallOnly;
         cfg.rolesMastercopy = c.rolesMastercopy;
+        cfg.delayMastercopy = c.delayMastercopy;
         cfg.moduleProxyFactory = c.moduleProxyFactory;
         for (uint256 i; i < list.length; ++i) {
             cfg.convertibles.push(list[i]);
@@ -125,15 +127,31 @@ abstract contract VaultFork is Test {
         outsider = vm.addr(vm.deriveKey(MNEMONIC, 6));
     }
 
-    /// Governance parameters of the fork vault: 2 of 3 owners.
+    /// Governance parameters of the fork vault: 2 of 3 owners, and the Delay's cooldown and expiration as
+    /// config/vault.example.env recommends them (so that file is what the tests prove).
     function governance() internal view virtual returns (DeployVault.Governance memory) {
         return DeployVault.Governance({
             owners: owners,
             threshold: 2,
             deliveryMember: delivery,
             conversionMember: cfg.venue == DeployVault.Venue.None ? address(0) : conversion,
+            cooldown: exampleValue("VAULT_DELAY_COOLDOWN"),
+            expiration: exampleValue("VAULT_DELAY_EXPIRATION"),
             saltNonce: uint256(keccak256(bytes(string.concat("bezent.vault.test.", network()))))
         });
+    }
+
+    /// `key=<unsigned integer>` from config/vault.example.env.
+    function exampleValue(string memory key) internal view returns (uint256) {
+        string memory file = vm.readFile(string.concat(vm.projectRoot(), "/config/vault.example.env"));
+        string[] memory lines = vm.split(file, "\n");
+        for (uint256 i; i < lines.length; ++i) {
+            string[] memory kv = vm.split(lines[i], "=");
+            if (kv.length == 2 && keccak256(bytes(kv[0])) == keccak256(bytes(key))) {
+                return vm.parseUint(kv[1]);
+            }
+        }
+        revert("exampleValue: key not in config/vault.example.env");
     }
 
     // ------------------------------------------------------------------ acting as a role
@@ -187,32 +205,73 @@ abstract contract VaultFork is Test {
     /// Executes a Safe transaction signed by the first `signers` owners (sorted by address, as Safe requires).
     function ownersExec(address to, bytes memory data, Enum.Operation op, uint256 signers)
         internal
-        returns (bool)
+        returns (bool ok)
     {
-        bytes32 h = safe.getTransactionHash(to, 0, data, op, 0, 0, 0, address(0), address(0), safe.nonce());
+        (ok,) = ownersTry(to, data, op, signers);
+    }
+
+    /// Like `ownersExec`, with the revert data (a guard's refusal is an `Error(string)`).
+    function ownersTry(address to, bytes memory data, Enum.Operation op, uint256 signers)
+        internal
+        returns (bool, bytes memory)
+    {
+        return ownersTx(to, 0, data, op, 0, 0, address(0), address(0), signers);
+    }
+
+    /// A Safe transaction with every field: value, the gas refund (`baseGas`, `gasPrice`, `gasToken`,
+    /// `refundReceiver`) and the number of owners who sign it.
+    function ownersTx(
+        address to,
+        uint256 value,
+        bytes memory data,
+        Enum.Operation op,
+        uint256 baseGas,
+        uint256 gasPrice,
+        address gasToken,
+        address refundReceiver,
+        uint256 signers
+    ) internal returns (bool, bytes memory) {
+        bytes32 h = safe.getTransactionHash(
+            to, value, data, op, 0, baseGas, gasPrice, gasToken, refundReceiver, safe.nonce()
+        );
+        bytes memory sigs = ownerSignatures(h, signers);
+        vm.prank(outsider); // anyone may relay a fully signed Safe transaction
+        return address(safe)
+            .call(
+                abi.encodeCall(
+                    ISafe.execTransaction,
+                    (to, value, data, op, 0, baseGas, gasPrice, gasToken, payable(refundReceiver), sigs)
+                )
+            );
+    }
+
+    /// A widening change, the way the vault allows it: the owners queue `data` for `to` in the Delay, the
+    /// cooldown passes, and anyone runs it.
+    function ownersDelayed(address to, bytes memory data) internal {
+        bytes memory queued =
+            abi.encodeCall(IDelay.execTransactionFromModule, (to, 0, data, Enum.Operation.Call));
+        (bool ok, bytes memory ret) = ownersTry(d.delay, queued, Enum.Operation.Call, 2);
+        assertTrue(ok, string(ret));
+        vm.warp(block.timestamp + delayMod.txCooldown());
+        vm.prank(outsider);
+        delayMod.executeNextTx(to, 0, data, Enum.Operation.Call);
+    }
+
+    /// The first `signers` owners' signatures over `hash`, sorted by signer address as Safe requires.
+    function ownerSignatures(bytes32 hash, uint256 signers) internal view returns (bytes memory sigs) {
         uint256[] memory keys = new uint256[](signers);
         for (uint256 i; i < signers; ++i) {
             keys[i] = ownerKeys[i];
         }
-        // Sort by signer address, ascending.
         for (uint256 i; i < signers; ++i) {
             for (uint256 j = i + 1; j < signers; ++j) {
                 if (vm.addr(keys[j]) < vm.addr(keys[i])) (keys[i], keys[j]) = (keys[j], keys[i]);
             }
         }
-        bytes memory sigs;
         for (uint256 i; i < signers; ++i) {
-            (uint8 v, bytes32 r, bytes32 s) = vm.sign(keys[i], h);
+            (uint8 v, bytes32 r, bytes32 s) = vm.sign(keys[i], hash);
             sigs = bytes.concat(sigs, abi.encodePacked(r, s, v));
         }
-        vm.prank(outsider); // anyone may relay a fully signed Safe transaction
-        (bool ok,) = address(safe)
-            .call(
-                abi.encodeCall(
-                    ISafe.execTransaction, (to, 0, data, op, 0, 0, 0, address(0), payable(address(0)), sigs)
-                )
-            );
-        return ok;
     }
 
     // ------------------------------------------------------------------ helpers

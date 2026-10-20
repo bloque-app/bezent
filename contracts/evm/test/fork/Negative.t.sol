@@ -5,7 +5,7 @@ pragma solidity 0.8.28;
 import {Enum} from "@gnosis.pm/safe-contracts/contracts/common/Enum.sol";
 
 import {VaultRoles} from "../../src/VaultRoles.sol";
-import {ISafe, IRoles} from "../../src/interfaces/External.sol";
+import {ISafe, IRoles, IDelay} from "../../src/interfaces/External.sol";
 import {Batches} from "../Batches.sol";
 import {VaultFork} from "./VaultFork.sol";
 
@@ -99,8 +99,9 @@ abstract contract NegativeTest is VaultFork {
                 );
             assertFalse(ok5);
         }
+        // The Roles modifier and the Delay, and no other.
         (address[] memory modules,) = safe.getModulesPaginated(address(0x1), 10);
-        assertEq(modules.length, 1);
+        assertEq(modules.length, 2);
         assertEq(safe.getOwners().length, owners.length);
     }
 
@@ -157,8 +158,11 @@ abstract contract NegativeTest is VaultFork {
             roleCall(outsider, VaultRoles.DELIVERY, cfg.multiSendCallOnly, 0, pair, dc);
         // Not even a module of the Roles modifier.
         assertRevertSelector(ok, ret, bytes4(keccak256("NotAuthorized(address)")));
-        (ok, ret) = roleCall(conversion, VaultRoles.DELIVERY, cfg.multiSendCallOnly, 0, pair, dc);
-        assertRevertSelector(ok, ret, NO_MEMBERSHIP);
+        // The conversion key is a member of its own role on Polygon only (DEC-13): elsewhere it is no module.
+        if (cfg.convertibles.length > 0) {
+            (ok, ret) = roleCall(conversion, VaultRoles.DELIVERY, cfg.multiSendCallOnly, 0, pair, dc);
+            assertRevertSelector(ok, ret, NO_MEMBERSHIP);
+        }
         (ok, ret) = roleCall(delivery, VaultRoles.CONVERSION, cfg.multiSendCallOnly, 0, pair, dc);
         assertRevertSelector(ok, ret, NO_MEMBERSHIP);
         vm.prank(delivery);
@@ -167,16 +171,28 @@ abstract contract NegativeTest is VaultFork {
         assertRevertSelector(ok, ret, NO_MEMBERSHIP);
     }
 
-    /// REQ-GV-3: role changes pass the Safe's owners at its threshold; fewer signatures are refused.
+    /// REQ-GV-3: role changes pass the Safe's owners at its threshold, and then the Delay: fewer signatures
+    /// are refused, a direct owner transaction is refused by the guard, and the queued change takes effect only
+    /// after the cooldown (the guard's and the Delay's own suites are in Governance.t.sol).
     function test_REQ_GV_3_onlyOwnersAtThresholdChangeRoles() public {
         bytes32 key = VaultRoles.deliveryAllowanceKey(cfg.originToken);
-        bytes memory raise = abi.encodeCall(IRoles.setAllowance, (key, 7, 7, 7, 1 days, 0));
-        assertFalse(ownersExec(d.roles, raise, Enum.Operation.Call, 1), "one signature");
+        uint128 raised = cfg.deliveryBalance * 2;
+        bytes memory raise = abi.encodeCall(
+            IRoles.setAllowance, (key, raised, raised, cfg.deliveryRefill, cfg.deliveryPeriod, 0)
+        );
+        bytes memory queued =
+            abi.encodeCall(IDelay.execTransactionFromModule, (d.roles, 0, raise, Enum.Operation.Call));
+
+        assertFalse(ownersExec(d.roles, raise, Enum.Operation.Call, 2), "directly, even at the threshold");
+        assertFalse(ownersExec(d.delay, queued, Enum.Operation.Call, 1), "queued with one signature");
+        assertTrue(ownersExec(d.delay, queued, Enum.Operation.Call, 2), "queued at the threshold");
         (,,, uint128 bal,) = roles.allowances(key);
-        assertEq(bal, cfg.deliveryBalance);
-        assertTrue(ownersExec(d.roles, raise, Enum.Operation.Call, 2), "threshold");
+        assertEq(bal, cfg.deliveryBalance, "not before the cooldown");
+
+        vm.warp(block.timestamp + delayMod.txCooldown());
+        delayMod.executeNextTx(d.roles, 0, raise, Enum.Operation.Call);
         (,,, bal,) = roles.allowances(key);
-        assertEq(bal, 7);
+        assertEq(bal, raised);
     }
 }
 

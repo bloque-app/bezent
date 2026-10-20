@@ -9,15 +9,13 @@ import {VaultRoles} from "../../src/VaultRoles.sol";
 import {
     IERC20,
     IUniswapSwapRouter02,
-    ISlipstreamSwapRouter,
     IUniswapV3Factory,
-    ISlipstreamFactory,
     IConcentratedPool
 } from "../../src/interfaces/External.sol";
 import {Batches} from "../Batches.sol";
 import {VaultFork} from "./VaultFork.sol";
 
-/// Router calldata per venue.
+/// Router calldata for the venue (Uniswap v3 SwapRouter02 on Polygon: DEC-13).
 library Venues {
     /// Uniswap v3 SwapRouter02 through the pool of fee tier `fee`.
     function uniswap(address tokenIn, address tokenOut, int24 fee, address recipient, uint256 amountIn)
@@ -29,22 +27,6 @@ library Venues {
             IUniswapSwapRouter02.exactInputSingle,
             (IUniswapSwapRouter02.ExactInputSingleParams(
                     tokenIn, tokenOut, uint24(fee), recipient, amountIn, 0, 0
-                ))
-        );
-    }
-
-    /// Aerodrome Slipstream through the pool of tick spacing `tickSpacing`.
-    function slipstream(
-        address tokenIn,
-        address tokenOut,
-        int24 tickSpacing,
-        address recipient,
-        uint256 amountIn
-    ) internal view returns (bytes memory) {
-        return abi.encodeCall(
-            ISlipstreamSwapRouter.exactInputSingle,
-            (ISlipstreamSwapRouter.ExactInputSingleParams(
-                    tokenIn, tokenOut, tickSpacing, recipient, block.timestamp + 600, amountIn, 0, 0
                 ))
         );
     }
@@ -65,7 +47,7 @@ abstract contract ConversionFork is VaultFork {
     }
 
     /// Router calldata for an exact-input single swap on this network's venue, through the pool whose fee
-    /// tier or tick spacing is `pool`.
+    /// tier is `pool`.
     function swapDataVia(address tokenIn, address tokenOut, int24 pool, address recipient, uint256 amountIn)
         internal
         view
@@ -125,12 +107,12 @@ abstract contract ConversionFork is VaultFork {
     }
 }
 
-/// The REQ-CV-7 suite, run on each venue.
+/// The REQ-CV-7 suite, run on the one venue that has a conversion role (Polygon; DEC-13).
 abstract contract ConversionTest is ConversionFork {
-    /// The pool parameters the venue's factory knows: every fee tier or tick spacing a pool can have.
+    /// The pool parameters the venue's factory knows: every fee tier a pool can have.
     function poolParams() internal view virtual returns (int24[] memory);
 
-    /// The venue's pool of (tokenIn, origin token) with fee tier or tick spacing `pool`, or zero.
+    /// The venue's pool of (tokenIn, origin token) with fee tier `pool`, or zero.
     function poolAt(address tokenIn, int24 pool) internal view virtual returns (address);
 
     /// REQ-VN-4: the review's scenario. A full window of the convertible (50 000 USDT0 on Polygon) through any
@@ -345,32 +327,6 @@ contract PolygonConversionTest is ConversionTest {
         address factory = IUniswapSwapRouter02(cfg.router).factory();
         // forge-lint: disable-next-line(unsafe-typecast)
         return IUniswapV3Factory(factory).getPool(tokenIn, cfg.originToken, uint24(fee));
-    }
-}
-
-/// Base: Aerodrome Slipstream, USDC → EURC through the declared tick-spacing-50 pool.
-contract BaseConversionTest is ConversionTest {
-    function network() internal pure override returns (string memory) {
-        return "base";
-    }
-
-    function swapDataVia(address tokenIn, address tokenOut, int24 pool, address recipient, uint256 amountIn)
-        internal
-        view
-        override
-        returns (bytes memory)
-    {
-        return Venues.slipstream(tokenIn, tokenOut, pool, recipient, amountIn);
-    }
-
-    /// Every tick spacing the factory lists at the fork block (`tickSpacings()`).
-    function poolParams() internal view override returns (int24[] memory) {
-        return ISlipstreamFactory(ISlipstreamSwapRouter(cfg.router).factory()).tickSpacings();
-    }
-
-    function poolAt(address tokenIn, int24 tickSpacing) internal view override returns (address) {
-        address factory = ISlipstreamSwapRouter(cfg.router).factory();
-        return ISlipstreamFactory(factory).getPool(tokenIn, cfg.originToken, tickSpacing);
     }
 }
 

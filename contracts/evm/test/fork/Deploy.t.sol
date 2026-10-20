@@ -3,20 +3,26 @@
 pragma solidity 0.8.28;
 
 import {Vm} from "forge-std/Vm.sol";
+import {Enum} from "@gnosis.pm/safe-contracts/contracts/common/Enum.sol";
 import {ExecutionOptions} from "zodiac-roles/Types.sol";
 
 import {DeployVault} from "../../script/DeployVault.s.sol";
 import {VerifyVault} from "../../script/VerifyVault.s.sol";
+import {VaultGuard} from "../../src/VaultGuard.sol";
 import {VaultRoles} from "../../src/VaultRoles.sol";
-import {IERC20, IRoles, IRolesEvents, ISafeProxyFactory} from "../../src/interfaces/External.sol";
+import {IERC20, IRoles, IRolesEvents, IDelay, ISafeProxyFactory} from "../../src/interfaces/External.sol";
 import {VaultFork} from "./VaultFork.sol";
 
-/// A deployer key that abuses its time as the modifier's owner, as the review's scenario does: before the
-/// handover it plants a member of its own, or widens the delivery role to the whole origin token.
+/// A deployer key that abuses its time as the modifiers' owner, as the review's scenario does: before the
+/// handover it plants a member of its own, widens the delivery role to the whole origin token, enables a module
+/// of its own on the Delay, or queues a transaction in the Delay (and then disables the module, leaving the
+/// module list clean).
 contract PlantingDeployVault is DeployVault {
     enum Plant {
         Member,
-        WidenedRole
+        WidenedRole,
+        DelayModule,
+        DelayQueue
     }
 
     Plant internal plant;
@@ -27,8 +33,18 @@ contract PlantingDeployVault is DeployVault {
         accomplice = accomplice_;
     }
 
-    function _beforeHandover(IRoles roles, NetworkConfig memory cfg, Deployment memory) internal override {
-        if (plant == Plant.Member) {
+    function _beforeHandover(IRoles roles, NetworkConfig memory cfg, Deployment memory d) internal override {
+        if (plant == Plant.DelayModule) {
+            IDelay(d.delay).enableModule(accomplice);
+        } else if (plant == Plant.DelayQueue) {
+            // The deployer is still the Delay's owner: it enables itself, queues, and disables itself again.
+            // Under the broadcast, the deployer is the caller of every one of these.
+            (, address self,) = vm.readCallers();
+            IDelay delay = IDelay(d.delay);
+            delay.enableModule(self);
+            delay.execTransactionFromModule(accomplice, 0, hex"deadbeef", Enum.Operation.Call);
+            delay.disableModule(address(0x1), self);
+        } else if (plant == Plant.Member) {
             bytes32[] memory keys = new bytes32[](1);
             keys[0] = VaultRoles.DELIVERY;
             bool[] memory yes = new bool[](1);
@@ -40,9 +56,9 @@ contract PlantingDeployVault is DeployVault {
     }
 }
 
-/// T-008-03: the deployment script on each fork. Owners and threshold as configured, the Roles modifier the
-/// only module and owned by the Safe, the deployer left with nothing, and every pinned address carrying the
-/// code its project published (NOTES.md).
+/// T-008-03, T-008-07: the deployment script on each fork. Owners and threshold as configured, the Roles and
+/// Delay modifiers the only modules and owned by the Safe, the guard set, the deployer left with nothing, and
+/// every pinned address carrying the code its project published (NOTES.md).
 abstract contract DeployTest is VaultFork {
     // Runtime code hashes, from safe-global/safe-deployments (v1.4.1 codeHash) and from the zodiac
     // repository's verified mastercopy artefacts; equal on Polygon, Base and BNB Chain at the pinned blocks.
@@ -52,9 +68,10 @@ abstract contract DeployTest is VaultFork {
         0x50c3cdc4074750a7a974204a716c999edd37482f907608d960b2b025ee0b3317;
     bytes32 internal constant MULTISEND_CALL_ONLY_141 =
         0xecd5bd14a08c5d2122379900b2f272bdf107a7e92423c10dd5fe3254386c9939;
-    bytes32 internal constant FALLBACK_HANDLER_141 =
-        0x7c6007a5d711cea8dfd5d91f5940ec29c7f200fe511eb1fc1397b367af3c42f9;
     bytes32 internal constant ROLES_211 = 0x471d8b3b419f1eb955230c0326c8812176df49bf3c7b414a563fda5a3c6c10b6;
+    // keccak of the runtime bytecode in gnosisguild/zodiac mastercopies/delay/1.1.1/Delay/bytecode.json, equal to
+    // the code on Polygon, Base and BNB Chain at the pinned blocks.
+    bytes32 internal constant DELAY_111 = 0xdd928eddfff7b68bd8fff28178c29e3388c1d098051d9262f151c4b534c577b8;
     bytes32 internal constant MODULE_PROXY_FACTORY_120 =
         0x01623cbcf010a1c326230f1b2d5f48a66b440232ee49096102bc84967dc5f21e;
 
@@ -69,8 +86,8 @@ abstract contract DeployTest is VaultFork {
         assertEq(cfg.safeSingleton.codehash, SAFE_L2_141, "SafeL2 1.4.1");
         assertEq(cfg.safeProxyFactory.codehash, SAFE_PROXY_FACTORY_141, "SafeProxyFactory 1.4.1");
         assertEq(cfg.multiSendCallOnly.codehash, MULTISEND_CALL_ONLY_141, "MultiSendCallOnly 1.4.1");
-        assertEq(cfg.fallbackHandler.codehash, FALLBACK_HANDLER_141, "CompatibilityFallbackHandler 1.4.1");
         assertEq(cfg.rolesMastercopy.codehash, ROLES_211, "Roles 2.1.1");
+        assertEq(cfg.delayMastercopy.codehash, DELAY_111, "Delay 1.1.1");
         assertEq(cfg.moduleProxyFactory.codehash, MODULE_PROXY_FACTORY_120, "ModuleProxyFactory 1.2.0");
         assertEq(IERC20(cfg.originToken).decimals(), cfg.originDecimals, "origin decimals");
         assertEq(IERC20(cfg.originToken).symbol(), cfg.originSymbol, "origin symbol");
@@ -95,16 +112,24 @@ abstract contract DeployTest is VaultFork {
         assertEq(safe.getThreshold(), 2);
     }
 
-    /// REQ-RN-4: the vault's code path for outflows is the Roles modifier only, owned by the Safe.
-    function test_REQ_RN_4_rolesIsTheOnlyModuleAndOwnedByTheSafe() public view {
+    /// REQ-RN-4, REQ-GV-3, REQ-GV-5: the vault's modules are the Roles modifier (outflows) and the Delay
+    /// (administration), both owned by the Safe; the guard is set; there is no fallback handler.
+    function test_REQ_RN_4_rolesAndDelayAreTheOnlyModulesAndOwnedByTheSafe() public view {
         (address[] memory modules,) = safe.getModulesPaginated(address(0x1), 10);
-        assertEq(modules.length, 1, "one module");
-        assertEq(modules[0], d.roles);
+        assertEq(modules.length, 2, "two modules");
+        assertTrue(safe.isModuleEnabled(d.roles), "Roles");
+        assertTrue(safe.isModuleEnabled(d.delay), "Delay");
         assertEq(roles.owner(), d.safe);
         assertEq(roles.avatar(), d.safe);
         assertEq(roles.target(), d.safe);
-        assertEq(uint256(bytes32(safe.getStorageAt(GUARD_SLOT, 1))), 0, "no guard");
-        assertEq(address(uint160(uint256(bytes32(safe.getStorageAt(FALLBACK_SLOT, 1))))), cfg.fallbackHandler);
+        assertEq(delayMod.owner(), d.safe);
+        assertEq(delayMod.avatar(), d.safe);
+        assertEq(delayMod.target(), d.safe);
+        (address[] memory delayModules,) = delayMod.getModulesPaginated(address(0x1), 10);
+        assertEq(delayModules.length, 1, "the Safe alone queues");
+        assertEq(delayModules[0], d.safe);
+        assertEq(address(uint160(uint256(bytes32(safe.getStorageAt(GUARD_SLOT, 1))))), d.guard, "guard");
+        assertEq(uint256(bytes32(safe.getStorageAt(FALLBACK_SLOT, 1))), 0, "no fallback handler");
         assertEq(address(roles.unwrappers(_unwrapperKey(cfg.multiSendCallOnly, 0x8d80ff0a))), d.unwrapper);
         assertEq(address(roles.unwrappers(_unwrapperKey(cfg.originToken, VaultRoles.TRANSFER))), d.unwrapper);
     }
@@ -158,11 +183,23 @@ abstract contract DeployTest is VaultFork {
 
         bytes32 enabled = keccak256("EnabledModule(address)");
         uint256 handover = type(uint256).max;
+        uint256 delayHandover = type(uint256).max;
         uint256 enabling = type(uint256).max;
         uint256 lastRoles;
+        uint256 lastDelay;
         for (uint256 i; i < logs.length; ++i) {
             Vm.Log memory l = logs[i];
             if (l.emitter == e.roles) lastRoles = i;
+            if (l.emitter == e.delay) lastDelay = i;
+            if (
+                l.emitter == e.delay && l.topics[0] == IRolesEvents.OwnershipTransferred.selector
+                    && address(uint160(uint256(l.topics[2]))) == e.safe
+            ) {
+                assertEq(
+                    address(uint160(uint256(l.topics[1]))), deployer, "Delay handed over by the deployer"
+                );
+                delayHandover = i;
+            }
             if (
                 l.emitter == e.roles && l.topics[0] == IRolesEvents.OwnershipTransferred.selector
                     && address(uint160(uint256(l.topics[2]))) == e.safe
@@ -178,8 +215,110 @@ abstract contract DeployTest is VaultFork {
             }
         }
         assertLt(handover, enabling, "the handover precedes the enabling");
+        assertLt(delayHandover, enabling, "the Delay's handover precedes the enabling");
         assertLt(lastRoles, enabling, "nothing changes the modifier once the Safe has it");
+        assertLt(lastDelay, enabling, "nothing changes the Delay once the Safe has it");
         assertEq(roles.owner(), d.safe);
+        assertEq(delayMod.owner(), d.safe);
+    }
+
+    /// REQ-GV-3: the Delay's cooldown and expiration are the configured ones, which are the recommended ones.
+    function test_REQ_GV_3_delayAsConfigured() public view {
+        assertEq(delayMod.txCooldown(), exampleValue("VAULT_DELAY_COOLDOWN"));
+        assertEq(delayMod.txExpiration(), exampleValue("VAULT_DELAY_EXPIRATION"));
+        assertEq(delayMod.txCooldown(), 1 days, "recommended cooldown");
+        assertEq(delayMod.txExpiration(), 7 days, "recommended expiration");
+        assertEq(delayMod.queueNonce(), 0);
+    }
+
+    /// REQ-GV-3: the script refuses a delay that is none.
+    function test_REQ_GV_3_scriptRefusesNoCooldown() public {
+        DeployVault.Governance memory g = governance();
+        g.saltNonce += 1;
+        g.cooldown = 0;
+        vm.expectRevert(bytes("DeployVault: no cooldown"));
+        script.deployAs(cfg, g, deployer);
+    }
+
+    /// REQ-GV-3: the script refuses a queue that never clears, and one the Delay itself would refuse.
+    function test_REQ_GV_3_scriptRefusesNoExpiration() public {
+        DeployVault.Governance memory g = governance();
+        g.saltNonce += 1;
+        g.expiration = 0;
+        vm.expectRevert(bytes("DeployVault: expiration below 60 s"));
+        script.deployAs(cfg, g, deployer);
+    }
+
+    function test_REQ_GV_3_scriptRefusesExpirationBelowTheDelaysMinimum() public {
+        DeployVault.Governance memory g = governance();
+        g.saltNonce += 1;
+        g.expiration = 59;
+        vm.expectRevert(bytes("DeployVault: expiration below 60 s"));
+        script.deployAs(cfg, g, deployer);
+    }
+
+    /// REQ-GV-3: a Delay module the deployer enabled before the handover survives it, and the verifier fails.
+    function test_REQ_GV_3_verifierDetectsAPlantedDelayModule() public {
+        PlantingDeployVault evil = new PlantingDeployVault(PlantingDeployVault.Plant.DelayModule, outsider);
+        (DeployVault.Deployment memory e, DeployVault.Governance memory g, VerifyVault.Log[] memory logs) =
+            _recordedDeployment(evil);
+        assertTrue(IDelay(e.delay).isModuleEnabled(outsider), "the plant survived the handover");
+        VerifyVault verifier = new VerifyVault();
+        vm.expectRevert(bytes("VerifyVault: Delay modules are not the Safe alone"));
+        verifier.check(script, cfg, g, e, logs);
+    }
+
+    /// REQ-GV-3: a transaction the deployer queued while it owned the Delay, with the module list left clean,
+    /// is still in the queue after the handover, and the verifier fails.
+    function test_REQ_GV_3_verifierDetectsAQueuedTransaction() public {
+        PlantingDeployVault evil = new PlantingDeployVault(PlantingDeployVault.Plant.DelayQueue, outsider);
+        (DeployVault.Deployment memory e, DeployVault.Governance memory g, VerifyVault.Log[] memory logs) =
+            _recordedDeployment(evil);
+        assertEq(IDelay(e.delay).queueNonce(), 1, "the queued transaction survived the handover");
+        assertFalse(IDelay(e.delay).isModuleEnabled(address(evil)), "its module is gone");
+        VerifyVault verifier = new VerifyVault();
+        vm.expectRevert(bytes("VerifyVault: Delay has queued transactions"));
+        verifier.check(script, cfg, g, e, logs);
+    }
+
+    /// REQ-GV-3, REQ-GV-5: the verifier checks the Delay's settings, the guard, the modules and the handler.
+    function test_REQ_GV_5_verifierChecksDelayGuardModulesAndHandler() public {
+        (DeployVault.Deployment memory e, DeployVault.Governance memory g, VerifyVault.Log[] memory logs) =
+            _recordedDeployment(script);
+        VerifyVault verifier = new VerifyVault();
+
+        DeployVault.Governance memory other = governance();
+        other.cooldown = g.cooldown - 1;
+        vm.expectRevert(bytes("VerifyVault: Delay cooldown"));
+        verifier.check(script, cfg, other, e, logs);
+        other = governance();
+        other.expiration = g.expiration + 1;
+        vm.expectRevert(bytes("VerifyVault: Delay expiration"));
+        verifier.check(script, cfg, other, e, logs);
+
+        // A guard that is not this repository's (here: one for another pair of modifiers).
+        DeployVault.Deployment memory wrongGuard = DeployVault.Deployment(
+            e.safe,
+            e.roles,
+            e.delay,
+            address(new VaultGuard(address(0xBEEF), address(0xCAFE))),
+            e.emitter,
+            e.unwrapper,
+            e.moduleSetup
+        );
+        vm.expectRevert(bytes("VerifyVault: Safe guard"));
+        verifier.check(script, cfg, g, wrongGuard, logs);
+        // The right guard address, but the Safe has none.
+        vm.store(e.safe, bytes32(GUARD_SLOT), bytes32(0));
+        vm.expectRevert(bytes("VerifyVault: Safe guard"));
+        verifier.check(script, cfg, g, e, logs);
+        vm.store(e.safe, bytes32(GUARD_SLOT), bytes32(uint256(uint160(e.guard))));
+        // A fallback handler, which would let the owners sign for the Safe.
+        vm.store(e.safe, bytes32(FALLBACK_SLOT), bytes32(uint256(uint160(address(0xF00D)))));
+        vm.expectRevert(bytes("VerifyVault: Safe fallback handler"));
+        verifier.check(script, cfg, g, e, logs);
+        vm.store(e.safe, bytes32(FALLBACK_SLOT), bytes32(0));
+        verifier.check(script, cfg, g, e, logs);
     }
 
     /// REQ-KY-4: a member planted by the deployer before the handover survives it, and the verifier fails.
