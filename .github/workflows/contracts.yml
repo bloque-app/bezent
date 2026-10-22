@@ -5,6 +5,7 @@ name: Contracts
 # F-006: bezent's ink! contract is a workspace of its own (`contracts/bezent`), excluded from any
 # root workspace. This workflow runs only when it changes. It follows aledgent's `contracts.yml`.
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
@@ -14,6 +15,9 @@ on:
     paths:
       - "contracts/bezent/**"
       - ".github/workflows/contracts.yml"
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -74,9 +78,33 @@ jobs:
           size=$(stat -c %s target/ink/bezent_contract.wasm)
           echo "contract code: $size bytes"
           test "$size" -le $((192 * 1024))
+      # What a reviewer needs to publish this exact build. The code hash is the blake2_256 of the code
+      # blob (`b2sum -l 256`); cargo-contract records the same value as `source.hash` in the bundle.
+      - name: Code hash and bundle digest
+        run: |
+          bundle=target/ink/bezent_contract.contract
+          blob=target/ink/bezent_contract.wasm
+          code_hash="0x$(b2sum -l 256 "$blob" | cut -d' ' -f1)"
+          test "$code_hash" = "$(jq -r '.source.hash' "$bundle")"
+          ink_version=$(sed -n '/^name = "ink"$/{n;s/^version = "\(.*\)"$/\1/p;}' Cargo.lock | head -n1)
+          {
+            echo "### bezent contract build"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| code hash (blake2_256 of the code blob) | \`$code_hash\` |"
+            echo "| bundle sha256 (\`bezent_contract.contract\`) | \`$(sha256sum "$bundle" | cut -d' ' -f1)\` |"
+            echo "| code blob size | $(stat -c %s "$blob") bytes |"
+            echo "| git commit | \`$GITHUB_SHA\` |"
+            echo "| cargo-contract | $(cargo contract --version | head -n1) |"
+            echo "| rustc | $(rustc --version) |"
+            echo "| cargo | $(cargo --version) |"
+            echo "| ink! | $ink_version |"
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: bezent-contract
+          if-no-files-found: error
           path: |
             contracts/bezent/target/ink/bezent_contract.contract
             contracts/bezent/target/ink/bezent_contract.wasm
