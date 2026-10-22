@@ -174,7 +174,7 @@ jobs:
           done
           test "$(docker image inspect -f '{{.Config.User}}' bezent-sidecar:ci)" = "65532:65532"
           # The RDS CA bundle is in each service image, at the path bezent_store::tls defaults to.
-          for t in ingress core signer kreivo-endpoint evm-endpoint; do
+          for t in ingress core signer kreivo-endpoint evm-endpoint migrate; do
             id=$(docker create "bezent-$t:ci")
             n=$(docker cp "$id:/usr/share/bezent/ca/rds-global-bundle.pem" - | tar -xO | grep -c 'BEGIN CERTIFICATE')
             docker rm "$id" > /dev/null

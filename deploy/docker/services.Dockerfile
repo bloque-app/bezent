@@ -152,6 +152,7 @@ LABEL org.opencontainers.image.title="bezent-migrate" \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
       org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-migrate /usr/local/bin/bezent-migrate
+COPY --from=rds-ca /out/ca/rds-global-bundle.pem /usr/share/bezent/ca/rds-global-bundle.pem
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/bezent-migrate"]
 
