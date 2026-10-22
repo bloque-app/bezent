@@ -292,6 +292,10 @@ pub enum StoreError {
     Exists(String),
     /// The store could not be reached or written.
     Io(String),
+    /// The bucket or the role is configured so that the store cannot tell whether a place is
+    /// free: a `403` for a missing key (no `s3:ListBucket` on the whole bucket), or a key whose
+    /// latest version is a delete marker. Not a transient failure and not a verdict on the key.
+    Misconfigured(String),
 }
 
 impl fmt::Display for StoreError {
@@ -301,19 +305,85 @@ impl fmt::Display for StoreError {
                 write!(f, "{name} exists; a statement is never revised (REQ-PR-2)")
             }
             Self::Io(e) => write!(f, "statement store: {e}"),
+            Self::Misconfigured(e) => write!(f, "statement store misconfigured: {e}"),
         }
     }
 }
 
 impl std::error::Error for StoreError {}
 
+/// What a store answered a write with: where the object is and the bucket's receipt for it. The
+/// core records it after the write succeeded (migration 0053; issue #58).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Receipt {
+    /// Where the object was written: the bucket key, or the file name for a directory.
+    pub location: String,
+    /// The ETag, if the store has one.
+    pub etag: Option<String>,
+    /// The version id, if the store is versioned.
+    pub version_id: Option<String>,
+}
+
+impl Receipt {
+    /// The receipt of a store that answers with a location only.
+    pub fn local(name: &str) -> Self {
+        Self {
+            location: name.to_owned(),
+            ..Self::default()
+        }
+    }
+}
+
+/// An object read from a store, with its receipt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stored {
+    /// Its bytes.
+    pub bytes: Vec<u8>,
+    /// Where it is, and its ETag and version.
+    pub receipt: Receipt,
+}
+
 /// An append-only store of statements (`REQ-PR-2`; `DEC-16`'s bucket with object lock).
+///
+/// The core calls [`put_at`](Self::put_at) and [`get_at`](Self::get_at), naming the statement's
+/// issue time, because the bucket keys a statement by its date. A store that does not need it
+/// implements [`put`](Self::put) and [`get`](Self::get) and takes the defaults.
 pub trait StatementStore: Send + Sync {
     /// Writes `bytes` under `name`; refuses a name that exists.
     fn put(&self, name: &str, bytes: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send;
 
     /// Reads `name`.
     fn get(&self, name: &str) -> impl Future<Output = Result<Option<Vec<u8>>, StoreError>> + Send;
+
+    /// Writes `bytes` under `name`, for a statement issued at `issued_at`; refuses a name that
+    /// exists, unless it holds exactly these bytes already. Returns the store's receipt.
+    fn put_at(
+        &self,
+        name: &str,
+        issued_at: DateTime<Utc>,
+        bytes: &[u8],
+    ) -> impl Future<Output = Result<Receipt, StoreError>> + Send {
+        let _ = issued_at;
+        async move {
+            self.put(name, bytes).await?;
+            Ok(Receipt::local(name))
+        }
+    }
+
+    /// Reads `name`, for a statement issued at `issued_at`.
+    fn get_at(
+        &self,
+        name: &str,
+        issued_at: DateTime<Utc>,
+    ) -> impl Future<Output = Result<Option<Stored>, StoreError>> + Send {
+        let _ = issued_at;
+        async move {
+            Ok(self.get(name).await?.map(|bytes| Stored {
+                bytes,
+                receipt: Receipt::local(name),
+            }))
+        }
+    }
 }
 
 /// A local directory as the store: files are created once and never opened for writing again.
@@ -424,6 +494,10 @@ pub struct Published {
     pub bytes: Vec<u8>,
     /// Their SHA-256.
     pub sha256: [u8; 32],
+    /// The store's receipt for the document (issue #58).
+    pub receipt: Receipt,
+    /// The store's receipt for the signature file.
+    pub signature_receipt: Receipt,
 }
 
 /// The statement publisher over the core's pool, the statement key and the store.
@@ -576,15 +650,19 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
         for _ in 0..ROUNDS {
             match self.publish_once(asset, now).await {
                 Ok(Step::Abandoned) => {}
-                Ok(Step::Published(p)) => return Ok(p),
+                Ok(Step::Published(p)) => return Ok(*p),
                 Err(e) => {
                     published = Err(e);
                     break;
                 }
             }
         }
-        if let Err(StatementError::Stuck(why)) = &published {
-            self.page_stuck(asset, why, now).await;
+        match &published {
+            Err(StatementError::Stuck(why)) => self.page_stuck(asset, why, now).await,
+            // The store could not take the statement (the bucket refused or was unreachable after
+            // every retry): a condition to page on at once, never a silent skip (issue #58).
+            Err(StatementError::Store(e)) => self.page_store_failure(asset, e, now).await,
+            _ => {}
         }
         published
     }
@@ -604,16 +682,55 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
                 "action": "the store holds the next statement's name with a document bezent did not sign and cannot re-derive; nothing was signed",
             }),
         };
+        self.page_once(page, asset, why, now).await;
+    }
+
+    /// Pages `statement-publish-failed` for `asset`, once per [`stuck_page_window`] (issue #58):
+    /// the statement store refused or failed to take a signed statement after every retry. The
+    /// error is in the page; the dedupe key is the fixed reason, so a changing error text does not
+    /// page every cycle.
+    async fn page_store_failure(&self, asset: &str, error: &StoreError, now: DateTime<Utc>) {
+        let (why, action) = match error {
+            StoreError::Misconfigured(_) => (
+                "the statement store is misconfigured",
+                "fix the bucket or the task role: s3:ListBucket on the whole bucket without an s3:prefix condition, s3:GetObject on the prefix, and a bucket policy denying s3:DeleteObject; the signed statement is kept and written again every cycle once it is fixed",
+            ),
+            _ => (
+                "the statement store did not take the statement",
+                "the signed statement is kept and written again every cycle; check the bucket (existence, object lock, versioning), the task role's policy and the KMS key",
+            ),
+        };
+        let page = Page {
+            kind: "statement-publish-failed".into(),
+            asset: asset.to_owned(),
+            detail: json!({
+                "spec": "REQ-PR-1, REQ-PR-2",
+                "asset": asset,
+                "why": why,
+                "error": error.to_string(),
+                "refused_to_overwrite": matches!(error, StoreError::Exists(_)),
+                "paged_at": now.to_rfc3339(),
+                "repeats_after_seconds": stuck_page_window().num_seconds(),
+                "action": action,
+            }),
+        };
+        self.page_once(page, asset, why, now).await;
+    }
+
+    /// Logs and pages `page` unless one of its kind with the same asset and `why` was paged within
+    /// the last [`stuck_page_window`] (PR #50 re-check S-3: not on every cycle).
+    async fn page_once(&self, page: Page, asset: &str, why: &str, now: DateTime<Utc>) {
         let logged = async {
             let mut conn = self.pool.acquire().await?;
             let paged: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM event_log WHERE kind = 'statement-stuck' \
+                "SELECT EXISTS (SELECT 1 FROM event_log WHERE kind = $4 \
                    AND payload ->> 'asset' = $1 AND payload ->> 'why' = $2 \
                    AND (payload ->> 'paged_at')::timestamptz > $3)",
             )
             .bind(asset)
             .bind(why)
             .bind(now - stuck_page_window())
+            .bind(&page.kind)
             .fetch_one(&mut *conn)
             .await?;
             if !paged {
@@ -625,7 +742,7 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
             Ok(false) => {}
             Ok(true) => self.pager.page(&page),
             Err(e) => {
-                tracing::error!(asset, error = %e, "REQ-PR-2: a stuck statement chain could not be logged");
+                tracing::error!(asset, error = %e, "REQ-PR-2: a statement page could not be logged");
                 self.pager.page(&page);
             }
         }
@@ -692,9 +809,6 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
             public_key: &public_key,
             name: name.clone(),
         };
-        if let Some(stored) = self.store.get(&name).await.map_err(StatementError::Store)? {
-            return self.adopt(tx, next, stored).await.map(Step::Published);
-        }
         // A statement the key signed for this place and that never reached the store (a publish
         // cut short after signing) is this place's statement: it is published as signed, never
         // replaced by another, so one statement is signed per place, whatever the key (REQ-PR-2;
@@ -718,6 +832,22 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
             .iter()
             .find(|(.., k)| k.as_slice() == public_key.as_slice())
             .or(signed_before.first());
+        // The bucket keys a statement by the date it was issued: that of the statement this key
+        // already signed for the place, if one was, never the date of this attempt (issue #58).
+        let issued_for_place = candidate
+            .and_then(|(_, message, ..)| issued_at_of(message))
+            .unwrap_or(now);
+        if let Some(stored) = self
+            .store
+            .get_at(&name, issued_for_place)
+            .await
+            .map_err(StatementError::Store)?
+        {
+            return self
+                .adopt(tx, next, stored)
+                .await
+                .map(|p| Step::Published(Box::new(p)));
+        }
         if let Some((intent, message, sha256, signature, key)) = candidate {
             let why = if key.as_slice() == public_key.as_slice() {
                 match self.storable(&mut tx, &next, message, signature).await {
@@ -732,7 +862,7 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
                                 issued_at,
                             )
                             .await
-                            .map(Step::Published);
+                            .map(|p| Step::Published(Box::new(p)));
                     }
                     Err(StatementError::Stuck(why)) => why,
                     Err(e) => return Err(e),
@@ -760,6 +890,8 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
         let signature = signed(&self.signer, &public_key, &bytes).await?;
         let signature_name = format!("{name}.sig");
         let signature_file = signature_file(&name, &sha256, &public_key, &signature);
+        // The row first, inside the open transaction: the store's guards refuse a statement that
+        // does not extend the chain before anything reaches an append-only bucket.
         sqlx::query(
             "INSERT INTO reserve_statements (asset, sequence, evaluation_id, issued_at, name, \
                  sha256, previous_sha256, public_key, signature) \
@@ -776,23 +908,38 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
         .bind(&signature)
         .execute(&mut *tx)
         .await?;
-        self.store
-            .put(&name, &bytes)
+        let receipt = self
+            .store
+            .put_at(&name, now, &bytes)
             .await
             .map_err(StatementError::Store)?;
-        self.store
-            .put(&signature_name, &signature_file)
+        let signature_receipt = self
+            .store
+            .put_at(&signature_name, now, &signature_file)
             .await
             .map_err(StatementError::Store)?;
+        // Recorded only now that both writes succeeded (issue #58).
+        record_objects(
+            &mut tx,
+            asset,
+            sequence,
+            &[
+                (&name, &receipt, &bytes),
+                (&signature_name, &signature_receipt, &signature_file),
+            ],
+        )
+        .await?;
         tx.commit().await?;
-        Ok(Step::Published(Published {
+        Ok(Step::Published(Box::new(Published {
             asset: asset.to_owned(),
             sequence,
             name,
             signature_name,
             bytes,
             sha256,
-        }))
+            receipt,
+            signature_receipt,
+        })))
     }
 
     /// Whether `message` (hex), signed by the current key with `signature` for `next`'s place and
@@ -893,7 +1040,7 @@ type SignedBefore = (i64, String, String, Vec<u8>, Vec<u8>);
 /// One step of [`Statements::publish`].
 enum Step {
     /// The place's statement was published.
-    Published(Published),
+    Published(Box<Published>),
     /// The place was abandoned; the next one is due at once.
     Abandoned,
 }
@@ -1062,17 +1209,9 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
     ) -> Result<Published, StatementError> {
         let sha256: [u8; 32] = Sha256::digest(&bytes).into();
         let signature_name = format!("{}.sig", next.name);
-        self.store
-            .put(&next.name, &bytes)
-            .await
-            .map_err(StatementError::Store)?;
-        self.store
-            .put(
-                &signature_name,
-                &signature_file(&next.name, &sha256, next.public_key, &signature),
-            )
-            .await
-            .map_err(StatementError::Store)?;
+        let signature_file = signature_file(&next.name, &sha256, next.public_key, &signature);
+        // The row first, so the store's guards refuse a statement that does not extend the chain
+        // before anything reaches an append-only bucket.
         sqlx::query(
             "INSERT INTO reserve_statements (asset, sequence, evaluation_id, issued_at, name, \
                  sha256, previous_sha256, public_key, signature) \
@@ -1089,6 +1228,28 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
         .bind(&signature)
         .execute(&mut *tx)
         .await?;
+        // The date is the signed statement's own, not this attempt's: a retry on a later day
+        // finds the object a cut-short attempt left (issue #58).
+        let receipt = self
+            .store
+            .put_at(&next.name, issued_at, &bytes)
+            .await
+            .map_err(StatementError::Store)?;
+        let signature_receipt = self
+            .store
+            .put_at(&signature_name, issued_at, &signature_file)
+            .await
+            .map_err(StatementError::Store)?;
+        record_objects(
+            &mut tx,
+            &next.a.asset,
+            next.sequence,
+            &[
+                (&next.name, &receipt, &bytes),
+                (&signature_name, &signature_receipt, &signature_file),
+            ],
+        )
+        .await?;
         tx.commit().await?;
         Ok(Published {
             asset: next.a.asset.clone(),
@@ -1097,6 +1258,8 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
             signature_name,
             bytes,
             sha256,
+            receipt,
+            signature_receipt,
         })
     }
 
@@ -1109,8 +1272,12 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
         &self,
         mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
         next: Next<'_>,
-        bytes: Vec<u8>,
+        stored: Stored,
     ) -> Result<Published, StatementError> {
+        let Stored {
+            bytes,
+            receipt: statement_receipt,
+        } = stored;
         let doc: Value = serde_json::from_slice(&bytes)
             .map_err(|_| StatementError::Stuck(format!("{}: not a statement", next.name)))?;
         let claimed =
@@ -1136,22 +1303,24 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
         let signature_name = format!("{name}.sig");
         let held = self
             .store
-            .get(&signature_name)
+            .get_at(&signature_name, issued_at)
             .await
             .map_err(StatementError::Store)?;
         let recorded = match held {
             Some(_) => None,
             None => self.recorded_signature(&sha256, &bytes, public_key).await?,
         };
-        let signature = match held {
+        let (signature, signature_receipt, signature_bytes) = match held {
             // Signed with this key already: adopted as it is, nothing new signed.
             Some(held) => {
-                if verify(&bytes, &held, public_key).is_err() {
+                if verify(&bytes, &held.bytes, public_key).is_err() {
                     return Err(stuck("its signature file does not verify"));
                 }
-                let sig: Value = serde_json::from_slice(&held)
+                let sig: Value = serde_json::from_slice(&held.bytes)
                     .map_err(|_| stuck("its signature file is malformed"))?;
-                unhex(&sig["signature"]).ok_or_else(|| stuck("its signature file is malformed"))?
+                let signature = unhex(&sig["signature"])
+                    .ok_or_else(|| stuck("its signature file is malformed"))?;
+                (signature, held.receipt, held.bytes)
             }
             // Unsigned: a signature file is written only for exactly the bytes bezent re-derives
             // (PR #50 review M3). Signed through a recorded statement intent over exactly these
@@ -1169,11 +1338,12 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
                     None => signed(&self.signer, public_key, &bytes).await?,
                 };
                 let file = signature_file(&name, &sha256, public_key, &signature);
-                self.store
-                    .put(&signature_name, &file)
+                let receipt = self
+                    .store
+                    .put_at(&signature_name, issued_at, &file)
                     .await
                     .map_err(StatementError::Store)?;
-                signature
+                (signature, receipt, file)
             }
         };
         sqlx::query(
@@ -1192,6 +1362,16 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
         .bind(&signature)
         .execute(&mut *tx)
         .await?;
+        record_objects(
+            &mut tx,
+            asset,
+            sequence,
+            &[
+                (&name, &statement_receipt, &bytes),
+                (&signature_name, &signature_receipt, &signature_bytes),
+            ],
+        )
+        .await?;
         tx.commit().await?;
         tracing::warn!(asset, name = %name, "REQ-PR-2: adopted a statement an earlier attempt left in the store");
         Ok(Published {
@@ -1201,6 +1381,8 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
             signature_name,
             bytes,
             sha256,
+            receipt: statement_receipt,
+            signature_receipt,
         })
     }
 }
@@ -1226,6 +1408,43 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
             .into_iter()
             .find(|g| verifies_exactly("ed25519", public_key, bytes, g)))
     }
+}
+
+/// The issue time a signed statement's bytes (the intent's `message`, hex) state.
+fn issued_at_of(message: &str) -> Option<DateTime<Utc>> {
+    let bytes = hex::decode(message.strip_prefix("0x").unwrap_or(message)).ok()?;
+    let doc: Value = serde_json::from_slice(&bytes).ok()?;
+    DateTime::parse_from_rfc3339(doc["issued_at"].as_str()?)
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
+}
+
+/// Records, in the open transaction, where the store wrote each object of the statement at
+/// (`asset`, `sequence`) and its receipt (migration 0053; issue #58): called only after every
+/// write succeeded, so a row means the object is in the store.
+async fn record_objects(
+    tx: &mut sqlx::PgConnection,
+    asset: &str,
+    sequence: i64,
+    objects: &[(&str, &Receipt, &[u8])],
+) -> sqlx::Result<()> {
+    for (name, receipt, bytes) in objects {
+        sqlx::query(
+            "INSERT INTO reserve_statement_objects \
+                 (asset, sequence, name, location, sha256, etag, version_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(asset)
+        .bind(sequence)
+        .bind(name)
+        .bind(&receipt.location)
+        .bind(Sha256::digest(bytes).as_slice())
+        .bind(&receipt.etag)
+        .bind(&receipt.version_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
 }
 
 /// The signature file published next to a statement.

@@ -33,6 +33,7 @@
 pub mod book;
 pub mod check;
 pub mod readings;
+pub mod s3;
 pub mod statement;
 
 use std::collections::BTreeMap;

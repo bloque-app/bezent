@@ -99,9 +99,112 @@ pub struct StatementConfig {
     /// The statement key's ed25519 public key, `0x` and 64 hex digits: what every signature the
     /// signer returns is verified with before anything is published.
     pub public_key: String,
-    /// The append-only directory statements are written to (`DEC-16`'s object-locked bucket is
-    /// mounted or synchronised there by the deployment, `F-014`).
-    pub directory: PathBuf,
+    /// The append-only directory statements are written to: the file sink, for tests. Refused
+    /// outside `environment = "test"`; exactly one of `directory` and `s3` is set (issue #58).
+    pub directory: Option<PathBuf>,
+    /// The object-locked bucket statements are written to, by the core itself (`DEC-16`; issue
+    /// #58). Written `[statement.s3]`.
+    pub s3: Option<S3Config>,
+}
+
+/// How an object-locked bucket retains what is written to it.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+pub enum ObjectLockMode {
+    /// Retention that only an identity with `s3:BypassGovernanceRetention` can shorten.
+    #[serde(rename = "GOVERNANCE")]
+    Governance,
+    /// Retention that no one can shorten or remove until it expires.
+    #[serde(rename = "COMPLIANCE")]
+    Compliance,
+    /// No retention header is sent: the bucket's own default applies, if any. Test only.
+    #[serde(rename = "off")]
+    Off,
+}
+
+/// The default retention of a statement object, in days.
+pub const DEFAULT_RETENTION_DAYS: u32 = 365;
+
+/// The most days an object may be retained for (100 years): a typo guard.
+pub const MAX_RETENTION_DAYS: u32 = 36_500;
+
+/// The `[statement.s3]` setting: the bucket the core writes the daily statements to (`DEC-16`;
+/// issue #58). Credentials are not here: they come from the task role (`REQ-KY-1`).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S3Config {
+    /// The bucket, created with versioning and Object Lock enabled.
+    pub bucket: String,
+    /// A key prefix inside the bucket, without leading or trailing slash; may be empty.
+    #[serde(default)]
+    pub prefix: String,
+    /// The bucket's region.
+    pub region: String,
+    /// A KMS key (id, ARN or alias) for SSE-KMS; left out, the bucket's default encryption
+    /// applies. A statement is public: anonymous readers cannot read SSE-KMS objects.
+    pub kms_key_id: Option<String>,
+    /// Retention mode; `off` only in a test deployment. Required: which mode production runs is
+    /// the owner's to decide (issue #58), so there is no default.
+    pub object_lock_mode: ObjectLockMode,
+    /// Days each object is retained for; left out, [`DEFAULT_RETENTION_DAYS`].
+    pub retention_days: Option<u32>,
+}
+
+impl S3Config {
+    /// The retention in days: the setting, or the default.
+    pub fn retention_days(&self) -> u32 {
+        self.retention_days.unwrap_or(DEFAULT_RETENTION_DAYS)
+    }
+
+    /// Why this setting is refused, if it is (`test` is whether `environment = "test"`).
+    pub fn validate(&self, test: bool) -> Result<(), String> {
+        let b = &self.bucket;
+        let ok = (3..=63).contains(&b.len())
+            && b.bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-' || c == b'.')
+            && b.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && b.ends_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit());
+        if !ok {
+            return Err("statement.s3.bucket is not a valid bucket name".into());
+        }
+        if !self.prefix.is_empty()
+            && self.prefix.split('/').any(|p| {
+                p.is_empty()
+                    || p == "."
+                    || p == ".."
+                    || !p
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"-_.=".contains(&c))
+            })
+        {
+            return Err("statement.s3.prefix must be plain path segments (letters, digits, - _ . =) without a leading, trailing or doubled slash".into());
+        }
+        if self.region.is_empty()
+            || !self
+                .region
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        {
+            return Err("statement.s3.region must be a region name such as us-east-2".into());
+        }
+        if self.kms_key_id.as_deref().is_some_and(str::is_empty) {
+            return Err("statement.s3.kms_key_id is empty; leave it out for the bucket's default encryption".into());
+        }
+        match self.object_lock_mode {
+            ObjectLockMode::Off if !test => {
+                return Err("statement.s3.object_lock_mode = \"off\" is refused outside environment = \"test\": statements are kept under object lock (REQ-PR-2, DEC-16)".into());
+            }
+            ObjectLockMode::Off => {}
+            mode => {
+                let days = self.retention_days();
+                if days == 0 || days > MAX_RETENTION_DAYS {
+                    return Err(format!(
+                        "statement.s3.retention_days must be 1 to {MAX_RETENTION_DAYS} with object_lock_mode = {mode:?}; got {days} (a lock without a retention keeps nothing, REQ-PR-2)"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl StatementConfig {
@@ -120,6 +223,7 @@ impl fmt::Debug for StatementConfig {
             .field("signer_token_file", &self.signer_token_file)
             .field("public_key", &self.public_key)
             .field("directory", &self.directory)
+            .field("s3", &self.s3)
             .finish()
     }
 }
@@ -189,12 +293,32 @@ impl Config {
                     path.display()
                 ));
             }
+            match (&statement.directory, &statement.s3) {
+                (Some(_), Some(_)) | (None, None) => {
+                    return Err(format!(
+                        "invalid configuration {}: set exactly one of statement.directory (tests) and [statement.s3] (REQ-PR-2, DEC-16)",
+                        path.display()
+                    ));
+                }
+                (Some(_), None) if !test => {
+                    return Err(format!(
+                        "invalid configuration {}: statement.directory is refused outside environment = \"test\": production statements go to the object-locked bucket, [statement.s3] (REQ-PR-2, DEC-16)",
+                        path.display()
+                    ));
+                }
+                (None, Some(s3)) => s3
+                    .validate(test)
+                    .map_err(|e| format!("invalid configuration {}: {e}", path.display()))?,
+                (Some(_), None) => {}
+            }
             let base = path.parent().unwrap_or(Path::new("."));
             for p in [
                 &mut statement.signer_socket,
                 &mut statement.signer_token_file,
-                &mut statement.directory,
-            ] {
+            ]
+            .into_iter()
+            .chain(statement.directory.as_mut())
+            {
                 if p.is_relative() {
                     *p = base.join(&*p);
                 }
@@ -309,7 +433,9 @@ mod tests {
         let table = |key: &str| {
             format!(
                 "[statement]\nsigner_socket = \"s.sock\"\nsigner_uid = 1\n\
-                 signer_token_file = \"t\"\npublic_key = \"{key}\"\ndirectory = \"d\"\n"
+                 signer_token_file = \"t\"\npublic_key = \"{key}\"\n\
+                 [statement.s3]\nbucket = \"bezent-statements\"\nregion = \"us-east-2\"\n\
+                 object_lock_mode = \"GOVERNANCE\"\n"
             )
         };
         let production = ["", "environment = \"production\"\n"];
@@ -358,7 +484,9 @@ mod tests {
         let table = |key: &str| {
             format!(
                 "[statement]\nsigner_socket = \"s.sock\"\nsigner_uid = 1\n\
-                 signer_token_file = \"t\"\npublic_key = \"{key}\"\ndirectory = \"d\"\n"
+                 signer_token_file = \"t\"\npublic_key = \"{key}\"\n\
+                 [statement.s3]\nbucket = \"bezent-statements\"\nregion = \"us-east-2\"\n\
+                 object_lock_mode = \"GOVERNANCE\"\n"
             )
         };
         let test_disabled = parse("environment = \"test\"\nstatement = \"disabled-test-only\"\n");
@@ -423,6 +551,7 @@ mod tests {
                 &path,
                 format!(
                     "database_url = \"postgres://core@db/bezent\"\n\
+                     environment = \"test\"\n\
                      [statement]\n\
                      signer_socket = \"signer.sock\"\n\
                      signer_uid = 1001\n\
@@ -438,11 +567,119 @@ mod tests {
         let s = config.statement.unwrap().configured().unwrap().clone();
         assert_eq!(s.public_key_bytes().unwrap(), vec![0xab; 32]);
         // Relative paths are the configuration's directory's.
-        assert_eq!(s.directory, dir.join("statements"));
+        assert_eq!(s.directory, Some(dir.join("statements")));
         // A key of another length, or not hex, is refused: there is no secret to name here.
         for bad in ["0xabcd", "ab".repeat(32).as_str(), "0xzz"] {
             write(bad);
             assert!(Config::from_file(&path).is_err(), "{bad}");
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Issue #58, `REQ-PR-2`: where statements go. Production takes the bucket only, with a
+    /// retention; the directory sink, a lock mode of `off` and a missing sink are refused.
+    #[test]
+    fn req_pr_2_statements_go_to_the_object_locked_bucket_in_production() {
+        let dir = std::env::temp_dir().join(format!("bzc-config-s3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("core.toml");
+        let key = format!("0x{}", "ab".repeat(32));
+        let load = |env: &str, sink: &str| {
+            std::fs::write(
+                &path,
+                format!(
+                    "database_url = \"postgres://core@db/bezent\"\n{env}\
+                     [statement]\nsigner_socket = \"s.sock\"\nsigner_uid = 1\n\
+                     signer_token_file = \"t\"\npublic_key = \"{key}\"\n{sink}"
+                ),
+            )
+            .unwrap();
+            Config::from_file(&path)
+        };
+        let s3 = |extra: &str| {
+            let mode = if extra.contains("object_lock_mode") {
+                ""
+            } else {
+                "object_lock_mode = \"GOVERNANCE\"\n"
+            };
+            format!(
+                "[statement.s3]\nbucket = \"bezent-statements\"\nprefix = \"statements\"\n\
+                 region = \"us-east-2\"\n{mode}{extra}"
+            )
+        };
+        // The mode has no default: leaving it out is refused.
+        let bare = "[statement.s3]\nbucket = \"bezent-statements\"\nregion = \"us-east-2\"\n";
+        assert!(load("", bare).is_err());
+        let err =
+            toml::from_str::<S3Config>("bucket = \"bezent-statements\"\nregion = \"us-east-2\"\n")
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("object_lock_mode"), "{err}");
+        // The retention defaults to 365 days; COMPLIANCE with a retention is accepted.
+        let ok = load("", &s3("")).unwrap();
+        let cfg = ok
+            .statement
+            .unwrap()
+            .configured()
+            .unwrap()
+            .s3
+            .clone()
+            .unwrap();
+        assert_eq!(cfg.object_lock_mode, ObjectLockMode::Governance);
+        assert_eq!(cfg.retention_days(), 365);
+        assert!(
+            load(
+                "",
+                &s3("object_lock_mode = \"COMPLIANCE\"\nretention_days = 400\n")
+            )
+            .is_ok()
+        );
+        // COMPLIANCE or GOVERNANCE without a retention keeps nothing: refused.
+        for mode in ["COMPLIANCE", "GOVERNANCE"] {
+            let err = load(
+                "",
+                &s3(&format!(
+                    "object_lock_mode = \"{mode}\"\nretention_days = 0\n"
+                )),
+            )
+            .unwrap_err();
+            assert!(err.contains("retention_days"), "{err}");
+        }
+        // No lock outside a test deployment; allowed in one.
+        let err = load("", &s3("object_lock_mode = \"off\"\n")).unwrap_err();
+        assert!(err.contains("refused outside"), "{err}");
+        assert!(
+            load(
+                "environment = \"test\"\n",
+                &s3("object_lock_mode = \"off\"\n")
+            )
+            .is_ok()
+        );
+        // The directory sink is for tests; exactly one sink is set.
+        let err = load("", "directory = \"d\"\n").unwrap_err();
+        assert!(err.contains("statement.directory is refused"), "{err}");
+        assert!(load("environment = \"test\"\n", "directory = \"d\"\n").is_ok());
+        let err = load("environment = \"test\"\n", "").unwrap_err();
+        assert!(err.contains("exactly one"), "{err}");
+        let both = format!("directory = \"d\"\n{}", s3(""));
+        let err = load("environment = \"test\"\n", &both).unwrap_err();
+        assert!(err.contains("exactly one"), "{err}");
+        // A malformed bucket, prefix or region is refused; so is an unknown key.
+        for bad in [
+            "bucket = \"BAD_Bucket\"",
+            "prefix = \"/lead\"",
+            "prefix = \"a//b\"",
+            "prefix = \"../x\"",
+            "region = \"\"",
+            "kms_key_id = \"\"",
+            "access_key_id = \"AKIA\"",
+        ] {
+            let sink = format!(
+                "[statement.s3]\nbucket = \"bezent-statements\"\nregion = \"us-east-2\"\n\
+                 object_lock_mode = \"GOVERNANCE\"\n{bad}\n"
+            );
+            // A repeated key is a TOML error, which is also a refusal.
+            assert!(load("", &sink).is_err(), "{bad}");
         }
         std::fs::remove_dir_all(dir).ok();
     }

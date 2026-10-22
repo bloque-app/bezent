@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bezent_core_service::reserve::book::{self, Cost};
 use bezent_core_service::reserve::check::{Outcome, ReserveCheck};
 use bezent_core_service::reserve::readings::{Readings, Recorded};
+use bezent_core_service::reserve::s3::fake::FakeBucket;
+use bezent_core_service::reserve::s3::{Backoff, S3Store};
 use bezent_core_service::reserve::statement::{
     DirectoryStore, KeyBackendSigner, SignerProcess, StatementError, StatementSigner,
     StatementStore, Statements, StoreError, verify, verify_chain,
@@ -1080,8 +1082,12 @@ async fn s_3_req_pr_2_a_signed_statement_that_no_longer_rederives_is_abandoned_a
         1
     );
     assert_eq!(w.count("SELECT count(*) FROM reserve_statements").await, 1);
-    // Told once, never paged as stuck.
-    assert_eq!(pager.kinds(), ["statement-abandoned"]);
+    // The store being down was paged when it happened (issue #58); the abandonment is told once,
+    // and the chain is never paged as stuck.
+    assert_eq!(
+        pager.kinds(),
+        ["statement-publish-failed", "statement-abandoned"]
+    );
     assert_eq!(
         w.count("SELECT count(*) FROM event_log WHERE kind = 'statement-abandoned'")
             .await,
@@ -1170,5 +1176,81 @@ async fn req_pr_1_a_statement_that_is_due_and_not_produced_pages(
         .unwrap();
     assert_eq!(pages.len(), 1);
     assert_eq!(overdue().await, 2);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Issue #58: the bucket key's date is the signed statement's own (read from the intent the
+/// signer signed), never the clock of the retry. The document reaches the bucket on one day and
+/// its signature file does not; the retry runs on the next UTC day: the same object is found and
+/// adopted, nothing is written twice, and the publication is recorded.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_58_a_retry_on_the_next_utc_day_finds_the_object_under_the_day_it_was_issued(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect.clone()).await;
+    let readings = evaluated_world(&w).await;
+    let dir = store_dir("bucket-next-day");
+    let public = signer_with_statement_key(&connect, &dir).await;
+    let bucket = FakeBucket::default();
+    let config = toml::from_str(
+        "bucket = \"bezent-statements\"\nprefix = \"statements\"\nregion = \"us-east-2\"\nobject_lock_mode = \"GOVERNANCE\"\n",
+    )
+    .unwrap();
+    let statements = Statements::new(
+        w.core.pool().clone(),
+        signer_process(&w, &dir, &public),
+        S3Store::new(bucket.clone(), &config).with_backoff(Backoff {
+            attempts: 2,
+            first_delay: std::time::Duration::from_millis(1),
+        }),
+    );
+    // Day one: the document is taken, the signature file is refused.
+    bucket.state().forbid_suffix = Some(".sig".into());
+    let err = statements.publish(ASSET, t0()).await.unwrap_err();
+    assert!(matches!(err, StatementError::Store(_)), "{err}");
+    assert_eq!(w.count("SELECT count(*) FROM reserve_statements").await, 0);
+    assert_eq!(bucket.state().objects.len(), 1);
+
+    // The next UTC day, on a fresh evaluation, the bucket healthy again.
+    bucket.state().forbid_suffix = None;
+    let later = t0() + Duration::days(1) + Duration::minutes(1);
+    read_all(&w.admin, (later - t0()).num_seconds()).await;
+    let (check, _, _) = checker(&w);
+    {
+        let mut c = check.readings().chain();
+        let fresh = readings.chain();
+        c.supply = fresh.supply.clone();
+        c.reserve = fresh.reserve.clone();
+    }
+    assert_eq!(
+        check.evaluate(ASSET, later).await.unwrap().outcome,
+        Outcome::Holds
+    );
+    let p = statements.publish(ASSET, later).await.unwrap();
+    assert_eq!(p.sequence, 1);
+    {
+        let st = bucket.state();
+        assert_eq!(
+            st.objects.len(),
+            2,
+            "one statement and its signature, no duplicate"
+        );
+        assert!(
+            st.objects.keys().all(|k| k.contains("/2026/10/13/")),
+            "{:?}",
+            st.objects.keys()
+        );
+    }
+    assert_eq!(
+        w.count("SELECT count(*) FROM reserve_statement_objects")
+            .await,
+        2
+    );
+    assert_eq!(
+        w.count("SELECT count(*) FROM intents WHERE purpose = 'statement'")
+            .await,
+        1
+    );
     std::fs::remove_dir_all(dir).ok();
 }

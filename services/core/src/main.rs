@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use bezent_core_service::reserve::check::{LogPager, ReserveCheck, SystemClock};
 use bezent_core_service::reserve::readings::Recorded;
+use bezent_core_service::reserve::s3::{AwsClient, S3Store, StatementSink};
 use bezent_core_service::reserve::statement::{DirectoryStore, SignerProcess, Statements};
 
 const NAME: &str = "bezent-core";
@@ -87,6 +88,22 @@ async fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // The configuration admits exactly one sink, and the directory only in a test
+            // deployment (issue #58).
+            let sink = match (&s.s3, &s.directory) {
+                (Some(s3), _) => match AwsClient::connect(s3).await {
+                    Ok(client) => StatementSink::S3(S3Store::new(client, s3)),
+                    Err(e) => {
+                        eprintln!("{NAME}: statement bucket: {e}");
+                        return ExitCode::from(2);
+                    }
+                },
+                (None, Some(dir)) => StatementSink::Directory(DirectoryStore::new(dir.clone())),
+                (None, None) => {
+                    eprintln!("{NAME}: no statement sink configured");
+                    return ExitCode::from(2);
+                }
+            };
             let public_key = s.public_key_bytes().unwrap_or_default();
             match SignerProcess::new(
                 pool.clone(),
@@ -95,11 +112,7 @@ async fn main() -> ExitCode {
                 token,
                 public_key,
             ) {
-                Ok(signer) => Some(Statements::new(
-                    pool.clone(),
-                    signer,
-                    DirectoryStore::new(s.directory.clone()),
-                )),
+                Ok(signer) => Some(Statements::new(pool.clone(), signer, sink)),
                 Err(e) => {
                     eprintln!("{NAME}: statement key: {e}");
                     return ExitCode::from(2);
