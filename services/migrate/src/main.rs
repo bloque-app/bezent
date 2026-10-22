@@ -4,12 +4,13 @@
 //!
 //! ```text
 //! bezent-migrate (--url-file <path> | --url-env <NAME>) [--check] [--login <name>]...
-//!                [--grants enforce|report|skip]
+//!                [--grants enforce|report|skip] [--lock-timeout <seconds>]
 //! ```
 //!
-//! - The owner's database URL is read from the file or from the environment variable the command
-//!   line names, and is never printed. `sslmode` and `sslrootcert` in it drive TLS
-//!   (`bezent_store::tls`).
+//! - The owner's database URL is read from the file (`--url-file`, preferred: a mounted secret) or
+//!   from the environment variable the command line names (`--url-env`, discouraged: the credential
+//!   stays in the process environment, visible to `docker inspect` and `/proc/<pid>/environ`). It is
+//!   never printed. `sslmode` and `sslrootcert` in it drive TLS (`bezent_store::tls`).
 //! - Without `--check` it applies the pending migrations and prints `applied <version>` for each.
 //!   It refuses, changing nothing, a store whose history diverges: a version this release lacks, a
 //!   different checksum, a migration that did not finish, or tables with no history.
@@ -19,6 +20,12 @@
 //!   `enforce`): `--login` names each service and operator login this deployment made, so that they
 //!   are not reported as strays.
 //! - It refuses a login that is a member of a service's role.
+//! - A wait for a lock longer than `--lock-timeout` seconds (default 300; 0 waits for ever) fails the
+//!   run with a clear error, instead of queueing behind a lock another session holds.
+//! - **Not all-or-nothing.** Each migration commits on its own. A failure at version N leaves the
+//!   versions before N applied, exits 1 and names N. The services refuse a store that is not exactly
+//!   at their release, so they stay down until a later run applies N and what follows. The runner
+//!   is re-runnable: the next run resumes at N and does not repeat the versions already applied.
 //!
 //! Exit status: 0 done (or current); 1 failure; 2 usage; 3 `--check`: migrations pending; 4 the
 //! history diverges; 5 the grants check found something (and `--grants enforce`).
@@ -29,8 +36,19 @@ use std::time::Duration;
 use sqlx::postgres::PgPoolOptions;
 
 const NAME: &str = "bezent-migrate";
+const DEFAULT_LOCK_TIMEOUT_SECS: u64 = 300;
 const USAGE: &str = "usage: bezent-migrate (--url-file <path> | --url-env <NAME>) [--check] \
-                     [--login <name>]... [--grants enforce|report|skip]";
+                     [--login <name>]... [--grants enforce|report|skip] [--lock-timeout <seconds>]
+  --url-file <path>        read the owner's database URL from a file (preferred: mount it as a secret)
+  --url-env <NAME>         read it from an environment variable (discouraged: the credential stays in
+                           the process environment)
+  --check                  change nothing; exit 3 if migrations are pending, 4 if the history diverges
+  --login <name>           a service or operator login of this deployment (not a stray); repeatable
+  --grants <mode>          enforce (default), report or skip the catalogue-wide grants check
+  --lock-timeout <seconds> fail instead of waiting longer than this for a lock (default 300; 0 = wait)
+Each migration commits on its own: a failure at version N leaves the versions before N applied, exits 1
+and names N. The services refuse a store that is not exactly at their release, so they stay down until
+a later run applies N and what follows; the runner is re-runnable and resumes at N.";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Grants {
@@ -45,6 +63,7 @@ struct Args {
     check: bool,
     logins: Vec<String>,
     grants: Grants,
+    lock_timeout: Duration,
 }
 
 fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -54,6 +73,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
         check: false,
         logins: Vec::new(),
         grants: Grants::Enforce,
+        lock_timeout: Duration::from_secs(DEFAULT_LOCK_TIMEOUT_SECS),
     };
     let mut args = args;
     while let Some(arg) = args.next() {
@@ -63,6 +83,13 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--url-file" => parsed.url_file = Some(value("a path")?),
             "--url-env" => parsed.url_env = Some(value("a variable name")?),
             "--login" => parsed.logins.push(value("a login name")?),
+            "--lock-timeout" => {
+                let seconds = value("a number of seconds")?;
+                parsed.lock_timeout =
+                    Duration::from_secs(seconds.parse().map_err(|_| {
+                        format!("--lock-timeout takes whole seconds, not {seconds}")
+                    })?);
+            }
             "--grants" => {
                 parsed.grants = match value("enforce, report or skip")?.as_str() {
                     "enforce" => Grants::Enforce,
@@ -131,9 +158,12 @@ async fn main() -> ExitCode {
 async fn run(args: Args) -> Result<ExitCode, String> {
     let url = read_url(&args)?;
     let pool = bezent_store::tls::connect(
-        PgPoolOptions::new()
-            .max_connections(2)
-            .acquire_timeout(Duration::from_secs(15)),
+        bezent_migrate::with_lock_timeout(
+            PgPoolOptions::new()
+                .max_connections(3)
+                .acquire_timeout(Duration::from_secs(15)),
+            args.lock_timeout,
+        ),
         &url,
     )
     .await

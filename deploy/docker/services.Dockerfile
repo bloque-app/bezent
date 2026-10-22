@@ -145,7 +145,10 @@ CMD ["/etc/bezent/evm-endpoint.toml"]
 
 # Run once per release that carries a migration, with every service stopped (crates/store/README.md,
 # "Deploying"): `bezent-migrate --url-file /run/secrets/owner-db-url [--check] --login <name>...`. The
-# owner's URL is mounted, never baked in or passed as an argument. It seeds nothing.
+# owner's URL is mounted (`--url-file`, preferred; `--url-env` leaves the credential in the process
+# environment and is discouraged), never baked in or passed as an argument. A failure at version N
+# leaves the versions before N applied; run again to resume (the services stay down until it is
+# done). `--lock-timeout <seconds>` (default 300) bounds any wait for a lock. It seeds nothing.
 FROM ${RUNTIME_IMAGE} AS migrate
 LABEL org.opencontainers.image.title="bezent-migrate" \
       org.opencontainers.image.description="bezent migration runner: applies the store's migrations as the migration owner, refuses a diverging history, checks the grants" \

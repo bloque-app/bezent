@@ -3,11 +3,14 @@
 //! `bezent-migrate`: the history rules, the owner rule, the grants check, and the command line.
 //! Each test runs in a fresh, empty database that `#[sqlx::test]` creates on `DATABASE_URL`'s server.
 
+use std::borrow::Cow;
 use std::process::{Command, Output};
+use std::time::Duration;
 
-use bezent_migrate::{apply, catalogue_findings, refuse_service_login, status};
+use bezent_migrate::{apply, catalogue_findings, refuse_service_login, status, with_lock_timeout};
 use bezent_store::MIGRATOR;
 use sqlx::PgPool;
+use sqlx::migrate::{Migration, MigrationType, Migrator};
 use sqlx::postgres::PgPoolOptions;
 
 /// Roles and memberships belong to the server, not to a test's database: the tests that create a
@@ -206,6 +209,159 @@ async fn the_grants_check_is_clean_on_a_migrated_store_and_sees_a_widening(pool:
     assert!(found.iter().any(|f| f.contains("transfers")), "{found:?}");
 }
 
+// ---- partial failure, locks, concurrency -------------------------------------------------------
+
+fn migrator(sql: &[(i64, &'static str)]) -> Migrator {
+    Migrator {
+        migrations: Cow::Owned(
+            sql.iter()
+                .map(|(v, sql)| {
+                    Migration::new(
+                        *v,
+                        Cow::Borrowed("test"),
+                        MigrationType::Simple,
+                        Cow::Borrowed(*sql),
+                        false,
+                    )
+                })
+                .collect(),
+        ),
+        ..Migrator::DEFAULT
+    }
+}
+
+async fn applied(pool: &PgPool) -> Vec<i64> {
+    sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success ORDER BY version")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// A pool of its own on the test's database, so that a test can run two runners at once.
+async fn pool_with(pool: &PgPool, lock_timeout: Duration) -> PgPool {
+    with_lock_timeout(PgPoolOptions::new().max_connections(4), lock_timeout)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn a_failure_at_n_keeps_the_versions_before_it_and_a_second_run_resumes(pool: PgPool) {
+    let broken = migrator(&[
+        (1, "CREATE TABLE one (id int)"),
+        (2, "CREATE TABLE two (id int)"),
+        (3, "CREATE TABLE three (id int); SELECT 1/0"),
+        (4, "CREATE TABLE four (id int)"),
+    ]);
+    let e = apply(&pool, &broken).await.unwrap_err();
+    assert!(e.contains("migration 3 failed"), "{e}");
+    assert!(e.contains("kept: 1, 2"), "{e}");
+    // 1 and 2 stay applied; 3 rolled back with its own statements; 4 never ran.
+    assert_eq!(applied(&pool).await, vec![1, 2]);
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT tablename::text FROM pg_tables WHERE schemaname = 'public' \
+         AND tablename <> '_sqlx_migrations' ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(tables, vec!["one", "two"]);
+    let s = status(&pool, &broken).await.unwrap();
+    assert_eq!((s.applied, s.pending), (vec![1, 2], vec![3, 4]));
+    assert!(s.divergences.is_empty(), "the stopped store is a prefix");
+
+    // The cause fixed (the same versions, 3 now sound): the next run resumes at 3.
+    let fixed = migrator(&[
+        (1, "CREATE TABLE one (id int)"),
+        (2, "CREATE TABLE two (id int)"),
+        (3, "CREATE TABLE three (id int)"),
+        (4, "CREATE TABLE four (id int)"),
+    ]);
+    assert_eq!(apply(&pool, &fixed).await.unwrap(), vec![3, 4]);
+    assert_eq!(applied(&pool).await, vec![1, 2, 3, 4]);
+    assert!(status(&pool, &fixed).await.unwrap().is_current());
+}
+
+#[sqlx::test]
+async fn a_migration_behind_a_held_lock_fails_at_the_lock_timeout_and_resumes_after(pool: PgPool) {
+    let release = migrator(&[
+        (1, "CREATE TABLE held (id int)"),
+        (2, "ALTER TABLE held ADD COLUMN extra int"),
+    ]);
+    let mut blocker = pool.acquire().await.unwrap();
+    let runner = pool_with(&pool, Duration::from_millis(800)).await;
+    // Version 1 applies; a session then holds the table while version 2 wants it.
+    let first = migrator(&[(1, "CREATE TABLE held (id int)")]);
+    apply(&runner, &first).await.unwrap();
+    sqlx::query("BEGIN").execute(&mut *blocker).await.unwrap();
+    sqlx::query("LOCK TABLE held IN ACCESS SHARE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let e = apply(&runner, &release).await.unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(20), "it waited");
+    assert!(e.contains("migration 2 failed"), "{e}");
+    assert!(e.contains("lock timeout"), "{e}");
+    assert_eq!(applied(&pool).await, vec![1]);
+    // The lock released, the same runner finishes.
+    sqlx::query("ROLLBACK")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    drop(blocker);
+    assert_eq!(apply(&runner, &release).await.unwrap(), vec![2]);
+    runner.close().await;
+}
+
+#[sqlx::test]
+async fn two_runners_at_once_serialise_and_nothing_is_applied_twice(pool: PgPool) {
+    let (a, b) = (
+        pool_with(&pool, Duration::from_secs(120)).await,
+        pool_with(&pool, Duration::from_secs(120)).await,
+    );
+    let (ra, rb) = tokio::join!(apply(&a, &MIGRATOR), apply(&b, &MIGRATOR));
+    let (ra, rb) = (ra.unwrap(), rb.unwrap());
+    let mut union: Vec<i64> = ra.iter().chain(&rb).copied().collect();
+    union.sort_unstable();
+    assert_eq!(
+        union,
+        all_versions(),
+        "applied twice or not at all: {ra:?} {rb:?}"
+    );
+    assert!(
+        ra.is_empty() || rb.is_empty(),
+        "the second run found work to do: {ra:?} {rb:?}"
+    );
+    assert!(status(&pool, &MIGRATOR).await.unwrap().is_current());
+    a.close().await;
+    b.close().await;
+}
+
+#[sqlx::test]
+async fn a_runner_behind_another_fails_at_the_lock_timeout(pool: PgPool) {
+    // Another runner holds the runner lock (the key is the crate's, "bezentmg").
+    let mut other = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(7090207764428123495)")
+        .execute(&mut *other)
+        .await
+        .unwrap();
+    let waiting = pool_with(&pool, Duration::from_millis(800)).await;
+    let e = apply(&waiting, &MIGRATOR).await.unwrap_err();
+    assert!(
+        e.contains("runner lock") && e.contains("lock timeout"),
+        "{e}"
+    );
+    assert!(!has_history(&pool).await, "it changed the store");
+    sqlx::query("SELECT pg_advisory_unlock(7090207764428123495)")
+        .execute(&mut *other)
+        .await
+        .unwrap();
+    drop(other);
+    assert_eq!(apply(&waiting, &MIGRATOR).await.unwrap(), all_versions());
+    waiting.close().await;
+}
+
 // ---- the command line ------------------------------------------------------------------------
 
 /// `DATABASE_URL` with the test's database in place of the one it names.
@@ -240,6 +396,8 @@ fn usage_errors_exit_2() {
         vec!["--url-file", "a", "--url-env", "B"],
         vec!["--url-env", "B", "--grants", "sometimes"],
         vec!["--url-env", "B", "extra"],
+        vec!["--url-env", "B", "--lock-timeout", "soon"],
+        vec!["--url-env", "B", "--lock-timeout"],
     ] {
         let out = run(&args, &[]);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {}", text(&out));
@@ -321,6 +479,28 @@ async fn the_grants_check_fails_the_run_unless_told_to_report(pool: PgPool) {
     assert_eq!(run(&args, &env).status.code(), Some(0));
     args.extend(["--grants", "skip"]);
     assert_eq!(run(&args, &env).status.code(), Some(0));
+}
+
+#[sqlx::test]
+async fn the_command_line_reads_the_url_from_a_file(pool: PgPool) {
+    let dir = std::env::temp_dir().join(format!("bezent-migrate-file-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("url");
+    std::fs::write(&file, format!("{}\n", url_for(&pool))).unwrap();
+    let out = run(
+        &[
+            "--url-file",
+            file.to_str().unwrap(),
+            "--grants",
+            "skip",
+            "--lock-timeout",
+            "30",
+        ],
+        &[],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(status(&pool, &MIGRATOR).await.unwrap().is_current());
 }
 
 #[test]

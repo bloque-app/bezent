@@ -9,7 +9,11 @@
 //! (production), not a migration runner's.
 //!
 //! - [`status`] reads the migration history without changing the database.
-//! - [`apply`] refuses a diverging history, applies what is pending, and reads the history again.
+//! - [`apply`] takes a lock of its own, refuses a diverging history, applies what is pending, and
+//!   reads the history again. Each migration commits on its own: a failure at version N leaves the
+//!   versions before it applied, and a new run resumes at N (see [`apply`]).
+//! - [`with_lock_timeout`] bounds every wait for a lock, so a run behind a held lock fails instead of
+//!   waiting for ever.
 //! - [`refuse_service_login`] refuses to run as a login that is a service's.
 //! - [`catalogue_findings`] is the catalogue-wide grants check of `bezent_store::grants`, the one
 //!   the store tests run.
@@ -17,8 +21,51 @@
 //! Output is versions and role or object names, never a URL, a password or a checksum.
 
 use bezent_store::grants::{self, PUBLIC_FUNCTIONS, ROLES};
-use sqlx::migrate::Migrator;
+use std::borrow::Cow;
+use std::time::Duration;
+
+use sqlx::migrate::{MigrateError, Migrator};
+use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgConnection, PgPool};
+
+/// The advisory lock that serialises runners of this crate on one database (`"bezentmg"`). `sqlx`'s
+/// own lock is switched off in its favour; this one also covers the reads before and after, so
+/// the versions [`apply`] returns are the ones this run applied.
+const RUNNER_LOCK: i64 = 0x6265_7a65_6e74_6d67;
+
+/// SQLSTATE `lock_not_available`: what `lock_timeout` raises.
+const LOCK_NOT_AVAILABLE: &str = "55P03";
+
+/// `options`, with `lock_timeout` set on every connection it opens. A statement, or the wait for the
+/// runner lock, that waits longer than `timeout` for a lock fails with a lock timeout instead of
+/// queueing behind it (and everything that queues behind the migration). `Duration::ZERO` sets no
+/// timeout. `statement_timeout` is left alone: a long migration is not an error.
+pub fn with_lock_timeout(options: PgPoolOptions, timeout: Duration) -> PgPoolOptions {
+    options.after_connect(move |conn, _| {
+        Box::pin(async move {
+            sqlx::query("SELECT set_config('lock_timeout', $1, false)")
+                .bind(format!("{}ms", timeout.as_millis()))
+                .execute(conn)
+                .await
+                .map(|_| ())
+        })
+    })
+}
+
+/// Words for a failure; a lock timeout says what it was and what to do.
+fn describe(e: &sqlx::Error) -> String {
+    let timed_out = e
+        .as_database_error()
+        .is_some_and(|d| d.code().as_deref() == Some(LOCK_NOT_AVAILABLE));
+    if timed_out {
+        format!(
+            "waited longer than the lock timeout (--lock-timeout) for a lock another session holds; \
+             stop the services and end any idle transaction on the store, then run again: {e}"
+        )
+    } else {
+        e.to_string()
+    }
+}
 
 /// Where a store stands against a release's migrations.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -111,7 +158,38 @@ pub async fn status(pool: &PgPool, migrator: &Migrator) -> Result<Status, String
 /// returns the versions it applied. Refuses, changing nothing, a store whose history diverges
 /// ([`status`]). Afterwards it reads the history again and fails unless the store is exactly at the
 /// release.
+///
+/// Runners on one database serialise on an advisory lock: a second waits (up to the connection's
+/// `lock_timeout`, see [`with_lock_timeout`]) and then finds nothing to do, so no version is applied
+/// twice and the versions each returns are disjoint.
+///
+/// **It is not all-or-nothing.** Each migration commits on its own. If the migration at version N
+/// fails, the versions before N stay applied and the error names N. The services refuse a store that
+/// is not exactly at their release, so they stay down until a later run applies N and what follows;
+/// that run resumes at N, and the migrations already applied are not run again.
 pub async fn apply(pool: &PgPool, migrator: &Migrator) -> Result<Vec<i64>, String> {
+    let mut guard = pool
+        .acquire()
+        .await
+        .map_err(|e| format!("cannot connect to the store: {e}"))?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(RUNNER_LOCK)
+        .execute(&mut *guard)
+        .await
+        .map_err(|e| format!("cannot take the runner lock: {}", describe(&e)))?;
+    let result = apply_locked(pool, migrator).await;
+    let released = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(RUNNER_LOCK)
+        .execute(&mut *guard)
+        .await;
+    if released.is_err() {
+        // End the session, which releases the lock, rather than hand a locked connection back.
+        drop(guard.detach());
+    }
+    result
+}
+
+async fn apply_locked(pool: &PgPool, migrator: &Migrator) -> Result<Vec<i64>, String> {
     let before = status(pool, migrator).await?;
     if !before.divergences.is_empty() {
         return Err(format!(
@@ -122,10 +200,41 @@ pub async fn apply(pool: &PgPool, migrator: &Migrator) -> Result<Vec<i64>, Strin
     if before.pending.is_empty() {
         return Ok(Vec::new());
     }
-    migrator
-        .run(pool)
-        .await
-        .map_err(|e| format!("migrations: {e}"))?;
+    // `sqlx`'s own lock is off: the runner lock above covers it, and `sqlx` leaves its session lock
+    // held on a connection when a migration fails, which would block the next run on this pool.
+    let unlocked = Migrator {
+        migrations: Cow::Owned(migrator.migrations.to_vec()),
+        ignore_missing: migrator.ignore_missing,
+        locking: false,
+        no_tx: migrator.no_tx,
+    };
+    if let Err(e) = unlocked.run(pool).await {
+        let done = status(pool, migrator).await.map(|s| s.applied).ok();
+        let kept = done
+            .map(|applied| {
+                let new: Vec<i64> = applied
+                    .into_iter()
+                    .filter(|v| before.pending.contains(v))
+                    .collect();
+                if new.is_empty() {
+                    "none of this run's migrations was applied".to_owned()
+                } else {
+                    format!("applied by this run and kept: {}", versions(&new))
+                }
+            })
+            .unwrap_or_else(|| "could not read which migrations were kept".to_owned());
+        let cause = match &e {
+            MigrateError::ExecuteMigration(inner, version) => {
+                format!("migration {version} failed: {}", describe(inner))
+            }
+            MigrateError::Execute(inner) => format!("migrations: {}", describe(inner)),
+            other => format!("migrations: {other}"),
+        };
+        return Err(format!(
+            "{cause}. Each migration commits on its own ({kept}); the services stay down until a \
+             later run brings the store to the release, and it resumes at the failed version"
+        ));
+    }
     let after = status(pool, migrator).await?;
     if !after.is_current() {
         return Err(format!(
@@ -135,6 +244,10 @@ pub async fn apply(pool: &PgPool, migrator: &Migrator) -> Result<Vec<i64>, Strin
         ));
     }
     Ok(before.pending)
+}
+
+fn versions(v: &[i64]) -> String {
+    v.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
 }
 
 /// Refuses a connection whose login is a member of one of the store's service roles (or is one):

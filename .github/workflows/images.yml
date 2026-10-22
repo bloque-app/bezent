@@ -297,7 +297,7 @@ jobs:
           docker run -d --name pgm --network bzm \
             -e POSTGRES_DB=bezent -e POSTGRES_USER=bloque -e POSTGRES_PASSWORD=bloque \
             --health-cmd pg_isready --health-interval 2s --health-retries 30 \
-            public.ecr.aws/docker/library/postgres:18-alpine
+            bezent-ci-postgres:18-alpine
           for i in $(seq 1 60); do
             [ "$(docker inspect -f '{{.State.Health.Status}}' pgm)" = healthy ] && break
             [ "$i" = 60 ] && { docker logs pgm; exit 1; }
@@ -314,6 +314,7 @@ jobs:
             local want=$1 c=0; shift
             "$@" > "$RUNNER_TEMP/migrate.out" 2>&1 || c=$?
             cat "$RUNNER_TEMP/migrate.out"
+            if grep -q 'bloque:bloque' "$RUNNER_TEMP/migrate.out"; then echo "the URL was printed"; exit 1; fi
             [ "$c" = "$want" ] || { echo "expected exit $want, got $c: $*"; exit 1; }
           }
           # An empty store is pending; the run applies every migration; then it is current.
@@ -330,7 +331,6 @@ jobs:
             "UPDATE _sqlx_migrations SET checksum = '\\x00' WHERE version = 1"
           expect 4 migrate --check
           expect 4 migrate
-          if grep -q 'bloque:bloque' "$RUNNER_TEMP/migrate.out"; then echo "the URL was printed"; exit 1; fi
           docker rm -f pgm > /dev/null
 
   publish:
