@@ -7,7 +7,7 @@
 //! | `sslmode` | Behaviour |
 //! |---|---|
 //! | `disable` | no TLS |
-//! | `require` | TLS, or the connection fails; the certificate is not checked unless `sslrootcert` names a CA bundle |
+//! | `require` | TLS, or the connection fails; the certificate is **not** verified, even when `sslrootcert` is set (libpq verifies the chain in that case; sqlx does not) |
 //! | `verify-ca` | TLS, certificate chain checked against `sslrootcert` (and the bundled web roots), host name not checked |
 //! | `verify-full` | TLS, certificate chain and host name checked |
 //!

@@ -189,8 +189,9 @@ reads the policy from the database URL it is given (the URL in the service's con
 postgres://<login>@<host>:5432/<database>?sslmode=verify-full&sslrootcert=/etc/bezent/rds-ca.pem
 ```
 
-- `sslmode=disable | require | verify-ca | verify-full`, as in libpq. `require` fails unless the server offers TLS;
-  `verify-full` also checks the certificate chain against `sslrootcert` (a PEM bundle, added to the bundled web roots;
+- `sslmode=disable | require | verify-ca | verify-full`, as in libpq. `require` fails unless the server offers TLS,
+  and encrypts, but does not verify the certificate (unlike libpq, even with `sslrootcert`); only `verify-ca` and
+  `verify-full` do. `verify-full` checks the certificate chain against `sslrootcert` (a PEM bundle, added to the bundled web roots;
   mount it, it is not in the image) and the host name. Production uses `verify-full`.
 - **No silent downgrade.** `allow` and `prefer` fall back to a plain connection, so they are refused, and so is a URL
   with no `sslmode`, for any server that is not on this machine (a loopback address or a Unix socket). A server
