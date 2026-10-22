@@ -28,12 +28,13 @@ prefix = "statements"                  # optional; plain path segments, no slash
 region = "us-east-2"
 # kms_key_id = "alias/example-bezent-statements"   # optional SSE-KMS; see "Encryption"
 object_lock_mode = "GOVERNANCE"        # GOVERNANCE | COMPLIANCE | off (off: tests only)
-retention_days = 365                   # 1 to 36500; left out, 365
+retention_days = 365                   # 1 to 36500; left out, 365. The mode has no default
 ```
 
-No credential is configured. The core takes them from its ECS task role (or, on EC2, the instance
-role) and refuses to start when `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
-`AWS_PROFILE` or `AWS_SHARED_CREDENTIALS_FILE` is set (`REQ-KY-1`).
+No credential is configured. The core takes them from its ECS task role only, never the instance
+role, and refuses to start without one (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`) or when
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE` or
+`AWS_SHARED_CREDENTIALS_FILE` is set (`REQ-KY-1`).
 
 ## Bucket requirements
 
@@ -115,8 +116,10 @@ publicly readable).
 
 ## What the core does when it cannot write
 
-- It retries transient failures (throttling, `409`, `5xx`, timeouts) four times with a doubling
-  backoff, inside the cycle's 60 s statement budget, and every cycle after that.
+- It retries transient failures (throttling, `409`, `5xx`, timeouts) three times (3 s each, 0.5 s
+  then 1 s apart) and again every cycle after that. The 60 s statement budget of a cycle covers all
+  assets together: a slow bucket can leave later assets to the next cycle, and `statement-overdue`
+  (an hour after a statement fell due) is the backstop.
 - The signed statement is kept (the signer's intent is in the store); the same bytes are written
   when the bucket answers again, even on a later UTC day.
 - It pages `statement-publish-failed` at once, once a day while it persists, and

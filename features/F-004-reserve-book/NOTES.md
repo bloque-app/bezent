@@ -275,12 +275,13 @@ this is how the bucket is reached.
   does not extend the chain before anything reaches an immutable bucket.
 - **Alert.** A store failure after the retries pages `statement-publish-failed` (once per window, like
   `statement-stuck`); `statement-overdue` remains the backstop.
-- **Credentials.** The task role only (ECS container provider, then instance metadata); the core refuses to start with
-  AWS key variables set (`REQ-KY-1`). The SDK's default chain, which reads the environment first, is not used.
+- **Credentials.** The ECS task role only (not the instance role, not the SDK's default chain, which reads the
+  environment first); the core refuses to start without a task role or with AWS key variables set (`REQ-KY-1`).
 - **Deviation from "the sink only writes".** The core also reads: `publish_once` asks the store whether the place's
   object exists, and an adopted or refused write is compared byte for byte. The policy therefore carries `s3:GetObject`
   and a prefix-conditioned `s3:ListBucket` (without it S3 answers a missing key with 403). See `deploy/statements.md`.
-- **Open.** SSE-KMS and a publicly readable bucket conflict (anonymous readers cannot read SSE-KMS objects).
+- **Open.** SSE-KMS and a publicly readable bucket conflict (anonymous readers cannot read SSE-KMS objects). The
+  lock mode has no default and production's is the owner's to name (GOVERNANCE or COMPLIANCE).
 
 ## Review items left open (PR #40 review, 2026-10-14)
 

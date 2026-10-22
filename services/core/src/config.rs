@@ -108,11 +108,10 @@ pub struct StatementConfig {
 }
 
 /// How an object-locked bucket retains what is written to it.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub enum ObjectLockMode {
     /// Retention that only an identity with `s3:BypassGovernanceRetention` can shorten.
     #[serde(rename = "GOVERNANCE")]
-    #[default]
     Governance,
     /// Retention that no one can shorten or remove until it expires.
     #[serde(rename = "COMPLIANCE")]
@@ -143,8 +142,8 @@ pub struct S3Config {
     /// A KMS key (id, ARN or alias) for SSE-KMS; left out, the bucket's default encryption
     /// applies. A statement is public: anonymous readers cannot read SSE-KMS objects.
     pub kms_key_id: Option<String>,
-    /// Retention mode; `off` only in a test deployment.
-    #[serde(default)]
+    /// Retention mode; `off` only in a test deployment. Required: which mode production runs is
+    /// the owner's to decide (issue #58), so there is no default.
     pub object_lock_mode: ObjectLockMode,
     /// Days each object is retained for; left out, [`DEFAULT_RETENTION_DAYS`].
     pub retention_days: Option<u32>,
@@ -435,7 +434,8 @@ mod tests {
             format!(
                 "[statement]\nsigner_socket = \"s.sock\"\nsigner_uid = 1\n\
                  signer_token_file = \"t\"\npublic_key = \"{key}\"\n\
-                 [statement.s3]\nbucket = \"bezent-statements\"\nregion = \"us-east-2\"\n"
+                 [statement.s3]\nbucket = \"bezent-statements\"\nregion = \"us-east-2\"\n\
+                 object_lock_mode = \"GOVERNANCE\"\n"
             )
         };
         let production = ["", "environment = \"production\"\n"];
@@ -485,7 +485,8 @@ mod tests {
             format!(
                 "[statement]\nsigner_socket = \"s.sock\"\nsigner_uid = 1\n\
                  signer_token_file = \"t\"\npublic_key = \"{key}\"\n\
-                 [statement.s3]\nbucket = \"bezent-statements\"\nregion = \"us-east-2\"\n"
+                 [statement.s3]\nbucket = \"bezent-statements\"\nregion = \"us-east-2\"\n\
+                 object_lock_mode = \"GOVERNANCE\"\n"
             )
         };
         let test_disabled = parse("environment = \"test\"\nstatement = \"disabled-test-only\"\n");
@@ -596,12 +597,25 @@ mod tests {
             Config::from_file(&path)
         };
         let s3 = |extra: &str| {
+            let mode = if extra.contains("object_lock_mode") {
+                ""
+            } else {
+                "object_lock_mode = \"GOVERNANCE\"\n"
+            };
             format!(
                 "[statement.s3]\nbucket = \"bezent-statements\"\nprefix = \"statements\"\n\
-                 region = \"us-east-2\"\n{extra}"
+                 region = \"us-east-2\"\n{mode}{extra}"
             )
         };
-        // The default is GOVERNANCE for 365 days; COMPLIANCE with a retention is accepted.
+        // The mode has no default: leaving it out is refused.
+        let bare = "[statement.s3]\nbucket = \"bezent-statements\"\nregion = \"us-east-2\"\n";
+        assert!(load("", bare).is_err());
+        let err =
+            toml::from_str::<S3Config>("bucket = \"bezent-statements\"\nregion = \"us-east-2\"\n")
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("object_lock_mode"), "{err}");
+        // The retention defaults to 365 days; COMPLIANCE with a retention is accepted.
         let ok = load("", &s3("")).unwrap();
         let cfg = ok
             .statement
@@ -661,7 +675,8 @@ mod tests {
             "access_key_id = \"AKIA\"",
         ] {
             let sink = format!(
-                "[statement.s3]\nbucket = \"bezent-statements\"\nregion = \"us-east-2\"\n{bad}\n"
+                "[statement.s3]\nbucket = \"bezent-statements\"\nregion = \"us-east-2\"\n\
+                 object_lock_mode = \"GOVERNANCE\"\n{bad}\n"
             );
             // A repeated key is a TOML error, which is also a refusal.
             assert!(load("", &sink).is_err(), "{bad}");

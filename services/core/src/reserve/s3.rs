@@ -14,8 +14,10 @@
 //! - **Retained.** Each put carries an Object Lock mode and a retain-until date, a SHA-256
 //!   checksum the bucket verifies, and, when configured, SSE-KMS.
 //! - **Retried.** Throttling, `409`, `5xx`, timeouts and connection failures are retried with a
-//!   doubling backoff, for a total that stays inside the core's per-cycle statement budget. What
-//!   still fails is an error the core pages on; a statement is never silently skipped.
+//!   doubling backoff, three attempts of at most three seconds each. What still fails is an error
+//!   the core pages on; a statement is never silently skipped. The core's 60 s cycle budget covers
+//!   all assets together, so a slow bucket can leave later assets for the next cycle, and
+//!   `statement-overdue` is the backstop.
 //! - **Recorded after.** The sink only writes. The core records the key, ETag and version id in its
 //!   store after the write succeeded (migration 0053), never before.
 //!
@@ -125,17 +127,19 @@ pub struct Backoff {
 }
 
 impl Backoff {
-    /// Four attempts, waiting 0.5 s, 1 s and 2 s between them: 3.5 s, and with the client's
-    /// [`ATTEMPT_TIMEOUT`] a worst case of 23.5 s an object, so a statement and its signature
-    /// file stay inside the core's 60 s cycle budget.
+    /// Three attempts, waiting 0.5 s and 1 s between them: 1.5 s, and with the client's
+    /// [`ATTEMPT_TIMEOUT`] a worst case of 10.5 s an operation. A statement is a read and two
+    /// writes, about 32 s, so one asset fits the core's 60 s cycle budget, which covers all assets
+    /// together; when a slow bucket outlasts it, the assets not reached are retried next cycle and
+    /// `statement-overdue` is the backstop.
     pub const DEFAULT: Self = Self {
-        attempts: 4,
+        attempts: 3,
         first_delay: Duration::from_millis(500),
     };
 }
 
 /// How long one attempt may take in the real client.
-pub const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The statement store backed by an object-locked bucket.
 pub struct S3Store<C> {
@@ -367,9 +371,10 @@ pub struct AwsClient {
 }
 
 impl AwsClient {
-    /// A client for `config`'s bucket. Credentials come from the ECS task role, then the instance
-    /// role, and from nowhere else: the SDK's default chain, which reads keys from the environment
-    /// first, is not used, and a key in the environment stops the core (`REQ-KY-1`).
+    /// A client for `config`'s bucket. Credentials come from the ECS task role and nowhere else:
+    /// not the instance role (a container on the host must not hand its task the host's role),
+    /// not the SDK's default chain, which reads keys from the environment first. A key in the
+    /// environment, or no task role, stops the core (`REQ-KY-1`).
     pub async fn connect(config: &S3Config) -> Result<Self, String> {
         for var in FORBIDDEN_ENV {
             if std::env::var_os(var).is_some() {
@@ -378,15 +383,12 @@ impl AwsClient {
                 ));
             }
         }
-        use aws_config::meta::credentials::CredentialsProviderChain;
-        let chain = CredentialsProviderChain::first_try(
-            "EcsContainer",
-            aws_config::ecs::EcsCredentialsProvider::builder().build(),
-        )
-        .or_else(
-            "Ec2InstanceMetadata",
-            aws_config::imds::credentials::ImdsCredentialsProvider::builder().build(),
-        );
+        if std::env::var_os("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").is_none()
+            && std::env::var_os("AWS_CONTAINER_CREDENTIALS_FULL_URI").is_none()
+        {
+            return Err("no ECS task role: AWS_CONTAINER_CREDENTIALS_RELATIVE_URI is not set; the statement sink takes its credentials from the task role only, never from the instance role (REQ-KY-1)".into());
+        }
+        let chain = aws_config::ecs::EcsCredentialsProvider::builder().build();
         let shared = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new(config.region.clone()))
             .credentials_provider(chain)
@@ -403,6 +405,16 @@ impl AwsClient {
             client: aws_sdk_s3::Client::new(&shared),
             bucket: config.bucket.clone(),
         })
+    }
+}
+
+impl AwsClient {
+    /// The client over an SDK client already built (the wire test's canned HTTP client).
+    pub fn from_client(client: aws_sdk_s3::Client, bucket: &str) -> Self {
+        Self {
+            client,
+            bucket: bucket.to_owned(),
+        }
     }
 }
 
@@ -662,7 +674,12 @@ mod tests {
 
     fn config(extra: &str) -> S3Config {
         toml::from_str(&format!(
-            "bucket = \"bezent-statements\"\nprefix = \"statements\"\nregion = \"us-east-2\"\n{extra}"
+            "bucket = \"bezent-statements\"\nprefix = \"statements\"\nregion = \"us-east-2\"\n{}{extra}",
+            if extra.contains("object_lock_mode") {
+                ""
+            } else {
+                "object_lock_mode = \"GOVERNANCE\"\n"
+            }
         ))
         .unwrap()
     }
@@ -846,5 +863,199 @@ mod tests {
         assert!(s.get_at(NAME, next).await.unwrap().is_none());
         // The undated calls refuse rather than guess a date.
         assert!(s.get(NAME).await.is_err() && s.put(NAME, b"x").await.is_err());
+    }
+
+    /// The real SDK client against a canned HTTP client: what goes on the wire, and how each
+    /// answer is sorted.
+    mod wire {
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+
+        use aws_sdk_s3::config::{Credentials, Region};
+        use aws_smithy_http_client::test_util::infallible_client_fn;
+
+        use super::super::*;
+
+        type Seen = Arc<Mutex<Vec<(String, String, Vec<(String, String)>)>>>;
+        type Canned = Arc<Mutex<VecDeque<(u16, Vec<(&'static str, &'static str)>, String)>>>;
+
+        fn client(canned: Canned, seen: Seen) -> AwsClient {
+            let http = infallible_client_fn(move |req| {
+                let headers = req
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_owned()))
+                    .collect();
+                seen.lock().unwrap().push((
+                    req.method().to_string(),
+                    req.uri().to_string(),
+                    headers,
+                ));
+                let (status, headers, body) = canned.lock().unwrap().pop_front().unwrap();
+                let mut response = http::Response::builder().status(status);
+                for (k, v) in headers {
+                    response = response.header(k, v);
+                }
+                response.body(body).unwrap()
+            });
+            let conf = aws_sdk_s3::Config::builder()
+                .behavior_version_latest()
+                .region(Region::new("us-east-2"))
+                .credentials_provider(Credentials::new(
+                    "AKIDEXAMPLE",
+                    "secret",
+                    None,
+                    None,
+                    "test",
+                ))
+                .http_client(http)
+                .retry_config(aws_config::retry::RetryConfig::disabled())
+                .build();
+            AwsClient::from_client(aws_sdk_s3::Client::from_conf(conf), "example-bucket")
+        }
+
+        type Item<'a> = (u16, Vec<(&'static str, &'static str)>, &'a str);
+
+        fn canned(items: Vec<Item<'_>>) -> Canned {
+            Arc::new(Mutex::new(
+                items
+                    .into_iter()
+                    .map(|(s, h, b)| (s, h, b.to_owned()))
+                    .collect(),
+            ))
+        }
+
+        fn request() -> PutRequest {
+            PutRequest {
+                key: "statements/2026/10/13/statement-bUSDC-2026-10-13.json".into(),
+                body: b"{}".to_vec(),
+                content_type: "application/json",
+                checksum_sha256: BASE64.encode(Sha256::digest(b"{}")),
+                if_none_match: true,
+                retention: Some(Retention {
+                    mode: ObjectLockMode::Compliance,
+                    until: "2027-10-13T00:00:00Z".parse().unwrap(),
+                }),
+                kms_key_id: Some("alias/example".into()),
+            }
+        }
+
+        fn header<'a>(h: &'a [(String, String)], name: &str) -> Option<&'a str> {
+            h.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        }
+
+        #[tokio::test]
+        async fn req_pr_2_the_put_carries_the_headers_the_bucket_enforces() {
+            let seen = Seen::default();
+            let c = client(
+                canned(vec![(
+                    200,
+                    vec![("etag", "\"abc\""), ("x-amz-version-id", "ver1")],
+                    "",
+                )]),
+                seen.clone(),
+            );
+            let done = c.put(&request()).await.unwrap();
+            assert_eq!(done.etag.as_deref(), Some("\"abc\""));
+            assert_eq!(done.version_id.as_deref(), Some("ver1"));
+            let seen = seen.lock().unwrap();
+            let (method, uri, h) = &seen[0];
+            assert_eq!(method, "PUT");
+            assert!(uri.contains("statement-bUSDC-2026-10-13.json"), "{uri}");
+            assert_eq!(header(h, "if-none-match"), Some("*"), "{h:?}");
+            assert_eq!(
+                header(h, "x-amz-object-lock-mode"),
+                Some("COMPLIANCE"),
+                "{h:?}"
+            );
+            assert!(
+                header(h, "x-amz-object-lock-retain-until-date")
+                    .is_some_and(|d| d.contains("2027-10-13")),
+                "{h:?}"
+            );
+            assert_eq!(
+                header(h, "x-amz-checksum-sha256"),
+                Some(BASE64.encode(Sha256::digest(b"{}")).as_str()),
+                "{h:?}"
+            );
+            assert_eq!(
+                header(h, "x-amz-server-side-encryption"),
+                Some("aws:kms"),
+                "{h:?}"
+            );
+            assert_eq!(
+                header(h, "x-amz-server-side-encryption-aws-kms-key-id"),
+                Some("alias/example"),
+                "{h:?}"
+            );
+            assert_eq!(header(h, "content-type"), Some("application/json"), "{h:?}");
+            assert!(
+                h.iter().all(|(k, _)| k != "x-amz-checksum-crc32"),
+                "the SDK added its own checksum next to ours: {h:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn req_pr_2_each_answer_is_sorted_as_the_sink_acts_on_it() {
+            let seen = Seen::default();
+            let xml = |code: &str| {
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>{code}</Code>\
+                     <Message>m</Message></Error>"
+                )
+            };
+            let items = vec![
+                (412, vec![], xml("PreconditionFailed")),
+                (409, vec![], xml("ConditionalRequestConflict")),
+                (503, vec![], xml("SlowDown")),
+                (403, vec![], xml("AccessDenied")),
+                (404, vec![], xml("NoSuchKey")),
+                (403, vec![], xml("AccessDenied")),
+                (500, vec![], xml("InternalError")),
+            ];
+            let c = client(Arc::new(Mutex::new(items.into_iter().collect())), seen);
+            assert_eq!(
+                c.put(&request()).await,
+                Err(ClientError::PreconditionFailed)
+            );
+            assert!(
+                matches!(c.put(&request()).await, Err(ClientError::Transient(_))),
+                "409"
+            );
+            assert!(
+                matches!(c.put(&request()).await, Err(ClientError::Transient(_))),
+                "503"
+            );
+            assert!(
+                matches!(c.put(&request()).await, Err(ClientError::Permanent(_))),
+                "403"
+            );
+            // A missing key is not an error; without s3:ListBucket it would be a 403.
+            assert_eq!(c.get("k").await, Ok(None));
+            assert!(
+                matches!(c.get("k").await, Err(ClientError::Permanent(_))),
+                "403 get"
+            );
+            assert!(
+                matches!(c.get("k").await, Err(ClientError::Transient(_))),
+                "500 get"
+            );
+        }
+
+        #[tokio::test]
+        async fn req_pr_2_a_get_returns_the_bytes_and_the_receipt() {
+            let c = client(
+                canned(vec![(
+                    200,
+                    vec![("etag", "\"e1\""), ("x-amz-version-id", "v9")],
+                    "held",
+                )]),
+                Seen::default(),
+            );
+            let got = c.get("k").await.unwrap().unwrap();
+            assert_eq!(got.bytes, b"held");
+            assert_eq!(got.etag.as_deref(), Some("\"e1\""));
+            assert_eq!(got.version_id.as_deref(), Some("v9"));
+        }
     }
 }

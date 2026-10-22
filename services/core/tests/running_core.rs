@@ -1194,7 +1194,7 @@ async fn issue_58_a_retry_on_the_next_utc_day_finds_the_object_under_the_day_it_
     let public = signer_with_statement_key(&connect, &dir).await;
     let bucket = FakeBucket::default();
     let config = toml::from_str(
-        "bucket = \"bezent-statements\"\nprefix = \"statements\"\nregion = \"us-east-2\"\n",
+        "bucket = \"bezent-statements\"\nprefix = \"statements\"\nregion = \"us-east-2\"\nobject_lock_mode = \"GOVERNANCE\"\n",
     )
     .unwrap();
     let statements = Statements::new(

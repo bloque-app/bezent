@@ -804,7 +804,7 @@ async fn req_pr_1_req_bk_4_sf5_the_movements_are_cut_at_the_evaluation(
 /// The S3 sink over a fake bucket (issue #58), with a backoff short enough for a test.
 fn bucket_store(bucket: &FakeBucket) -> S3Store<FakeBucket> {
     let config = toml::from_str(
-        "bucket = \"bezent-statements\"\nprefix = \"statements\"\nregion = \"us-east-2\"\n",
+        "bucket = \"bezent-statements\"\nprefix = \"statements\"\nregion = \"us-east-2\"\nobject_lock_mode = \"GOVERNANCE\"\n",
     )
     .unwrap();
     S3Store::new(bucket.clone(), &config).with_backoff(Backoff {

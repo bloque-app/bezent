@@ -45,6 +45,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
 
 [dev-dependencies]
+# The S3 sink's wire test: the real SDK client against a canned HTTP client (issue #58).
+aws-smithy-http-client = { version = "1", default-features = false, features = ["test-util"] }
+http = "1"
 # The test payout key's EVM address, for the cancels the tests prepare as the EVM endpoint would
 # (issue #41; the signer reads a cancel's bytes).
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
