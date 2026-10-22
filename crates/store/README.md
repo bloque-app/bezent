@@ -88,7 +88,7 @@ and no role may DELETE or TRUNCATE anything but the dispatcher's own condition h
 | `transfers` columns, UPDATE | ingress: `expires_at`; core: `on_chain_reference` |
 | `transitions` | ingress: only a request's decision, `Received` to `Accepted` or `Refused`, of a deposit or of the refund of an unassociated arrival, with no coordinate; core: every other edge, the ones that rest on chain data (the store refuses any other writer, 0046); each under the id the store's sequence drew for the session, never one a login chooses (0049) |
 | `event_log` | each kind by the role whose events it records (0046): `transfer`, `transition` by the store's own triggers; `refusal` by the ingress; `key-compromise` by the role that detects it (the core, an endpoint on a network it covers, the signer), stamped by the store with its detector and detection key, one per pair (0049); `pause-requested` by the endpoints, the core or the signer; `delivery-anomaly` by the endpoints or the core; every other kind (conditions, reviews, the reserve check's pages) by the core |
-| `intents` | core: a delivery order only on a final, executed observation of its transfer's source, for exactly the amount it carries (0049) |
+| `intents` | core: a delivery order only on a final, executed observation of its transfer's source, for exactly the amount it carries (0049), to the deposit's destination and in the transfer's own asset and token (0050) |
 | `book_entries`, `book_postings`, `book_quarantine` | core |
 | `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned` | core |
 | `pauses(asset, cause, evaluation_id, quarantine_id, reading_id)` | core |
@@ -149,6 +149,13 @@ The audit of PR #56 added these (0049), for every login but the owner:
   issuing asset, on the issuing network; a payout of a withdrawal, the redemption's amount scaled to the
   destination's token, to its destination; a refund mint, the redemption's amount to its redeemer; a
   payout of an unassociated arrival's refund, the arrival's amount on its network.
+  Since 0050 (issue #36) the order's other fields are tied too: a mint's `to` is the 32-byte account the
+  deposit's destination decodes to (`0x` and 64 hex digits, or SS58); a payout's `asset` is its transfer's
+  and its `token`, when it names one, the token admitted for that asset on the destination network (an
+  unassociated arrival's refund: the arrival's own token, or, its token not being admitted, that token and
+  no asset).
+  Since 0050 too, a network admits one token per asset (a unique index on `admitted_tokens (network,
+  asset)`): the payout's scaling and its token check read the same row.
 - A transition's id, like a transfer's, is the one the store's sequence drew for the session.
 - A `key-compromise` alert carries the detector and detection key the store stamps on it; a detector
   looks only for its own, so a row another role wrote never suppresses it.
