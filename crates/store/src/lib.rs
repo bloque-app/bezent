@@ -56,6 +56,7 @@
 pub mod environment;
 pub mod grants;
 pub mod login;
+pub mod tls;
 
 /// The SQLSTATE every store-rule refusal raises.
 pub const REFUSAL_SQLSTATE: &str = "BZ001";

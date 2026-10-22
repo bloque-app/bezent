@@ -152,12 +152,14 @@ pub fn router(app: App) -> Router {
 /// and of nothing else, holding exactly the ingress's grants (#46, `REQ-AR-3`). Fails closed: the
 /// ingress does not start without its store, or on any other login.
 pub async fn connect(config: &Config) -> Result<PgPool, String> {
-    let pool = bezent_store::login::pool_options()
-        .max_connections(config.max_connections)
-        .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
-        .connect(&config.database_url)
-        .await
-        .map_err(|e| format!("cannot connect to the store: {e}"))?;
+    let pool = bezent_store::tls::connect(
+        bezent_store::login::pool_options()
+            .max_connections(config.max_connections)
+            .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms)),
+        &config.database_url,
+    )
+    .await
+    .map_err(|e| format!("cannot connect to the store: {e}"))?;
     sqlx::query("SELECT 1 FROM event_log_head")
         .execute(&pool)
         .await
@@ -211,12 +213,14 @@ pub async fn serve(
     let mut dispatcher = None;
     if let (Some(hooks), Some(w)) = (hooks, &config.webhooks) {
         app = app.with_webhooks(hooks.clone());
-        let dispatch_pool = bezent_store::login::pool_options()
-            .max_connections(2)
-            .acquire_timeout(Duration::from_secs(5))
-            .connect(&w.database_url)
-            .await
-            .map_err(|e| format!("cannot connect the webhook dispatcher to the store: {e}"))?;
+        let dispatch_pool = bezent_store::tls::connect(
+            bezent_store::login::pool_options()
+                .max_connections(2)
+                .acquire_timeout(Duration::from_secs(5)),
+            &w.database_url,
+        )
+        .await
+        .map_err(|e| format!("cannot connect the webhook dispatcher to the store: {e}"))?;
         // Its own login: a member of bezent_webhooks and of nothing else (#46; PR #55 review M2).
         bezent_store::login::check_login(&dispatch_pool, bezent_store::WEBHOOKS_ROLE)
             .await

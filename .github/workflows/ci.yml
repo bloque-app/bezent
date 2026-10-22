@@ -97,6 +97,34 @@ jobs:
       - run: pg_dump --version && psql --version
       - run: cargo test --workspace --locked
 
+  # The services reach PostgreSQL over TLS and fail closed (bezent_store::tls): against a server that
+  # forces TLS with a throwaway CA (tools/ci/tls-postgres.sh), and one that offers none.
+  database-tls:
+    name: database TLS
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: (rustup toolchain install || rustup show) && cargo --version
+      - uses: Swatinem/rust-cache@v2
+      - name: A PostgreSQL that forces TLS
+        run: tools/ci/tls-postgres.sh "$RUNNER_TEMP/tls" 5433 | tee -a "$GITHUB_ENV"
+      - name: TLS against both servers
+        env:
+          BEZENT_PLAIN_TEST_HOSTPORT: localhost:5432
+        run: cargo test -p bezent-store --lib --test tls --locked -- --include-ignored
+
   # F-009: the EVM endpoint against an anvil fork of Polygon at the block e2e/evm/forks.env pins,
   # with F-008's vault deployed by its own script and Foundry's test keys (services/evm-endpoint/
   # tests/fork.rs). anvil reads the pinned state from the upstream archive RPC; nothing is sent to
