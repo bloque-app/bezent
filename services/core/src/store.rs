@@ -303,6 +303,52 @@ pub async fn attempts_unproven(conn: &mut PgConnection, transfer: i64) -> sqlx::
         .await
 }
 
+/// The transfer's next attempt, if it was ordered and nothing was ever signed for it: the attempt
+/// after the last one that reached `Delivering`, with an intent, no signature, no signed bytes and
+/// no cancellation yet (issue #25). It is the one attempt `attempts_unproven` lists without a
+/// proof to wait for, and the one the store lets be cancelled (`unsigned_attempt_cancellations`).
+pub async fn unsigned_next_attempt(
+    conn: &mut PgConnection,
+    transfer: i64,
+) -> sqlx::Result<Option<i32>> {
+    sqlx::query_scalar(
+        "SELECT n.attempt FROM (SELECT COALESCE(max(attempt), 0) + 1 AS attempt \
+                                FROM transitions WHERE transfer_id = $1) n \
+         WHERE n.attempt > 1 \
+           AND EXISTS (SELECT 1 FROM intents WHERE transfer_id = $1 AND attempt = n.attempt) \
+           AND NOT EXISTS (SELECT 1 FROM signatures s JOIN intents i ON i.id = s.intent_id \
+                           WHERE i.transfer_id = $1 AND i.attempt = n.attempt) \
+           AND NOT EXISTS (SELECT 1 FROM signed_transactions st \
+                           JOIN intents i ON i.id = st.intent_id \
+                           WHERE i.transfer_id = $1 AND i.attempt = n.attempt) \
+           AND NOT EXISTS (SELECT 1 FROM unsigned_attempt_cancellations c \
+                           WHERE c.transfer_id = $1 AND c.attempt = n.attempt)",
+    )
+    .bind(transfer)
+    .fetch_optional(conn)
+    .await
+}
+
+/// Cancels the transfer's unsigned attempt `attempt` under the review resolution `action` into
+/// `Refunding` (issue #25). The store accepts it only on the evidence it checks itself.
+pub async fn cancel_unsigned_attempt(
+    conn: &mut PgConnection,
+    transfer: i64,
+    attempt: i32,
+    action: i64,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO unsigned_attempt_cancellations (transfer_id, attempt, manual_action_id) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(transfer)
+    .bind(attempt)
+    .bind(action)
+    .execute(conn)
+    .await
+    .map(|_| ())
+}
+
 /// Whether any intent (an order or a signing intent) is recorded for a transfer's attempt.
 pub async fn attempt_has_intents(
     conn: &mut PgConnection,

@@ -95,6 +95,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "transfers",
             "transitions",
             "unassociated_arrivals",
+            "unsigned_attempt_cancellations",
         ],
     ),
     (
@@ -112,6 +113,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "reserve_statements",
             "transfers",
             "transitions",
+            "unsigned_attempt_cancellations",
         ],
     ),
     (
