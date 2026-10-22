@@ -52,12 +52,12 @@ abstract contract DeliveryTest is VaultFork {
         uint256 held = balance(cfg.originToken, d.safe);
         (,,, uint128 allowanceBefore,) = roles.allowances(VaultRoles.deliveryAllowanceKey(cfg.originToken));
         // Within the allowance after a top-up of it, above what the vault holds.
-        // Governance (2 of 3 owners) raises the allowance above what the vault holds.
+        // Governance (2 of 3 owners) raises the allowance above what the vault holds, through the Delay.
         bytes memory raise = abi.encodeCall(
             IRoles.setAllowance,
             (VaultRoles.deliveryAllowanceKey(cfg.originToken), uint128(held + 1), 0, 0, 0, 0)
         );
-        assertTrue(ownersExec(d.roles, raise, Enum.Operation.Call, 2));
+        ownersDelayed(d.roles, raise);
         vm.recordLogs();
         (bool ok,) = deliver(BENEFICIARY, held + 1, keccak256("too much"));
         assertFalse(ok);

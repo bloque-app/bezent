@@ -57,6 +57,9 @@ interface ISafe {
         view
         returns (address[] memory array, address next);
     function enableModule(address module) external;
+    function disableModule(address prevModule, address module) external;
+    function setGuard(address guard) external;
+    function domainSeparator() external view returns (bytes32);
     function addOwnerWithThreshold(address owner, uint256 threshold) external;
     function getStorageAt(uint256 offset, uint256 length) external view returns (bytes memory);
 }
@@ -135,6 +138,55 @@ interface IRoles {
         view
         returns (address[] memory array, address next);
     function allowTarget(bytes32 roleKey, address targetAddress, ExecutionOptions options) external;
+    function revokeTarget(bytes32 roleKey, address targetAddress) external;
+    function revokeFunction(bytes32 roleKey, address targetAddress, bytes4 selector) external;
+}
+
+/// Zodiac Delay Modifier v1.1.1 (mastercopy 0x8241…dF01; contracts/Delay.sol and zodiac-core 3.x Modifier,
+/// Module and SignatureChecker, as published in gnosisguild/zodiac `mastercopies/delay/1.1.1`).
+interface IDelay {
+    function setUp(bytes memory initParams) external;
+    function owner() external view returns (address);
+    function avatar() external view returns (address);
+    function target() external view returns (address);
+    function transferOwnership(address newOwner) external;
+    function setAvatar(address avatar) external;
+    function setTarget(address target) external;
+    function enableModule(address module) external;
+    function disableModule(address prevModule, address module) external;
+    function isModuleEnabled(address module) external view returns (bool);
+    function getModulesPaginated(address start, uint256 pageSize)
+        external
+        view
+        returns (address[] memory array, address next);
+
+    function setTxCooldown(uint256 txCooldown) external;
+    function setTxExpiration(uint256 txExpiration) external;
+    function setTxNonce(uint256 txNonce) external;
+    function txCooldown() external view returns (uint256);
+    function txExpiration() external view returns (uint256);
+    function txNonce() external view returns (uint256);
+    function queueNonce() external view returns (uint256);
+    function txCreatedAt(uint256 nonce) external view returns (uint256);
+    function txHash(uint256 nonce) external view returns (bytes32);
+
+    /// Queues a transaction (the avatar's interface, so the Delay sits between a module and the avatar).
+    function execTransactionFromModule(
+        address to,
+        uint256 value,
+        bytes calldata data,
+        Enum.Operation operation
+    ) external returns (bool success);
+    function execTransactionFromModuleReturnData(
+        address to,
+        uint256 value,
+        bytes calldata data,
+        Enum.Operation operation
+    ) external returns (bool success, bytes memory returnData);
+    /// Executes the oldest queued transaction once its cooldown has passed and before it expires. Anyone may call.
+    function executeNextTx(address to, uint256 value, bytes calldata data, Enum.Operation operation) external;
+    function skipExpired() external;
+    function moduleTxHash(bytes calldata data, bytes32 salt) external view returns (bytes32);
 }
 
 /// Every event the Roles Modifier v2.1.1 mastercopy can emit (Roles.sol, PermissionBuilder.sol,
@@ -229,33 +281,7 @@ interface IUniswapV3Factory {
     function feeAmountTickSpacing(uint24 fee) external view returns (int24);
 }
 
-/// Aerodrome Slipstream CLFactory: a pool per (token pair, tick spacing).
-interface ISlipstreamFactory {
-    function getPool(address tokenA, address tokenB, int24 tickSpacing) external view returns (address pool);
-    function tickSpacings() external view returns (int24[] memory);
-}
-
-/// The in-range liquidity of a concentrated-liquidity pool (Uniswap v3 and Slipstream alike).
+/// The in-range liquidity of a Uniswap v3 pool.
 interface IConcentratedPool {
     function liquidity() external view returns (uint128);
-}
-
-/// Aerodrome Slipstream SwapRouter (ISwapRouter): exact-input single hop, keyed by tick spacing.
-interface ISlipstreamSwapRouter {
-    struct ExactInputSingleParams {
-        address tokenIn;
-        address tokenOut;
-        int24 tickSpacing;
-        address recipient;
-        uint256 deadline;
-        uint256 amountIn;
-        uint256 amountOutMinimum;
-        uint160 sqrtPriceLimitX96;
-    }
-
-    function exactInputSingle(ExactInputSingleParams calldata params)
-        external
-        payable
-        returns (uint256 amountOut);
-    function factory() external view returns (address);
 }

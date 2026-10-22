@@ -13,17 +13,24 @@ import {ConditionFlat, ParameterType, Operator} from "zodiac-roles/Types.sol";
 ///   `ReferenceEmitter.emitReference(any)`, reachable only as the pair that ReferencedTransferUnwrapper
 ///   admits. No value, no delegatecall but the MultiSendCallOnly batch, no other target.
 ///
+/// Guardian (an independent key, held in a second Roles instance; REQ-GV-2, REQ-KY-4): on the Delay,
+///   `setTxNonce(any)` (veto a queued change), and on the Safe `disableModule(any prev, the delivery Roles
+///   instance)` (pause the vault). No value, no delegatecall, no other target or function, and no unwrapper.
+///
 /// Conversion (the requester's key; REQ-CV-7, REQ-VN-4):
 ///   per admitted convertible token, `approve(router, any)`, and on the router `exactInputSingle` with
-///   tokenIn that convertible, tokenOut the origin token, the pool pinned (fee tier on Uniswap, tick spacing
-///   on Slipstream, equal to the declared pool's), recipient the vault (EqualToAvatar), and amountIn within
-///   that convertible's allowance. No value, no delegatecall, no other target or function.
+///   tokenIn that convertible, tokenOut the origin token, the pool pinned (the fee tier of the Uniswap v3
+///   pool declared for it), recipient the vault (EqualToAvatar), and amountIn within that convertible's
+///   allowance. Only Polygon has this role (DEC-13). No value, no delegatecall, no other target or function.
 library VaultRoles {
     // Role keys are short ASCII names, padded right (as the Roles SDK encodes them).
     // forge-lint: disable-next-line(unsafe-typecast)
     bytes32 internal constant DELIVERY = bytes32("bezent.delivery");
     // forge-lint: disable-next-line(unsafe-typecast)
     bytes32 internal constant CONVERSION = bytes32("bezent.conversion");
+
+    // forge-lint: disable-next-line(unsafe-typecast)
+    bytes32 internal constant GUARDIAN = bytes32("bezent.guardian");
 
     bytes4 internal constant TRANSFER = 0xa9059cbb; // transfer(address,uint256)
     bytes4 internal constant APPROVE = 0x095ea7b3; // approve(address,uint256)
@@ -56,12 +63,22 @@ library VaultRoles {
         c[2] = ConditionFlat(0, ParameterType.Static, Operator.Pass, "");
     }
 
+    /// disableModule(address prevModule, address module): any `prevModule` (the Safe checks it is the real
+    /// predecessor), `module` the delivery Roles instance and nothing else, so the guardian can switch the
+    /// delivery role off and cannot remove the Delay, itself, or any other module.
+    function pauseConditions(address deliveryRoles) internal pure returns (ConditionFlat[] memory c) {
+        c = new ConditionFlat[](3);
+        c[0] = ConditionFlat(0, ParameterType.Calldata, Operator.Matches, "");
+        c[1] = ConditionFlat(0, ParameterType.Static, Operator.Pass, "");
+        c[2] = ConditionFlat(0, ParameterType.Static, Operator.EqualTo, abi.encode(deliveryRoles));
+    }
+
     /// Field positions of an exact-input single-hop params struct (all fields static, so the tuple is inline).
     struct SwapLayout {
         uint8 fields;
         uint8 tokenIn;
         uint8 tokenOut;
-        uint8 pool; // fee tier (Uniswap) or tick spacing (Slipstream): with the tokens, it names the pool
+        uint8 pool; // fee tier: with the tokens, it names the pool
         uint8 recipient;
         uint8 amountIn;
     }
@@ -71,15 +88,9 @@ library VaultRoles {
         return SwapLayout({fields: 7, tokenIn: 0, tokenOut: 1, pool: 2, recipient: 3, amountIn: 4});
     }
 
-    /// Aerodrome Slipstream: (tokenIn, tokenOut, tickSpacing, recipient, deadline, amountIn, amountOutMinimum,
-    /// sqrtPriceLimitX96).
-    function slipstreamLayout() internal pure returns (SwapLayout memory) {
-        return SwapLayout({fields: 8, tokenIn: 0, tokenOut: 1, pool: 2, recipient: 3, amountIn: 5});
-    }
-
     /// exactInputSingle(params): one branch per admitted convertible (an Or when there are several), each
-    /// pinning tokenIn, tokenOut = origin, the declared pool's fee tier or tick spacing (`pools[i]`;
-    /// REQ-VN-4: value goes only to a declared venue, and on these routers the pool is the venue), recipient
+    /// pinning tokenIn, tokenOut = origin, the declared pool's fee tier (`pools[i]`;
+    /// REQ-VN-4: value goes only to a declared venue, and on this router the pool is the venue), recipient
     /// = avatar, amountIn within the convertible's allowance. The remaining fields (deadline, minimum output,
     /// price limit) are the requester's (REQ-CV-5).
     function swapConditions(
@@ -113,7 +124,7 @@ library VaultRoles {
                     node.operator = Operator.EqualTo;
                     node.compValue = abi.encode(originToken);
                 } else if (f == l.pool) {
-                    // uint24 fee and int24 tick spacing are both one ABI word, sign-extended for int24.
+                    // uint24 fee is one ABI word (the pool parameter is carried as int24).
                     node.operator = Operator.EqualTo;
                     node.compValue = abi.encode(int256(pools[i]));
                 } else if (f == l.recipient) {
