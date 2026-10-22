@@ -262,3 +262,96 @@ async fn req_ob_5_nothing_above_the_finalized_head_is_read(
     follow(&f).await;
     assert_eq!(f.count("SELECT count(*) FROM observations").await, 1);
 }
+
+/// A backlog of 43 blocks (the fixture's three and 40 more) read in rungs of 5, a header failing late in the walk down to the first.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_49_a_walk_that_fails_late_keeps_its_anchors_and_resumes_from_them(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    f.chain.advance(40);
+    f.chain.fail_header_at(12);
+
+    // The walk from the head (40) towards the first rung's top (5) fails at block 12: a retry,
+    // not the whole backlog recorded as a gap.
+    let step = f.follower().step().await.unwrap();
+    let Step::Unavailable(reason) = &step else {
+        panic!("{step:?}");
+    };
+    assert!(reason.contains("block 12"), "{reason}");
+    assert_eq!(f.count("SELECT count(*) FROM observation_gaps").await, 0);
+    assert_eq!(f.count("SELECT count(*) FROM observation_ranges").await, 0);
+    // Everything above the failure that is a multiple of the rung is anchored, nothing below.
+    let anchored: Vec<i64> = sqlx::query_scalar(
+        "SELECT block_number FROM observation_walk_anchors ORDER BY block_number",
+    )
+    .fetch_all(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!(anchored, vec![15, 20, 25, 30, 35, 40]);
+
+    // The failure heals and the endpoint restarts (a new follower, nothing in memory): the walk
+    // resumes at its lowest anchor, 15, and asks for no header above it.
+    f.chain.heal_header(12);
+    let asked = f.chain.header_reads().len();
+    let step = f.follower().step().await.unwrap();
+    assert!(
+        matches!(
+            step,
+            Step::Read {
+                first: 1,
+                last: 5,
+                ..
+            }
+        ),
+        "{step:?}"
+    );
+    let resumed = f.chain.header_reads()[asked..].to_vec();
+    assert!(
+        !resumed.is_empty() && resumed.iter().all(|n| *n <= 15),
+        "{resumed:?}"
+    );
+
+    // The rest is read rung by rung to the head, each rung walking at most 5 headers.
+    let mut rungs = 1;
+    loop {
+        let asked = f.chain.header_reads().len();
+        match f.follower().step().await.unwrap() {
+            Step::Read { .. } => {
+                rungs += 1;
+                assert!(f.chain.header_reads().len() - asked <= 10);
+            }
+            other => {
+                assert_eq!(other, Step::CaughtUp { watermark: 43 });
+                break;
+            }
+        }
+    }
+    assert_eq!(rungs, 9);
+    assert_eq!(
+        observe::watermark(&f.endpoint, NETWORK).await.unwrap(),
+        Some(43)
+    );
+    assert_eq!(f.count("SELECT count(*) FROM observation_gaps").await, 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_49_start_block_is_anchored_to_the_finalized_chain_once(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    f.chain.advance(23);
+    // start_block 1 is reached from the head by parent hash; its hash is the chain's.
+    let hash = f.follower().start_anchor().await.unwrap().unwrap();
+    assert_eq!(hash, f.chain.block(1).hash);
+    // Asked again (a restart), it is the stored anchor: no header is asked for.
+    let asked = f.chain.header_reads().len();
+    assert_eq!(f.follower().start_anchor().await.unwrap().unwrap(), hash);
+    assert_eq!(f.chain.header_reads().len(), asked);
+    // A start_block above the finalized head is not reachable.
+    let mut follower = f.follower();
+    follower.start_block = 99;
+    assert!(follower.start_anchor().await.unwrap().is_err());
+}

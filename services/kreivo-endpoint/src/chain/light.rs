@@ -339,8 +339,12 @@ pub struct WsSource {
     url: String,
     name: String,
     timeout: Duration,
+    max_response: u32,
     client: tokio::sync::Mutex<Option<Arc<Reconnecting>>>,
 }
+
+/// The most characters of what a server or a transport said that an error keeps.
+const ERROR_TEXT: usize = 160;
 
 fn h256(v: &serde_json::Value) -> Option<[u8; 32]> {
     crate::config::hex_bytes(v.as_str()?, "a hash").ok()
@@ -370,14 +374,44 @@ pub fn scale_header(v: &serde_json::Value) -> Option<Vec<u8>> {
 }
 
 impl WsSource {
-    /// A source at `url`; it connects on its first request.
-    pub fn new(url: &str, timeout: Duration) -> WsSource {
+    /// A source at `url`; it connects on its first request. An answer longer than `max_response`
+    /// bytes is a failed request.
+    pub fn new(url: &str, timeout: Duration, max_response: u32) -> WsSource {
         WsSource {
             url: url.to_owned(),
             name: crate::config::source_name(url),
             timeout,
+            max_response,
             client: tokio::sync::Mutex::default(),
         }
+    }
+
+    /// `text` as an error message may be logged and recorded: no part of the URL (its path may
+    /// hold a key), and at most [`ERROR_TEXT`] characters of what a server or a transport said.
+    fn scrub(&self, text: &str) -> String {
+        let rest = self.url.split_once("://").map(|(_, rest)| rest);
+        let tail = rest
+            .and_then(|r| r.split_once(['/', '?', '#']))
+            .map(|(_, tail)| tail);
+        let userinfo = rest
+            .and_then(|r| r.split(['/', '?', '#']).next())
+            .and_then(|authority| authority.rsplit_once('@'))
+            .map(|(userinfo, _)| userinfo);
+        // The URL whole and in its parts, then every token of the parts that could be a key.
+        let parts = [Some(self.url.as_str()), rest, tail, userinfo];
+        let tokens = [tail, userinfo]
+            .into_iter()
+            .flatten()
+            .flat_map(|p| p.split(['/', '?', '#', '&', '=', ':', '@']))
+            .filter(|t| t.chars().count() >= 4);
+        let mut out = text.to_owned();
+        for secret in parts.into_iter().flatten().chain(tokens) {
+            out = out.replace(secret, "<source>");
+        }
+        out.chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(ERROR_TEXT)
+            .collect()
     }
 
     async fn call(
@@ -395,12 +429,12 @@ impl WsSource {
                             ExponentialBackoff::from_millis(10).max_delay(Duration::from_secs(30)),
                         )
                         .request_timeout(self.timeout)
+                        .max_response_size(self.max_response)
                         .build(&self.url);
                     let c = match tokio::time::timeout(self.timeout, build).await {
                         Ok(Ok(c)) => Arc::new(c),
-                        Ok(Err(e)) => {
-                            return Err(Fail::Unavailable(format!("cannot connect: {e}")));
-                        }
+                        // The transport's error can carry the URL: none of it is kept.
+                        Ok(Err(_)) => return Err(Fail::Unavailable("cannot connect".into())),
                         Err(_) => return Err(Fail::Unavailable("cannot connect in time".into())),
                     };
                     *held = Some(c.clone());
@@ -409,16 +443,22 @@ impl WsSource {
             }
         };
         let params = serde_json::value::to_raw_value(&params)
-            .map_err(|e| Fail::Unavailable(e.to_string()))?;
+            .map_err(|_| Fail::Unavailable("the request cannot be encoded".into()))?;
         match tokio::time::timeout(self.timeout, client.request_raw(method, Some(params))).await {
             Err(_) => Err(Fail::Unavailable(format!(
                 "{method}: no answer in {:?}",
                 self.timeout
             ))),
-            Ok(Err(RpcError::User(e))) => Err(Fail::Missing(format!("{method}: {}", e.message))),
-            Ok(Err(e)) => Err(Fail::Unavailable(format!("{method}: {e}"))),
+            Ok(Err(RpcError::User(e))) => Err(Fail::Missing(format!(
+                "{method}: {}",
+                self.scrub(&e.message)
+            ))),
+            Ok(Err(e)) => Err(Fail::Unavailable(format!(
+                "{method}: {}",
+                self.scrub(&e.to_string())
+            ))),
             Ok(Ok(raw)) => serde_json::from_str(raw.get())
-                .map_err(|e| Fail::Lied(format!("{method}: not JSON: {e}"))),
+                .map_err(|_| Fail::Lied(format!("{method}: not JSON"))),
         }
     }
 }
@@ -550,6 +590,26 @@ pub struct LightChain {
 /// Block numbers remembered by hash, at most.
 const NUMBERS: usize = 262_144;
 
+/// Whether block `number` is beyond the light client's reach: more than `depth` blocks behind
+/// `finalized`.
+fn is_old(finalized: u64, number: u64, depth: u64) -> bool {
+    finalized.saturating_sub(number) > depth
+}
+
+/// A read at an old block asks the archive first, any other the light client first; each falls
+/// back to the other side.
+async fn routed<T>(
+    old: bool,
+    archive: impl std::future::Future<Output = ChainResult<T>>,
+    light: impl std::future::Future<Output = ChainResult<T>>,
+) -> ChainResult<T> {
+    if old {
+        either(archive, light).await
+    } else {
+        either(light, archive).await
+    }
+}
+
 /// Tries `first`, then `second` when it fails. When both fail: `Invalid` if either is (a source
 /// lied, or an answer cannot be used), else unknown, with both reasons.
 async fn either<T>(
@@ -582,6 +642,7 @@ impl LightChain {
         archive_rpc: &[String],
         depth: u64,
         timeout: Duration,
+        max_response: u32,
     ) -> ChainResult<LightChain> {
         let rpc = LightRpc::new(chain_spec, relay_chain_spec).map_err(unavailable)?;
         let rpc_client = RpcClient::new(rpc);
@@ -595,7 +656,7 @@ impl LightChain {
             archive: Archive::new(
                 archive_rpc
                     .iter()
-                    .map(|u| WsSource::new(u, timeout))
+                    .map(|u| WsSource::new(u, timeout, max_response))
                     .collect(),
             ),
             depth,
@@ -604,12 +665,14 @@ impl LightChain {
         })
     }
 
+    /// How often each history source lied or failed since start-up.
+    pub fn history_counts(&self) -> Vec<super::archive::SourceCounts> {
+        self.archive.counts()
+    }
+
     /// Whether block `number` is beyond the light client's reach.
     fn old(&self, number: u64) -> bool {
-        self.finalized
-            .load(Ordering::Relaxed)
-            .saturating_sub(number)
-            > self.depth
+        is_old(self.finalized.load(Ordering::Relaxed), number, self.depth)
     }
 
     fn learn(&self, h: &Header) {
@@ -674,11 +737,7 @@ impl LightChain {
             let value = self.archived(at, &[key]).await?.remove(0);
             value.map(|b| self.decode(pallet, entry, &b)).transpose()
         };
-        if self.old(at.number) {
-            either(archive, light).await
-        } else {
-            either(light, archive).await
-        }
+        routed(self.old(at.number), archive, light).await
     }
 
     async fn light_header(&self, hash: &[u8; 32]) -> ChainResult<Header> {
@@ -748,6 +807,7 @@ impl LightChain {
         &self,
         genesis: [u8; 32],
         start_block: u64,
+        start_hash: [u8; 32],
         contract: &AccountId32,
         code_hash: [u8; 32],
     ) -> Result<(), String> {
@@ -768,6 +828,7 @@ impl LightChain {
                 genesis,
                 finalized,
                 start_block,
+                start_hash,
                 contract_key,
                 code_hash,
                 decode_code_hash: &decode,
@@ -862,29 +923,19 @@ impl Chain for LightChain {
 
     async fn header(&self, hash: &[u8; 32]) -> ChainResult<Header> {
         let archive = async { Ok(self.archive.header(hash).await?.header) };
-        let header = if lock(&self.numbers).get(hash).is_some_and(|n| self.old(*n)) {
-            either(archive, self.light_header(hash)).await?
-        } else {
-            either(self.light_header(hash), archive).await?
-        };
+        let old = lock(&self.numbers).get(hash).is_some_and(|n| self.old(*n));
+        let header = routed(old, archive, self.light_header(hash)).await?;
         self.learn(&header);
         Ok(header)
     }
 
     async fn events(&self, at: &BlockRef, contract: &AccountId32) -> ChainResult<BlockEvents> {
-        if self.old(at.number) {
-            either(
-                self.archive_events(at, contract),
-                self.light_events(at, contract),
-            )
-            .await
-        } else {
-            either(
-                self.light_events(at, contract),
-                self.archive_events(at, contract),
-            )
-            .await
-        }
+        routed(
+            self.old(at.number),
+            self.archive_events(at, contract),
+            self.light_events(at, contract),
+        )
+        .await
     }
 
     async fn extrinsics(&self, at: &BlockRef) -> ChainResult<Vec<Vec<u8>>> {
@@ -898,11 +949,7 @@ impl Chain for LightChain {
             Ok(block.block.extrinsics.into_iter().map(|b| b.0).collect())
         };
         let archive = self.archive.extrinsics(&at.hash);
-        if self.old(at.number) {
-            either(archive, light).await
-        } else {
-            either(light, archive).await
-        }
+        routed(self.old(at.number), archive, light).await
     }
 
     async fn account_nonce(&self, at: &BlockRef, account: &AccountId32) -> ChainResult<u64> {
@@ -993,5 +1040,478 @@ impl Chain for LightChain {
             // not an outcome (REQ-NX-3).
             Err(e) => Err(unavailable(e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The history side of the light chain (issue #49): the JSON-to-SCALE header, the source over a
+    //! real WebSocket (reconnects, errors, the response cap), `either` and the routing. No test
+    //! reaches a real network; the light client itself is not started.
+
+    use std::sync::atomic::AtomicUsize;
+
+    use serde_json::{Value, json};
+    use soketto::handshake::{Server, server::Response};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_util::compat::TokioAsyncReadCompatExt;
+
+    use super::*;
+
+    fn fixture() -> Value {
+        serde_json::from_str(include_str!("../../fixtures/archive-39867043.json")).unwrap()
+    }
+
+    // -------------------------------------------------------------------------- scale_header
+
+    #[test]
+    fn issue_49_the_json_header_is_the_scale_header_that_hashes_to_its_hash() {
+        let f = fixture();
+        let bytes = scale_header(&f["header_json"]).expect("a header");
+        // As the archive served it: the very bytes whose BLAKE2b-256 is the block's hash.
+        assert_eq!(hex0x(&bytes), f["header"].as_str().unwrap());
+        assert_eq!(hex0x(&blake2_256(&bytes)), f["hash"].as_str().unwrap());
+        let verified = super::super::archive::verify_header(&h256(&f["hash"]).unwrap(), &bytes)
+            .expect("verifies");
+        assert_eq!(verified.header.block.number, 39_867_043);
+    }
+
+    #[test]
+    fn issue_49_a_json_header_that_is_not_one_is_refused_not_guessed() {
+        let good = fixture()["header_json"].clone();
+        let broken = |f: &dyn Fn(&mut Value)| {
+            let mut v = good.clone();
+            f(&mut v);
+            scale_header(&v)
+        };
+        assert!(broken(&|v| _ = v.as_object_mut().unwrap().remove("stateRoot")).is_none());
+        assert!(broken(&|v| v["parentHash"] = json!("0x1234")).is_none());
+        assert!(broken(&|v| v["number"] = json!("39867043")).is_none());
+        assert!(broken(&|v| v["number"] = json!("0x1ffffffff")).is_none());
+        assert!(broken(&|v| v["digest"]["logs"][0] = json!("not hex")).is_none());
+        // Another number is another header, which then does not hash to the hash asked for.
+        let other = broken(&|v| v["number"] = json!("0x26052a4")).unwrap();
+        assert_ne!(other, hex_vec(&fixture()["header"]).unwrap());
+        assert_ne!(blake2_256(&other), h256(&fixture()["hash"]).unwrap());
+    }
+
+    // -------------------------------------------------------------------------- either, routing
+
+    fn unavailable_err(s: &str) -> ChainError {
+        ChainError::Unavailable(s.into())
+    }
+
+    fn invalid_err(s: &str) -> ChainError {
+        ChainError::Invalid(s.into())
+    }
+
+    #[tokio::test]
+    async fn issue_49_either_falls_back_and_says_why_both_failed() {
+        let ok = |n: u8| async move { Ok::<u8, ChainError>(n) };
+        let no = |e: ChainError| async move { Err::<u8, ChainError>(e) };
+        assert_eq!(either(ok(1), no(invalid_err("never asked"))).await, Ok(1));
+        assert_eq!(either(no(unavailable_err("down")), ok(2)).await, Ok(2));
+        // A lie on the first side is not the end: the other side may answer.
+        assert_eq!(either(no(invalid_err("lied")), ok(3)).await, Ok(3));
+        assert_eq!(
+            either(no(unavailable_err("a")), no(unavailable_err("b"))).await,
+            Err(unavailable_err("a; then b"))
+        );
+        // Both unknown is unknown; a lie on either side makes the failure `Invalid`.
+        assert_eq!(
+            either(no(invalid_err("a")), no(unavailable_err("b"))).await,
+            Err(invalid_err("a; then b"))
+        );
+        assert_eq!(
+            either(no(unavailable_err("a")), no(invalid_err("b"))).await,
+            Err(invalid_err("a; then b"))
+        );
+    }
+
+    #[test]
+    fn issue_49_a_block_is_old_when_more_than_depth_behind_the_finalized_head() {
+        assert!(!is_old(1_000, 1_000, 128));
+        assert!(!is_old(1_000, 872, 128), "exactly depth behind is not old");
+        assert!(is_old(1_000, 871, 128), "depth + 1 is");
+        assert!(is_old(1_000, 0, 128));
+        // Above the finalized head (the head moved on while a block was being read) is not old.
+        assert!(!is_old(1_000, 1_001, 128));
+        assert!(!is_old(0, 5, 128));
+    }
+
+    #[tokio::test]
+    async fn issue_49_old_reads_ask_the_archive_first_and_recent_ones_the_light_client() {
+        let asked = Mutex::new(Vec::<&'static str>::new());
+        let probe = |name: &'static str, result: ChainResult<u8>| {
+            let asked = &asked;
+            async move {
+                asked.lock().unwrap().push(name);
+                result
+            }
+        };
+        let take = || std::mem::take(&mut *asked.lock().unwrap());
+
+        // The first side answers: the other is never asked.
+        assert_eq!(
+            routed(true, probe("archive", Ok(1)), probe("light", Ok(2))).await,
+            Ok(1)
+        );
+        assert_eq!(take(), ["archive"]);
+        assert_eq!(
+            routed(false, probe("archive", Ok(1)), probe("light", Ok(2))).await,
+            Ok(2)
+        );
+        assert_eq!(take(), ["light"]);
+
+        // The first side fails: the other answers.
+        let down = || Err(unavailable_err("down"));
+        assert_eq!(
+            routed(true, probe("archive", down()), probe("light", Ok(2))).await,
+            Ok(2)
+        );
+        assert_eq!(take(), ["archive", "light"]);
+        assert_eq!(
+            routed(false, probe("archive", Ok(1)), probe("light", down())).await,
+            Ok(1)
+        );
+        assert_eq!(take(), ["light", "archive"]);
+
+        // Neither answers: unknown, with both reasons, the first side's first.
+        let got = routed(
+            true,
+            probe("archive", Err(unavailable_err("archive down"))),
+            probe("light", Err(unavailable_err("light down"))),
+        )
+        .await;
+        assert_eq!(got, Err(unavailable_err("archive down; then light down")));
+    }
+
+    // -------------------------------------------------------------------------- WsSource
+
+    /// What the mock archive answers to one request.
+    enum Reply {
+        Result(Value),
+        Error(String),
+        /// Text that is not JSON.
+        Garbage,
+        /// Close the connection without answering.
+        Hang,
+    }
+
+    type Script = Arc<dyn Fn(&str, &Value) -> Reply + Send + Sync>;
+
+    struct Mock {
+        port: u16,
+        connections: Arc<AtomicUsize>,
+        tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    }
+
+    impl Mock {
+        async fn start(script: impl Fn(&str, &Value) -> Reply + Send + Sync + 'static) -> Mock {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            Mock::serve(listener, port, Arc::new(script))
+        }
+
+        /// On `port` again, after a mock there was stopped.
+        async fn restart(
+            port: u16,
+            script: impl Fn(&str, &Value) -> Reply + Send + Sync + 'static,
+        ) -> Mock {
+            let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+            Mock::serve(listener, port, Arc::new(script))
+        }
+
+        fn serve(listener: TcpListener, port: u16, script: Script) -> Mock {
+            let connections = Arc::new(AtomicUsize::new(0));
+            let counted = connections.clone();
+            let tasks = Arc::new(Mutex::new(Vec::new()));
+            let spawned = tasks.clone();
+            let accepting = tokio::spawn(async move {
+                loop {
+                    let Ok((socket, _)) = listener.accept().await else {
+                        break;
+                    };
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    let serving = tokio::spawn(Mock::connection(socket, script.clone()));
+                    spawned.lock().unwrap().push(serving);
+                }
+            });
+            tasks.lock().unwrap().push(accepting);
+            Mock {
+                port,
+                connections,
+                tasks,
+            }
+        }
+
+        async fn connection(socket: TcpStream, script: Script) {
+            let mut server = Server::new(socket.compat());
+            let Ok(request) = server.receive_request().await else {
+                return;
+            };
+            let key = request.key();
+            if server
+                .send_response(&Response::Accept {
+                    key,
+                    protocol: None,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let (mut sender, mut receiver) = server.into_builder().finish();
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                if receiver.receive_data(&mut buf).await.is_err() {
+                    return;
+                }
+                let Ok(request) = serde_json::from_slice::<Value>(&buf) else {
+                    return;
+                };
+                let method = request["method"].as_str().unwrap_or_default().to_owned();
+                let text = match script(&method, &request["params"]) {
+                    Reply::Result(v) => {
+                        json!({"jsonrpc": "2.0", "id": request["id"], "result": v}).to_string()
+                    }
+                    Reply::Error(message) => json!({"jsonrpc": "2.0", "id": request["id"],
+                        "error": {"code": -32000, "message": message}})
+                    .to_string(),
+                    Reply::Garbage => "this is not json".to_owned(),
+                    Reply::Hang => return,
+                };
+                if sender.send_text(text).await.is_err() || sender.flush().await.is_err() {
+                    return;
+                }
+            }
+        }
+
+        fn url(&self, path: &str) -> String {
+            format!("ws://127.0.0.1:{}{path}", self.port)
+        }
+
+        /// Stops listening and drops every connection it has not already.
+        fn stop(self) {
+            for task in self.tasks.lock().unwrap().iter() {
+                task.abort();
+            }
+        }
+    }
+
+    fn source(url: &str) -> WsSource {
+        WsSource::new(url, Duration::from_secs(5), 16 * 1024 * 1024)
+    }
+
+    #[tokio::test]
+    async fn issue_49_a_source_reads_headers_proofs_and_bodies_over_one_connection() {
+        let f = fixture();
+        let hash = h256(&f["hash"]).unwrap();
+        let header_json = f["header_json"].clone();
+        let mock = Mock::start(move |method, params| match method {
+            "chain_getBlockHash" if params[0] == json!(39_867_043) => {
+                Reply::Result(json!(hash0x(&hash)))
+            }
+            "chain_getBlockHash" => Reply::Result(Value::Null),
+            "chain_getHeader" => Reply::Result(header_json.clone()),
+            "state_getReadProof" => {
+                Reply::Result(json!({"at": "0x00", "proof": ["0x0102", "0x03"]}))
+            }
+            "chain_getBlock" => Reply::Result(json!({"block": {"extrinsics": ["0xaa", "0xbbcc"]}})),
+            _ => Reply::Error("method not found".into()),
+        })
+        .await;
+        let s = source(&mock.url(""));
+        assert_eq!(s.name(), format!("ws://127.0.0.1:{}", mock.port));
+        assert_eq!(s.block_hash(39_867_043).await, Ok(Some(hash)));
+        assert_eq!(s.block_hash(1).await, Ok(None));
+        let header = s.header(&hash).await.unwrap();
+        assert_eq!(hex0x(&header), f["header"].as_str().unwrap());
+        assert_eq!(
+            s.read_proof(&hash, &[vec![1]]).await,
+            Ok(vec![vec![1, 2], vec![3]])
+        );
+        assert_eq!(s.body(&hash).await, Ok(vec![vec![0xaa], vec![0xbb, 0xcc]]));
+        assert_eq!(
+            mock.connections.load(Ordering::SeqCst),
+            1,
+            "one connection for all of it"
+        );
+        mock.stop();
+    }
+
+    fn hash0x(h: &[u8; 32]) -> String {
+        hex0x(h)
+    }
+
+    #[tokio::test]
+    async fn issue_49_a_source_that_answers_wrongly_lies_and_one_that_refuses_is_missing() {
+        let mock = Mock::start(|method, _| match method {
+            "chain_getBlockHash" => Reply::Garbage,
+            "chain_getHeader" => Reply::Result(json!({"number": "0x1"})),
+            "state_getReadProof" => Reply::Result(json!({"proof": "no"})),
+            "chain_getBlock" => Reply::Error("State already discarded".into()),
+            _ => Reply::Result(json!("not a hash")),
+        })
+        .await;
+        let s = source(&mock.url(""));
+        // Not even a JSON-RPC message: the connection is not trusted to have answered.
+        assert!(matches!(s.block_hash(1).await, Err(Fail::Unavailable(_))));
+        assert!(matches!(s.header(&[1; 32]).await, Err(Fail::Lied(_))));
+        assert!(matches!(
+            s.read_proof(&[1; 32], &[]).await,
+            Err(Fail::Lied(_))
+        ));
+        // A refusal from the node is "it does not have it", not a lie.
+        match s.body(&[1; 32]).await {
+            Err(Fail::Missing(m)) => assert!(m.contains("State already discarded"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn issue_49_a_source_connects_again_after_the_node_drops_or_restarts() {
+        let answer = |method: &str, _: &Value| match method {
+            "chain_getBlockHash" => Reply::Result(json!(hex0x(&[5; 32]))),
+            _ => Reply::Error("no".into()),
+        };
+        // A node that drops the connection on its first request, then behaves.
+        let first = Arc::new(AtomicUsize::new(0));
+        let seen = first.clone();
+        let mock = Mock::start(move |m, p| {
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                Reply::Hang
+            } else {
+                answer(m, p)
+            }
+        })
+        .await;
+        let s = WsSource::new(&mock.url(""), Duration::from_millis(500), 1 << 20);
+        let mut got = None;
+        for _ in 0..40 {
+            if let Ok(v) = s.block_hash(1).await {
+                got = Some(v);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(got, Some(Some([5; 32])), "the source recovered");
+        assert!(
+            mock.connections.load(Ordering::SeqCst) >= 2,
+            "it connected again"
+        );
+
+        // The node goes away altogether: the source is unreachable, with a reason that says
+        // nothing of the address, and it works once the node is back on the same port.
+        let port = mock.port;
+        mock.stop();
+        let mut down = None;
+        for _ in 0..40 {
+            match s.block_hash(1).await {
+                Ok(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+                Err(e) => {
+                    down = Some(e);
+                    break;
+                }
+            }
+        }
+        assert!(matches!(down, Some(Fail::Unavailable(_))), "{down:?}");
+        let back = Mock::restart(port, answer).await;
+        let mut got = None;
+        for _ in 0..80 {
+            if let Ok(v) = s.block_hash(1).await {
+                got = Some(v);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            got,
+            Some(Some([5; 32])),
+            "the source reconnected with backoff"
+        );
+        back.stop();
+    }
+
+    #[tokio::test]
+    async fn issue_49_a_source_never_reached_is_unavailable_without_its_address() {
+        // A port nothing listens on.
+        let free = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let s = WsSource::new(
+            &format!("ws://user:SECRETKEY@127.0.0.1:{port}/v2/SECRETKEY?k=SECRETKEY"),
+            Duration::from_millis(300),
+            1 << 20,
+        );
+        let started = std::time::Instant::now();
+        let err = s.block_hash(1).await.unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "bounded by the timeout"
+        );
+        let Fail::Unavailable(text) = err else {
+            panic!("{err:?}");
+        };
+        assert!(
+            !text.contains("SECRETKEY") && !text.contains("127.0.0.1"),
+            "{text}"
+        );
+        assert_eq!(s.name(), format!("ws://127.0.0.1:{port}"));
+    }
+
+    #[tokio::test]
+    async fn issue_49_what_a_server_says_is_neither_unbounded_nor_carries_the_key() {
+        let mock = Mock::start(|_, _| {
+            // An error that echoes the request URL, then goes on for a long time.
+            Reply::Error(format!(
+                "bad request to ws://127.0.0.1:1/v2/SECRETKEY?apikey=SECRETKEY {}",
+                "x".repeat(10_000)
+            ))
+        })
+        .await;
+        let s = source(&mock.url("/v2/SECRETKEY"));
+        // The mock cannot know its own address in the message above, so the source is told to
+        // scrub the text it will be asked about: the URL's path is a secret too.
+        let Err(Fail::Missing(text)) = s.block_hash(1).await else {
+            panic!("a refusal is `Missing`");
+        };
+        assert!(text.len() < 260, "{} bytes", text.len());
+        assert!(!text.contains("SECRETKEY"), "{text}");
+        // The scrubbing, directly: the whole URL, its path, its query and its userinfo.
+        let s = source("wss://user:PASS@node.example:9944/v2/PATHKEY?apikey=QUERYKEY");
+        for secret in [
+            "wss://user:PASS@node.example:9944/v2/PATHKEY?apikey=QUERYKEY",
+            "user:PASS@node.example:9944/v2/PATHKEY?apikey=QUERYKEY",
+            "v2/PATHKEY?apikey=QUERYKEY",
+            "user:PASS",
+        ] {
+            let out = s.scrub(&format!("connect to {secret} failed\nbadly"));
+            assert!(
+                !out.contains("PASS") && !out.contains("PATHKEY") && !out.contains("QUERYKEY"),
+                "{out}"
+            );
+            assert!(!out.contains('\n'));
+        }
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn issue_49_an_answer_over_the_cap_is_a_failed_request_not_a_big_allocation() {
+        let mock =
+            Mock::start(|_, _| Reply::Result(json!("0x".to_owned() + &"ab".repeat(20_000)))).await;
+        // Cap: 4 KiB; the answer is 40 KB.
+        let capped = WsSource::new(&mock.url(""), Duration::from_secs(2), 4 * 1024);
+        let got = capped.header(&[1; 32]).await;
+        assert!(
+            matches!(got, Err(Fail::Unavailable(_) | Fail::Missing(_))),
+            "{got:?}"
+        );
+        // The same answer is read under a larger cap (it then fails as a header, not as a size).
+        let roomy = WsSource::new(&mock.url(""), Duration::from_secs(2), 1 << 20);
+        assert!(matches!(roomy.header(&[1; 32]).await, Err(Fail::Lied(_))));
+        mock.stop();
     }
 }

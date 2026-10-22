@@ -43,7 +43,9 @@
 //! client's finalized chain ([`crate::chain::archive`]). At least one source is required to run;
 //! each must serve proven state at `start_block` and agree with the light client, or the endpoint
 //! refuses to start. `max_walk` bounds how far one look walks back by parent hash: on a first start
-//! it must cover the blocks from `start_block` to the finalized head, or the backlog is a gap.
+//! it must cover the blocks from `start_block` to the finalized head, or the backlog is a gap (the walk
+//! is kept in rungs, so an error late in it, or a restart, does not lose it). `archive_max_response_bytes`
+//! caps one answer of a source (16 MiB by default).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -123,6 +125,10 @@ pub struct Config {
     /// How long one request to a history source may take, in milliseconds.
     #[serde(default = "default_archive_timeout_ms")]
     pub archive_timeout_ms: u64,
+    /// The most bytes one answer of a history source may be (issue #49): a longer one is a failed
+    /// request. 16 MiB by default; a block's events are far smaller.
+    #[serde(default = "default_archive_max_response_bytes")]
+    pub archive_max_response_bytes: u32,
     /// The delivery key's signing lane.
     pub lane: LaneConfig,
     /// The signer link.
@@ -171,16 +177,20 @@ fn default_light_client_depth() -> u64 {
 fn default_archive_timeout_ms() -> u64 {
     30_000
 }
+fn default_archive_max_response_bytes() -> u32 {
+    16 * 1024 * 1024
+}
 
-/// A history source's URL for logs: scheme, host and path, without credentials or query.
+/// A history source's URL for logs: scheme, host and port only. Credentials (`user:pass@`), the
+/// path (some providers put the API key there) and the query are left out.
 pub fn source_name(url: &str) -> String {
-    let url = url.split(['?', '#']).next().unwrap_or_default();
     match url.split_once("://") {
         Some((scheme, rest)) => {
-            let rest = rest.split_once('@').map_or(rest, |(_, host)| host);
-            format!("{scheme}://{rest}")
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+            let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+            format!("{scheme}://{host}")
         }
-        None => url.to_owned(),
+        None => "an invalid URL".to_owned(),
     }
 }
 
@@ -236,6 +246,9 @@ impl Config {
         }
         if !(1..256).contains(&self.light_client_depth) || self.archive_timeout_ms == 0 {
             return Err("light_client_depth must be 1 to 255, archive_timeout_ms positive".into());
+        }
+        if self.archive_max_response_bytes < 1024 {
+            return Err("archive_max_response_bytes must be at least 1024".into());
         }
         if let Some(u) = self
             .archive_rpc
@@ -352,7 +365,7 @@ mod tests {
         c.archive_rpc
             .push("https://user:secret@archive.example/?key=k".into());
         let err = c.check().unwrap_err();
-        assert!(err.contains("https://archive.example/"), "{err}");
+        assert!(err.contains("https://archive.example"), "{err}");
         assert!(!err.contains("secret") && !err.contains("key=k"), "{err}");
         let debug = format!("{c:?}");
         assert!(
@@ -362,5 +375,43 @@ mod tests {
         c.archive_rpc.pop();
         c.light_client_depth = 256;
         assert!(c.check().is_err());
+    }
+
+    #[test]
+    fn issue_49_a_source_is_named_by_its_host_alone() {
+        for (url, name) in [
+            ("wss://rpc.example", "wss://rpc.example"),
+            ("wss://rpc.example:443/", "wss://rpc.example:443"),
+            // A key in the path, in the userinfo, in the query, in a fragment, and with an `@`
+            // after the path.
+            ("wss://rpc.example/v2/KEY123", "wss://rpc.example"),
+            (
+                "wss://user:KEY123@rpc.example:9944/ws",
+                "wss://rpc.example:9944",
+            ),
+            (
+                "wss://rpc.example/ws?apikey=KEY123#KEY123",
+                "wss://rpc.example",
+            ),
+            ("wss://rpc.example?apikey=KEY123", "wss://rpc.example"),
+            ("wss://rpc.example/path/KEY@123", "wss://rpc.example"),
+            ("not a url KEY123", "an invalid URL"),
+        ] {
+            let got = source_name(url);
+            assert_eq!(got, name, "{url}");
+            assert!(!got.contains("KEY123"), "{got}");
+        }
+    }
+
+    #[test]
+    fn issue_49_the_response_cap_is_16_mib_and_bounded_below() {
+        let mut c = sample();
+        assert_eq!(c.archive_max_response_bytes, 16 * 1024 * 1024);
+        c.archive_max_response_bytes = 10;
+        assert!(
+            c.check()
+                .unwrap_err()
+                .contains("archive_max_response_bytes")
+        );
     }
 }

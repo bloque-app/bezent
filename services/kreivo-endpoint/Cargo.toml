@@ -61,6 +61,10 @@ sha2 = "0.10"
 # The core, for the two-step delivery end to end (tests/delivery.rs; PLAN DEC-3).
 bezent-core-service = { path = "../core" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# A WebSocket server for the history source's tests (`WsSource`): reconnects, size cap, errors. Both
+# are already in the tree under jsonrpsee.
+soketto = "0.8"
+tokio-util = { version = "0.7", features = ["compat"] }
 
 [lints]
 workspace = true

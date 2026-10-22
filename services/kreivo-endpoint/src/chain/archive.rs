@@ -8,7 +8,8 @@
 //! and **nothing they say is taken on their word**:
 //!
 //! - a header is asked for by hash and kept only if its SCALE bytes hash (BLAKE2b-256) to that
-//!   hash. Hashes come from the light client's finalized head, by parent hash (`ancestry`), so a
+//!   hash. Hashes come from the light client's finalized head, by parent hash (`ancestry`, or the
+//!   follower's anchors, each reached the same way), so a
 //!   verified header is a block of the finalized chain;
 //! - a storage value is read with `state_getReadProof` and verified against the state root of the
 //!   verified header of its block: a value that is not proven, or a node left out, is `Invalid`,
@@ -23,7 +24,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use parity_scale_codec::Encode;
 use smoldot::trie::{self, TrieEntryVersion, proof_decode};
@@ -140,6 +141,30 @@ pub struct Archive<S> {
     /// The source that answered last: tried first.
     current: AtomicUsize,
     headers: Mutex<HashMap<[u8; 32], Verified>>,
+    /// Per source, how often it answered what does not verify, and how often it failed.
+    counts: Vec<Counts>,
+}
+
+#[derive(Default)]
+struct Counts {
+    lied: AtomicU64,
+    failed: AtomicU64,
+}
+
+/// What one source has done since start-up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceCounts {
+    /// The source, for logs.
+    pub source: String,
+    /// Answers that did not verify.
+    pub lied: u64,
+    /// Requests that failed otherwise (unreachable, no answer in time, or no such data).
+    pub failed: u64,
+}
+
+/// Whether the `n`th occurrence of something is logged: the first, then every thousandth.
+fn log_this(n: u64) -> bool {
+    n == 1 || n.is_multiple_of(1_000)
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -154,6 +179,9 @@ pub struct StartCheck<'a> {
     pub finalized: BlockRef,
     /// The block the contract was instantiated in.
     pub start_block: u64,
+    /// That block's hash, reached from the finalized head by parent hash (the follower's anchor):
+    /// not any source's word.
+    pub start_hash: [u8; 32],
     /// The storage key of the contract's `ContractInfoOf`.
     pub contract_key: Vec<u8>,
     /// The declared code hash.
@@ -170,10 +198,24 @@ impl<S: Source> Archive<S> {
     /// The sources, in the order they are tried.
     pub fn new(sources: Vec<S>) -> Archive<S> {
         Archive {
+            counts: sources.iter().map(|_| Counts::default()).collect(),
             sources,
             current: AtomicUsize::new(0),
             headers: Mutex::default(),
         }
+    }
+
+    /// How often each source lied or failed since start-up.
+    pub fn counts(&self) -> Vec<SourceCounts> {
+        self.sources
+            .iter()
+            .zip(&self.counts)
+            .map(|(s, c)| SourceCounts {
+                source: s.name().to_owned(),
+                lied: c.lied.load(Ordering::Relaxed),
+                failed: c.failed.load(Ordering::Relaxed),
+            })
+            .collect()
     }
 
     /// Asks each source in turn, from the one that answered last, until one answers what
@@ -194,11 +236,18 @@ impl<S: Source> Archive<S> {
                     return Ok(v);
                 }
                 Err(Fail::Lied(e)) => {
-                    tracing::error!(source = s.name(), what, reason = %e, "REQ-RQ-7: a history source answered what does not verify; not used, trying the next");
+                    let n = self.counts[i].lied.fetch_add(1, Ordering::Relaxed) + 1;
+                    if log_this(n) {
+                        tracing::error!(source = s.name(), what, reason = %e, lied = n, "REQ-RQ-7: a history source answered what does not verify; not used, trying the next (logged for the first and every thousandth)");
+                    }
                     lied = true;
                     failures.push(format!("{}: {e}", s.name()));
                 }
                 Err(Fail::Unavailable(e) | Fail::Missing(e)) => {
+                    let n = self.counts[i].failed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if log_this(n) {
+                        tracing::warn!(source = s.name(), what, reason = %e, failed = n, "issue #49: a history source did not answer (logged for the first and every thousandth)");
+                    }
                     failures.push(format!("{}: {e}", s.name()))
                 }
             }
@@ -339,6 +388,16 @@ impl<S: Source> Archive<S> {
         let start = s.block_hash(c.start_block).await?.ok_or_else(|| {
             Fail::Missing(format!("it has no block {} (start_block)", c.start_block))
         })?;
+        // Its word is not enough: start_block is the block of the finalized chain reached by
+        // parent hash from the light client's head.
+        if start != c.start_hash {
+            return Err(Fail::Lied(format!(
+                "its block {} (start_block) is {}, the finalized chain's is {}",
+                c.start_block,
+                hex0x(&start),
+                hex0x(&c.start_hash)
+            )));
+        }
         let keys = std::slice::from_ref(&c.contract_key);
         let info = self.storage_from(s, &start, keys).await.map_err(missing)?;
         let code = info[0].as_deref().and_then(c.decode_code_hash);
@@ -520,6 +579,7 @@ mod tests {
                 hash: h(&f["hash"]),
             },
             start_block: 39_867_043,
+            start_hash: h(&f["hash"]),
             contract_key: bytes(&f["keys"]["contract_info"]),
             code_hash: code_hash(&bytes(&f["values"]["contract_info"])).unwrap(),
             decode_code_hash: &code_hash,
@@ -639,5 +699,43 @@ mod tests {
         );
         // No source at all.
         assert!(Archive::<Fake>::new(vec![]).check(&c).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn issue_49_start_block_is_the_finalized_chains_not_the_sources() {
+        let f = fixture();
+        // The source's start_block is a block of another chain (the finalized chain's is another
+        // hash): refused, however well the source proves its own.
+        let other = StartCheck {
+            start_hash: [9; 32],
+            ..check(&f)
+        };
+        let err = Archive::new(vec![fake(Does::Honest)])
+            .check(&other)
+            .await
+            .unwrap_err();
+        assert!(err.contains("the finalized chain's"), "{err}");
+        assert!(err.contains("refusing to start"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn issue_49_lying_and_failing_sources_are_counted() {
+        let f = fixture();
+        let at = h(&f["hash"]);
+        let archive = Archive::new(vec![
+            fake(Does::LieEvents),
+            fake(Does::Down),
+            fake(Does::Honest),
+        ]);
+        for _ in 0..3 {
+            archive.storage(&at, &keys(&f)).await.unwrap();
+        }
+        // The one that answered is asked first from then on: the liar and the dead one were
+        // tried once each.
+        let counts = archive.counts();
+        assert_eq!((counts[0].lied, counts[0].failed), (1, 0));
+        assert_eq!((counts[1].lied, counts[1].failed), (0, 1));
+        assert_eq!((counts[2].lied, counts[2].failed), (0, 0));
+        assert!(log_this(1) && !log_this(2) && log_this(1_000) && !log_this(1_001));
     }
 }

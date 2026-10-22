@@ -246,13 +246,41 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
     `fixtures/archive-39867043.json`: the values verify; a flipped header byte, a changed `System::Events` value, a
     dropped proof node and a changed body are each refused; a source that is down, lies or lacks the state gives way to
     the next; the start-up check refuses a source with Kippu's "State already discarded" answer, another genesis,
-    another finalized hash, a lie, a late `start_block`, and no source. The live path (the patched smoldot, the
+    another finalized hash, a lie, a late `start_block`, a `start_block` hash that is not the finalized chain's, and no
+    source. The live path (the patched smoldot, the
     WebSocket source, the start-up check against the archive node and the public endpoint) was run once by hand; CI
     has no network.
 
+37. **The first-start walk is kept, in rungs** (review of PR #54). The follower no longer walks the whole backlog before
+    reading a block. It reads a **rung** at a time (4,096 blocks, up to the next multiple of 4,096): reaching the
+    rung's top from the finalized head by parent hash records an anchor there and at every multiple passed on the way
+    (`observation_walk_anchors`, migration 0052). A walk that fails on an unavailable header keeps its anchors and
+    returns "unavailable", not a gap, and the next step resumes from the lowest anchor; a header that does not verify
+    is still a visible gap. After a restart a walk resumes from the anchors, and each later rung walks at most 4,096
+    headers. The migration was unavoidable: nothing the endpoint stores held a mid-chain block (`final_heads` is read
+    as "the newest row is the head" and carries a block time, and `observation_ranges` rows move the watermark or are
+    gaps). It adds one append-only table, one hash per height, scoped to the endpoint's own networks (0049), granted
+    to the Kreivo endpoint alone. `max_walk` still bounds the whole backlog.
+38. **The start-up check is anchored.** `start_block`'s hash is the finalized chain's, reached by parent hash (the
+    anchor above), and each source's `block_hash(start_block)` must equal it: a source with a chain of its own is
+    refused, not believed. A first start walks for it before the check (the follower would walk it next anyway), and a
+    walk that cannot finish refuses the start.
+39. **Hygiene and limits of a source.** A source is named by scheme, host and port (a path, a query and userinfo can
+    hold a key); no transport error text is kept, and a server's message is scrubbed of the URL's parts and cut at 160
+    characters, because error text reaches gap reasons in the store. An answer is capped at `archive_max_response_bytes`
+    (16 MiB by default; the client's own default is 50 MiB). Answers that do not verify and requests that fail are
+    counted per source; the first of each and then every thousandth is logged, and the endpoint logs an error when the
+    count of lies grows.
+40. **Tests added.** Against the recorded real header JSON (`header_json`): `scale_header` gives the archive's bytes,
+    which hash to the block's hash. Against a WebSocket server in the test (`soketto`, already in the tree): reads,
+    refusals and lies, reconnect after a dropped connection and after the node returns, the unreachable source, scrubbed
+    errors and the response cap. `either` and the routing (`is_old`, `routed`) as plain functions. A fake chain that
+    fails the header of block N and counts the headers asked for: the walk keeps its anchors, a new follower resumes
+    below the lowest anchor and asks for no header above it.
+
 **Runbook** (first start on Kreivo mainnet): `start_block = 39867043`, `first_seq = 0`, `archive_rpc` with the
-archive node first, `max_walk` above the blocks from `start_block` to the head (`ancestry` walks the whole backlog in
-one look; a smaller value records the backlog as a gap that never fills). The replay is sequential: a header and a
+archive node first, `max_walk` above the blocks from `start_block` to the head (a smaller value records the backlog as a gap that never
+fills; the walk itself is kept in rungs, item 37). The replay is sequential: a header and a
 proof per block, about 0.19 s per block from a client about 95 ms from the node, so about 4 to 5 hours for the
 backlog of 2026-10-22, during which nothing else in the loop runs and `NFR-6` alerts fire; it is shorter close to the
 node. `wss://` verifies with the system's roots (`rustls-platform-verifier`); the distroless runtime image carries

@@ -201,8 +201,17 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
     ),
     // The endpoints: each alone appends what it observes and delivers; the guards of migrations
     // 0034 to 0036 narrow each to its own networks.
-    (crate::KREIVO_ENDPOINT_ROLE, "SELECT", ENDPOINT_SELECT),
-    (crate::KREIVO_ENDPOINT_ROLE, "INSERT", ENDPOINT_INSERT),
+    // The Kreivo endpoint alone walks long histories from a final head (migration 0052).
+    (
+        crate::KREIVO_ENDPOINT_ROLE,
+        "SELECT",
+        KREIVO_ENDPOINT_SELECT,
+    ),
+    (
+        crate::KREIVO_ENDPOINT_ROLE,
+        "INSERT",
+        KREIVO_ENDPOINT_INSERT,
+    ),
     (crate::KREIVO_ENDPOINT_ROLE, "EXECUTE", ENDPOINT_EXECUTE),
     (crate::EVM_ENDPOINT_ROLE, "SELECT", ENDPOINT_SELECT),
     (crate::EVM_ENDPOINT_ROLE, "INSERT", ENDPOINT_INSERT),
@@ -342,6 +351,43 @@ const ENDPOINT_INSERT: &[&str] = &[
     "non_execution_proofs",
     "observation_outcomes",
     "observation_ranges",
+    "observations",
+    "prepared_transactions",
+    "reserve_readings",
+    "signed_transactions",
+];
+
+/// [`ENDPOINT_SELECT`] and the Kreivo endpoint's walk anchors.
+const KREIVO_ENDPOINT_SELECT: &[&str] = &[
+    "admitted_tokens",
+    "assets",
+    "endpoint_scopes",
+    "event_log",
+    "final_heads",
+    "intents",
+    "networks",
+    "non_execution_proofs",
+    "observation_gaps",
+    "observation_outcomes",
+    "observation_ranges",
+    "observation_walk_anchors",
+    "observation_watermarks",
+    "observations",
+    "prepared_transactions",
+    "reserve_readings",
+    "reserves",
+    "signatures",
+    "signed_transactions",
+];
+
+/// [`ENDPOINT_INSERT`] and the Kreivo endpoint's walk anchors.
+const KREIVO_ENDPOINT_INSERT: &[&str] = &[
+    "event_log",
+    "final_heads",
+    "non_execution_proofs",
+    "observation_outcomes",
+    "observation_ranges",
+    "observation_walk_anchors",
     "observations",
     "prepared_transactions",
     "reserve_readings",

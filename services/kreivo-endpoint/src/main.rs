@@ -120,7 +120,7 @@ mod run {
     use bezent_kreivo_endpoint::chain::light::LightChain;
     use bezent_kreivo_endpoint::config::Config;
     use bezent_kreivo_endpoint::network;
-    use bezent_kreivo_endpoint::observe::{Follower, Step};
+    use bezent_kreivo_endpoint::observe::{Follower, Step, WALK_RUNG};
     use bezent_kreivo_endpoint::proof::Prover;
     use bezent_kreivo_endpoint::submit::{Lane, SignerLink, Submitter};
     use bezent_kreivo_endpoint::supply::{Recorded, Supplies};
@@ -155,6 +155,7 @@ mod run {
             &config.archive_rpc,
             config.light_client_depth,
             Duration::from_millis(config.archive_timeout_ms),
+            config.archive_max_response_bytes,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -167,12 +168,38 @@ mod run {
         network::check_contract(&chain, &contract, config.declared_code_hash()?)
             .await
             .map_err(|e| e.to_string())?;
+        let follower = Follower {
+            chain: &chain,
+            pool: &pool,
+            network: &config.network,
+            contract,
+            start_block: config.start_block,
+            first_seq: config.first_seq,
+            max_range: config.max_range,
+            max_walk: config.max_walk,
+            rung: WALK_RUNG.min(config.max_walk),
+        };
+        // Issue #49: start_block's hash is the finalized chain's, reached by parent hash from the
+        // light client's head, not any source's word. A first start walks the backlog for it (its
+        // anchors are kept, and the follower resumes from them); a failed walk is tried again
+        // next start.
+        let start_hash = match follower.start_anchor().await {
+            Ok(Ok(hash)) => hash,
+            Ok(Err(e)) => {
+                return Err(format!(
+                    "issue #49: start_block {} cannot be reached from the finalized head: {e}; refusing to start",
+                    config.start_block
+                ));
+            }
+            Err(e) => return Err(format!("the store: {e}")),
+        };
         // Issue #49: every history source agrees with the light client and serves proven state at
         // the contract's instantiation, or nothing starts.
         if let Err(e) = chain
             .check_history(
                 declared,
                 config.start_block,
+                start_hash,
                 &contract,
                 config.declared_code_hash()?,
             )
@@ -193,16 +220,6 @@ mod run {
             socket: config.signer.socket.clone(),
             uid: config.signer.uid,
             token: read_secret(&config.signer.token_file, "signer token")?,
-        };
-        let follower = Follower {
-            chain: &chain,
-            pool: &pool,
-            network: &config.network,
-            contract,
-            start_block: config.start_block,
-            first_seq: config.first_seq,
-            max_range: config.max_range,
-            max_walk: config.max_walk,
         };
         let supplies = Supplies {
             chain: &chain,
@@ -228,6 +245,7 @@ mod run {
             max_walk: config.max_walk,
         };
 
+        let mut lied_seen = 0u64;
         let mut tick = tokio::time::interval(Duration::from_millis(config.poll_ms));
         loop {
             tokio::select! {
@@ -239,6 +257,12 @@ mod run {
             }
             let result: Result<(), sqlx::Error> = async {
                 while let Step::Read { .. } = follower.step().await? {}
+                let counts = chain.history_counts();
+                let lied: u64 = counts.iter().map(|c| c.lied).sum();
+                if lied > lied_seen {
+                    lied_seen = lied;
+                    tracing::error!(sources = ?counts, "REQ-RQ-7: history sources have answered what does not verify (counts since start-up)");
+                }
                 // Issue #42: the supply of every bridged asset at the finalized head, for the
                 // reserve check (REQ-BK-8, NFR-5).
                 match supplies.record().await? {

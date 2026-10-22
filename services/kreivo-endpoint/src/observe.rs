@@ -18,6 +18,15 @@
 //! again, which is how the gap is filled from history. The store refuses a read range that starts
 //! past the watermark, so nothing moves past a gap; and nothing past the watermark may be decided.
 //!
+//! **Rungs** (issue #49): a first start is about 81,000 blocks behind. Walking them all back from the
+//! finalized head before reading any would lose the walk to its first late error or restart, so the
+//! backlog is read **a rung at a time**: a rung is the blocks from the watermark up to the next
+//! multiple of `rung`. Reaching that block from the head by parent hash records an **anchor** at it
+//! and at every multiple of `rung` passed on the way (`observation_walk_anchors`), so the walk
+//! resumes from the lowest anchor it reached, and later rungs walk at most `rung` headers. A walk
+//! that cannot go on because a header is unavailable keeps its anchors and tries again; one that
+//! meets a header which does not verify is a visible gap.
+//!
 //! **What an observation is**: one event of the contract, at its coordinate (network, block number,
 //! block hash, event index), recorded once (`INV-10`): `Minted`, `Redeemed`, `RefundMinted`, the
 //! pause and bounds events, and the contract's other events by name. A redemption's observation
@@ -28,7 +37,7 @@
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use crate::chain::{BlockRef, Chain, ancestry};
+use crate::chain::{BlockRef, Chain, ChainError, ancestry};
 use crate::kreivo::{self, AccountId32, Backend, ContractEvent, Payout};
 
 /// One observation to record.
@@ -92,7 +101,12 @@ pub struct Follower<'a, C> {
     pub max_range: u64,
     /// The most blocks walked back from the finalized head.
     pub max_walk: u64,
+    /// The blocks between two anchors of a long walk, and the most one step reads (at least 1).
+    pub rung: u64,
 }
+
+/// The default distance between anchors.
+pub const WALK_RUNG: u64 = 4_096;
 
 impl<C: Chain> Follower<'_, C> {
     /// Reads from the watermark to the finalized head, or to the first block it cannot read.
@@ -108,20 +122,41 @@ impl<C: Chain> Follower<'_, C> {
                 watermark: watermark.unwrap_or(finalized.number),
             });
         }
-        let blocks = match ancestry(self.chain, &finalized, next, self.max_walk).await {
+        if finalized.number - next >= self.max_walk {
+            // The same words every look, so the same open gap is recorded once.
+            let reason = format!(
+                "more than max_walk ({}) blocks behind the finalized head",
+                self.max_walk
+            );
+            return self.gap(next, finalized.number, &finalized, reason).await;
+        }
+        // This step's rung ends at the next multiple of `rung`, or at the head.
+        let rung = self.rung.max(1);
+        let top = next.div_ceil(rung).saturating_mul(rung);
+        let head = if top >= finalized.number {
+            finalized
+        } else {
+            match self.anchor(&finalized, top).await? {
+                Ok(hash) => BlockRef { number: top, hash },
+                Err(e @ ChainError::Unavailable(_)) => {
+                    // Whatever the walk anchored is kept: the next step resumes from there.
+                    tracing::warn!(network = self.network, to = top, reason = %e, "REQ-OB-3: the walk back from the finalized head could not go on; it resumes from its last anchor");
+                    return Ok(Step::Unavailable(e.to_string()));
+                }
+                Err(e) => return self.gap(next, top, &finalized, e.to_string()).await,
+            }
+        };
+        let blocks = match ancestry(self.chain, &head, next, self.max_walk).await {
             Ok(Some(blocks)) => blocks,
             Ok(None) => {
-                // The same words every look, so the same open gap is recorded once.
                 let reason = format!(
                     "more than max_walk ({}) blocks behind the finalized head",
                     self.max_walk
                 );
-                return self.gap(next, finalized.number, &finalized, reason).await;
+                return self.gap(next, head.number, &finalized, reason).await;
             }
             Err(e) => {
-                return self
-                    .gap(next, finalized.number, &finalized, e.to_string())
-                    .await;
+                return self.gap(next, head.number, &finalized, e.to_string()).await;
             }
         };
         let mut seq = match last_seq(self.pool, self.network, &self.contract).await? {
@@ -177,6 +212,112 @@ impl<C: Chain> Follower<'_, C> {
                 watermark: finalized.number,
             },
         })
+    }
+
+    /// The hash of the final block `number`, reached from `finalized` by parent hash: an anchor
+    /// recorded earlier, or else the walk down from the lowest anchor above it (the head itself
+    /// if there is none), anchoring every multiple of `rung` and `number` on the way. A walk that
+    /// fails keeps its anchors.
+    pub async fn anchor(
+        &self,
+        finalized: &BlockRef,
+        number: u64,
+    ) -> Result<Result<[u8; 32], ChainError>, sqlx::Error> {
+        let rung = self.rung.max(1);
+        let above: Option<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT block_number, block_hash FROM observation_walk_anchors \
+             WHERE network = $1 AND block_number >= $2 ORDER BY block_number LIMIT 1",
+        )
+        .bind(self.network)
+        .bind(i64_of(number)?)
+        .fetch_optional(self.pool)
+        .await?;
+        let mut at =
+            match above.and_then(|(n, h)| Some((u64::try_from(n).ok()?, h.try_into().ok()?))) {
+                Some((n, hash)) if n == number => return Ok(Ok(hash)),
+                Some((n, hash)) => BlockRef { number: n, hash },
+                None => *finalized,
+            };
+        if at.number < number {
+            return Ok(Err(ChainError::Invalid(format!(
+                "block {number} is above the finalized head {}",
+                finalized.number
+            ))));
+        }
+        loop {
+            if at.number == number || at.number.is_multiple_of(rung) {
+                match self.keep_anchor(&at, finalized).await? {
+                    Ok(()) => {}
+                    Err(e) => return Ok(Err(e)),
+                }
+            }
+            if at.number == number {
+                return Ok(Ok(at.hash));
+            }
+            let header = match self.chain.header(&at.hash).await {
+                Ok(h) => h,
+                Err(e) => return Ok(Err(e)),
+            };
+            if header.block != at {
+                return Ok(Err(ChainError::Invalid(format!(
+                    "the header asked for as block {} is block {}",
+                    at.number, header.block.number
+                ))));
+            }
+            at = BlockRef {
+                number: at.number - 1,
+                hash: header.parent,
+            };
+        }
+    }
+
+    /// Records `at` as an anchor under `finalized`; another hash at its height is an error.
+    async fn keep_anchor(
+        &self,
+        at: &BlockRef,
+        finalized: &BlockRef,
+    ) -> Result<Result<(), ChainError>, sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO observation_walk_anchors (network, block_number, block_hash, \
+               final_block_number, final_block_hash) VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT ON CONSTRAINT observation_walk_anchors_one_hash_per_height DO NOTHING",
+        )
+        .bind(self.network)
+        .bind(i64_of(at.number)?)
+        .bind(at.hash.as_slice())
+        .bind(i64_of(finalized.number)?)
+        .bind(finalized.hash.as_slice())
+        .execute(self.pool)
+        .await?;
+        let stored: Vec<u8> = sqlx::query_scalar(
+            "SELECT block_hash FROM observation_walk_anchors \
+             WHERE network = $1 AND block_number = $2",
+        )
+        .bind(self.network)
+        .bind(i64_of(at.number)?)
+        .fetch_one(self.pool)
+        .await?;
+        Ok(if stored == at.hash {
+            Ok(())
+        } else {
+            Err(ChainError::Invalid(format!(
+                "block {} is 0x{} on the chain walked, but 0x{} was anchored there earlier",
+                at.number,
+                hex::encode(at.hash),
+                hex::encode(stored)
+            )))
+        })
+    }
+
+    /// The hash of `start_block`, reached from the finalized head by parent hash (issue #49): what
+    /// the start-up check holds each history source's `start_block` to. A first start walks the
+    /// whole backlog to get it, which the follower would walk next anyway.
+    pub async fn start_anchor(&self) -> Result<Result<[u8; 32], ChainError>, sqlx::Error> {
+        let finalized = match self.chain.finalized().await {
+            Ok(f) => f,
+            Err(e) => return Ok(Err(e)),
+        };
+        self.anchor(&finalized, self.start_block).await
     }
 
     async fn gap(

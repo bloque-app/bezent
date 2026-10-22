@@ -1,0 +1,1 @@
+../../migrations/0052_walk_anchors.up.sql

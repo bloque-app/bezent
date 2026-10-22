@@ -36,6 +36,7 @@ const TABLES: &[&str] = &[
     "intake_answers",
     "relayed_instructions",
     "final_heads",
+    "observation_walk_anchors",
     "attempt_milestones",
     "manual_actions",
     "manual_approvals",
