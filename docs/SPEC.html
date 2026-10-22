@@ -108,7 +108,7 @@ scope</a></li>
       <div class="kicker">SPEC.md</div>
       <h1>bezent Spec</h1>
       <p class="summary">A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger&#x27;s contract.</p>
-      <dl class="meta"><div><dt>Version</dt><dd>0.5.2</dd></div><div><dt>Status</dt><dd>draft</dd></div><div><dt>Date</dt><dd>2026-10-13</dd></div><div><dt>Source</dt><dd><code>bezent/SPEC.md</code> · uncommitted + local changes</dd></div></dl>
+      <dl class="meta"><div><dt>Version</dt><dd>0.5.3</dd></div><div><dt>Status</dt><dd>draft</dd></div><div><dt>Date</dt><dd>2026-10-13</dd></div><div><dt>Source</dt><dd><code>bezent/SPEC.md</code> · b57024e 2026-10-17 + local changes</dd></div></dl>
     </header>
     
 <h1 id="bezent--system-specification">bezent — System Specification</h1>
@@ -119,7 +119,7 @@ does not say how bezent is built, which technologies implement it, which
 networks it serves today, or why the project exists. <code>notes/</code>
 says why, and <code>notes/CONSTRAINTS-FOR-PLAN.md</code> says what the
 plan is expected to bind.</p>
-<p>Amendments 0001 to 0010 are applied (see
+<p>Amendments 0001 to 0014 are applied (see
 <code>amendments/</code>).</p>
 <h3 id="change-history">Change history</h3>
 <div class="scroll"><table>
@@ -132,6 +132,20 @@ plan is expected to bind.</p>
 </thead>
 <tbody>
 <tr class="odd">
+<td>0.5.3</td>
+<td>2026-10-22</td>
+<td>Amendment 0013 (decision item <code>sp-needs-review-when</code>,
+ruled by @pandres95): two more occasions for <code>Needs-Review</code>
+in §5.4 — a delivery attempt whose preparation is refused without a
+named condition past the route's deadline, and a delivery anomaly
+recorded for the transfer's attempt. Amendment 0014
+(<code>sp-inv8-unsigned</code>): an attempt for which no signature has
+been recorded, and which the store has closed to signing under the
+approved resolution that refunds, counts as proven not executed for
+<code>INV-8</code>; and the signer releases a signature only once it is
+recorded (<code>INV-9</code>).</td>
+</tr>
+<tr class="even">
 <td>0.5.2</td>
 <td>2026-10-15</td>
 <td>Amendment 0012 (decision item <code>sp-payout-window</code>): new
@@ -139,7 +153,7 @@ named condition <code>CND-PayoutWindow</code> — a withdrawal waits while
 the reserve's outflow allowance is spent and resumes when it
 refills.</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>0.5.1</td>
 <td>2026-10-13</td>
 <td>Amendment 0011 (decision item <code>sp-refund-dest</code>, ruled in
@@ -147,7 +161,7 @@ chat): a withdrawal's refund always goes to its redeemer; the refund
 destination leaves a redemption's extras (<a class="ref" href="#REQ-RQ-4"><code>REQ-RQ-4</code></a>), and
 <a class="ref" href="#REQ-RF-2"><code>REQ-RF-2</code></a> binds deposits.</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>0.5.0</td>
 <td>2026-10-13</td>
 <td>Amendment 0008 (decision item <code>sp-redemption-ref</code>): a
@@ -168,7 +182,7 @@ refusals (<code>ERR-Malformed</code>,
 <code>Needs-Review</code> state's meaning matches the transition
 table.</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>0.4.0</td>
 <td>2026-10-13</td>
 <td>Amendment 0007 (decision items <code>pl-scope</code>,
@@ -1379,9 +1393,13 @@ Nothing moved</td>
 <tr class="even">
 <td><code>Needs-Review</code></td>
 <td>A leg is unknown past its deadline, an execution was partial or
-mismatched, or a condition that blocks delivery is past its deadline
-(<a class="ref" href="#REQ-RV-1"><code>REQ-RV-1</code></a>, <a class="ref" href="#REQ-TR-3"><code>REQ-TR-3</code></a>,
-<a class="ref" href="#REQ-TR-5"><code>REQ-TR-5</code></a>)</td>
+mismatched, a condition that blocks delivery is past its deadline, a
+delivery attempt's preparation was refused without a named condition and
+the route's deadline is past, or a delivery anomaly was recorded for the
+transfer's attempt, which makes its leg unknown at once, with no
+deadline to wait for (<a class="ref" href="#REQ-RV-1"><code>REQ-RV-1</code></a>, <a class="ref" href="#REQ-TR-3"><code>REQ-TR-3</code></a>,
+<a class="ref" href="#REQ-TR-5"><code>REQ-TR-5</code></a>, <a class="ref" href="#REQ-EO-3"><code>REQ-EO-3</code></a>,
+<a class="ref" href="#REQ-NX-3"><code>REQ-NX-3</code></a>)</td>
 <td>No</td>
 </tr>
 </tbody>
@@ -1464,7 +1482,11 @@ deadline (<a class="ref" href="#REQ-RV-1"><code>REQ-RV-1</code></a>)</td>
 <td>A condition that blocks delivery
 (<code>CND-AwaitingConversion</code>,
 <code>CND-DestinationRefused</code>) is past its deadline
-(<a class="ref" href="#REQ-CV-6"><code>REQ-CV-6</code></a>, <a class="ref" href="#REQ-IN-9"><code>REQ-IN-9</code></a>)</td>
+(<a class="ref" href="#REQ-CV-6"><code>REQ-CV-6</code></a>, <a class="ref" href="#REQ-IN-9"><code>REQ-IN-9</code></a>); or the delivery
+attempt's preparation was refused without a named condition and the
+route's deadline is past (<a class="ref" href="#REQ-EO-3"><code>REQ-EO-3</code></a>); or a delivery anomaly
+was recorded for the transfer's attempt, which makes its leg unknown
+(<a class="ref" href="#REQ-NX-3"><code>REQ-NX-3</code></a>, <code>INV-8</code>)</td>
 </tr>
 <tr class="odd">
 <td><code>Delivering</code></td>
@@ -1488,7 +1510,12 @@ transfer exists</td>
 <td><code>Delivering</code>, <code>Delivered</code></td>
 <td><code>Needs-Review</code></td>
 <td>A leg unknown past its deadline; a partial or mismatched execution
-(<a class="ref" href="#REQ-TR-3"><code>REQ-TR-3</code></a>, <a class="ref" href="#REQ-TR-5"><code>REQ-TR-5</code></a>)</td>
+(<a class="ref" href="#REQ-TR-3"><code>REQ-TR-3</code></a>, <a class="ref" href="#REQ-TR-5"><code>REQ-TR-5</code></a>); or the next attempt's
+preparation was refused without a named condition and the route's
+deadline, counted from the proof it rests on, is past
+(<a class="ref" href="#REQ-EO-3"><code>REQ-EO-3</code></a>); or a delivery anomaly was recorded for the
+transfer's attempt, which makes its leg unknown (<a class="ref" href="#REQ-NX-3"><code>REQ-NX-3</code></a>,
+<code>INV-8</code>)</td>
 </tr>
 <tr class="odd">
 <td><code>Delivered</code></td>
@@ -1632,11 +1659,15 @@ attempt MUST be recorded and proven before the next.</p>
 <h3 id="59-review">5.9 Review</h3>
 <p><strong id="REQ-RV-1" class="def"><code>REQ-RV-1</code></strong> A transfer or venue delivery
 with an unknown leg past its deadline MUST go to
-<code>Needs-Review</code>, with an owner and a service level. It MUST
-NOT be refunded, retried as a new transaction, or failed. The owner of
-<code>Needs-Review</code> and <code>CND-Unassociated</code> is the
-operator's operations function, and the service level is one business
-day.</p>
+<code>Needs-Review</code>, and so MUST a transfer whose delivery
+attempt's preparation was refused without a named condition past the
+route's deadline (<a class="ref" href="#REQ-EO-3"><code>REQ-EO-3</code></a>), and one for which a delivery
+anomaly was recorded, which makes its leg unknown at once
+(<a class="ref" href="#REQ-NX-3"><code>REQ-NX-3</code></a>), with no deadline to wait for. Each goes with an
+owner and a service level, and MUST NOT be refunded, retried as a new
+transaction, or failed. The owner of <code>Needs-Review</code> and
+<code>CND-Unassociated</code> is the operator's operations function, and
+the service level is one business day.</p>
 <p><strong id="REQ-RV-2" class="def"><code>REQ-RV-2</code></strong> A review MUST end only by
 evidence: a coordinate that settles the disposition, which the bridge
 verifies itself, after which the ordinary steps run. A resolution that
@@ -2366,13 +2397,16 @@ it destroys only value it holds.</td>
 <td><code>INV-8</code></td>
 <td>No refund mint is made unless every payout attempt for the
 redemption is proven not executed at finality, and at most one is made
-per redemption.</td>
-<td>Service + chain</td>
+per redemption. An attempt for which no signature has been recorded, and
+which the store has closed to signing under the approved resolution that
+refunds, counts as proven.</td>
+<td>Store + service + chain</td>
 </tr>
 <tr class="odd">
 <td><code>INV-9</code></td>
 <td>No transaction is signed without a recorded intent, and none is
-submitted before its exact bytes are stored.</td>
+submitted before its exact bytes are stored. The signer releases a
+signature only once it is recorded.</td>
 <td>Custody + store</td>
 </tr>
 <tr class="even">

@@ -1,7 +1,7 @@
 ---
 name: bezent
 summary: A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger's contract.
-spec_version: 0.5.2
+spec_version: 0.5.3
 status: draft
 date: 2026-10-13
 ---
@@ -15,12 +15,13 @@ It is normative and self-contained. It does not say how bezent is built, which t
 implement it, which networks it serves today, or why the project exists. `notes/` says why, and
 `notes/CONSTRAINTS-FOR-PLAN.md` says what the plan is expected to bind.
 
-Amendments 0001 to 0010 are applied (see `amendments/`).
+Amendments 0001 to 0014 are applied (see `amendments/`).
 
 ### Change history
 
 | Version | Date | Change |
 |---|---|---|
+| 0.5.3 | 2026-10-22 | Amendment 0013 (decision item `sp-needs-review-when`, ruled by @pandres95): two more occasions for `Needs-Review` in §5.4 — a delivery attempt whose preparation is refused without a named condition past the route's deadline, and a delivery anomaly recorded for the transfer's attempt. Amendment 0014 (`sp-inv8-unsigned`): an attempt for which no signature has been recorded, and which the store has closed to signing under the approved resolution that refunds, counts as proven not executed for `INV-8`; and the signer releases a signature only once it is recorded (`INV-9`). |
 | 0.5.2 | 2026-10-15 | Amendment 0012 (decision item `sp-payout-window`): new named condition `CND-PayoutWindow` — a withdrawal waits while the reserve's outflow allowance is spent and resumes when it refills. |
 | 0.5.1 | 2026-10-13 | Amendment 0011 (decision item `sp-refund-dest`, ruled in chat): a withdrawal's refund always goes to its redeemer; the refund destination leaves a redemption's extras (`REQ-RQ-4`), and `REQ-RF-2` binds deposits. |
 | 0.5.0 | 2026-10-13 | Amendment 0008 (decision item `sp-redemption-ref`): a redemption's on-chain reference is the redeemer together with the reference it chose, and mint and redemption references are separate namespaces (`REQ-OT-2`, `REQ-ID-2`, `AC-B5.2`). Amendment 0009 (`sp-transitions`): the transition table in §5.4 is normative (`REQ-TR-6`), and a new delivery attempt keeps its on-chain reference and waits for proof that the previous one did not execute (`REQ-EO-6`). Amendment 0010 (`sp-request-gaps`): who may add a redemption's extras (`REQ-RQ-4`); a cut-off holds a transfer and never refuses a request (`REQ-LM-1`, `CND-CutOff`); two named refusals (`ERR-Malformed`, `ERR-CommitmentMismatch`). Consistency, same rulings: `REQ-PN-2` lists the extras and refund grants that `REQ-RQ-4` and `REQ-RQ-6` use, and the `Needs-Review` state's meaning matches the transition table. |
@@ -644,7 +645,7 @@ a refund destination, and a source binding: the coordinate of the leg that funds
 | `Refunded` | Its refund transfer is `Completed` | Yes |
 | `Expired` | Accepted, but its source leg never arrived before the request's expiry. Nothing moved | Yes |
 | `Withdrawn` | Its source observation no longer matches the chain, before finality. Nothing moved | Yes |
-| `Needs-Review` | A leg is unknown past its deadline, an execution was partial or mismatched, or a condition that blocks delivery is past its deadline (`REQ-RV-1`, `REQ-TR-3`, `REQ-TR-5`) | No |
+| `Needs-Review` | A leg is unknown past its deadline, an execution was partial or mismatched, a condition that blocks delivery is past its deadline, a delivery attempt's preparation was refused without a named condition and the route's deadline is past, or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown at once, with no deadline to wait for (`REQ-RV-1`, `REQ-TR-3`, `REQ-TR-5`, `REQ-EO-3`, `REQ-NX-3`) | No |
 
 A transfer that cannot proceed for a named reason that clears itself holds a **named condition**
 (`CND-*`, §10) in its current state. A condition is not a state and never a failure.
@@ -677,11 +678,11 @@ sends the transfer to `Needs-Review`.
 | `Accepted` | `Withdrawn` | The source observation no longer matches the chain, before finality (`REQ-IN-7`) |
 | `Accepted` | `Needs-Review` | The source leg is observed but neither final nor withdrawn past its deadline (`REQ-RV-1`) |
 | `Source-Final` | `Delivering` | A destination transaction is signed and recorded |
-| `Source-Final` | `Needs-Review` | A condition that blocks delivery (`CND-AwaitingConversion`, `CND-DestinationRefused`) is past its deadline (`REQ-CV-6`, `REQ-IN-9`) |
+| `Source-Final` | `Needs-Review` | A condition that blocks delivery (`CND-AwaitingConversion`, `CND-DestinationRefused`) is past its deadline (`REQ-CV-6`, `REQ-IN-9`); or the delivery attempt's preparation was refused without a named condition and the route's deadline is past (`REQ-EO-3`); or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown (`REQ-NX-3`, `INV-8`) |
 | `Delivering` | `Delivered` | The destination leg is included |
 | `Delivering`, `Delivered` | `Delivering` | A **new attempt** after the previous one is proven not executed at finality (`REQ-RF-5`); each attempt is numbered and recorded |
 | `Delivering`, `Delivered` | `Refunding` | The destination leg is proven not executed at finality, and a refund transfer exists |
-| `Delivering`, `Delivered` | `Needs-Review` | A leg unknown past its deadline; a partial or mismatched execution (`REQ-TR-3`, `REQ-TR-5`) |
+| `Delivering`, `Delivered` | `Needs-Review` | A leg unknown past its deadline; a partial or mismatched execution (`REQ-TR-3`, `REQ-TR-5`); or the next attempt's preparation was refused without a named condition and the route's deadline, counted from the proof it rests on, is past (`REQ-EO-3`); or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown (`REQ-NX-3`, `INV-8`) |
 | `Delivered` | `Completed` | The destination leg is final and executed in full (`REQ-TR-3`) |
 | `Refunding` | `Refunded` | Its refund transfer is `Completed` |
 | `Needs-Review` | Any state reachable by **one ordinary edge** from the state held before review | The evidence is that edge's coordinate, verified by bezent (`REQ-RV-2`); a resolution that moves value has a second approver (`REQ-GV-5`) |
@@ -786,8 +787,10 @@ proven before the next.
 ### 5.9 Review
 
 **`REQ-RV-1`** A transfer or venue delivery with an unknown leg past its deadline MUST go to `Needs-Review`,
-with an owner and a service level. It MUST NOT be refunded, retried as a new transaction, or failed. The owner
-of `Needs-Review` and `CND-Unassociated` is the operator's operations function, and the service level is one
+and so MUST a transfer whose delivery attempt's preparation was refused without a named condition past the route's
+deadline (`REQ-EO-3`), and one for which a delivery anomaly was recorded, which makes its leg unknown at once
+(`REQ-NX-3`), with no deadline to wait for. Each goes with an owner and a service level, and MUST NOT be
+refunded, retried as a new transaction, or failed. The owner of `Needs-Review` and `CND-Unassociated` is the operator's operations function, and the service level is one
 business day.
 
 **`REQ-RV-2`** A review MUST end only by evidence: a coordinate that settles the disposition, which the
@@ -1296,8 +1299,8 @@ The layers are:
 | `INV-5` | A terminal state never changes. | Store |
 | `INV-6` | Nothing is minted against an arrival that is not final. | Service |
 | `INV-7` | Nothing is paid out before its redemption is final. | Service |
-| `INV-8` | No refund mint is made unless every payout attempt for the redemption is proven not executed at finality, and at most one is made per redemption. | Service + chain |
-| `INV-9` | No transaction is signed without a recorded intent, and none is submitted before its exact bytes are stored. | Custody + store |
+| `INV-8` | No refund mint is made unless every payout attempt for the redemption is proven not executed at finality, and at most one is made per redemption. An attempt for which no signature has been recorded, and which the store has closed to signing under the approved resolution that refunds, counts as proven. | Store + service + chain |
+| `INV-9` | No transaction is signed without a recorded intent, and none is submitted before its exact bytes are stored. The signer releases a signature only once it is recorded. | Custody + store |
 | `INV-10` | An observation coordinate is applied at most once. | Store |
 | `INV-11` | Every amount is an exact integer count of minor units, at every boundary. | Store + type |
 | `INV-12` | No personal data, and no account reference in clear, is written to any network. | Service |

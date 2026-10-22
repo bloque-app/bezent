@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # F-012 — Swaps integration in the Swaps platform
 
-Milestone `M-1` (first module); attested reports in `M-3`. Serves SPEC v0.5.2 §3 and §7.A–§7.C from the requester's
+Milestone `M-1` (first module); attested reports in `M-3`. Serves SPEC v0.5.3 §3 and §7.A–§7.C from the requester's
 side: `REQ-RQ-1`, `REQ-RQ-3`, `REQ-RQ-4`, `REQ-RQ-6`, `REQ-RQ-7`, `REQ-RQ-8`, `REQ-RQ-9`, `REQ-ID-1`, `REQ-ST-4`,
 `REQ-ST-5`, `REQ-TR-5` (plan `DEC-15`, `DEC-19`). Go-ahead from @pandres95 on 2026-10-15; the PR stays a **draft** until
 bezent's core is ready.
