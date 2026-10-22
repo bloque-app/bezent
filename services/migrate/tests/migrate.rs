@@ -679,6 +679,7 @@ async fn a_migration_behind_a_held_lock_fails_at_the_lock_timeout_and_resumes_af
 
 #[sqlx::test]
 async fn two_runners_at_once_serialise_and_nothing_is_applied_twice(pool: PgPool) {
+    let _roles = SERVER_ROLES.lock().await;
     let (a, b) = (
         pool_with(&pool, Duration::from_secs(120)).await,
         pool_with(&pool, Duration::from_secs(120)).await,
@@ -703,6 +704,7 @@ async fn two_runners_at_once_serialise_and_nothing_is_applied_twice(pool: PgPool
 
 #[sqlx::test]
 async fn a_runner_behind_another_fails_at_the_lock_timeout(pool: PgPool) {
+    let _roles = SERVER_ROLES.lock().await;
     // Another runner holds the runner lock (the key is the crate's, "bezentmg").
     let mut other = pool.acquire().await.unwrap();
     sqlx::query("SELECT pg_advisory_lock(7090207764428123495)")
@@ -848,6 +850,7 @@ async fn the_grants_check_fails_the_run_unless_told_to_report(pool: PgPool) {
 
 #[sqlx::test]
 async fn the_command_line_reads_the_url_from_a_file(pool: PgPool) {
+    let _roles = SERVER_ROLES.lock().await;
     let dir = std::env::temp_dir().join(format!("bezent-migrate-file-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("url");
