@@ -117,11 +117,12 @@ async fn run(config: Config) -> Result<(), String> {
     .await?;
     tracing::info!(roles = %checked.contracts.roles, vault = %checked.vault, "AC-I4.1: the Roles modifier's avatar and target are the vault, which enables it");
 
-    let pool = bezent_store::login::pool_options()
-        .max_connections(config.max_connections)
-        .connect(&read_secret(&config.database_url_file, "database URL")?)
-        .await
-        .map_err(|e| format!("the store: {e}"))?;
+    let pool = bezent_store::tls::connect(
+        bezent_store::login::pool_options().max_connections(config.max_connections),
+        &read_secret(&config.database_url_file, "database URL")?,
+    )
+    .await
+    .map_err(|e| format!("the store: {e}"))?;
     // The login is a member of bezent_evm_endpoint and of nothing else, and holds exactly its
     // grants (#46, REQ-AR-3).
     bezent_store::login::check_login(&pool, bezent_store::EVM_ENDPOINT_ROLE)

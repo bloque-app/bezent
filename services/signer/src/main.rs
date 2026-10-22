@@ -69,8 +69,7 @@ async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Resu
         std::fs::read_to_string(url_file)
             .map_err(|e| format!("cannot read {}: {}", url_file.display(), e.kind()))?,
     );
-    let pool = pool_options()
-        .connect(url.trim())
+    let pool = bezent_store::tls::connect(pool_options(), url.trim())
         .await
         .map_err(|e| format!("store: {e}"))?;
     // The keys' environment is held to the networks the store declares, as the core does

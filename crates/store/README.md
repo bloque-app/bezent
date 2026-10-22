@@ -180,6 +180,32 @@ action's own login. A login two people share could therefore act and approve as 
 nobody's action at all: value that needs a second approver (REQ-GV-5) would never move. An operator who
 leaves has their login dropped (`DROP ROLE`); their recorded actions keep their name.
 
+## Connecting over TLS
+
+Every service connects through `bezent_store::tls::connect`, which builds the pool with rustls (no OpenSSL) and
+reads the policy from the database URL it is given (the URL in the service's configuration or secret file):
+
+```
+postgres://<login>@<host>:5432/<database>?sslmode=verify-full&sslrootcert=/etc/bezent/rds-ca.pem
+```
+
+- `sslmode=disable | require | verify-ca | verify-full`, as in libpq. `require` fails unless the server offers TLS,
+  and encrypts, but does not verify the certificate (unlike libpq, even with `sslrootcert`); only `verify-ca` and
+  `verify-full` do. `verify-full` checks the certificate chain against `sslrootcert` (a PEM bundle, added to the bundled web roots;
+  mount it, it is not in the image) and the host name. Production uses `verify-full`.
+- The service images carry the public AWS RDS bundle (`global-bundle.pem`, pinned by SHA-256 in the Dockerfile) at
+  `/usr/share/bezent/ca/rds-global-bundle.pem` (`bezent_store::tls::DEFAULT_CA_BUNDLE`). With `verify-ca` or
+  `verify-full` and no `sslrootcert`, that file is the CA bundle; an explicit `sslrootcert` replaces it. `require`
+  needs no bundle (it encrypts without verifying).
+- **No silent downgrade.** `allow` and `prefer` fall back to a plain connection, so they are refused, and so is a URL
+  with no `sslmode`, for any server that is not on this machine (a loopback address or a Unix socket). A server
+  that does not offer TLS, or whose certificate does not verify, stops the service from starting.
+- The error never repeats the URL, which holds the password.
+
+`crates/store/tests/tls.rs` checks this against a server that forces TLS with a throwaway CA and one that offers none
+(the `database TLS` job of `ci.yml`; locally, `tools/ci/tls-postgres.sh <dir>` starts the first and prints the
+variables the test reads).
+
 ## Deploying
 
 The order matters: running `0045` empties `bezent_service` at once, so services of the previous release

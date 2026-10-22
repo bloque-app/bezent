@@ -51,10 +51,11 @@ async fn main() -> ExitCode {
     }
 
     tracing_subscriber::fmt().with_target(false).init();
-    let pool = match bezent_store::login::pool_options()
-        .max_connections(config.max_connections)
-        .connect(&config.database_url)
-        .await
+    let pool = match bezent_store::tls::connect(
+        bezent_store::login::pool_options().max_connections(config.max_connections),
+        &config.database_url,
+    )
+    .await
     {
         Ok(pool) => pool,
         Err(e) => {

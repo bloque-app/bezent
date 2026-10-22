@@ -40,7 +40,7 @@ publish = false
 
 [workspace.dependencies]
 bezent-core = { path = "crates/core" }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "migrate", "macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 trybuild = "1"
 

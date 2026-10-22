@@ -132,11 +132,12 @@ mod run {
 
     pub async fn run(config: Config, spec: String, relay: Option<String>) -> Result<(), String> {
         let declared = config.declared_genesis()?;
-        let pool = bezent_store::login::pool_options()
-            .max_connections(config.max_connections)
-            .connect(&read_secret(&config.database_url_file, "database URL")?)
-            .await
-            .map_err(|e| format!("the store: {e}"))?;
+        let pool = bezent_store::tls::connect(
+            bezent_store::login::pool_options().max_connections(config.max_connections),
+            &read_secret(&config.database_url_file, "database URL")?,
+        )
+        .await
+        .map_err(|e| format!("the store: {e}"))?;
         // The login is a member of bezent_kreivo_endpoint and of nothing else, and holds exactly
         // its grants (#46, REQ-AR-3).
         bezent_store::login::check_login(&pool, bezent_store::KREIVO_ENDPOINT_ROLE)
