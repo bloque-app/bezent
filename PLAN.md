@@ -1,9 +1,9 @@
 ---
 name: bezent
-plan_version: 0.6.0
-status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20
-date: 2026-10-20
-binds: SPEC.md v0.5.2
+plan_version: 0.6.1
+status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22
+date: 2026-10-22
+binds: SPEC.md v0.5.3
 ---
 
 # bezent — Implementation Plan
@@ -21,7 +21,7 @@ that serves nothing in the spec is not in this plan.
 | `M-*` | A milestone: a set of features that together make a stated claim true, with exit criteria |
 | `RISK-*` | A risk to the plan, with its mitigation |
 
-1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.2. If a technical fact makes a requirement
+1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.3. If a technical fact makes a requirement
    impossible to meet, that becomes a spec amendment first (`amendments/`), and the plan follows it. A gap in the spec
    is handled the same way: we stop, propose an amendment, and do not fill the gap in code.
 2. **Facts come from the notes.** Numbers and properties of Kreivo, the EVM networks, CCTP, evmhot and Swaps come from
@@ -36,6 +36,7 @@ that serves nothing in the spec is not in this plan.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.6.1 | 2026-10-22 | The plan binds `SPEC.md` v0.5.3 (amendments 0013 and 0014; no requirement the plan relies on changes). @pandres95's rulings of 2026-10-22: the 48-hour mainnet soak exercises tiny synthetic transfers within the bounds between Polygon and Kreivo (his option A; `DEC-19`, `M-4`); the vault guard's bounds are confirmed: a delay cooldown from 1 hour to 30 days and an expiration from 1 day to 90 days, with a deployment default of a 24-hour cooldown and a 7-day expiration (`DEC-10`); and the guardian key is replaced by a key held by an independent party before the vault is funded, the holder still to be decided, a hot key until then (`DEC-10`, `RISK-10`) |
 | 0.6.0 | 2026-10-20 | @pandres95's rulings of 2026-10-15 to 2026-10-20; `SPEC.md` is unchanged. The repository is public now, and one mainnet instance serves Bloque Test and Bloque: the separate test environment is gone, the test bed stays, and a 48-hour soak runs on mainnet before bUSDC goes live (`DEC-15`, `DEC-18`, `DEC-19`, `DEC-20`, `F-014`, `F-017`, `M-1`, `M-4`, `M-5`). Kreivo is set up with no Root referendum: community 4243, the contract's roles and the hand-over of the asset roles (`DEC-6`, `DEC-7`, `F-015`; `RISK-6` closed). The vault gains a guardian (`DEC-10`). Polygon conversions move before the bUSDC launch gate (`DEC-13`, `F-010`, `M-2`, `M-4`). The delivery account carries a KSM float (`DEC-18`, `F-014`). Block-denominated constants use 41,739 blocks a day (`DEC-6`). New `RISK-9` and `RISK-10` |
 | 0.1.0 to 0.5.0 | 2026-10-13 | The first draft (0.1.0), the plan rulings (0.2.0), the sign-off, the EVM test harness and the open-source release (0.3.0), the scope narrowed to the reserves and Kreivo (0.4.0), and the bounds, the vault guard and delay, and USDT0 only (0.5.0). `git log -- PLAN.md` has each |
 
@@ -317,9 +318,9 @@ evmhot's sweeps; Swaps then requests the deposit by naming the arrival's coordin
   widening changes) and `Safe.disableModule` on the main Roles module (the pause: the delivery role stops working).
   Either call stops value moving, and one party suffices (`REQ-GV-2`). The owner quorum cannot remove the guardian
   instantly. The delay's cooldown and expiration are deployment parameters, and the deployment accepts a cooldown from
-  1 hour to 30 days and an expiration from 1 day to 90 days: decided at plan level in pull request #41 (the author's
-  choice), **to be confirmed by @pandres95**. The starting guardian is a software key held by @pandres95; before real funds it is replaced by
-  a key held by an independent party, a 2-of-N multisig or a hardware key (`RISK-10`).
+  1 hour to 30 days and an expiration from 1 day to 90 days, with a default of a 24-hour cooldown and a 7-day
+  expiration: proposed in pull request #41 and **confirmed by @pandres95 on 2026-10-22**. The starting guardian is a software key held by @pandres95; before the vault is funded it is replaced by
+  a key held by an independent party (the holder is still to be decided; a 2-of-N multisig or a hardware key are the candidates) (`RISK-10`).
 - An externally owned account cannot bound its own outflows, so a contract is needed whichever option is chosen.
 - The alternative is a small custom vault, which needs its own audit.
 
@@ -551,10 +552,9 @@ end-to-end suite being green and every runbook exercised.**
   soak is a gate on top of the test bed, not instead of it: the criteria of §15 and the runbook exercises of `NFR-9` are
   proven on the test bed above, on a test network, as the spec says.
 
-> **NOTE for @pandres95.** What does the soak exercise? With no real user flow, the reserve check and the statements run on
-> an idle bezent. Not ruled: whether anything is minted or moved during the 48 hours (the spec puts "before any value"
-> on a test network), which transfers if any, and whether the soak is meant to stand in for part of §15 or `NFR-9`, which
-> it cannot without an amendment to the spec. The plan assumes none of these.
+The soak exercises tiny synthetic transfers within the bounds between Polygon and Kreivo (@pandres95's option A,
+2026-10-22), so the reserve check and the statements run on real movement and not on an idle bezent. It does not stand
+in for any part of §15 or `NFR-9`, which would need an amendment to the spec.
 
 *Serves:* route budgets measured on a test network first (`NFR-2`), runbooks exercised before value (`NFR-9`,
 `REQ-IC-6`), and the release scope (§15). *Cost:* a fork does not reproduce a network's real finality timing, so

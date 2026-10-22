@@ -92,7 +92,7 @@ Traceability</a></li>
       <div class="kicker">PLAN.md</div>
       <h1>bezent</h1>
       
-      <dl class="meta"><div><dt>Version</dt><dd>0.6.0</dd></div><div><dt>Status</dt><dd>approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20</dd></div><div><dt>Date</dt><dd>2026-10-20</dd></div><div><dt>Source</dt><dd><code>bezent/PLAN.md</code> · d11cf3e 2026-10-20</dd></div></dl>
+      <dl class="meta"><div><dt>Version</dt><dd>0.6.1</dd></div><div><dt>Status</dt><dd>approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22</dd></div><div><dt>Date</dt><dd>2026-10-22</dd></div><div><dt>Source</dt><dd><code>bezent/PLAN.md</code> · ec2ea18 2026-10-21 + local changes</dd></div></dl>
     </header>
     
 <h1 id="bezent--implementation-plan">bezent — Implementation Plan</h1>
@@ -134,7 +134,7 @@ true, with exit criteria</td>
 </table></div>
 <ol type="1">
 <li><strong>The plan never contradicts the spec.</strong> It binds
-<code>SPEC.md</code> v0.5.2. If a technical fact makes a requirement
+<code>SPEC.md</code> v0.5.3. If a technical fact makes a requirement
 impossible to meet, that becomes a spec amendment first
 (<code>amendments/</code>), and the plan follows it. A gap in the spec
 is handled the same way: we stop, propose an amendment, and do not fill
@@ -164,6 +164,21 @@ would change the spec goes through an amendment first.</li>
 </thead>
 <tbody>
 <tr class="odd">
+<td>0.6.1</td>
+<td>2026-10-22</td>
+<td>The plan binds <code>SPEC.md</code> v0.5.3 (amendments 0013 and
+0014; no requirement the plan relies on changes). @pandres95's rulings
+of 2026-10-22: the 48-hour mainnet soak exercises tiny synthetic
+transfers within the bounds between Polygon and Kreivo (his option A;
+<code>DEC-19</code>, <code>M-4</code>); the vault guard's bounds are
+confirmed: a delay cooldown from 1 hour to 30 days and an expiration
+from 1 day to 90 days, with a deployment default of a 24-hour cooldown
+and a 7-day expiration (<code>DEC-10</code>); and the guardian key is
+replaced by a key held by an independent party before the vault is
+funded, the holder still to be decided, a hot key until then
+(<code>DEC-10</code>, <code>RISK-10</code>)</td>
+</tr>
+<tr class="even">
 <td>0.6.0</td>
 <td>2026-10-20</td>
 <td>@pandres95's rulings of 2026-10-15 to 2026-10-20;
@@ -184,7 +199,7 @@ float (<code>DEC-18</code>, <code>F-014</code>). Block-denominated
 constants use 41,739 blocks a day (<code>DEC-6</code>). New
 <code>RISK-9</code> and <code>RISK-10</code></td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>0.1.0 to 0.5.0</td>
 <td>2026-10-13</td>
 <td>The first draft (0.1.0), the plan rulings (0.2.0), the sign-off, the
@@ -672,12 +687,13 @@ delivery role stops working). Either call stops value moving, and one
 party suffices (<code>REQ-GV-2</code>). The owner quorum cannot remove
 the guardian instantly. The delay's cooldown and expiration are
 deployment parameters, and the deployment accepts a cooldown from 1 hour
-to 30 days and an expiration from 1 day to 90 days: decided at plan
-level in pull request #41 (the author's choice), <strong>to be confirmed
-by @pandres95</strong>. The starting guardian is a software key held by
-@pandres95; before real funds it is replaced by a key held by an
-independent party, a 2-of-N multisig or a hardware key
-(<code>RISK-10</code>).</li>
+to 30 days and an expiration from 1 day to 90 days, with a default of a
+24-hour cooldown and a 7-day expiration: proposed in pull request #41
+and <strong>confirmed by @pandres95 on 2026-10-22</strong>. The starting
+guardian is a software key held by @pandres95; before the vault is
+funded it is replaced by a key held by an independent party (the holder
+is still to be decided; a 2-of-N multisig or a hardware key are the
+candidates) (<code>RISK-10</code>).</li>
 <li>An externally owned account cannot bound its own outflows, so a
 contract is needed whichever option is chosen.</li>
 <li>The alternative is a small custom vault, which needs its own
@@ -1042,15 +1058,11 @@ soak is a gate on top of the test bed, not instead of it: the criteria
 of §15 and the runbook exercises of <code>NFR-9</code> are proven on the
 test bed above, on a test network, as the spec says.</li>
 </ul>
-<blockquote>
-<p><strong>NOTE for @pandres95.</strong> What does the soak exercise?
-With no real user flow, the reserve check and the statements run on an
-idle bezent. Not ruled: whether anything is minted or moved during the
-48 hours (the spec puts "before any value" on a test network), which
-transfers if any, and whether the soak is meant to stand in for part of
-§15 or <code>NFR-9</code>, which it cannot without an amendment to the
-spec. The plan assumes none of these.</p>
-</blockquote>
+<p>The soak exercises tiny synthetic transfers within the bounds between
+Polygon and Kreivo (@pandres95's option A, 2026-10-22), so the reserve
+check and the statements run on real movement and not on an idle bezent.
+It does not stand in for any part of §15 or <code>NFR-9</code>, which
+would need an amendment to the spec.</p>
 <p><em>Serves:</em> route budgets measured on a test network first
 (<code>NFR-2</code>), runbooks exercised before value
 (<code>NFR-9</code>, <code>REQ-IC-6</code>), and the release scope
