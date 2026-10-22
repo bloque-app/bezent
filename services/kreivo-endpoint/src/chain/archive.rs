@@ -307,6 +307,12 @@ impl<S: Source> Archive<S> {
         loop {
             match s.block_hash(c.finalized.number).await? {
                 Some(h) if h == c.finalized.hash => break,
+                // A source not yet final at that height may still show a fork's block there:
+                // asked again within the same window before it counts as a disagreement.
+                Some(_) | None if tries < c.lag_retries => {
+                    tries += 1;
+                    tokio::time::sleep(c.lag_wait).await;
+                }
                 Some(h) => {
                     return Err(Fail::Lied(format!(
                         "its block {} is {}, the light client's finalized head is {}",
@@ -314,10 +320,6 @@ impl<S: Source> Archive<S> {
                         hex0x(&h),
                         hex0x(&c.finalized.hash)
                     )));
-                }
-                None if tries < c.lag_retries => {
-                    tries += 1;
-                    tokio::time::sleep(c.lag_wait).await;
                 }
                 None => {
                     return Err(Fail::Unavailable(format!(

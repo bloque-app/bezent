@@ -255,7 +255,9 @@ archive node first, `max_walk` above the blocks from `start_block` to the head (
 one look; a smaller value records the backlog as a gap that never fills). The replay is sequential: a header and a
 proof per block, about 0.19 s per block from a client about 95 ms from the node, so about 4 to 5 hours for the
 backlog of 2026-10-22, during which nothing else in the loop runs and `NFR-6` alerts fire; it is shorter close to the
-node. The image must carry CA roots for `wss://`. A failed start-up check names the source and why.
+node. `wss://` verifies with the system's roots (`rustls-platform-verifier`); the distroless runtime image carries
+them. A failed start-up check names the source and why. `T-013-05` (zombienet) now needs `archive_rpc` too: a
+zombienet node run as an archive, back to `start_block` and its parent.
 
 ## Limits stated plainly
 
