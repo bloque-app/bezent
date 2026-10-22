@@ -14,6 +14,12 @@ use sqlx::postgres::PgPoolOptions;
 /// login, or read the catalogue's logins, take this lock, so that one's login is not another's stray.
 static SERVER_ROLES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// The tests that change a store role's attributes or a login's memberships on the shared server
+/// (the owner tripwires: SET on a role, LOGIN on a role) take it for writing; every other test
+/// that migrates or reads the catalogue takes it for reading, so none sees such a change half-way.
+/// Taken first, before `SERVER_ROLES`.
+static ROLE_ATTRS: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
 fn all_versions() -> Vec<i64> {
     MIGRATOR.iter().map(|m| m.version).collect()
 }
@@ -27,6 +33,7 @@ async fn has_history(pool: &PgPool) -> bool {
 
 #[sqlx::test]
 async fn status_reads_without_changing_anything(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
     let s = status(&pool, &MIGRATOR).await.unwrap();
     assert_eq!(s.applied, Vec::<i64>::new());
     assert_eq!(s.pending, all_versions());
@@ -40,6 +47,7 @@ async fn status_reads_without_changing_anything(pool: PgPool) {
 
 #[sqlx::test]
 async fn apply_brings_the_store_to_the_release_and_is_then_a_no_op(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
     assert_eq!(apply(&pool, &MIGRATOR).await.unwrap(), all_versions());
     let s = status(&pool, &MIGRATOR).await.unwrap();
     assert!(s.is_current(), "{s:?}");
@@ -49,6 +57,7 @@ async fn apply_brings_the_store_to_the_release_and_is_then_a_no_op(pool: PgPool)
 
 #[sqlx::test]
 async fn a_different_checksum_diverges_and_nothing_is_applied(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
     apply(&pool, &MIGRATOR).await.unwrap();
     sqlx::query("UPDATE _sqlx_migrations SET checksum = '\\x00' WHERE version = 1")
         .execute(&pool)
@@ -63,6 +72,7 @@ async fn a_different_checksum_diverges_and_nothing_is_applied(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_pending_release_on_a_diverged_history_is_refused_before_any_change(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
     // Only the first migration applied, with a wrong checksum: the rest are pending, and none runs.
     let first = MIGRATOR.iter().next().unwrap();
     sqlx::query(
@@ -97,6 +107,7 @@ async fn a_pending_release_on_a_diverged_history_is_refused_before_any_change(po
 
 #[sqlx::test]
 async fn a_version_this_release_lacks_diverges(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
     apply(&pool, &MIGRATOR).await.unwrap();
     sqlx::query(
         "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
@@ -111,6 +122,7 @@ async fn a_version_this_release_lacks_diverges(pool: PgPool) {
 
 #[sqlx::test]
 async fn an_unfinished_migration_diverges(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
     apply(&pool, &MIGRATOR).await.unwrap();
     sqlx::query("UPDATE _sqlx_migrations SET success = false WHERE version = 2")
         .execute(&pool)
@@ -125,6 +137,7 @@ async fn an_unfinished_migration_diverges(pool: PgPool) {
 
 #[sqlx::test]
 async fn tables_with_no_history_diverge(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
     sqlx::query("CREATE TABLE networks (network text)")
         .execute(&pool)
         .await
@@ -141,6 +154,7 @@ async fn tables_with_no_history_diverge(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_service_login_is_not_the_owner(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
     let _roles = SERVER_ROLES.lock().await;
     apply(&pool, &MIGRATOR).await.unwrap();
     refuse_service_login(&pool).await.expect("the test owner");
@@ -188,6 +202,7 @@ async fn logins(pool: &PgPool) -> Vec<String> {
 
 #[sqlx::test]
 async fn the_grants_check_is_clean_on_a_migrated_store_and_sees_a_widening(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
     let _roles = SERVER_ROLES.lock().await;
     apply(&pool, &MIGRATOR).await.unwrap();
     let logins = logins(&pool).await;
@@ -230,6 +245,7 @@ async fn acting_as(pool: &PgPool, login: &'static str) -> PgPool {
 /// `crates/store/tests/logins.rs`).
 #[sqlx::test]
 async fn an_admin_only_login_is_not_refused_by_the_runner_but_is_reported(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
     let _roles = SERVER_ROLES.lock().await;
     apply(&pool, &MIGRATOR).await.unwrap();
     sqlx::raw_sql(
@@ -338,6 +354,7 @@ async fn owner_tripwires(owner: &PgPool, known: &[String]) {
 
 #[sqlx::test]
 async fn the_catalogue_check_sees_a_superuser_owner_act_as_a_store_role(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.write().await;
     let _roles = SERVER_ROLES.lock().await;
     apply(&pool, &MIGRATOR).await.unwrap();
     let known = logins(&pool).await;
@@ -540,12 +557,14 @@ async fn createrole_owner_run(pool: &PgPool, self_grant: &str) {
 
 #[sqlx::test]
 async fn a_createrole_owner_without_superuser_runs_the_migrations(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.write().await;
     let _roles = SERVER_ROLES.lock().await;
     createrole_owner_run(&pool, "").await;
 }
 
 #[sqlx::test]
 async fn a_createrole_owner_the_server_makes_a_full_member_is_brought_to_admin_only(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.write().await;
     let _roles = SERVER_ROLES.lock().await;
     createrole_owner_run(&pool, "set, inherit").await;
 }
@@ -592,6 +611,7 @@ fn usage_errors_exit_2() {
 
 #[sqlx::test]
 async fn the_command_line_checks_applies_and_refuses(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
     let _roles = SERVER_ROLES.lock().await;
     let url = url_for(&pool);
     let logins = logins(&pool).await;
@@ -643,6 +663,7 @@ async fn the_command_line_checks_applies_and_refuses(pool: PgPool) {
 
 #[sqlx::test]
 async fn the_grants_check_fails_the_run_unless_told_to_report(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
     let url = url_for(&pool);
     let env = [("BEZENT_MIGRATE_TEST_URL", url.as_str())];
     let base = [
