@@ -17,3 +17,13 @@ signer_uid = 1000
 signer_token_file = "core-signer-token"
 public_key = "0x66d5b675e8fddf84c70c76d1815d6a5d531bbc96de157b591489be0cdbe5f615"
 directory = "statements"
+
+# A production deployment writes statements to the object-locked bucket instead (issue #58;
+# deploy/statements.md); `directory` is refused outside environment = "test":
+#
+# [statement.s3]
+# bucket = "example-bezent-statements"
+# prefix = "statements"
+# region = "us-east-2"
+# object_lock_mode = "GOVERNANCE"
+# retention_days = 365

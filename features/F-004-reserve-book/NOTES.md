@@ -252,6 +252,36 @@ loop. Each choice below is a reading of the spec and plan, not a ruling.
     when the budget changes (decision 22); 0039 adds a network's role to the columns that re-check its bound, since a
     network made the issuing one serves every route.
 
+## Issue #58: the core writes the statement to S3 (2026-10-22)
+
+Owner decision 2026-10-22: "change the code to write to the bucket directly". `DEC-16` and `REQ-PR-2` are unchanged;
+this is how the bucket is reached.
+
+- **Sink.** `StatementStore` gains `put_at` and `get_at`, which name the statement's issue time and return a `Receipt`
+  (key, ETag, version id); a store that needs neither implements `put` and `get` and takes the defaults, so the
+  directory store and the tests' wrappers are unchanged. `reserve::s3::S3Store` is the S3 sink over an `ObjectClient`
+  (the AWS SDK in deployment, an in-memory fake in tests). `[statement.s3]` selects it; `[statement] directory` is the
+  file sink, refused outside `environment = "test"`, as is `object_lock_mode = "off"`.
+- **Key** `<prefix>/<YYYY>/<MM>/<DD>/statement-<asset>-<date>.json` and `.json.sig`. The date is the statement's own
+  `issued_at`, read from the intent the signer signed when a retry looks for a place's object, never the retry's clock:
+  a statement stored on one day and recorded on the next is found, not duplicated. One key a day per asset holds
+  because a statement is due 24 h after the last published one; there is no combined statement, so no `all`.
+- **Never overwritten.** `If-None-Match: *` on every put; a 412 is not retried. The sink reads the object back: the
+  same bytes are a write whose answer was lost (success), other bytes are `StoreError::Exists`, paged.
+- **Retention** headers (GOVERNANCE or COMPLIANCE, default 365 days), a SHA-256 checksum, SSE-KMS if configured.
+- **Recorded after.** Migration 0053 `reserve_statement_objects` (append-only, core INSERT/SELECT, operators SELECT):
+  one row per object with key, ETag, version id and SHA-256, inserted in the statement's own transaction after both
+  writes. The statement row is still inserted first in that transaction so the store's guards refuse a statement that
+  does not extend the chain before anything reaches an immutable bucket.
+- **Alert.** A store failure after the retries pages `statement-publish-failed` (once per window, like
+  `statement-stuck`); `statement-overdue` remains the backstop.
+- **Credentials.** The task role only (ECS container provider, then instance metadata); the core refuses to start with
+  AWS key variables set (`REQ-KY-1`). The SDK's default chain, which reads the environment first, is not used.
+- **Deviation from "the sink only writes".** The core also reads: `publish_once` asks the store whether the place's
+  object exists, and an adopted or refused write is compared byte for byte. The policy therefore carries `s3:GetObject`
+  and a prefix-conditioned `s3:ListBucket` (without it S3 answers a missing key with 403). See `deploy/statements.md`.
+- **Open.** SSE-KMS and a publicly readable bucket conflict (anonymous readers cannot read SSE-KMS objects).
+
 ## Review items left open (PR #40 review, 2026-10-14)
 
 Not fixed in this PR (each needs more than a small change, or a ruling); none of them lets a divergence pass unseen.

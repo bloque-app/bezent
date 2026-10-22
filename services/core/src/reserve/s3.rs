@@ -1,0 +1,850 @@
+// Copyright (c) 2026 Pagos Cube LLC
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! The S3 statement sink (issue #58; `REQ-PR-1`, `REQ-PR-2`; PLAN `DEC-16`): the core writes each
+//! daily signed statement, and its signature file, to an object-locked bucket itself.
+//!
+//! - **Key.** `<prefix>/<YYYY>/<MM>/<DD>/statement-<asset>-<date>.json`, and the signature file
+//!   next to it with `.sig` appended. The date is the statement's own `issued_at` (UTC), never the
+//!   clock of the retry: a statement stored on one day and recorded on the next is found again.
+//!   The asset is named in the key; there is no combined statement.
+//! - **Never overwritten.** Every `PutObject` carries `If-None-Match: *`. A `412` is not retried:
+//!   the sink reads the object back and succeeds only when it holds exactly the bytes being
+//!   written (a write that landed and whose answer was lost); different bytes are
+//!   [`StoreError::Exists`], which the core surfaces and pages (`REQ-PR-2`).
+//! - **Retained.** Each put carries an Object Lock mode and a retain-until date, a SHA-256
+//!   checksum the bucket verifies, and, when configured, SSE-KMS.
+//! - **Retried.** Throttling, `409`, `5xx`, timeouts and connection failures are retried with a
+//!   doubling backoff, for a total that stays inside the core's per-cycle statement budget. What
+//!   still fails is an error the core pages on; a statement is never silently skipped.
+//! - **Recorded after.** The sink only writes. The core records the key, ETag and version id in its
+//!   store after the write succeeded (migration 0053), never before.
+//!
+//! The sink is generic over an [`ObjectClient`]: [`AwsClient`] in deployment, a fake in tests.
+
+use std::fmt;
+use std::future::Future;
+use std::time::Duration;
+
+use aws_sdk_s3::error::ProvideErrorMetadata;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
+
+use super::statement::{DirectoryStore, Receipt, StatementStore, StoreError, Stored};
+use crate::config::{ObjectLockMode, S3Config};
+
+/// What one attempt at an object operation came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClientError {
+    /// `412 Precondition Failed`: the key exists (`If-None-Match: *`).
+    PreconditionFailed,
+    /// Worth trying again: throttling, `409`, `5xx`, a timeout, a lost connection.
+    Transient(String),
+    /// Not worth trying again: access denied, a bad request, a missing bucket.
+    Permanent(String),
+}
+
+impl fmt::Display for ClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PreconditionFailed => f.write_str("412 precondition failed: the key exists"),
+            Self::Transient(e) => write!(f, "transient: {e}"),
+            Self::Permanent(e) => write!(f, "permanent: {e}"),
+        }
+    }
+}
+
+/// An object's retention, as sent with the put.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retention {
+    /// `GOVERNANCE` or `COMPLIANCE`.
+    pub mode: ObjectLockMode,
+    /// The date before which the object cannot be deleted or overwritten.
+    pub until: DateTime<Utc>,
+}
+
+/// One `PutObject`, as the sink asks for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PutRequest {
+    /// The object key.
+    pub key: String,
+    /// The object's bytes.
+    pub body: Vec<u8>,
+    /// Its media type.
+    pub content_type: &'static str,
+    /// The base64 of the SHA-256 of `body`, sent as the checksum the bucket verifies.
+    pub checksum_sha256: String,
+    /// Always set: `If-None-Match: *`, so an existing key is never overwritten.
+    pub if_none_match: bool,
+    /// The retention headers, unless the lock mode is `off`.
+    pub retention: Option<Retention>,
+    /// The SSE-KMS key, if one is configured.
+    pub kms_key_id: Option<String>,
+}
+
+/// What the bucket answered a successful put with.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PutOutcome {
+    /// The ETag.
+    pub etag: Option<String>,
+    /// The version id (the bucket is versioned).
+    pub version_id: Option<String>,
+}
+
+/// An object read back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fetched {
+    /// Its bytes.
+    pub bytes: Vec<u8>,
+    /// The ETag.
+    pub etag: Option<String>,
+    /// The version id.
+    pub version_id: Option<String>,
+}
+
+/// The two bucket operations the sink needs. Nothing lists, deletes or changes retention.
+pub trait ObjectClient: Send + Sync {
+    /// One attempt at `PutObject`.
+    fn put(
+        &self,
+        request: &PutRequest,
+    ) -> impl Future<Output = Result<PutOutcome, ClientError>> + Send;
+
+    /// One attempt at `GetObject`; `Ok(None)` when the key does not exist.
+    fn get(&self, key: &str) -> impl Future<Output = Result<Option<Fetched>, ClientError>> + Send;
+}
+
+/// How often and how fast the sink tries again.
+#[derive(Clone, Copy, Debug)]
+pub struct Backoff {
+    /// Attempts in all, the first included.
+    pub attempts: u32,
+    /// The wait after the first failed attempt; doubled after each.
+    pub first_delay: Duration,
+}
+
+impl Backoff {
+    /// Four attempts, waiting 0.5 s, 1 s and 2 s between them: 3.5 s, and with the client's
+    /// [`ATTEMPT_TIMEOUT`] a worst case of 23.5 s an object, so a statement and its signature
+    /// file stay inside the core's 60 s cycle budget.
+    pub const DEFAULT: Self = Self {
+        attempts: 4,
+        first_delay: Duration::from_millis(500),
+    };
+}
+
+/// How long one attempt may take in the real client.
+pub const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The statement store backed by an object-locked bucket.
+pub struct S3Store<C> {
+    client: C,
+    prefix: String,
+    mode: ObjectLockMode,
+    retention_days: u32,
+    kms_key_id: Option<String>,
+    backoff: Backoff,
+}
+
+impl<C: ObjectClient> S3Store<C> {
+    /// The store for `config` (validated by [`S3Config::validate`]) over `client`.
+    pub fn new(client: C, config: &S3Config) -> Self {
+        Self {
+            client,
+            prefix: config.prefix.clone(),
+            mode: config.object_lock_mode,
+            retention_days: config.retention_days(),
+            kms_key_id: config.kms_key_id.clone(),
+            backoff: Backoff::DEFAULT,
+        }
+    }
+
+    /// The same store with another backoff (tests).
+    #[must_use]
+    pub fn with_backoff(mut self, backoff: Backoff) -> Self {
+        self.backoff = backoff;
+        self
+    }
+
+    /// The object key of the statement object `name` (`<asset>/<sequence>.json`, or that and
+    /// `.sig`) issued at `issued_at`.
+    pub fn key(&self, name: &str, issued_at: DateTime<Utc>) -> Result<String, StoreError> {
+        let bad = || StoreError::Io(format!("{name} is not a statement name"));
+        let (asset, file) = name.split_once('/').ok_or_else(bad)?;
+        let suffix = if file.ends_with(".json.sig") {
+            ".json.sig"
+        } else if file.ends_with(".json") {
+            ".json"
+        } else {
+            return Err(bad());
+        };
+        let sequence = file.strip_suffix(suffix).unwrap_or_default();
+        if sequence.is_empty()
+            || !sequence.bytes().all(|c| c.is_ascii_digit())
+            || asset.is_empty()
+            || !asset
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+            || asset == "."
+            || asset == ".."
+        {
+            return Err(bad());
+        }
+        let path = issued_at.format("%Y/%m/%d");
+        let date = issued_at.format("%Y-%m-%d");
+        let head = if self.prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.prefix)
+        };
+        Ok(format!("{head}{path}/statement-{asset}-{date}{suffix}"))
+    }
+
+    fn request(&self, key: String, bytes: &[u8], now: DateTime<Utc>) -> PutRequest {
+        let retention = match self.mode {
+            ObjectLockMode::Off => None,
+            mode => Some(Retention {
+                mode,
+                until: now + chrono::Duration::days(i64::from(self.retention_days)),
+            }),
+        };
+        PutRequest {
+            key,
+            body: bytes.to_vec(),
+            content_type: "application/json",
+            checksum_sha256: BASE64.encode(Sha256::digest(bytes)),
+            if_none_match: true,
+            retention,
+            kms_key_id: self.kms_key_id.clone(),
+        }
+    }
+
+    async fn pause(&self, failed: u32) {
+        let wait = self.backoff.first_delay * 2u32.saturating_pow(failed.saturating_sub(1));
+        tokio::time::sleep(wait).await;
+    }
+
+    async fn write(
+        &self,
+        name: &str,
+        issued_at: DateTime<Utc>,
+        bytes: &[u8],
+    ) -> Result<Receipt, StoreError> {
+        let key = self.key(name, issued_at)?;
+        let request = self.request(key.clone(), bytes, Utc::now());
+        let mut last = String::new();
+        for attempt in 1..=self.backoff.attempts.max(1) {
+            if attempt > 1 {
+                self.pause(attempt - 1).await;
+            }
+            match self.client.put(&request).await {
+                Ok(done) => {
+                    return Ok(Receipt {
+                        location: key,
+                        etag: done.etag,
+                        version_id: done.version_id,
+                    });
+                }
+                // The key exists. Never retried: read it back. The same bytes are a write that
+                // landed and whose answer was lost; anything else is a refusal to overwrite.
+                Err(ClientError::PreconditionFailed) => match self.client.get(&key).await {
+                    Ok(Some(held)) if held.bytes == bytes => {
+                        tracing::warn!(key = %key, "REQ-PR-2: the object was already written with exactly these bytes");
+                        return Ok(Receipt {
+                            location: key,
+                            etag: held.etag,
+                            version_id: held.version_id,
+                        });
+                    }
+                    Ok(Some(_)) => return Err(StoreError::Exists(key)),
+                    Ok(None) => {
+                        return Err(StoreError::Io(format!(
+                            "{key}: the bucket refused the write as existing, yet holds no object"
+                        )));
+                    }
+                    Err(ClientError::Permanent(e)) => {
+                        return Err(StoreError::Io(format!("{key}: {e}")));
+                    }
+                    Err(e) => last = e.to_string(),
+                },
+                Err(ClientError::Permanent(e)) => {
+                    return Err(StoreError::Io(format!("{key}: {e}")));
+                }
+                Err(e @ ClientError::Transient(_)) => last = e.to_string(),
+            }
+            tracing::warn!(key = %key, attempt, error = %last, "REQ-PR-2: writing a statement to the bucket failed");
+        }
+        Err(StoreError::Io(format!(
+            "{key}: not written after {} attempts: {last}",
+            self.backoff.attempts.max(1)
+        )))
+    }
+
+    async fn read(
+        &self,
+        name: &str,
+        issued_at: DateTime<Utc>,
+    ) -> Result<Option<Stored>, StoreError> {
+        let key = self.key(name, issued_at)?;
+        let mut last = String::new();
+        for attempt in 1..=self.backoff.attempts.max(1) {
+            if attempt > 1 {
+                self.pause(attempt - 1).await;
+            }
+            match self.client.get(&key).await {
+                Ok(held) => {
+                    return Ok(held.map(|h| Stored {
+                        bytes: h.bytes,
+                        receipt: Receipt {
+                            location: key.clone(),
+                            etag: h.etag,
+                            version_id: h.version_id,
+                        },
+                    }));
+                }
+                Err(ClientError::Permanent(e)) => {
+                    return Err(StoreError::Io(format!("{key}: {e}")));
+                }
+                Err(e) => last = e.to_string(),
+            }
+        }
+        Err(StoreError::Io(format!(
+            "{key}: not read after {} attempts: {last}",
+            self.backoff.attempts.max(1)
+        )))
+    }
+}
+
+impl<C: ObjectClient> StatementStore for S3Store<C> {
+    fn put(
+        &self,
+        name: &str,
+        _bytes: &[u8],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        std::future::ready(Err(StoreError::Io(format!(
+            "{name}: the bucket keys a statement by its issue date; use put_at"
+        ))))
+    }
+
+    fn get(&self, name: &str) -> impl Future<Output = Result<Option<Vec<u8>>, StoreError>> + Send {
+        std::future::ready(Err(StoreError::Io(format!(
+            "{name}: the bucket keys a statement by its issue date; use get_at"
+        ))))
+    }
+
+    fn put_at(
+        &self,
+        name: &str,
+        issued_at: DateTime<Utc>,
+        bytes: &[u8],
+    ) -> impl Future<Output = Result<Receipt, StoreError>> + Send {
+        self.write(name, issued_at, bytes)
+    }
+
+    fn get_at(
+        &self,
+        name: &str,
+        issued_at: DateTime<Utc>,
+    ) -> impl Future<Output = Result<Option<Stored>, StoreError>> + Send {
+        self.read(name, issued_at)
+    }
+}
+
+/// Credentials never come from keys in the environment (`REQ-KY-1`): the task role only.
+const FORBIDDEN_ENV: &[&str] = &[
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+];
+
+/// The real bucket, through the AWS SDK.
+pub struct AwsClient {
+    client: aws_sdk_s3::Client,
+    bucket: String,
+}
+
+impl AwsClient {
+    /// A client for `config`'s bucket. Credentials come from the ECS task role, then the instance
+    /// role, and from nowhere else: the SDK's default chain, which reads keys from the environment
+    /// first, is not used, and a key in the environment stops the core (`REQ-KY-1`).
+    pub async fn connect(config: &S3Config) -> Result<Self, String> {
+        for var in FORBIDDEN_ENV {
+            if std::env::var_os(var).is_some() {
+                return Err(format!(
+                    "{var} is set: the statement sink takes its credentials from the task role only (REQ-KY-1)"
+                ));
+            }
+        }
+        use aws_config::meta::credentials::CredentialsProviderChain;
+        let chain = CredentialsProviderChain::first_try(
+            "EcsContainer",
+            aws_config::ecs::EcsCredentialsProvider::builder().build(),
+        )
+        .or_else(
+            "Ec2InstanceMetadata",
+            aws_config::imds::credentials::ImdsCredentialsProvider::builder().build(),
+        );
+        let shared = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new(config.region.clone()))
+            .credentials_provider(chain)
+            // The sink does its own retrying, with its own bound.
+            .retry_config(aws_config::retry::RetryConfig::disabled())
+            .timeout_config(
+                aws_config::timeout::TimeoutConfig::builder()
+                    .operation_attempt_timeout(ATTEMPT_TIMEOUT)
+                    .build(),
+            )
+            .load()
+            .await;
+        Ok(Self {
+            client: aws_sdk_s3::Client::new(&shared),
+            bucket: config.bucket.clone(),
+        })
+    }
+}
+
+/// Sorts an SDK failure into what the sink does about it.
+fn classify<E, R>(e: &aws_sdk_s3::error::SdkError<E, R>, status: Option<u16>) -> ClientError
+where
+    E: ProvideErrorMetadata + std::error::Error + 'static,
+    R: fmt::Debug,
+{
+    use aws_sdk_s3::error::{DisplayErrorContext, SdkError};
+    let text = DisplayErrorContext(e).to_string();
+    let code = e.code().unwrap_or_default();
+    match status {
+        Some(412) => ClientError::PreconditionFailed,
+        Some(409 | 429 | 500..=599) => ClientError::Transient(text),
+        _ if matches!(
+            code,
+            "SlowDown" | "RequestTimeout" | "InternalError" | "ServiceUnavailable"
+        ) || matches!(e, SdkError::TimeoutError(_) | SdkError::DispatchFailure(_)) =>
+        {
+            ClientError::Transient(text)
+        }
+        _ => ClientError::Permanent(text),
+    }
+}
+
+fn text_of(e: &impl fmt::Display) -> String {
+    e.to_string()
+}
+
+impl ObjectClient for AwsClient {
+    async fn put(&self, request: &PutRequest) -> Result<PutOutcome, ClientError> {
+        use aws_sdk_s3::primitives::{ByteStream, DateTime as AwsDateTime};
+        use aws_sdk_s3::types::{ObjectLockMode as Mode, ServerSideEncryption};
+        let mut put = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&request.key)
+            .body(ByteStream::from(request.body.clone()))
+            .content_type(request.content_type)
+            .checksum_sha256(&request.checksum_sha256);
+        if request.if_none_match {
+            put = put.if_none_match("*");
+        }
+        if let Some(r) = request.retention {
+            let mode = match r.mode {
+                ObjectLockMode::Compliance => Mode::Compliance,
+                _ => Mode::Governance,
+            };
+            put = put
+                .object_lock_mode(mode)
+                .object_lock_retain_until_date(AwsDateTime::from_secs(r.until.timestamp()));
+        }
+        if let Some(key) = &request.kms_key_id {
+            put = put
+                .server_side_encryption(ServerSideEncryption::AwsKms)
+                .ssekms_key_id(key);
+        }
+        match put.send().await {
+            Ok(done) => Ok(PutOutcome {
+                etag: done.e_tag().map(str::to_owned),
+                version_id: done.version_id().map(str::to_owned),
+            }),
+            Err(e) => Err(classify(&e, e.raw_response().map(|r| r.status().as_u16()))),
+        }
+    }
+
+    async fn get(&self, key: &str) -> Result<Option<Fetched>, ClientError> {
+        use aws_sdk_s3::operation::get_object::GetObjectError;
+        let got = match self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+        {
+            Ok(got) => got,
+            Err(e) => {
+                if matches!(e.as_service_error(), Some(GetObjectError::NoSuchKey(_))) {
+                    return Ok(None);
+                }
+                return Err(classify(&e, e.raw_response().map(|r| r.status().as_u16())));
+            }
+        };
+        let (etag, version_id) = (
+            got.e_tag().map(str::to_owned),
+            got.version_id().map(str::to_owned),
+        );
+        let bytes = got
+            .body
+            .collect()
+            .await
+            .map_err(|e| ClientError::Transient(text_of(&e)))?
+            .into_bytes()
+            .to_vec();
+        Ok(Some(Fetched {
+            bytes,
+            etag,
+            version_id,
+        }))
+    }
+}
+
+/// The statement sink a deployment is configured with (issue #58): the object-locked bucket, or,
+/// in tests only, a directory. The configuration admits the directory only in a test deployment.
+pub enum StatementSink {
+    /// A local directory, files created once.
+    Directory(DirectoryStore),
+    /// The object-locked bucket.
+    S3(S3Store<AwsClient>),
+}
+
+impl StatementStore for StatementSink {
+    fn put(&self, name: &str, bytes: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let name = name.to_owned();
+        let bytes = bytes.to_vec();
+        async move {
+            match self {
+                Self::Directory(d) => d.put(&name, &bytes).await,
+                Self::S3(s) => s.put(&name, &bytes).await,
+            }
+        }
+    }
+
+    fn get(&self, name: &str) -> impl Future<Output = Result<Option<Vec<u8>>, StoreError>> + Send {
+        let name = name.to_owned();
+        async move {
+            match self {
+                Self::Directory(d) => d.get(&name).await,
+                Self::S3(s) => s.get(&name).await,
+            }
+        }
+    }
+
+    fn put_at(
+        &self,
+        name: &str,
+        issued_at: DateTime<Utc>,
+        bytes: &[u8],
+    ) -> impl Future<Output = Result<Receipt, StoreError>> + Send {
+        let name = name.to_owned();
+        let bytes = bytes.to_vec();
+        async move {
+            match self {
+                Self::Directory(d) => d.put_at(&name, issued_at, &bytes).await,
+                Self::S3(s) => s.put_at(&name, issued_at, &bytes).await,
+            }
+        }
+    }
+
+    fn get_at(
+        &self,
+        name: &str,
+        issued_at: DateTime<Utc>,
+    ) -> impl Future<Output = Result<Option<Stored>, StoreError>> + Send {
+        let name = name.to_owned();
+        async move {
+            match self {
+                Self::Directory(d) => d.get_at(&name, issued_at).await,
+                Self::S3(s) => s.get_at(&name, issued_at).await,
+            }
+        }
+    }
+}
+
+/// An in-memory bucket with the semantics the sink relies on, for tests: `If-None-Match: *`
+/// refuses an existing key, every successful put gets a new version id, and failures can be
+/// scripted. It is no stand-in for S3's behaviour beyond that.
+pub mod fake {
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::{Arc, Mutex};
+
+    use sha2::{Digest, Sha256};
+
+    use super::{ClientError, Fetched, ObjectClient, PutOutcome, PutRequest};
+
+    /// What the fake bucket holds and was asked.
+    #[derive(Default)]
+    pub struct State {
+        /// Objects by key: bytes, ETag, version id.
+        pub objects: BTreeMap<String, (Vec<u8>, String, String)>,
+        /// Every put the bucket received, accepted or not.
+        pub puts: Vec<PutRequest>,
+        /// Answers for the next puts, in order, before the bucket looks at them.
+        pub script: VecDeque<ClientError>,
+        /// The next put is stored, and answered with a transient error: an answer lost on the way.
+        pub lose_next_answer: bool,
+        /// Every put fails permanently while set (the bucket is unreachable or forbidden).
+        pub forbidden: bool,
+        /// Only puts of keys ending in this fail permanently (a cut-short publish).
+        pub forbid_suffix: Option<String>,
+        /// Gets issued.
+        pub gets: usize,
+    }
+
+    /// A cloneable handle on the shared state.
+    #[derive(Clone, Default)]
+    pub struct FakeBucket(pub Arc<Mutex<State>>);
+
+    impl FakeBucket {
+        /// Locks the state.
+        pub fn state(&self) -> std::sync::MutexGuard<'_, State> {
+            self.0.lock().unwrap()
+        }
+    }
+
+    impl ObjectClient for FakeBucket {
+        async fn put(&self, request: &PutRequest) -> Result<PutOutcome, ClientError> {
+            let mut s = self.state();
+            s.puts.push(request.clone());
+            if s.forbidden
+                || s.forbid_suffix
+                    .as_ref()
+                    .is_some_and(|x| request.key.ends_with(x.as_str()))
+            {
+                return Err(ClientError::Permanent("AccessDenied".into()));
+            }
+            if let Some(e) = s.script.pop_front() {
+                return Err(e);
+            }
+            if request.if_none_match && s.objects.contains_key(&request.key) {
+                return Err(ClientError::PreconditionFailed);
+            }
+            let version = format!("v{}", s.objects.len() + 1);
+            let etag = format!("\"{}\"", hex::encode(&Sha256::digest(&request.body)[..16]));
+            s.objects.insert(
+                request.key.clone(),
+                (request.body.clone(), etag.clone(), version.clone()),
+            );
+            if std::mem::take(&mut s.lose_next_answer) {
+                return Err(ClientError::Transient("connection reset".into()));
+            }
+            Ok(PutOutcome {
+                etag: Some(etag),
+                version_id: Some(version),
+            })
+        }
+
+        async fn get(&self, key: &str) -> Result<Option<Fetched>, ClientError> {
+            let mut s = self.state();
+            s.gets += 1;
+            Ok(s.objects.get(key).map(|(b, e, v)| Fetched {
+                bytes: b.clone(),
+                etag: Some(e.clone()),
+                version_id: Some(v.clone()),
+            }))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fake::FakeBucket;
+    use super::*;
+
+    fn config(extra: &str) -> S3Config {
+        toml::from_str(&format!(
+            "bucket = \"bezent-statements\"\nprefix = \"statements\"\nregion = \"us-east-2\"\n{extra}"
+        ))
+        .unwrap()
+    }
+
+    fn store(bucket: &FakeBucket, extra: &str) -> S3Store<FakeBucket> {
+        S3Store::new(bucket.clone(), &config(extra)).with_backoff(Backoff {
+            attempts: 4,
+            first_delay: Duration::from_millis(1),
+        })
+    }
+
+    fn day() -> DateTime<Utc> {
+        "2026-10-13T00:00:00Z".parse().unwrap()
+    }
+
+    const NAME: &str = "bUSDC/0000000001.json";
+
+    #[test]
+    fn req_pr_2_the_key_is_the_asset_and_the_issue_date_and_the_signature_sits_beside_it() {
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        assert_eq!(
+            s.key(NAME, day()).unwrap(),
+            "statements/2026/10/13/statement-bUSDC-2026-10-13.json"
+        );
+        assert_eq!(
+            s.key(&format!("{NAME}.sig"), day()).unwrap(),
+            "statements/2026/10/13/statement-bUSDC-2026-10-13.json.sig"
+        );
+        // No prefix: the date directories are the bucket's top level.
+        let bare = S3Store::new(
+            b,
+            &S3Config {
+                prefix: String::new(),
+                ..config("")
+            },
+        );
+        assert_eq!(
+            bare.key(NAME, day()).unwrap(),
+            "2026/10/13/statement-bUSDC-2026-10-13.json"
+        );
+        // Names that are not a statement's are refused, never turned into a key.
+        for bad in [
+            "x.json",
+            "../a/0001.json",
+            "a/b/0001.json",
+            "a/0001.txt",
+            "/0001.json",
+        ] {
+            assert!(s.key(bad, day()).is_err(), "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn req_pr_2_a_put_is_conditional_retained_checksummed_and_encrypted() {
+        let b = FakeBucket::default();
+        let s = store(&b, "kms_key_id = \"alias/bezent-statements\"\n");
+        let r = s.put_at(NAME, day(), b"{}").await.unwrap();
+        assert_eq!(
+            r.location,
+            "statements/2026/10/13/statement-bUSDC-2026-10-13.json"
+        );
+        assert!(r.etag.is_some() && r.version_id.is_some());
+        let st = b.state();
+        let p = &st.puts[0];
+        assert!(p.if_none_match, "If-None-Match: * is always sent");
+        assert_eq!(p.checksum_sha256, BASE64.encode(Sha256::digest(b"{}")));
+        assert_eq!(p.kms_key_id.as_deref(), Some("alias/bezent-statements"));
+        let ret = p.retention.expect("retention headers");
+        assert_eq!(ret.mode, ObjectLockMode::Governance);
+        let days = (ret.until - Utc::now()).num_days();
+        assert!((363..=365).contains(&days), "{days}");
+    }
+
+    #[tokio::test]
+    async fn req_pr_2_compliance_and_the_configured_retention_are_sent_and_off_sends_none() {
+        let b = FakeBucket::default();
+        let s = store(
+            &b,
+            "object_lock_mode = \"COMPLIANCE\"\nretention_days = 30\n",
+        );
+        s.put_at(NAME, day(), b"{}").await.unwrap();
+        let ret = b.state().puts[0].retention.unwrap();
+        assert_eq!(ret.mode, ObjectLockMode::Compliance);
+        assert!((28..=30).contains(&(ret.until - Utc::now()).num_days()));
+        let b = FakeBucket::default();
+        let s = store(&b, "object_lock_mode = \"off\"\n");
+        s.put_at(NAME, day(), b"{}").await.unwrap();
+        assert!(b.state().puts[0].retention.is_none());
+    }
+
+    #[tokio::test]
+    async fn req_pr_2_an_existing_key_is_never_overwritten_and_the_refusal_is_surfaced() {
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        s.put_at(NAME, day(), b"first").await.unwrap();
+        let key = s.key(NAME, day()).unwrap();
+        // Other bytes under the same key: refused, surfaced, not retried, object untouched.
+        let err = s.put_at(NAME, day(), b"second").await.unwrap_err();
+        assert_eq!(err, StoreError::Exists(key.clone()));
+        let st = b.state();
+        assert_eq!(st.puts.len(), 2, "a 412 is not retried");
+        assert_eq!(st.objects[&key].0, b"first");
+        assert_eq!(st.objects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn req_pr_2_the_same_bytes_again_are_a_write_that_landed_not_a_second_version() {
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        let first = s.put_at(NAME, day(), b"same").await.unwrap();
+        let again = s.put_at(NAME, day(), b"same").await.unwrap();
+        assert_eq!(first, again, "the receipt is the object's own");
+        assert_eq!(b.state().objects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn req_pr_2_a_transient_error_is_retried_and_a_lost_answer_is_recognised() {
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        {
+            let mut st = b.state();
+            st.script
+                .push_back(ClientError::Transient("503 SlowDown".into()));
+            st.script
+                .push_back(ClientError::Transient("timeout".into()));
+        }
+        let r = s.put_at(NAME, day(), b"x").await.unwrap();
+        assert!(r.version_id.is_some());
+        assert_eq!(b.state().puts.len(), 3, "two failures, then the write");
+        // The write lands and the answer is lost: the retry finds its own bytes and succeeds.
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        b.state().lose_next_answer = true;
+        let r = s.put_at(NAME, day(), b"x").await.unwrap();
+        assert_eq!(b.state().objects.len(), 1);
+        assert_eq!(
+            r.etag,
+            b.state().objects.values().next().map(|o| o.1.clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn req_pr_2_a_failure_that_outlasts_the_retries_is_an_error_never_a_skip() {
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        for _ in 0..10 {
+            b.state()
+                .script
+                .push_back(ClientError::Transient("503".into()));
+        }
+        let err = s.put_at(NAME, day(), b"x").await.unwrap_err();
+        assert!(
+            matches!(&err, StoreError::Io(e) if e.contains("4 attempts")),
+            "{err}"
+        );
+        assert_eq!(b.state().puts.len(), 4);
+        assert!(b.state().objects.is_empty());
+        // A permanent refusal is not retried at all.
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        b.state().forbidden = true;
+        let err = s.put_at(NAME, day(), b"x").await.unwrap_err();
+        assert!(
+            matches!(&err, StoreError::Io(e) if e.contains("AccessDenied")),
+            "{err}"
+        );
+        assert_eq!(b.state().puts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn req_pr_2_get_at_reads_by_the_issue_date_and_a_missing_object_is_none() {
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        s.put_at(NAME, day(), b"held").await.unwrap();
+        let held = s.get_at(NAME, day()).await.unwrap().unwrap();
+        assert_eq!(held.bytes, b"held");
+        assert!(held.receipt.version_id.is_some());
+        // The next day's key is another key.
+        let next = day() + chrono::Duration::days(1);
+        assert!(s.get_at(NAME, next).await.unwrap().is_none());
+        // The undated calls refuse rather than guess a date.
+        assert!(s.get(NAME).await.is_err() && s.put(NAME, b"x").await.is_err());
+    }
+}

@@ -91,7 +91,7 @@ and no role may DELETE or TRUNCATE anything but the dispatcher's own condition h
 | `intents` | core: a delivery order only on a final, executed observation of its transfer's source, for exactly the amount it carries (0049), to the deposit's destination and in the transfer's own asset and token (0050) |
 | `unsigned_attempt_cancellations` | core: an attempt ordered and never signed, cancelled under an approved review resolution into `Refunding` (0051) |
 | `book_entries`, `book_postings`, `book_quarantine` | core |
-| `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned` | core |
+| `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_statement_objects` (0053: where the statement sink wrote each object, with its ETag and version id) | core |
 | `pauses(asset, cause, evaluation_id, quarantine_id, reading_id)` | core |
 | `observations`, `observation_outcomes`, `observation_ranges`, `final_heads` | Kreivo endpoint, EVM endpoint: each its own networks only, the Kreivo endpoint the issuing network, the EVM endpoint the EVM origin networks (the guard of 0049 on every chain table, by the session's login and the role it acts as; 0034 and 0035 before it) |
 | `prepared_transactions`, `signed_transactions`, `non_execution_proofs` | Kreivo endpoint, EVM endpoint: each its own networks only, a preparation counting as its order's network and a signed transaction as its intent's (0049) |
@@ -111,7 +111,7 @@ Who **reads** what (SELECT):
 | Kreivo endpoint, EVM endpoint | `networks`, `assets`, `admitted_tokens`, `reserves`, `endpoint_scopes`, `intents`, `signatures`, their own records (`observations`, `observation_outcomes`, `observation_ranges`, `observation_gaps`, `observation_watermarks`, `final_heads`, `prepared_transactions`, `signed_transactions`, `non_execution_proofs`, `reserve_readings`) and `event_log`; the Kreivo endpoint also `observation_walk_anchors` (0052: blocks of a long history walk, so it resumes). **No** transfer, request or book |
 | webhook dispatcher | `event_log`, `event_log_head`, `transfers`, `intake`, `intake_answers`, `requester_grants`, and the webhooks' tables, sealed columns included |
 | signer | `intents` (the signing intent and the core's order), `prepared_transactions`, `signatures`, and since 0049 `admitted_tokens` and `signed_transactions(id, intent_id)` (to compare the bytes it decodes with the core's order: the token an asset is paid in, a cancel's target) and `event_log(seq)` (the position of an alert it appends); nothing else |
-| operators | `manual_actions`, `manual_approvals`, `reviews`, `unassociated_arrivals`, `ledger_accounts`, `ledger_accounts_listed`, `book_quarantine`, `surplus_funding_addresses`, `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_readings` |
+| operators | `manual_actions`, `manual_approvals`, `reviews`, `unassociated_arrivals`, `ledger_accounts`, `ledger_accounts_listed`, `book_quarantine`, `surplus_funding_addresses`, `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_statement_objects`, `reserve_readings` |
 | `bezent_service`, `bezent_endpoint` | nothing |
 
 Who may **call** what (EXECUTE; the functions that run as the owner are marked *definer*):

@@ -13,6 +13,8 @@ use bezent_core_service::reserve::book::{self, Cost};
 use bezent_core_service::reserve::check::Outcome;
 use bezent_core_service::reserve::coordinate_key;
 use bezent_core_service::reserve::readings::Holding;
+use bezent_core_service::reserve::s3::fake::FakeBucket;
+use bezent_core_service::reserve::s3::{Backoff, S3Store};
 use bezent_core_service::reserve::statement::{
     DirectoryStore, KeyBackendSigner, StatementError, StatementStore, Statements, StoreError,
     VerifyError, stuck_page_window, verify, verify_chain,
@@ -797,4 +799,158 @@ async fn req_pr_1_req_bk_4_sf5_the_movements_are_cut_at_the_evaluation(
         .sum();
     assert_eq!(sum.to_string(), surplus["book_amount"].as_str().unwrap());
     std::fs::remove_dir_all(dir).ok();
+}
+
+/// The S3 sink over a fake bucket (issue #58), with a backoff short enough for a test.
+fn bucket_store(bucket: &FakeBucket) -> S3Store<FakeBucket> {
+    let config = toml::from_str(
+        "bucket = \"bezent-statements\"\nprefix = \"statements\"\nregion = \"us-east-2\"\n",
+    )
+    .unwrap();
+    S3Store::new(bucket.clone(), &config).with_backoff(Backoff {
+        attempts: 2,
+        first_delay: std::time::Duration::from_millis(1),
+    })
+}
+
+fn bucket_publisher(
+    w: &World,
+    bucket: &FakeBucket,
+) -> (
+    Statements<KeyBackendSigner<FileBackend>, S3Store<FakeBucket>>,
+    Vec<u8>,
+) {
+    let backend = key_file("ed25519");
+    let public = backend.public_key("statement").unwrap();
+    (
+        Statements::new(
+            w.core.pool().clone(),
+            KeyBackendSigner::new(backend, "statement").unwrap(),
+            bucket_store(bucket),
+        ),
+        public,
+    )
+}
+
+/// Issue #58, `REQ-PR-2`: the publication is recorded (key, ETag, version id) only after the
+/// bucket took both objects; a bucket that refuses leaves nothing recorded, pages once, and the
+/// same signed statement is written when the bucket answers again.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_58_req_pr_2_publication_is_recorded_only_after_the_bucket_took_the_statement(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    stated_world(&w).await;
+    let bucket = FakeBucket::default();
+    let (statements, public) = bucket_publisher(&w, &bucket);
+    let pager = FakePager::default();
+    let statements = statements.with_pager(pager.clone());
+
+    // The bucket refuses every write: nothing is recorded, a human is paged, no statement exists.
+    bucket.state().forbidden = true;
+    assert!(statements.publish_due(t0()).await.unwrap().is_empty());
+    assert_eq!(w.count("SELECT count(*) FROM reserve_statements").await, 0);
+    assert_eq!(
+        w.count("SELECT count(*) FROM reserve_statement_objects")
+            .await,
+        0
+    );
+    assert!(bucket.state().objects.is_empty());
+    assert!(
+        pager
+            .kinds()
+            .contains(&"statement-publish-failed".to_owned()),
+        "{:?}",
+        pager.kinds()
+    );
+    // Not paged again on the next cycle, inside the window.
+    let before = pager.kinds().len();
+    assert!(
+        statements
+            .publish_due(t0() + Duration::seconds(5))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(pager.kinds().len(), before);
+
+    // The bucket answers again: the statement is written, then recorded with its receipts.
+    bucket.state().forbidden = false;
+    let published = statements
+        .publish_due(t0() + Duration::seconds(10))
+        .await
+        .unwrap();
+    assert_eq!(published.len(), 1);
+    let p = &published[0];
+    let key = "statements/2026/10/13/statement-".to_owned() + ASSET + "-2026-10-13.json";
+    assert_eq!(p.receipt.location, key);
+    assert_eq!(p.signature_receipt.location, format!("{key}.sig"));
+    assert_eq!(
+        w.count("SELECT count(*) FROM reserve_statement_objects")
+            .await,
+        2
+    );
+    let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT name, location, etag, version_id FROM reserve_statement_objects ORDER BY name",
+    )
+    .fetch_all(&w.admin)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    for (_, location, etag, version) in &rows {
+        assert!(bucket.state().objects.contains_key(location));
+        assert!(etag.is_some() && version.is_some());
+    }
+    // What the bucket holds is exactly what the core signed.
+    let (bytes, signature) = {
+        let st = bucket.state();
+        (
+            st.objects[&key].0.clone(),
+            st.objects[&format!("{key}.sig")].0.clone(),
+        )
+    };
+    assert_eq!(bytes, p.bytes);
+    verify(&bytes, &signature, &public).unwrap();
+    // Append-only.
+    assert!(
+        sqlx::query("UPDATE reserve_statement_objects SET etag = 'x'")
+            .execute(&w.admin)
+            .await
+            .is_err()
+    );
+}
+
+/// Issue #58: the chain goes on in the bucket, a day a statement, and each is recorded.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_58_the_chain_goes_on_in_the_bucket_one_object_pair_a_day(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    stated_world(&w).await;
+    let bucket = FakeBucket::default();
+    let (statements, _) = bucket_publisher(&w, &bucket);
+    let first = statements.publish_due(t0()).await.unwrap();
+    let next_day = t0() + Duration::days(1);
+    evaluated_at(&w, next_day).await;
+    let second = statements.publish_due(next_day).await.unwrap();
+    assert_eq!((first[0].sequence, second[0].sequence), (1, 2));
+    verify_chain(&[first[0].bytes.clone(), second[0].bytes.clone()]).unwrap();
+    assert_eq!(bucket.state().objects.len(), 4);
+    assert!(second[0].receipt.location.contains("2026/10/14/"));
+    assert_eq!(
+        w.count("SELECT count(*) FROM reserve_statement_objects")
+            .await,
+        4
+    );
+    // A third attempt on the same day is not due, and writes nothing.
+    assert!(
+        statements
+            .publish_due(next_day + Duration::hours(1))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(bucket.state().objects.len(), 4);
 }

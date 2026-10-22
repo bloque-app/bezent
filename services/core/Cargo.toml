@@ -21,6 +21,11 @@ bezent-core.workspace = true
 bezent-store = { path = "../../crates/store" }
 # The compromise path and signature checks (F-005); the core holds no key.
 bezent-signer = { path = "../signer" }
+# The S3 statement sink (issue #58). The same AWS stack, features and licences as the signer's KMS
+# client; credentials come from the task role only (see `reserve::s3`).
+aws-config = { version = "1.12.0", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
+base64 = "0.22"
 blake2 = "0.10"
 bs58 = "0.5"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

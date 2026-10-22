@@ -51,6 +51,7 @@ const TABLES: &[&str] = &[
     "surplus_funding_addresses",
     "reserve_readings",
     "reserve_statement_abandoned",
+    "reserve_statement_objects",
     "ledger_accounts",
     "webhook_secrets",
     "webhook_transfer_urls",

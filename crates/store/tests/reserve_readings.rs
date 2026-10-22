@@ -571,3 +571,77 @@ async fn s_1_s_3_req_pr_2_an_abandoned_place_is_recorded_once_and_skipped_only_b
         assert!(!may, "{role}");
     }
 }
+
+/// Issue #58 (migration 0053): the receipt of each object the statement sink wrote is recorded
+/// against a statement that is already recorded, by the login that records it, and never changed
+/// (`REQ-PR-2`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_58_req_pr_2_statement_object_receipts_name_a_recorded_statement_and_are_append_only(
+    pool: PgPool,
+) {
+    declare(&pool).await;
+    let evaluation: i64 = sqlx::query_scalar(
+        "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome) \
+         VALUES ('bUSDC', now(), 'holds') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let object = |sequence: i64, name: &str| {
+        format!(
+            "INSERT INTO reserve_statement_objects (asset, sequence, name, location, sha256, etag, \
+                 version_id, actor) \
+             VALUES ('bUSDC', {sequence}, '{name}', 'statements/{name}', '\\x{}', '\"abc\"', 'v1', \
+                     'mallory')",
+            hex::encode([7u8; 32])
+        )
+    };
+    // No statement is recorded yet: refused.
+    assert_refused(&pool, &object(1, "bUSDC/1.json"), "REQ-PR-2").await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO reserve_statements (asset, sequence, evaluation_id, issued_at, name, \
+                 sha256, public_key, signature) \
+             VALUES ('bUSDC', 1, {evaluation}, now(), 'bUSDC/1.json', '\\x{}', '\\x{}', '\\x{}')",
+            hex::encode([1u8; 32]),
+            hex::encode([1u8; 32]),
+            hex::encode([9u8; 64]),
+        ),
+    )
+    .await;
+    exec(&pool, &object(1, "bUSDC/1.json")).await;
+    exec(&pool, &object(1, "bUSDC/1.json.sig")).await;
+    // Once per object; the actor is the login, whatever it names.
+    assert!(
+        sqlx::raw_sql(&object(1, "bUSDC/1.json"))
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    let me: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let actors: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT actor FROM reserve_statement_objects")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(actors, [me]);
+    for sql in [
+        "UPDATE reserve_statement_objects SET etag = 'x'",
+        "DELETE FROM reserve_statement_objects",
+        "TRUNCATE reserve_statement_objects",
+    ] {
+        assert_refused(&pool, sql, "REQ-PR-2").await;
+    }
+    // The trigger function is no one's to call.
+    let public: bool = sqlx::query_scalar(
+        "SELECT has_function_privilege('public', 'reserve_statement_objects_guard_insert()', 'EXECUTE')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!public);
+}
