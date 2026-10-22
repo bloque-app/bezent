@@ -1740,6 +1740,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "smoldot 4.0.0",
  "smoldot-light 2.1.0",
  "sqlx",
  "subxt",
@@ -3105,6 +3106,16 @@ name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+
+[[package]]
+name = "finito"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2384245d85162258a14b43567a9ee3598f5ae746a1581fb5d3d2cb780f0dbf95"
+dependencies = [
+ "futures-timer",
+ "pin-project",
+]
 
 [[package]]
 name = "fixed-cache"
@@ -6889,6 +6900,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dec54130c797530e6aa6a52e8ba9f95fd296d19da2f9f3e23ed5353a83573f74"
 dependencies = [
  "derive-where",
+ "finito",
  "frame-metadata",
  "futures",
  "hex",
@@ -6901,6 +6913,7 @@ dependencies = [
  "subxt-core",
  "subxt-lightclient",
  "thiserror 2.0.21",
+ "tokio",
  "tokio-util",
  "tracing",
  "url",

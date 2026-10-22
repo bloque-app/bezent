@@ -18,6 +18,8 @@
 //! contract_code_hash = "0x…"           # the code hash of the build deployed there (AC-I4.1); see below
 //! start_block = 7000000                # the block the contract was instantiated in
 //! database_url_file = "/run/secrets/bezent-kreivo-endpoint-db"
+//! archive_rpc = ["wss://archive.example"] # history sources, tried in order (issue #49); see below
+//! max_walk = 200000                    # on a first start, at least the blocks from start_block to the head
 //!
 //! [lane]                               # the delivery key's signing lane (REQ-EO-4)
 //! key = "kreivo-mint"
@@ -34,6 +36,14 @@
 //! `0xe89943fbbed677f2e33fde16e4877c84bf339354d05c796accf97614e2fb24ad`: that is the value to configure.
 //! It equals the hash of the public CI build (PR #40, run 39369032023, artifact `bezent-contract`).
 //! A wrong value stops the endpoint at start, which is the intended failure.
+//!
+//! **History** (issue #49): the light client reads only what its peers still hold, and they prune
+//! state after 256 blocks, so blocks more than `light_client_depth` behind the finalized head are
+//! read from `archive_rpc`, archive nodes' WebSocket JSON-RPC, each answer proven against the light
+//! client's finalized chain ([`crate::chain::archive`]). At least one source is required to run;
+//! each must serve proven state at `start_block` and agree with the light client, or the endpoint
+//! refuses to start. `max_walk` bounds how far one look walks back by parent hash: on a first start
+//! it must cover the blocks from `start_block` to the finalized head, or the backlog is a gap.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -100,6 +110,19 @@ pub struct Config {
     /// The most blocks the endpoint walks back by parent hash in one look.
     #[serde(default = "default_max_walk")]
     pub max_walk: u64,
+    /// History sources (issue #49): archive nodes' WebSocket JSON-RPC URLs (`ws://` or `wss://`),
+    /// tried in order, the one that answered last first. Nothing they serve is trusted: headers
+    /// are checked by hash, state by proof, bodies by extrinsics root. Required to run, not for
+    /// `--check`.
+    #[serde(default)]
+    pub archive_rpc: Vec<String>,
+    /// Blocks at most this far behind the finalized head are read through the light client, older
+    /// ones from `archive_rpc`. Below 256, the state its peers keep.
+    #[serde(default = "default_light_client_depth")]
+    pub light_client_depth: u64,
+    /// How long one request to a history source may take, in milliseconds.
+    #[serde(default = "default_archive_timeout_ms")]
+    pub archive_timeout_ms: u64,
     /// The delivery key's signing lane.
     pub lane: LaneConfig,
     /// The signer link.
@@ -141,6 +164,24 @@ fn default_max_range() -> u64 {
 }
 fn default_max_walk() -> u64 {
     4_096
+}
+fn default_light_client_depth() -> u64 {
+    128
+}
+fn default_archive_timeout_ms() -> u64 {
+    30_000
+}
+
+/// A history source's URL for logs: scheme, host and path, without credentials or query.
+pub fn source_name(url: &str) -> String {
+    let url = url.split(['?', '#']).next().unwrap_or_default();
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let rest = rest.split_once('@').map_or(rest, |(_, host)| host);
+            format!("{scheme}://{rest}")
+        }
+        None => url.to_owned(),
+    }
 }
 
 /// `0x` hex of an exact length.
@@ -192,6 +233,19 @@ impl Config {
         self.lane_account()?;
         if self.max_range == 0 || self.max_walk == 0 {
             return Err("max_range and max_walk must be positive".into());
+        }
+        if !(1..256).contains(&self.light_client_depth) || self.archive_timeout_ms == 0 {
+            return Err("light_client_depth must be 1 to 255, archive_timeout_ms positive".into());
+        }
+        if let Some(u) = self
+            .archive_rpc
+            .iter()
+            .find(|u| !(u.starts_with("ws://") || u.starts_with("wss://")))
+        {
+            return Err(format!(
+                "archive_rpc {} is not a ws:// or wss:// URL",
+                source_name(u)
+            ));
         }
         Ok(())
     }
@@ -267,8 +321,46 @@ impl fmt::Debug for Config {
             .field("start_block", &self.start_block)
             .field("first_seq", &self.first_seq)
             .field("database_url_file", &self.database_url_file)
+            .field(
+                "archive_rpc",
+                &self
+                    .archive_rpc
+                    .iter()
+                    .map(|u| source_name(u))
+                    .collect::<Vec<_>>(),
+            )
+            .field("light_client_depth", &self.light_client_depth)
             .field("lane", &self.lane)
             .field("signer", &self.signer)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Config {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/endpoint.toml");
+        Config::from_file(&path).unwrap()
+    }
+
+    #[test]
+    fn issue_49_history_sources_are_websocket_urls() {
+        let mut c = sample();
+        assert_eq!(c.archive_rpc, vec!["wss://rpc.kreivo.bloque.sh".to_owned()]);
+        c.archive_rpc
+            .push("https://user:secret@archive.example/?key=k".into());
+        let err = c.check().unwrap_err();
+        assert!(err.contains("https://archive.example/"), "{err}");
+        assert!(!err.contains("secret") && !err.contains("key=k"), "{err}");
+        let debug = format!("{c:?}");
+        assert!(
+            !debug.contains("user:secret") && !debug.contains("key=k"),
+            "{debug}"
+        );
+        c.archive_rpc.pop();
+        c.light_client_depth = 256;
+        assert!(c.check().is_err());
     }
 }

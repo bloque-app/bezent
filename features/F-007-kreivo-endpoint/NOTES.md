@@ -63,6 +63,7 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
     aledgent#121), behind the default feature `light-client`. No RPC fallback was added. Every test runs against
     `chain::fake::FakeChain`; nothing reaches a network. The pinned chain spec is Kreivo's light spec, copied
     from aledgent's canary; the relay chain's spec is a deployment file (`relay_chain_spec`), not committed.
+    *Superseded for history by item 32 (issue #49): old state comes from archive nodes, verified.*
 
 ## Review fixes (PR #31, security review of `58dab73`)
 
@@ -199,16 +200,70 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
 - **A gap longer than `max_walk`** stays closed and stalls the follower until `max_walk` is raised.
 - **A nonce consumed before the era's birth** stays unknown. M2 makes it unreachable for anything signed now
   (at signing the nonce is at least the chain's at a finalized block at or after the birth).
-- **The bisect reads state** up to the era's age; pruned peers make it unknown. Scanning block bodies in the
-  era window for (lane, `N`) would not need old state.
+- **The bisect reads state** up to the era's age; past `light_client_depth` it is read from the archive (item 32).
+  Scanning block bodies in the era window for (lane, `N`) would not need old state.
 - **`T-013-05`** should assert that `tx_hash` matches the body item `chain_getBlock` returns: `FakeChain`
   hashes the way it encodes.
 
+## History from archive nodes (issue #49)
+
+32. **Where history is read.** Checked against the code and against Kreivo mainnet (read-only, 2026-10-22). Most reads
+    are at the finalized head and need no history: the supply readings, the contract's code hash at start-up, every
+    `ContractsApi_call` (dry runs; the used-reference check runs at the proof's final block, which is always the
+    finalized head the prover looked from), the runtime version and the lane nonce at preparation. History is read in
+    two places only: the follower (`ancestry` headers from the finalized head back to the watermark, then
+    `Timestamp::Now` and `System::Events` of every block; on a first start back to the contract's instantiation,
+    block 39,867,043, about 81,000 blocks behind the head on 2026-10-22 and 14,000 more a day), and the prover after a
+    downtime longer than the light client's reach (the era's birth header, the nonce bisect, the consuming block's
+    body and events). No runtime call is ever made at an old block.
+33. **What the light client serves of it.** Run once with the pinned light spec and Kusama's spec on the patched smoldot
+    (`67ad6c3`): the instantiation block's header and body arrive, but its state does not (`storage proof request:
+    RemoteCouldntAnswer` from three peers). Headers come at about 175 ms each, so even a header walk of 81,000 blocks
+    through it would take hours. Of the RPC endpoints, only the archive node keeps that state; the public endpoint
+    answers `State already discarded` and has no body.
+34. **The design.** The light client stays the source of truth for the live chain: the finalized head (GRANDPA,
+    verified by smoldot), every read at it, every runtime call, every submission. Reads at blocks more than
+    `light_client_depth` (default 128, below the 256 blocks peers keep) behind the finalized head go to `archive_rpc`,
+    archive nodes' WebSocket JSON-RPC in order, the last one that answered first; a header is routed the same way once
+    its number is known from its child. Each side falls back to the other. Nothing a source says is believed:
+    `chain::archive` keeps a header only if its SCALE bytes hash to the hash asked for (hashes come from the light
+    client's finalized head by parent hash, so a verified header is a block of the finalized chain), a value only if
+    `state_getReadProof` proves it under that header's state root (a node left out is `Invalid`, never "absent"), a body
+    only if it matches the extrinsics root. This is a proof, not a cross-check of two sources, so one archive node is
+    enough for correctness (`REQ-RQ-7`, PLAN `DEC-5`: the RPC is never trusted for an outcome). A source that cannot be
+    reached is unknown, the next is tried, and if none answers the block is a visible gap as before (`REQ-OB-3`); one
+    that answers something that does not verify is logged as an error and the next is tried. Each source holds one
+    long-lived connection (subxt's reconnecting client, exponential backoff up to 30 s, `archive_timeout_ms` per
+    request): an archive node's connections are shared with every other client. A block's `Timestamp::Now` and
+    `System::Events` are one proof.
+35. **The start-up check** (after the genesis and code-hash checks; `AC-I4.1`, `REQ-IC-1`). `archive_rpc` must not be
+    empty. Each source must answer the declared genesis at block 0 and the light client's finalized hash at its
+    height (asked again for up to a minute while it lags), and serve proven state at `start_block`: the contract there
+    with the declared code hash, and proven absent at its parent, which also proves `start_block` is the contract's
+    instantiation. A source that disagrees, does not verify or lacks that state refuses the start (exit 1, logged as an
+    error); one that cannot be reached is left out while another passes. `--check` stays offline.
+36. **Tests** (`chain::archive`, `config`): against the archive node's answers at block 39,867,043, recorded read-only in
+    `fixtures/archive-39867043.json`: the values verify; a flipped header byte, a changed `System::Events` value, a
+    dropped proof node and a changed body are each refused; a source that is down, lies or lacks the state gives way to
+    the next; the start-up check refuses a source with Kippu's "State already discarded" answer, another genesis,
+    another finalized hash, a lie, a late `start_block`, and no source. The live path (the patched smoldot, the
+    WebSocket source, the start-up check against the archive node and the public endpoint) was run once by hand; CI
+    has no network.
+
+**Runbook** (first start on Kreivo mainnet): `start_block = 39867043`, `first_seq = 0`, `archive_rpc` with the
+archive node first, `max_walk` above the blocks from `start_block` to the head (`ancestry` walks the whole backlog in
+one look; a smaller value records the backlog as a gap that never fills). The replay is sequential: a header and a
+proof per block, about 0.19 s per block from a client about 95 ms from the node, so about 4 to 5 hours for the
+backlog of 2026-10-22, during which nothing else in the loop runs and `NFR-6` alerts fire; it is shorter close to the
+node. The image must carry CA roots for `wss://`. A failed start-up check names the source and why.
+
 ## Limits stated plainly
 
-- **History**: a light client reads old state from peers that keep it; most nodes prune state after 256
-  blocks. A backlog older than that stays a visible gap until a peer serves it (`REQ-RN-6`), and a proof
-  whose blocks are pruned stays unknown.
+- **History**: verified from `archive_rpc` (items 32 to 35). Its availability is the archive nodes': with one node, an
+  outage longer than `light_client_depth` leaves new blocks a visible gap until it is back, and a restart refuses to
+  start while no source passes the check. A second archive node is an owner decision.
+- **The replay is sequential** (one request at a time per block). Pipelining the header walk and the proofs would cut
+  the first start from hours to minutes; not done here.
 - **Runtime upgrades**: events are decoded with the metadata subxt holds; an old block of an earlier runtime
   may not decode, and becomes a gap.
 - **The light-client code path is compiled in CI but exercised only by `T-013-05`** (zombienet).

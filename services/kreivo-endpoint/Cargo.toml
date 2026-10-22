@@ -22,7 +22,13 @@ default = ["light-client"]
 # aledgent's fork with the child-trie-root fix (aledgent#121), pinned by commit in the workspace's
 # `[patch.crates-io]`. Without it the crate builds its logic and the in-memory chain only, which is
 # what every test here runs against: no test reaches a real network.
-light-client = ["dep:subxt", "dep:smoldot-light", "dep:ed25519-zebra", "dep:scale-value"]
+light-client = [
+    "dep:subxt",
+    "dep:smoldot-light",
+    "dep:smoldot",
+    "dep:ed25519-zebra",
+    "dep:scale-value",
+]
 
 [dependencies]
 bezent-store = { path = "../../crates/store" }
@@ -39,8 +45,12 @@ tokio = { workspace = true, features = ["net", "signal", "sync", "time", "fs"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
-subxt = { version = "0.44", optional = true }
+# `reconnecting-rpc-client`: one long-lived connection per history source, re-opened with backoff (issue #49).
+subxt = { version = "0.44", optional = true, features = ["reconnecting-rpc-client"] }
 smoldot-light = { version = "2.1", optional = true }
+# The same patched library smoldot-light is built on (`[patch.crates-io]`), for verifying what a history source
+# serves: header hashes, storage proofs and extrinsics roots (issue #49).
+smoldot = { version = "4", default-features = false, optional = true }
 scale-value = { version = "0.18", optional = true }
 # Not used directly: smoldot uses ed25519-zebra's batch verifier, which 4.2 moved behind its
 # `alloc` feature without smoldot asking for it (as in aledgent's settle).
