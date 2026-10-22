@@ -19,6 +19,17 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bezent_service') THEN
         BEGIN
             CREATE ROLE bezent_service NOLOGIN;
+            -- PostgreSQL 16 records the creator as a member of the role it made (ADMIN OPTION, and SET and
+            -- INHERIT too if createrole_self_grant says so). The owner keeps ADMIN OPTION (it grants the role to
+            -- the services' logins) and drops the rest, so it never acts as the role nor inherits it.
+            IF EXISTS (SELECT 1 FROM pg_auth_members m
+                       JOIN pg_roles g ON g.oid = m.roleid
+                       JOIN pg_roles u ON u.oid = m.member
+                       WHERE g.rolname = 'bezent_service' AND u.rolname = current_user
+                         AND (m.set_option OR m.inherit_option)) THEN
+                REVOKE SET OPTION FOR bezent_service FROM CURRENT_USER;
+                REVOKE INHERIT OPTION FOR bezent_service FROM CURRENT_USER;
+            END IF;
         EXCEPTION WHEN duplicate_object OR unique_violation THEN
             NULL;  -- created concurrently by another database's migration on the same server
         END;
@@ -28,7 +39,8 @@ BEGIN
        OR EXISTS (SELECT 1 FROM pg_auth_members m
                   JOIN pg_roles g ON g.oid = m.roleid
                   JOIN pg_roles u ON u.oid = m.member
-                  WHERE g.rolname = 'bezent_service' AND u.rolname = current_user) THEN
+                  WHERE g.rolname = 'bezent_service' AND u.rolname = current_user
+                    AND (m.set_option OR m.inherit_option)) THEN
         RAISE EXCEPTION 'migrations run as the migration owner, never as the service role (%)', current_user
             USING ERRCODE = 'BZ001';
     END IF;

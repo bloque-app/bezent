@@ -221,10 +221,17 @@ stop working as soon as it runs. As the migration owner, on the release's store:
    bezent-migrate --url-file /run/secrets/owner-db-url --login <each service and operator login>...
    ```
 
-   The owner must be a superuser: from PostgreSQL 16 a role that creates a role is recorded as a member of it, and
-   migration `0009` refuses any owner that is a member of a service role, so a `CREATEROLE` login that is not a
-   superuser fails at `0009` (checked on 16). Managed servers that offer no superuser cannot run these migrations as
-   they are.
+   The owner may be a superuser or, on a managed server that has none, a login with `CREATEROLE` and `CREATEDB`
+   that owns the database (on AWS RDS, the master user: `rds_superuser` is not a superuser). From PostgreSQL 16 a
+   role that creates a role is recorded as a member of it with `ADMIN OPTION`; the migrations keep that and drop
+   any `SET` or `INHERIT` the server's `createrole_self_grant` adds, so the owner never acts as a service role
+   nor inherits its privileges, and it keeps the `ADMIN OPTION` it needs to grant each role to a login. The
+   owner is refused only if it can act as a service role or inherit it (a membership with `SET` or `INHERIT`).
+   Create the store's roles with the owner, not with another login: a role made by a superuser leaves a
+   `CREATEROLE` owner without `ADMIN OPTION` on it (`GRANT <role> TO <owner> WITH ADMIN TRUE, INHERIT FALSE, SET
+   FALSE`, as a superuser, repairs that). `services/migrate/tests/migrate.rs` runs the
+   whole chain as such an owner and compares the result with a superuser's run (the `migrate-createrole-owner` job of
+   `ci.yml` does it on a server of its own).
 
    The owner's URL (`sslmode=verify-full` and `sslrootcert`, as above) is read from the file, and is never
    printed. Mount it as a secret and pass `--url-file`: that is the way to run it in production.
@@ -301,7 +308,7 @@ $$;
 ```
 
 A login must not be a superuser, nor able to create roles or databases, replicate or bypass row
-security (`ALTER ROLE … NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, as a superuser),
+security (`ALTER ROLE … NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, as a superuser; a login the `CREATEROLE` owner creates has none of them already),
 and must not own the database or any object in it (the check refuses a login that is the
 database's `datdba`): if it does, `ALTER DATABASE … OWNER TO` the migration owner first, and
 `REASSIGN OWNED BY` the login `TO` the migration owner.

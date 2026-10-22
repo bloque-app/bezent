@@ -364,6 +364,210 @@ async fn a_runner_behind_another_fails_at_the_lock_timeout(pool: PgPool) {
     waiting.close().await;
 }
 
+// ---- an owner that is not a superuser ---------------------------------------------------------
+
+/// What a store's roles are, whoever ran the migrations: every store role's attributes and
+/// privileges, and the memberships among them, sorted. Not the owner's own memberships.
+async fn store_shape(pool: &PgPool) -> Vec<String> {
+    let mut conn = pool.acquire().await.unwrap();
+    let mut shape: Vec<String> = sqlx::query_scalar(
+        "SELECT rolname::text || ' ' || rolsuper::text || rolcreaterole::text || rolcreatedb::text \
+                || rolcanlogin::text || rolbypassrls::text || rolinherit::text \
+         FROM pg_roles WHERE rolname LIKE 'bezent\\_%' ORDER BY 1",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .unwrap();
+    shape.extend(
+        sqlx::query_scalar::<_, String>(
+            "SELECT g.rolname::text || ' > ' || u.rolname::text || ' ' || m.admin_option::text \
+                    || m.inherit_option::text || m.set_option::text \
+             FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid \
+             JOIN pg_roles u ON u.oid = m.member \
+             WHERE g.rolname LIKE 'bezent\\_%' AND u.rolname LIKE 'bezent\\_%' ORDER BY 1",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap(),
+    );
+    for role in bezent_store::grants::ROLES {
+        for (object, privilege) in bezent_store::grants::held(&mut conn, role).await.unwrap() {
+            shape.push(format!("{role} holds {privilege} on {object}"));
+        }
+    }
+    shape
+}
+
+/// The pattern of a managed server with no superuser (AWS RDS): the owner is a login with
+/// CREATEROLE and CREATEDB, not a superuser. On PostgreSQL 16 or later a role that makes a role is
+/// recorded as a member of it, with ADMIN OPTION (and SET and INHERIT if `createrole_self_grant`
+/// says so); the migrations must run, and leave the store as a superuser's run does.
+async fn createrole_owner_run(pool: &PgPool, self_grant: &str) {
+    const OWNER: &str = "migrate_test_createrole_owner";
+    const DATABASE: &str = "migrate_test_createrole_owner_db";
+    const REFERENCE: &str = "migrate_test_createrole_reference_db";
+    // On a server of its own (the CI job that sets this) the store's roles do not exist yet, so the
+    // owner makes them, as it does on a new managed server. Elsewhere other tests share the server
+    // and its roles: they are left alone, and the owner is given ADMIN OPTION on them instead.
+    let fresh = std::env::var_os("BEZENT_TEST_FRESH_SERVER").is_some();
+    async fn admin(pool: &PgPool, sql: &str) {
+        sqlx::raw_sql(sql).execute(pool).await.unwrap();
+    }
+    async fn cleanup(pool: &PgPool, fresh: bool) {
+        for db in [DATABASE, REFERENCE] {
+            admin(pool, &format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)")).await;
+        }
+        admin(
+            pool,
+            &format!(
+                "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{OWNER}') THEN \
+                   DROP OWNED BY {OWNER}; DROP ROLE {OWNER}; END IF; END $$"
+            ),
+        )
+        .await;
+        if fresh {
+            // Memberships between the roles make a drop fail until the other is gone: go round.
+            admin(
+                pool,
+                "DO $$ DECLARE r TEXT; BEGIN FOR i IN 1..4 LOOP \
+                   FOR r IN SELECT rolname::text FROM pg_roles WHERE rolname LIKE 'bezent\\_%' LOOP \
+                     BEGIN EXECUTE format('DROP ROLE %I', r); EXCEPTION WHEN OTHERS THEN NULL; END; \
+                   END LOOP; END LOOP; END $$",
+            )
+            .await;
+        }
+    }
+    cleanup(pool, fresh).await;
+    if fresh {
+        let left: Vec<String> = sqlx::query_scalar(
+            "SELECT rolname::text FROM pg_roles WHERE rolname LIKE 'bezent\\_%'",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        assert_eq!(left, Vec::<String>::new(), "this server is not fresh");
+    }
+    admin(
+        pool,
+        &format!("CREATE ROLE {OWNER} LOGIN CREATEROLE CREATEDB PASSWORD 'test-only-owner-login'"),
+    )
+    .await;
+    admin(
+        pool,
+        &format!("ALTER ROLE {OWNER} SET createrole_self_grant = '{self_grant}'"),
+    )
+    .await;
+    admin(pool, &format!("CREATE DATABASE {DATABASE} OWNER {OWNER}")).await;
+    admin(pool, &format!("CREATE DATABASE {REFERENCE}")).await;
+    if !fresh {
+        admin(
+            pool,
+            &format!(
+                "DO $$ DECLARE r TEXT; BEGIN \
+                   FOR r IN SELECT rolname::text FROM pg_roles WHERE rolname LIKE 'bezent\\_%' LOOP \
+                     EXECUTE format('GRANT %I TO {OWNER} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE', r); \
+                   END LOOP; END $$"
+            ),
+        )
+        .await;
+    }
+
+    let options = (*pool.connect_options())
+        .clone()
+        .database(DATABASE)
+        .username(OWNER)
+        .password("test-only-owner-login");
+    let owner = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let is_super: bool =
+        sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = session_user")
+            .fetch_one(&owner)
+            .await
+            .unwrap();
+    assert!(!is_super, "the owner must not be a superuser");
+
+    refuse_service_login(&owner)
+        .await
+        .expect("the owner is not a service login");
+    assert_eq!(apply(&owner, &MIGRATOR).await.unwrap(), all_versions());
+    let s = status(&owner, &MIGRATOR).await.unwrap();
+    assert!(s.is_current(), "{s:?}");
+    // Still the owner after the run, and still not refused.
+    refuse_service_login(&owner)
+        .await
+        .expect("the owner is not a service login");
+
+    // The same roles, attributes, memberships and privileges as the server's superuser makes of the
+    // same release in a database of its own.
+    let su: bool = sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = session_user")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert!(su, "the test server's login is a superuser");
+    let reference_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with((*pool.connect_options()).clone().database(REFERENCE))
+        .await
+        .unwrap();
+    apply(&reference_pool, &MIGRATOR).await.unwrap();
+    assert_eq!(
+        store_shape(&owner).await,
+        store_shape(&reference_pool).await
+    );
+    reference_pool.close().await;
+
+    // The owner holds ADMIN OPTION on the roles it made (to grant them to the services' logins),
+    // and neither SET nor INHERIT: it never acts as a service role nor inherits its privileges.
+    let acts: Vec<String> = sqlx::query_scalar(
+        "SELECT g.rolname::text FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid \
+         WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = session_user) \
+           AND g.rolname LIKE 'bezent\\_%' AND (m.inherit_option OR m.set_option)",
+    )
+    .fetch_all(&owner)
+    .await
+    .unwrap();
+    assert_eq!(
+        acts,
+        Vec::<String>::new(),
+        "the owner can act as a store role"
+    );
+
+    // The catalogue-wide grants check is clean, and the owner can make a service's login.
+    let mut known = logins(&owner).await;
+    known.push(OWNER.to_owned());
+    let mut conn = owner.acquire().await.unwrap();
+    assert_eq!(
+        catalogue_findings(&mut conn, &known).await.unwrap(),
+        Vec::<String>::new()
+    );
+    drop(conn);
+    bezent_store::login::ensure_login(&owner, "migrate_test_rds_core", "bezent_core", "00ff00ff")
+        .await
+        .unwrap();
+    owner.close().await;
+    admin(
+        pool,
+        "DROP OWNED BY migrate_test_rds_core; DROP ROLE migrate_test_rds_core",
+    )
+    .await;
+    cleanup(pool, fresh).await;
+}
+
+#[sqlx::test]
+async fn a_createrole_owner_without_superuser_runs_the_migrations(pool: PgPool) {
+    let _roles = SERVER_ROLES.lock().await;
+    createrole_owner_run(&pool, "").await;
+}
+
+#[sqlx::test]
+async fn a_createrole_owner_the_server_makes_a_full_member_is_brought_to_admin_only(pool: PgPool) {
+    let _roles = SERVER_ROLES.lock().await;
+    createrole_owner_run(&pool, "set, inherit").await;
+}
+
 // ---- the command line ------------------------------------------------------------------------
 
 /// `DATABASE_URL` with the test's database in place of the one it names.

@@ -34,6 +34,15 @@ BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
             BEGIN
                 EXECUTE format('CREATE ROLE %I NOLOGIN', role_name);
+                -- PostgreSQL 16 makes the creator a member of the role (see 0009); keep ADMIN OPTION only.
+                IF EXISTS (SELECT 1 FROM pg_auth_members m
+                           JOIN pg_roles g ON g.oid = m.roleid
+                           JOIN pg_roles u ON u.oid = m.member
+                           WHERE g.rolname = role_name AND u.rolname = current_user
+                             AND (m.set_option OR m.inherit_option)) THEN
+                    EXECUTE format('REVOKE SET OPTION FOR %I FROM CURRENT_USER', role_name);
+                    EXECUTE format('REVOKE INHERIT OPTION FOR %I FROM CURRENT_USER', role_name);
+                END IF;
             EXCEPTION WHEN duplicate_object OR unique_violation THEN
                 NULL;  -- created concurrently by another database's migration on the same server
             END;
@@ -43,7 +52,8 @@ BEGIN
            OR EXISTS (SELECT 1 FROM pg_auth_members m
                       JOIN pg_roles g ON g.oid = m.roleid
                       JOIN pg_roles u ON u.oid = m.member
-                      WHERE g.rolname = role_name AND u.rolname = current_user) THEN
+                      WHERE g.rolname = role_name AND u.rolname = current_user
+                    AND (m.set_option OR m.inherit_option)) THEN
             RAISE EXCEPTION 'migrations run as the migration owner, never as %, (%)', role_name, current_user
                 USING ERRCODE = 'BZ001';
         END IF;

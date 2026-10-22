@@ -254,12 +254,17 @@ fn versions(v: &[i64]) -> String {
 /// the migration owner is a login of its own, and a service's login must never migrate.
 pub async fn refuse_service_login(pool: &PgPool) -> Result<(), String> {
     let roles: Vec<String> = sqlx::query_scalar(
-        // The recorded memberships, followed transitively, and the login itself. `pg_has_role`
-        // would answer yes for every role to a superuser, who is the owner on a local server.
+        // The recorded memberships that let the login act as the role or inherit its privileges,
+        // followed transitively, and the login itself. `pg_has_role` would answer yes for every
+        // role to a superuser, who is the owner on a local server. A membership with ADMIN
+        // OPTION alone (SET FALSE, INHERIT FALSE) is not counted: PostgreSQL 16 records the owner
+        // that creates a role as such a member, and on a server with no superuser (a managed one)
+        // the owner needs it to grant the role to the services' logins.
         "WITH RECURSIVE held(oid) AS ( \
              SELECT oid FROM pg_roles WHERE rolname = session_user \
              UNION \
-             SELECT m.roleid FROM pg_auth_members m JOIN held h ON m.member = h.oid) \
+             SELECT m.roleid FROM pg_auth_members m JOIN held h ON m.member = h.oid \
+             WHERE m.set_option OR m.inherit_option) \
          SELECT r.rolname::text FROM pg_roles r JOIN held h ON h.oid = r.oid \
          WHERE r.rolname = ANY ($1) ORDER BY 1",
     )
