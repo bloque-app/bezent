@@ -1,0 +1,28 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "bezent-migrate"
+description = "bezent-migrate: applies the store's migrations as the migration owner, refuses a history that diverges, and checks the catalogue's grants; the only production path that migrates"
+edition.workspace = true
+version.workspace = true
+license = "GPL-3.0-or-later"
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bezent_migrate"
+
+[[bin]]
+name = "bezent-migrate"
+path = "src/main.rs"
+
+[dependencies]
+bezent-store = { path = "../../crates/store" }
+sqlx.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync"] }
+
+[lints]
+workspace = true

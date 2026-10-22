@@ -13,6 +13,7 @@
 #   services/evm-endpoint    F-001   empty binary
 #   services/signer          F-001   empty binary
 #   services/core            F-003   the core: state machine, conditions, review (DEC-3)
+#   services/migrate         prod  bezent-migrate: applies the store's migrations as the owner (the only production path that migrates)
 #   services/sidecar         e2e   ingress, core, a test signer and a chain-event driver in one process, for other repos' harnesses (TEST only)
 #
 # The ink! contract (contracts/bezent/) and the Foundry projects (contracts/evm/) are workspaces of
@@ -28,6 +29,7 @@ members = [
     "services/signer",
     "services/core",
     "services/sidecar",
+    "services/migrate",
 ]
 # Workspaces of their own (F-006 and later): never members of this one.
 exclude = ["contracts/bezent"]

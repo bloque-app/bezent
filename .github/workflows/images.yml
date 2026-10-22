@@ -11,6 +11,7 @@ name: Images
 #   ghcr.io/bloque-app/bezent-signer
 #   ghcr.io/bloque-app/bezent-kreivo-endpoint
 #   ghcr.io/bloque-app/bezent-evm-endpoint
+#   ghcr.io/bloque-app/bezent-migrate        the migration runner, run once per release that migrates
 #   ghcr.io/bloque-app/bezent-sidecar        TEST only: for other repositories' e2e harnesses
 #
 # A pull request builds every image, runs each binary once inside it (a distroless image has no
@@ -70,7 +71,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
-      # One builder for the six targets: the Rust build stage is shared, so the workspace
+      # One builder for the seven targets: the Rust build stage is shared, so the workspace
       # compiles once.
       - name: Build ingress
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
@@ -132,6 +133,18 @@ jobs:
           cache-to: type=gha,scope=images,mode=max
           load: true
           tags: bezent-evm-endpoint:ci
+      - name: Build migrate
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: deploy/docker/services.Dockerfile
+          target: migrate
+          platforms: linux/amd64
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=images
+          cache-to: type=gha,scope=images,mode=max
+          load: true
+          tags: bezent-migrate:ci
       - name: Build sidecar
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
@@ -150,7 +163,7 @@ jobs:
       - name: Each image runs its binary
         run: |
           set +e -uo pipefail
-          for t in ingress core signer kreivo-endpoint evm-endpoint; do
+          for t in ingress core signer kreivo-endpoint evm-endpoint migrate; do
             user=$(docker image inspect -f '{{.Config.User}}' "bezent-$t:ci")
             want=65532:65532; [ "$t" = signer ] && want=65533:65533
             test "$user" = "$want" || { echo "bezent-$t runs as '$user', not $want"; exit 1; }
@@ -161,7 +174,7 @@ jobs:
           done
           test "$(docker image inspect -f '{{.Config.User}}' bezent-sidecar:ci)" = "65532:65532"
           # The RDS CA bundle is in each service image, at the path bezent_store::tls defaults to.
-          for t in ingress core signer kreivo-endpoint evm-endpoint; do
+          for t in ingress core signer kreivo-endpoint evm-endpoint migrate; do
             id=$(docker create "bezent-$t:ci")
             n=$(docker cp "$id:/usr/share/bezent/ca/rds-global-bundle.pem" - | tar -xO | grep -c 'BEGIN CERTIFICATE')
             docker rm "$id" > /dev/null
@@ -274,6 +287,52 @@ jobs:
           size=$(docker image inspect -f '{{.Size}}' bezent-sidecar:ci)
           echo "bezent-sidecar (linux/amd64): $((size / 1024 / 1024)) MiB" >> "$GITHUB_STEP_SUMMARY"
 
+      # The migration runner as a one-off job would run it: the owner's URL in a mounted file, never an
+      # argument. An empty store is pending, then migrated, then current; a history that diverges is
+      # refused. It seeds nothing (the store holds no declaration afterwards).
+      - name: The migration runner
+        run: |
+          set -euo pipefail
+          docker network create bzm
+          docker run -d --name pgm --network bzm \
+            -e POSTGRES_DB=bezent -e POSTGRES_USER=bloque -e POSTGRES_PASSWORD=bloque \
+            --health-cmd pg_isready --health-interval 2s --health-retries 30 \
+            bezent-ci-postgres:18-alpine
+          for i in $(seq 1 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' pgm)" = healthy ] && break
+            [ "$i" = 60 ] && { docker logs pgm; exit 1; }
+            sleep 1
+          done
+          echo 'postgres://bloque:bloque@pgm:5432/bezent?sslmode=disable' > "$RUNNER_TEMP/owner-url"
+          chmod 644 "$RUNNER_TEMP/owner-url"
+          migrate() {
+            docker run --rm --network bzm -v "$RUNNER_TEMP/owner-url:/run/owner-url:ro" \
+              bezent-migrate:ci --url-file /run/owner-url "$@"
+          }
+          # Runs the command, shows its output (kept in migrate.out) and checks its exit status.
+          expect() {
+            local want=$1 c=0; shift
+            "$@" > "$RUNNER_TEMP/migrate.out" 2>&1 || c=$?
+            cat "$RUNNER_TEMP/migrate.out"
+            if grep -q 'bloque:bloque' "$RUNNER_TEMP/migrate.out"; then echo "the URL was printed"; exit 1; fi
+            [ "$c" = "$want" ] || { echo "expected exit $want, got $c: $*"; exit 1; }
+          }
+          # An empty store is pending; the run applies every migration; then it is current.
+          expect 3 migrate --check
+          expect 0 migrate
+          grep -q '^applied 1$' "$RUNNER_TEMP/migrate.out"
+          expect 0 migrate --check
+          expect 0 migrate
+          grep -q 'nothing to apply' "$RUNNER_TEMP/migrate.out"
+          # No declaration was seeded.
+          test "$(docker exec pgm psql -U bloque -d bezent -Atc 'SELECT count(*) FROM networks')" = 0
+          # A history that diverges is refused, with and without --check.
+          docker exec pgm psql -U bloque -d bezent -qc \
+            "UPDATE _sqlx_migrations SET checksum = '\\x00' WHERE version = 1"
+          expect 4 migrate --check
+          expect 4 migrate
+          docker rm -f pgm > /dev/null
+
   publish:
     name: publish ${{ matrix.target }}
     # A merge to main, or a manual dispatch on main. One image at a time: the first builds the
@@ -285,7 +344,7 @@ jobs:
       max-parallel: 1
       fail-fast: false
       matrix:
-        target: [ingress, core, signer, kreivo-endpoint, evm-endpoint, sidecar]
+        target: [ingress, core, signer, kreivo-endpoint, evm-endpoint, migrate, sidecar]
     permissions:
       contents: read
       packages: write
