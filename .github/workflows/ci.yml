@@ -93,6 +93,35 @@ jobs:
       - run: pg_dump --version && psql --version
       - run: cargo test --workspace --locked
 
+  # A managed server has no superuser (AWS RDS: the master user is rds_superuser): the migrations
+  # must run as a CREATEROLE login that owns the database. On PostgreSQL 16 a role that makes a role
+  # is made a member of it; this job runs the whole chain as such an owner on a server of its own
+  # (no store role exists yet, so the owner creates them all) and compares the result with a
+  # superuser's run of the same release.
+  migrate-createrole-owner:
+    name: migrations as a CREATEROLE owner (PostgreSQL 16)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      BEZENT_TEST_FRESH_SERVER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - run: (rustup toolchain install || rustup show) && cargo --version
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p bezent-migrate --test migrate --locked createrole_owner -- --test-threads=1
+
   # The services reach PostgreSQL over TLS and fail closed (bezent_store::tls): against a server that
   # forces TLS with a throwaway CA (tools/ci/tls-postgres.sh), and one that offers none.
   database-tls:

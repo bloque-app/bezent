@@ -333,8 +333,22 @@ pub async fn ensure_login(
              BEGIN CREATE ROLE \"{name}\" LOGIN PASSWORD '{password}'; \
              EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END; \
            END IF; \
-           ALTER ROLE \"{name}\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION \
-             NOBYPASSRLS INHERIT PASSWORD '{password}'; \
+           ALTER ROLE \"{name}\" LOGIN INHERIT PASSWORD '{password}'; \
+           /* A role made by CREATEROLE has none of these attributes, and PostgreSQL 16 lets an owner \
+              that is not a superuser name SUPERUSER, REPLICATION or BYPASSRLS in an ALTER ROLE only if \
+              it holds the attribute itself: name each only when the login has it. */ \
+           IF (SELECT rolsuper FROM pg_roles WHERE rolname = '{name}') THEN \
+             ALTER ROLE \"{name}\" NOSUPERUSER; \
+           END IF; \
+           IF (SELECT rolreplication FROM pg_roles WHERE rolname = '{name}') THEN \
+             ALTER ROLE \"{name}\" NOREPLICATION; \
+           END IF; \
+           IF (SELECT rolbypassrls FROM pg_roles WHERE rolname = '{name}') THEN \
+             ALTER ROLE \"{name}\" NOBYPASSRLS; \
+           END IF; \
+           IF (SELECT rolcreatedb OR rolcreaterole FROM pg_roles WHERE rolname = '{name}') THEN \
+             ALTER ROLE \"{name}\" NOCREATEDB NOCREATEROLE; \
+           END IF; \
            FOR other, grantor IN SELECT g.rolname, gr.rolname FROM pg_auth_members m \
                JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles u ON u.oid = m.member \
                JOIN pg_roles gr ON gr.oid = m.grantor \
