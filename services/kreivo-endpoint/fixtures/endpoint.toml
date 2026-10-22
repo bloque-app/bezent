@@ -18,6 +18,14 @@ contract = "0x0000000000000000000000000000000000000000000000000000000000000001"
 contract_code_hash = "0x00000000000000000000000000000000000000000000000000000000000000c0"
 start_block = 0
 database_url_file = "/run/secrets/bezent-kreivo-endpoint-db"
+# History sources (issue #49), tried in order: archive nodes' WebSocket JSON-RPC. Nothing they serve
+# is trusted (headers by hash, state by proof, bodies by extrinsics root), and each must serve state
+# at start_block, or the endpoint refuses to start. A Kreivo mainnet deployment declares
+# start_block = 39867043 (the contract's instantiation) and a max_walk above the blocks from there
+# to the finalized head, about 14,000 a day.
+archive_rpc = ["wss://rpc.kreivo.bloque.sh"]
+light_client_depth = 128
+max_walk = 200000
 
 [lane]
 key = "kreivo-mint"

@@ -66,6 +66,9 @@ struct State {
     outside: Vec<ContractEvent>,
     other_nonces: Vec<AccountId32>,
     failing: HashSet<u64>,
+    failing_headers: HashSet<u64>,
+    /// The number of every header asked for, in order.
+    header_log: Vec<u64>,
     dry_run: DryRunMode,
     refuse_on_chain: bool,
     seq: u64,
@@ -134,6 +137,8 @@ impl FakeChain {
                 outside: Vec::new(),
                 other_nonces: Vec::new(),
                 failing: HashSet::new(),
+                failing_headers: HashSet::new(),
+                header_log: Vec::new(),
                 dry_run: DryRunMode::Pass,
                 refuse_on_chain: false,
                 seq: 0,
@@ -183,6 +188,21 @@ impl FakeChain {
     /// Reads of block `n`'s events fail until [`FakeChain::heal`].
     pub fn fail_reads_at(&self, n: u64) {
         self.lock().failing.insert(n);
+    }
+
+    /// Reads of block `n`'s header fail until [`FakeChain::heal_header`].
+    pub fn fail_header_at(&self, n: u64) {
+        self.lock().failing_headers.insert(n);
+    }
+
+    /// Reads of block `n`'s header work again.
+    pub fn heal_header(&self, n: u64) {
+        self.lock().failing_headers.remove(&n);
+    }
+
+    /// The number of every header asked for so far, in order (failed asks included).
+    pub fn header_reads(&self) -> Vec<u64> {
+        self.lock().header_log.clone()
     }
 
     /// Reads of block `n`'s events work again.
@@ -644,13 +664,25 @@ impl Chain for FakeChain {
     }
 
     async fn header(&self, hash: &[u8; 32]) -> ChainResult<Header> {
-        self.answer(|s| {
-            s.blocks
-                .iter()
-                .find(|b| b.header.block.hash == *hash)
-                .map(|b| b.header)
-                .ok_or_else(|| ChainError::Unavailable("no such block".into()))
-        })
+        let mut s = self.lock();
+        if s.unavailable {
+            return Err(ChainError::Unavailable("the fake chain is offline".into()));
+        }
+        let found = s
+            .blocks
+            .iter()
+            .find(|b| b.header.block.hash == *hash)
+            .map(|b| b.header);
+        if let Some(h) = found {
+            s.header_log.push(h.block.number);
+            if s.failing_headers.contains(&h.block.number) {
+                return Err(ChainError::Unavailable(format!(
+                    "the header of block {} cannot be read",
+                    h.block.number
+                )));
+            }
+        }
+        found.ok_or_else(|| ChainError::Unavailable("no such block".into()))
     }
 
     async fn events(&self, at: &BlockRef, contract: &AccountId32) -> ChainResult<BlockEvents> {

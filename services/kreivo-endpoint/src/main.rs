@@ -12,8 +12,9 @@
 //! the declared network, its relay chain spec the declared relay chain with the declared
 //! checkpoint, and its `para_id` the declared one (a parachain's identity is pinned with its relay
 //! chain's), then the chain the light client follows must be it, and the contract at the declared
-//! account must have the declared code hash (`contract_code_hash`, issue #24). Any
-//! mismatch exits with status 1.
+//! account must have the declared code hash (`contract_code_hash`, issue #24), and every history
+//! source (`archive_rpc`, issue #49) must agree with the light client and serve proven state at
+//! `start_block`. Any mismatch exits with status 1.
 
 use std::process::ExitCode;
 
@@ -119,7 +120,7 @@ mod run {
     use bezent_kreivo_endpoint::chain::light::LightChain;
     use bezent_kreivo_endpoint::config::Config;
     use bezent_kreivo_endpoint::network;
-    use bezent_kreivo_endpoint::observe::{Follower, Step};
+    use bezent_kreivo_endpoint::observe::{Follower, Step, WALK_RUNG};
     use bezent_kreivo_endpoint::proof::Prover;
     use bezent_kreivo_endpoint::submit::{Lane, SignerLink, Submitter};
     use bezent_kreivo_endpoint::supply::{Recorded, Supplies};
@@ -143,9 +144,21 @@ mod run {
         bezent_store::login::check_login(&pool, bezent_store::KREIVO_ENDPOINT_ROLE)
             .await
             .map_err(|e| format!("refusing to start: {e}"))?;
-        let chain = LightChain::start(&spec, relay.as_deref())
-            .await
-            .map_err(|e| e.to_string())?;
+        // Issue #49: history comes from archive nodes, verified; the light client's peers keep
+        // only recent state. Without one, a first start or a restart after downtime cannot read.
+        if config.archive_rpc.is_empty() {
+            return Err("issue #49: archive_rpc is empty; at least one history source is required; refusing to start".into());
+        }
+        let chain = LightChain::start(
+            &spec,
+            relay.as_deref(),
+            &config.archive_rpc,
+            config.light_client_depth,
+            Duration::from_millis(config.archive_timeout_ms),
+            config.archive_max_response_bytes,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         // AC-I4.1: the chain the light client follows is the declared network, or nothing starts.
         network::check_chain(&chain, declared)
             .await
@@ -155,6 +168,46 @@ mod run {
         network::check_contract(&chain, &contract, config.declared_code_hash()?)
             .await
             .map_err(|e| e.to_string())?;
+        let follower = Follower {
+            chain: &chain,
+            pool: &pool,
+            network: &config.network,
+            contract,
+            start_block: config.start_block,
+            first_seq: config.first_seq,
+            max_range: config.max_range,
+            max_walk: config.max_walk,
+            rung: WALK_RUNG.min(config.max_walk),
+        };
+        // Issue #49: start_block's hash is the finalized chain's, reached by parent hash from the
+        // light client's head, not any source's word. A first start walks the backlog for it (its
+        // anchors are kept, and the follower resumes from them); a failed walk is tried again
+        // next start.
+        let start_hash = match follower.start_anchor().await {
+            Ok(Ok(hash)) => hash,
+            Ok(Err(e)) => {
+                return Err(format!(
+                    "issue #49: the walk from the finalized head to start_block {} stopped: {e}; its anchors are kept and the next start resumes from them; refusing to start",
+                    config.start_block
+                ));
+            }
+            Err(e) => return Err(format!("the store: {e}")),
+        };
+        // Issue #49: every history source agrees with the light client and serves proven state at
+        // the contract's instantiation, or nothing starts.
+        if let Err(e) = chain
+            .check_history(
+                declared,
+                config.start_block,
+                start_hash,
+                &contract,
+                config.declared_code_hash()?,
+            )
+            .await
+        {
+            tracing::error!(reason = %e, "issue #49: the history sources failed the start-up check");
+            return Err(e);
+        }
         let (scheme, public_key, account) = config.lane_account()?;
         let lane = Lane {
             key: config.lane.key.clone(),
@@ -167,16 +220,6 @@ mod run {
             socket: config.signer.socket.clone(),
             uid: config.signer.uid,
             token: read_secret(&config.signer.token_file, "signer token")?,
-        };
-        let follower = Follower {
-            chain: &chain,
-            pool: &pool,
-            network: &config.network,
-            contract,
-            start_block: config.start_block,
-            first_seq: config.first_seq,
-            max_range: config.max_range,
-            max_walk: config.max_walk,
         };
         let supplies = Supplies {
             chain: &chain,
@@ -202,6 +245,7 @@ mod run {
             max_walk: config.max_walk,
         };
 
+        let mut lied_seen = 0u64;
         let mut tick = tokio::time::interval(Duration::from_millis(config.poll_ms));
         loop {
             tokio::select! {
@@ -213,6 +257,12 @@ mod run {
             }
             let result: Result<(), sqlx::Error> = async {
                 while let Step::Read { .. } = follower.step().await? {}
+                let counts = chain.history_counts();
+                let lied: u64 = counts.iter().map(|c| c.lied).sum();
+                if lied > lied_seen {
+                    lied_seen = lied;
+                    tracing::error!(sources = ?counts, "REQ-RQ-7: history sources have answered what does not verify (counts since start-up)");
+                }
                 // Issue #42: the supply of every bridged asset at the finalized head, for the
                 // reserve check (REQ-BK-8, NFR-5).
                 match supplies.record().await? {

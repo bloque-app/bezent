@@ -8,11 +8,15 @@
 //! - `light::LightChain` (feature `light-client`, the default): subxt over the embedded smoldot
 //!   light client (`DEC-5`). Kreivo's RPC is never trusted for an outcome: smoldot verifies the
 //!   relay-chain-finalised head itself, and every storage read and runtime call it serves is proven.
+//!   History older than its peers keep comes from archive nodes, each answer proven against the
+//!   light client's finalized chain (`archive`, issue #49).
 //!
 //! Every read is made at a named block, and the endpoint reads only finalized blocks for what it
 //! records (`REQ-OB-5`). Blocks are reached from the finalized head by parent hash, never by
 //! number: the light client answers no lookup by number.
 
+#[cfg(feature = "light-client")]
+pub mod archive;
 pub mod fake;
 #[cfg(feature = "light-client")]
 pub mod light;

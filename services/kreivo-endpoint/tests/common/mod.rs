@@ -216,6 +216,7 @@ impl Fixture {
             first_seq: 0,
             max_range: 4,
             max_walk: 10_000,
+            rung: 5,
         }
     }
 
