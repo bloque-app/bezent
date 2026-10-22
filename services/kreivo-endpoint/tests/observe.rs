@@ -354,4 +354,12 @@ async fn issue_49_start_block_is_anchored_to_the_finalized_chain_once(
     let mut follower = f.follower();
     follower.start_block = 99;
     assert!(follower.start_anchor().await.unwrap().is_err());
+    // One too far back for max_walk is refused at once, with no header asked for.
+    let mut follower = f.follower();
+    follower.start_block = 0;
+    follower.max_walk = 26;
+    let asked = f.chain.header_reads().len();
+    let err = follower.start_anchor().await.unwrap().unwrap_err();
+    assert!(err.to_string().contains("max_walk"), "{err}");
+    assert_eq!(f.chain.header_reads().len(), asked);
 }

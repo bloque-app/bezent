@@ -79,7 +79,8 @@ pub enum Step {
         /// Why.
         reason: String,
     },
-    /// The finalized head could not be read: nothing was recorded.
+    /// The finalized head could not be read, or a walk back from it could not go on: nothing was
+    /// read, though a walk keeps the anchors it reached and resumes from them.
     Unavailable(String),
 }
 
@@ -317,6 +318,14 @@ impl<C: Chain> Follower<'_, C> {
             Ok(f) => f,
             Err(e) => return Ok(Err(e)),
         };
+        // As far back as a look walks, no further: a start_block set far too low is refused here,
+        // not after days of walking.
+        if finalized.number.saturating_sub(self.start_block) >= self.max_walk {
+            return Ok(Err(ChainError::Invalid(format!(
+                "start_block {} is more than max_walk ({}) blocks behind the finalized head {}",
+                self.start_block, self.max_walk, finalized.number
+            ))));
+        }
         self.anchor(&finalized, self.start_block).await
     }
 

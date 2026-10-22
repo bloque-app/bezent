@@ -187,7 +187,7 @@ mod run {
             Ok(Ok(hash)) => hash,
             Ok(Err(e)) => {
                 return Err(format!(
-                    "issue #49: start_block {} cannot be reached from the finalized head: {e}; refusing to start",
+                    "issue #49: the walk from the finalized head to start_block {} stopped: {e}; its anchors are kept and the next start resumes from them; refusing to start",
                     config.start_block
                 ));
             }
