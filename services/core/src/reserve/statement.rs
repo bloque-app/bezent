@@ -292,6 +292,10 @@ pub enum StoreError {
     Exists(String),
     /// The store could not be reached or written.
     Io(String),
+    /// The bucket or the role is configured so that the store cannot tell whether a place is
+    /// free: a `403` for a missing key (no `s3:ListBucket` on the whole bucket), or a key whose
+    /// latest version is a delete marker. Not a transient failure and not a verdict on the key.
+    Misconfigured(String),
 }
 
 impl fmt::Display for StoreError {
@@ -301,6 +305,7 @@ impl fmt::Display for StoreError {
                 write!(f, "{name} exists; a statement is never revised (REQ-PR-2)")
             }
             Self::Io(e) => write!(f, "statement store: {e}"),
+            Self::Misconfigured(e) => write!(f, "statement store misconfigured: {e}"),
         }
     }
 }
@@ -685,7 +690,16 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
     /// error is in the page; the dedupe key is the fixed reason, so a changing error text does not
     /// page every cycle.
     async fn page_store_failure(&self, asset: &str, error: &StoreError, now: DateTime<Utc>) {
-        let why = "the statement store did not take the statement";
+        let (why, action) = match error {
+            StoreError::Misconfigured(_) => (
+                "the statement store is misconfigured",
+                "fix the bucket or the task role: s3:ListBucket on the whole bucket without an s3:prefix condition, s3:GetObject on the prefix, and a bucket policy denying s3:DeleteObject; the signed statement is kept and written again every cycle once it is fixed",
+            ),
+            _ => (
+                "the statement store did not take the statement",
+                "the signed statement is kept and written again every cycle; check the bucket (existence, object lock, versioning), the task role's policy and the KMS key",
+            ),
+        };
         let page = Page {
             kind: "statement-publish-failed".into(),
             asset: asset.to_owned(),
@@ -697,7 +711,7 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
                 "refused_to_overwrite": matches!(error, StoreError::Exists(_)),
                 "paged_at": now.to_rfc3339(),
                 "repeats_after_seconds": stuck_page_window().num_seconds(),
-                "action": "the signed statement is kept and written again every cycle; check the bucket (existence, object lock, versioning), the task role's policy and the KMS key",
+                "action": action,
             }),
         };
         self.page_once(page, asset, why, now).await;

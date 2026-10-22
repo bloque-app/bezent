@@ -883,7 +883,7 @@ async fn issue_58_req_pr_2_publication_is_recorded_only_after_the_bucket_took_th
         .unwrap();
     assert_eq!(published.len(), 1);
     let p = &published[0];
-    let key = "statements/2026/10/13/statement-".to_owned() + ASSET + "-2026-10-13.json";
+    let key = "statements/2026/10/13/statement-".to_owned() + ASSET + "-2026-10-13-0000000001.json";
     assert_eq!(p.receipt.location, key);
     assert_eq!(p.signature_receipt.location, format!("{key}.sig"));
     assert_eq!(
@@ -953,4 +953,116 @@ async fn issue_58_the_chain_goes_on_in_the_bucket_one_object_pair_a_day(
             .is_empty()
     );
     assert_eq!(bucket.state().objects.len(), 4);
+}
+
+/// Issue #58 review: S3 answers a read of a missing key with 403 when the caller lacks
+/// `s3:ListBucket` on the whole bucket. That is a misconfiguration, paged by name at once; the
+/// signed statement is not lost, and the same one is written once the policy is fixed.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_58_a_403_for_a_missing_key_is_paged_as_a_misconfiguration_and_the_day_is_not_lost(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    stated_world(&w).await;
+    let bucket = FakeBucket::default();
+    let (statements, _) = bucket_publisher(&w, &bucket);
+    let pager = FakePager::default();
+    let statements = statements.with_pager(pager.clone());
+
+    bucket.state().no_list_bucket = true;
+    assert!(statements.publish_due(t0()).await.unwrap().is_empty());
+    assert_eq!(w.count("SELECT count(*) FROM reserve_statements").await, 0);
+    assert!(bucket.state().objects.is_empty());
+    assert!(
+        bucket.state().puts.is_empty(),
+        "nothing is written when the place cannot be told free"
+    );
+    assert_eq!(pager.kinds(), ["statement-publish-failed"]);
+    let paged: String = sqlx::query_scalar(
+        "SELECT payload ->> 'error' FROM event_log WHERE kind = 'statement-publish-failed'",
+    )
+    .fetch_one(&w.admin)
+    .await
+    .unwrap();
+    assert!(
+        paged.contains("check s3:ListBucket on the whole bucket"),
+        "{paged}"
+    );
+    let why: String = sqlx::query_scalar(
+        "SELECT payload ->> 'why' FROM event_log WHERE kind = 'statement-publish-failed'",
+    )
+    .fetch_one(&w.admin)
+    .await
+    .unwrap();
+    assert_eq!(why, "the statement store is misconfigured");
+
+    // The policy is fixed: the same day is published.
+    bucket.state().no_list_bucket = false;
+    let published = statements
+        .publish_due(t0() + Duration::seconds(10))
+        .await
+        .unwrap();
+    assert_eq!(published.len(), 1);
+}
+
+/// Issue #58 review: a key whose latest version is a delete marker would accept a new version
+/// under `If-None-Match: *`; the core reads first, finds the marker, writes nothing and pages.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_58_a_delete_marker_on_the_statement_key_is_paged_and_nothing_is_written_over_it(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    stated_world(&w).await;
+    let bucket = FakeBucket::default();
+    let (statements, _) = bucket_publisher(&w, &bucket);
+    let pager = FakePager::default();
+    let statements = statements.with_pager(pager.clone());
+    let key = "statements/2026/10/13/statement-".to_owned() + ASSET + "-2026-10-13-0000000001.json";
+    bucket.state().delete_marker(&key);
+
+    assert!(statements.publish_due(t0()).await.unwrap().is_empty());
+    assert_eq!(pager.kinds(), ["statement-publish-failed"]);
+    assert!(
+        bucket.state().puts.is_empty(),
+        "no version is put over a marker"
+    );
+    assert_eq!(w.count("SELECT count(*) FROM reserve_statements").await, 0);
+    let paged: String = sqlx::query_scalar(
+        "SELECT payload ->> 'error' FROM event_log WHERE kind = 'statement-publish-failed'",
+    )
+    .fetch_one(&w.admin)
+    .await
+    .unwrap();
+    assert!(paged.contains("delete marker"), "{paged}");
+}
+
+/// Issue #58 review: the object lock the fake models is applied to what the core writes: every
+/// object carries retention, and none can be shortened or deleted.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_58_what_the_core_writes_is_retained_and_cannot_be_shortened_or_deleted(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    stated_world(&w).await;
+    let bucket = FakeBucket::default();
+    bucket.state().minimum_retention = Some(300);
+    let (statements, _) = bucket_publisher(&w, &bucket);
+    let published = statements.publish_due(t0()).await.unwrap();
+    assert_eq!(published.len(), 1);
+    let mut st = bucket.state();
+    let keys: Vec<String> = st.objects.keys().cloned().collect();
+    assert_eq!(keys.len(), 2);
+    for key in keys {
+        let version = st.objects[&key].2.clone();
+        assert!(
+            st.retention.contains_key(&version),
+            "{key} has no retention"
+        );
+        let sooner = chrono::Utc::now() + Duration::days(1);
+        assert!(st.shorten_retention(&key, sooner).is_err());
+        assert!(st.delete_version(&version, chrono::Utc::now()).is_err());
+    }
 }

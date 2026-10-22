@@ -3,14 +3,21 @@
 //! The S3 statement sink (issue #58; `REQ-PR-1`, `REQ-PR-2`; PLAN `DEC-16`): the core writes each
 //! daily signed statement, and its signature file, to an object-locked bucket itself.
 //!
-//! - **Key.** `<prefix>/<YYYY>/<MM>/<DD>/statement-<asset>-<date>.json`, and the signature file
-//!   next to it with `.sig` appended. The date is the statement's own `issued_at` (UTC), never the
-//!   clock of the retry: a statement stored on one day and recorded on the next is found again.
-//!   The asset is named in the key; there is no combined statement.
+//! - **Key.** `<prefix>/<YYYY>/<MM>/<DD>/statement-<asset>-<date>-<sequence>.json`, and the
+//!   signature file next to it with `.sig` appended. The date is the statement's own `issued_at`
+//!   (UTC), never the clock of the retry: a statement stored on one day and recorded on the next is
+//!   found again. The sequence is the statement's own (ten digits): a place abandoned and replaced
+//!   the same UTC day gets a key of its own, never the abandoned one's. The asset is named in the
+//!   key; there is no combined statement.
 //! - **Never overwritten.** Every `PutObject` carries `If-None-Match: *`. A `412` is not retried:
 //!   the sink reads the object back and succeeds only when it holds exactly the bytes being
 //!   written (a write that landed and whose answer was lost); different bytes are
 //!   [`StoreError::Exists`], which the core surfaces and pages (`REQ-PR-2`).
+//! - **Misconfiguration is an alert.** S3 answers `GetObject` of a missing key with `403` when the
+//!   caller lacks `s3:ListBucket` on the whole bucket (a prefix condition does not apply to
+//!   `GetObject`), and answers `404` with `x-amz-delete-marker` when the key's latest version is a
+//!   delete marker (after which `If-None-Match: *` would accept a new version). Both are
+//!   [`StoreError::Misconfigured`], paged by name, never a silent permanent failure of the day.
 //! - **Retained.** Each put carries an Object Lock mode and a retain-until date, a SHA-256
 //!   checksum the bucket verifies, and, when configured, SSE-KMS.
 //! - **Retried.** Throttling, `409`, `5xx`, timeouts and connection failures are retried with a
@@ -43,8 +50,13 @@ pub enum ClientError {
     PreconditionFailed,
     /// Worth trying again: throttling, `409`, `5xx`, a timeout, a lost connection.
     Transient(String),
-    /// Not worth trying again: access denied, a bad request, a missing bucket.
+    /// Not worth trying again: a bad request, a missing bucket.
     Permanent(String),
+    /// `403` on a `GetObject`: without `s3:ListBucket` on the whole bucket S3 answers a missing key
+    /// so. A configuration error of the bucket or the role, not a verdict on the key.
+    Forbidden(String),
+    /// `404` with `x-amz-delete-marker: true`: the key's latest version is a delete marker.
+    DeleteMarker,
 }
 
 impl fmt::Display for ClientError {
@@ -53,6 +65,8 @@ impl fmt::Display for ClientError {
             Self::PreconditionFailed => f.write_str("412 precondition failed: the key exists"),
             Self::Transient(e) => write!(f, "transient: {e}"),
             Self::Permanent(e) => write!(f, "permanent: {e}"),
+            Self::Forbidden(e) => write!(f, "403 on a read: {e}"),
+            Self::DeleteMarker => f.write_str("the key's latest version is a delete marker"),
         }
     }
 }
@@ -172,7 +186,7 @@ impl<C: ObjectClient> S3Store<C> {
     }
 
     /// The object key of the statement object `name` (`<asset>/<sequence>.json`, or that and
-    /// `.sig`) issued at `issued_at`.
+    /// `.sig`) issued at `issued_at`: the asset, the issue date and the sequence are all in it.
     pub fn key(&self, name: &str, issued_at: DateTime<Utc>) -> Result<String, StoreError> {
         let bad = || StoreError::Io(format!("{name} is not a statement name"));
         let (asset, file) = name.split_once('/').ok_or_else(bad)?;
@@ -202,7 +216,9 @@ impl<C: ObjectClient> S3Store<C> {
         } else {
             format!("{}/", self.prefix)
         };
-        Ok(format!("{head}{path}/statement-{asset}-{date}{suffix}"))
+        Ok(format!(
+            "{head}{path}/statement-{asset}-{date}-{sequence}{suffix}"
+        ))
     }
 
     fn request(&self, key: String, bytes: &[u8], now: DateTime<Utc>) -> PutRequest {
@@ -221,6 +237,22 @@ impl<C: ObjectClient> S3Store<C> {
             if_none_match: true,
             retention,
             kms_key_id: self.kms_key_id.clone(),
+        }
+    }
+
+    /// What a failed read of `key` is to the caller: a refusal that is the bucket's or the role's
+    /// configuration, named as such, or an ordinary store failure.
+    fn unreadable(key: &str, e: &ClientError) -> StoreError {
+        match e {
+            ClientError::Forbidden(why) => StoreError::Misconfigured(format!(
+                "{key}: the bucket answered 403 to a read of the key about to be written ({why}); \
+                 check s3:ListBucket on the whole bucket (no s3:prefix condition) and s3:GetObject on the prefix"
+            )),
+            ClientError::DeleteMarker => StoreError::Misconfigured(format!(
+                "{key}: the key's latest version is a delete marker; something deleted a statement \
+                 object, and a new version here would hide it. Check the bucket policy's deny of s3:DeleteObject"
+            )),
+            other => StoreError::Io(format!("{key}: {other}")),
         }
     }
 
@@ -267,15 +299,21 @@ impl<C: ObjectClient> S3Store<C> {
                             "{key}: the bucket refused the write as existing, yet holds no object"
                         )));
                     }
-                    Err(ClientError::Permanent(e)) => {
-                        return Err(StoreError::Io(format!("{key}: {e}")));
+                    Err(
+                        e @ (ClientError::Permanent(_)
+                        | ClientError::Forbidden(_)
+                        | ClientError::DeleteMarker),
+                    ) => {
+                        return Err(Self::unreadable(&key, &e));
                     }
                     Err(e) => last = e.to_string(),
                 },
-                Err(ClientError::Permanent(e)) => {
+                Err(ClientError::Permanent(e) | ClientError::Forbidden(e)) => {
                     return Err(StoreError::Io(format!("{key}: {e}")));
                 }
-                Err(e @ ClientError::Transient(_)) => last = e.to_string(),
+                Err(e @ (ClientError::Transient(_) | ClientError::DeleteMarker)) => {
+                    last = e.to_string();
+                }
             }
             tracing::warn!(key = %key, attempt, error = %last, "REQ-PR-2: writing a statement to the bucket failed");
         }
@@ -307,8 +345,12 @@ impl<C: ObjectClient> S3Store<C> {
                         },
                     }));
                 }
-                Err(ClientError::Permanent(e)) => {
-                    return Err(StoreError::Io(format!("{key}: {e}")));
+                Err(
+                    e @ (ClientError::Permanent(_)
+                    | ClientError::Forbidden(_)
+                    | ClientError::DeleteMarker),
+                ) => {
+                    return Err(Self::unreadable(&key, &e));
                 }
                 Err(e) => last = e.to_string(),
             }
@@ -495,10 +537,26 @@ impl ObjectClient for AwsClient {
         {
             Ok(got) => got,
             Err(e) => {
+                let raw = e.raw_response();
                 if matches!(e.as_service_error(), Some(GetObjectError::NoSuchKey(_))) {
-                    return Ok(None);
+                    // A 404 carrying `x-amz-delete-marker` is a key whose latest version is a
+                    // delete marker, not a key never written.
+                    let marker = raw
+                        .and_then(|r| r.headers().get("x-amz-delete-marker"))
+                        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+                    return if marker {
+                        Err(ClientError::DeleteMarker)
+                    } else {
+                        Ok(None)
+                    };
                 }
-                return Err(classify(&e, e.raw_response().map(|r| r.status().as_u16())));
+                let status = raw.map(|r| r.status().as_u16());
+                return Err(match classify(&e, status) {
+                    ClientError::Permanent(text) if status == Some(403) => {
+                        ClientError::Forbidden(text)
+                    }
+                    other => other,
+                });
             }
         };
         let (etag, version_id) = (
@@ -583,21 +641,43 @@ impl StatementStore for StatementSink {
 }
 
 /// An in-memory bucket with the semantics the sink relies on, for tests: `If-None-Match: *`
-/// refuses an existing key, every successful put gets a new version id, and failures can be
-/// scripted. It is no stand-in for S3's behaviour beyond that.
+/// refuses a key that has a live object, every successful put gets a new version id, failures can
+/// be scripted, and, as the real bucket does:
+///
+/// - **Object Lock.** Retention headers are refused when the bucket has Object Lock off
+///   ([`State::no_object_lock`]) or ask for less than the bucket's minimum
+///   ([`State::minimum_retention`]); a retention is never shortened
+///   ([`State::shorten_retention`]) and a version under retention cannot be deleted
+///   ([`State::delete_version`]).
+/// - **Versioning.** A delete adds a delete marker ([`State::delete_marker`]); the key then answers
+///   a read with [`ClientError::DeleteMarker`], yet `If-None-Match: *` accepts a new version there
+///   (that is S3's behaviour, and why the bucket policy must deny deletes).
+/// - **`ListBucket`.** With [`State::no_list_bucket`] set, a read of a missing key is a `403`, not
+///   a `404`, whatever a prefix condition says.
+///
+/// It is no stand-in for S3's behaviour beyond that.
 pub mod fake {
-    use std::collections::{BTreeMap, VecDeque};
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::sync::{Arc, Mutex};
 
+    use chrono::{DateTime, Utc};
     use sha2::{Digest, Sha256};
 
-    use super::{ClientError, Fetched, ObjectClient, PutOutcome, PutRequest};
+    use super::{ClientError, Fetched, ObjectClient, PutOutcome, PutRequest, Retention};
+    use crate::config::ObjectLockMode;
 
     /// What the fake bucket holds and was asked.
     #[derive(Default)]
     pub struct State {
-        /// Objects by key: bytes, ETag, version id.
+        /// The live (current) objects by key: bytes, ETag, version id.
         pub objects: BTreeMap<String, (Vec<u8>, String, String)>,
+        /// Versions no longer current (deleted behind a marker), by key, with their version id
+        /// and bytes: still held, and still under their retention.
+        pub noncurrent: Vec<(String, String, Vec<u8>)>,
+        /// Keys whose latest version is a delete marker.
+        pub markers: BTreeSet<String>,
+        /// The retention of each version, by version id.
+        pub retention: BTreeMap<String, Retention>,
         /// Every put the bucket received, accepted or not.
         pub puts: Vec<PutRequest>,
         /// Answers for the next puts, in order, before the bucket looks at them.
@@ -608,8 +688,54 @@ pub mod fake {
         pub forbidden: bool,
         /// Only puts of keys ending in this fail permanently (a cut-short publish).
         pub forbid_suffix: Option<String>,
+        /// The caller has no `s3:ListBucket` on the whole bucket: a read of a missing key is 403.
+        pub no_list_bucket: bool,
+        /// The bucket was created without Object Lock: retention headers are refused.
+        pub no_object_lock: bool,
+        /// The least retention, in days, a put may ask for; a shorter one is refused.
+        pub minimum_retention: Option<i64>,
         /// Gets issued.
         pub gets: usize,
+    }
+
+    impl State {
+        /// Adds a delete marker on `key`: its live object becomes a noncurrent version.
+        pub fn delete_marker(&mut self, key: &str) {
+            if let Some((bytes, _, version)) = self.objects.remove(key) {
+                self.noncurrent.push((key.to_owned(), version, bytes));
+            }
+            self.markers.insert(key.to_owned());
+        }
+
+        /// Asks to move the retention of the live object at `key` to `until`. Refused unless it
+        /// lengthens it, as Object Lock refuses to shorten a COMPLIANCE retention, and a
+        /// GOVERNANCE one without the bypass permission the core never holds.
+        pub fn shorten_retention(&mut self, key: &str, until: DateTime<Utc>) -> Result<(), String> {
+            let version = self
+                .objects
+                .get(key)
+                .map(|o| o.2.clone())
+                .ok_or_else(|| "NoSuchKey".to_owned())?;
+            let held = self
+                .retention
+                .get_mut(&version)
+                .ok_or_else(|| "the object has no retention".to_owned())?;
+            if until < held.until {
+                return Err("AccessDenied: a retention is not shortened".into());
+            }
+            held.until = until;
+            Ok(())
+        }
+
+        /// Deletes a version for good: refused while it is under retention.
+        pub fn delete_version(&mut self, version: &str, now: DateTime<Utc>) -> Result<(), String> {
+            if self.retention.get(version).is_some_and(|r| r.until > now) {
+                return Err("AccessDenied: the version is under retention".into());
+            }
+            self.objects.retain(|_, o| o.2 != version);
+            self.noncurrent.retain(|(_, v, _)| v != version);
+            Ok(())
+        }
     }
 
     /// A cloneable handle on the shared state.
@@ -637,15 +763,38 @@ pub mod fake {
             if let Some(e) = s.script.pop_front() {
                 return Err(e);
             }
+            if let Some(r) = request.retention {
+                if s.no_object_lock {
+                    return Err(ClientError::Permanent(
+                        "InvalidRequest: Bucket is missing Object Lock Configuration".into(),
+                    ));
+                }
+                if r.mode == ObjectLockMode::Off {
+                    return Err(ClientError::Permanent("InvalidArgument: mode".into()));
+                }
+                if let Some(days) = s.minimum_retention
+                    && r.until
+                        < Utc::now() + chrono::Duration::days(days) - chrono::Duration::minutes(1)
+                {
+                    return Err(ClientError::Permanent(
+                        "InvalidArgument: a retention shorter than the bucket's minimum".into(),
+                    ));
+                }
+            }
+            // A delete marker is no object: the condition accepts a new version there.
             if request.if_none_match && s.objects.contains_key(&request.key) {
                 return Err(ClientError::PreconditionFailed);
             }
-            let version = format!("v{}", s.objects.len() + 1);
+            let version = format!("v{}", s.objects.len() + s.noncurrent.len() + 1);
             let etag = format!("\"{}\"", hex::encode(&Sha256::digest(&request.body)[..16]));
+            s.markers.remove(&request.key);
             s.objects.insert(
                 request.key.clone(),
                 (request.body.clone(), etag.clone(), version.clone()),
             );
+            if let Some(r) = request.retention {
+                s.retention.insert(version.clone(), r);
+            }
             if std::mem::take(&mut s.lose_next_answer) {
                 return Err(ClientError::Transient("connection reset".into()));
             }
@@ -658,11 +807,18 @@ pub mod fake {
         async fn get(&self, key: &str) -> Result<Option<Fetched>, ClientError> {
             let mut s = self.state();
             s.gets += 1;
-            Ok(s.objects.get(key).map(|(b, e, v)| Fetched {
-                bytes: b.clone(),
-                etag: Some(e.clone()),
-                version_id: Some(v.clone()),
-            }))
+            if s.markers.contains(key) {
+                return Err(ClientError::DeleteMarker);
+            }
+            match s.objects.get(key) {
+                Some((b, e, v)) => Ok(Some(Fetched {
+                    bytes: b.clone(),
+                    etag: Some(e.clone()),
+                    version_id: Some(v.clone()),
+                })),
+                None if s.no_list_bucket => Err(ClientError::Forbidden("AccessDenied".into())),
+                None => Ok(None),
+            }
         }
     }
 }
@@ -703,11 +859,11 @@ mod tests {
         let s = store(&b, "");
         assert_eq!(
             s.key(NAME, day()).unwrap(),
-            "statements/2026/10/13/statement-bUSDC-2026-10-13.json"
+            "statements/2026/10/13/statement-bUSDC-2026-10-13-0000000001.json"
         );
         assert_eq!(
             s.key(&format!("{NAME}.sig"), day()).unwrap(),
-            "statements/2026/10/13/statement-bUSDC-2026-10-13.json.sig"
+            "statements/2026/10/13/statement-bUSDC-2026-10-13-0000000001.json.sig"
         );
         // No prefix: the date directories are the bucket's top level.
         let bare = S3Store::new(
@@ -719,7 +875,7 @@ mod tests {
         );
         assert_eq!(
             bare.key(NAME, day()).unwrap(),
-            "2026/10/13/statement-bUSDC-2026-10-13.json"
+            "2026/10/13/statement-bUSDC-2026-10-13-0000000001.json"
         );
         // Names that are not a statement's are refused, never turned into a key.
         for bad in [
@@ -740,7 +896,7 @@ mod tests {
         let r = s.put_at(NAME, day(), b"{}").await.unwrap();
         assert_eq!(
             r.location,
-            "statements/2026/10/13/statement-bUSDC-2026-10-13.json"
+            "statements/2026/10/13/statement-bUSDC-2026-10-13-0000000001.json"
         );
         assert!(r.etag.is_some() && r.version_id.is_some());
         let st = b.state();
@@ -863,6 +1019,125 @@ mod tests {
         assert!(s.get_at(NAME, next).await.unwrap().is_none());
         // The undated calls refuse rather than guess a date.
         assert!(s.get(NAME).await.is_err() && s.put(NAME, b"x").await.is_err());
+    }
+
+    #[test]
+    fn req_pr_2_the_sequence_is_in_the_key_so_a_replaced_place_has_a_key_of_its_own() {
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        let first = s.key("bUSDC/0000000007.json", day()).unwrap();
+        let replacement = s.key("bUSDC/0000000008.json", day()).unwrap();
+        assert_ne!(first, replacement, "the same UTC day, two places, two keys");
+        assert!(first.ends_with("-2026-10-13-0000000007.json"), "{first}");
+        assert_eq!(
+            s.key("bUSDC/0000000008.json.sig", day()).unwrap(),
+            format!("{replacement}.sig")
+        );
+    }
+
+    #[tokio::test]
+    async fn req_pr_2_a_replaced_place_the_same_day_is_written_beside_the_abandoned_one() {
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        s.put_at("bUSDC/0000000007.json", day(), b"abandoned")
+            .await
+            .unwrap();
+        // Before the fix both places named one key: a 412 with other bytes, `Exists`, forever.
+        let r = s
+            .put_at("bUSDC/0000000008.json", day(), b"replacement")
+            .await
+            .unwrap();
+        assert!(r.location.ends_with("-0000000008.json"), "{}", r.location);
+        assert_eq!(b.state().objects.len(), 2);
+        assert!(
+            s.get_at("bUSDC/0000000008.json", day())
+                .await
+                .unwrap()
+                .is_some_and(|h| h.bytes == b"replacement")
+        );
+    }
+
+    #[tokio::test]
+    async fn req_pr_2_a_403_for_the_key_about_to_be_written_is_a_misconfiguration_not_a_missing_key()
+     {
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        b.state().no_list_bucket = true;
+        // An existing key is still readable; a missing one is a 403 in the real bucket.
+        let err = s.get_at(NAME, day()).await.unwrap_err();
+        let StoreError::Misconfigured(why) = &err else {
+            panic!("{err}")
+        };
+        assert!(why.contains("s3:ListBucket on the whole bucket"), "{why}");
+        assert_eq!(b.state().gets, 1, "a 403 is not retried");
+        // The same on the read-back after a refused overwrite: no object is invented.
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        s.put_at(NAME, day(), b"x").await.unwrap();
+        b.state().no_list_bucket = true;
+        assert!(s.get_at(NAME, day()).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn req_pr_2_a_key_whose_latest_version_is_a_delete_marker_is_an_alert_and_is_not_written()
+    {
+        let b = FakeBucket::default();
+        let s = store(&b, "");
+        let key = s.put_at(NAME, day(), b"first").await.unwrap().location;
+        b.state().delete_marker(&key);
+        // The fake models S3: a conditional put would be accepted at the marker...
+        let err = s.get_at(NAME, day()).await.unwrap_err();
+        assert!(
+            matches!(&err, StoreError::Misconfigured(w) if w.contains("delete marker")),
+            "{err}"
+        );
+        // ...so the sink, asked to write, never gets as far as a new version when it reads first,
+        // and a write on its own that reaches the read-back also names the marker.
+        assert!(b.state().objects.is_empty() && b.state().noncurrent.len() == 1);
+        let direct = b.put(&s.request(key.clone(), b"second", Utc::now())).await;
+        assert!(
+            direct.is_ok(),
+            "S3 accepts If-None-Match: * at a delete marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn req_pr_2_the_fake_models_object_lock() {
+        let b = FakeBucket::default();
+        let s = store(&b, "retention_days = 30\n");
+        let key = s.put_at(NAME, day(), b"x").await.unwrap();
+        let version = key.version_id.unwrap();
+        // A retention is never shortened; a version under retention is never deleted.
+        let sooner = Utc::now() + chrono::Duration::days(1);
+        assert!(b.state().shorten_retention(&key.location, sooner).is_err());
+        assert!(b.state().delete_version(&version, Utc::now()).is_err());
+        assert!(
+            b.state()
+                .shorten_retention(&key.location, Utc::now() + chrono::Duration::days(90))
+                .is_ok()
+        );
+        // A bucket without Object Lock refuses the retention headers, and so does a minimum.
+        let nolock = FakeBucket::default();
+        nolock.state().no_object_lock = true;
+        let err = store(&nolock, "")
+            .put_at(NAME, day(), b"x")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, StoreError::Io(e) if e.contains("Object Lock")),
+            "{err}"
+        );
+        let strict = FakeBucket::default();
+        strict.state().minimum_retention = Some(365);
+        let err = store(&strict, "retention_days = 30\n")
+            .put_at(NAME, day(), b"x")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, StoreError::Io(e) if e.contains("minimum")),
+            "{err}"
+        );
+        assert!(store(&strict, "").put_at(NAME, day(), b"x").await.is_ok());
     }
 
     /// The real SDK client against a canned HTTP client: what goes on the wire, and how each
@@ -1033,13 +1308,32 @@ mod tests {
             // A missing key is not an error; without s3:ListBucket it would be a 403.
             assert_eq!(c.get("k").await, Ok(None));
             assert!(
-                matches!(c.get("k").await, Err(ClientError::Permanent(_))),
+                matches!(c.get("k").await, Err(ClientError::Forbidden(_))),
                 "403 get"
             );
             assert!(
                 matches!(c.get("k").await, Err(ClientError::Transient(_))),
                 "500 get"
             );
+        }
+
+        #[tokio::test]
+        async fn req_pr_2_a_404_with_a_delete_marker_is_not_a_missing_key() {
+            let nosuch = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>NoSuchKey</Code>\
+                          <Message>m</Message></Error>";
+            let c = client(
+                canned(vec![
+                    (
+                        404,
+                        vec![("x-amz-delete-marker", "true"), ("x-amz-version-id", "dm1")],
+                        nosuch,
+                    ),
+                    (404, vec![], nosuch),
+                ]),
+                Seen::default(),
+            );
+            assert_eq!(c.get("k").await, Err(ClientError::DeleteMarker));
+            assert_eq!(c.get("k").await, Ok(None), "a never-written key is None");
         }
 
         #[tokio::test]

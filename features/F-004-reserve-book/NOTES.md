@@ -262,10 +262,10 @@ this is how the bucket is reached.
   directory store and the tests' wrappers are unchanged. `reserve::s3::S3Store` is the S3 sink over an `ObjectClient`
   (the AWS SDK in deployment, an in-memory fake in tests). `[statement.s3]` selects it; `[statement] directory` is the
   file sink, refused outside `environment = "test"`, as is `object_lock_mode = "off"`.
-- **Key** `<prefix>/<YYYY>/<MM>/<DD>/statement-<asset>-<date>.json` and `.json.sig`. The date is the statement's own
+- **Key** `<prefix>/<YYYY>/<MM>/<DD>/statement-<asset>-<date>-<sequence>.json` and `.json.sig` (the sequence, ten digits,
+  so a place abandoned and replaced the same UTC day has its own key; PR #60 review). The date is the statement's own
   `issued_at`, read from the intent the signer signed when a retry looks for a place's object, never the retry's clock:
-  a statement stored on one day and recorded on the next is found, not duplicated. One key a day per asset holds
-  because a statement is due 24 h after the last published one; there is no combined statement, so no `all`.
+  a statement stored on one day and recorded on the next is found, not duplicated. There is no combined statement, so no `all`.
 - **Never overwritten.** `If-None-Match: *` on every put; a 412 is not retried. The sink reads the object back: the
   same bytes are a write whose answer was lost (success), other bytes are `StoreError::Exists`, paged.
 - **Retention** headers (GOVERNANCE or COMPLIANCE, default 365 days), a SHA-256 checksum, SSE-KMS if configured.
@@ -279,7 +279,10 @@ this is how the bucket is reached.
   environment first); the core refuses to start without a task role or with AWS key variables set (`REQ-KY-1`).
 - **Deviation from "the sink only writes".** The core also reads: `publish_once` asks the store whether the place's
   object exists, and an adopted or refused write is compared byte for byte. The policy therefore carries `s3:GetObject`
-  and a prefix-conditioned `s3:ListBucket` (without it S3 answers a missing key with 403). See `deploy/statements.md`.
+  and `s3:ListBucket` on the whole bucket, with no `s3:prefix` condition (a `GetObject` carries no prefix, so a condition
+  yields a 403 for a missing key; the bucket is therefore dedicated to statements). A 403 on that read and a key whose latest
+  version is a delete marker are `StoreError::Misconfigured`, paged. The bucket policy must deny `s3:DeleteObject*`
+  bucket-wide. See `deploy/statements.md`.
 - **Open.** SSE-KMS and a publicly readable bucket conflict (anonymous readers cannot read SSE-KMS objects). The
   lock mode has no default and production's is the owner's to name (GOVERNANCE or COMPLIANCE).
 
