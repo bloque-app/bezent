@@ -224,9 +224,27 @@ stop working as soon as it runs. As the migration owner, on the release's store:
    The owner may be a superuser or, on a managed server that has none, a login with `CREATEROLE` and `CREATEDB`
    that owns the database (on AWS RDS, the master user: `rds_superuser` is not a superuser). From PostgreSQL 16 a
    role that creates a role is recorded as a member of it with `ADMIN OPTION`; the migrations keep that and drop
-   any `SET` or `INHERIT` the server's `createrole_self_grant` adds, so the owner never acts as a service role
-   nor inherits its privileges, and it keeps the `ADMIN OPTION` it needs to grant each role to a login. The
-   owner is refused only if it can act as a service role or inherit it (a membership with `SET` or `INHERIT`).
+   any `SET` or `INHERIT` the server's `createrole_self_grant` adds, so that, as recorded, the owner does not act as a
+   service role nor inherit its privileges, and it keeps the `ADMIN OPTION` it needs to grant each role to a login.
+   The owner is refused only if it can act as a service role or inherit it (a membership with `SET` or `INHERIT`).
+
+   **That separation is a tripwire, not an enforced property.** `ADMIN OPTION` lets the owner grant itself a service
+   role `WITH SET`, `ALTER ROLE <service role> LOGIN PASSWORD '…'` and log in as it, and (as owner of the tables) disable
+   the append-only triggers, as a superuser owner could. Nothing in the server stops it. What the store does is make
+   it visible: the runner refuses an owner that holds `SET` or `INHERIT`, and its grants check (also under `--check`,
+   on a store that is current) reports a store role that can log in, and a login other than the owner holding `ADMIN
+   OPTION` on a store role or reaching several. The guarantee is operational: **the owner is a cold credential**, used
+   only by the migration runner (its URL file mounted only into the migration job), never on a service host and never
+   in a service's configuration. Services and operators use their own logins, which are checked at start-up.
+
+   For a hard guarantee, create the store's roles with a separate, even colder provisioner (a `CREATEROLE` login
+   that holds the `ADMIN OPTION` and runs the statements that grant a role to a role or a login) and migrate as an
+   owner that has neither `CREATEROLE` nor `ADMIN OPTION`. The owner cannot give itself what it was never given. This
+   needs the migrations' role-edge statements (such as `0034`'s `GRANT bezent_endpoint TO bezent_kreivo_endpoint`) moved
+   to the provisioner's step; the migrations do not support that split yet. The owner cannot drop its own `ADMIN
+   OPTION` afterwards (only its grantor can, and on RDS that is `rdsadmin`), nor does dropping its `CREATEROLE`
+   help, since the chain itself needs the `ADMIN OPTION`.
+
    Create the store's roles with the owner, not with another login: a role made by a superuser leaves a
    `CREATEROLE` owner without `ADMIN OPTION` on it (`GRANT <role> TO <owner> WITH ADMIN TRUE, INHERIT FALSE, SET
    FALSE`, as a superuser, repairs that). `services/migrate/tests/migrate.rs` runs the

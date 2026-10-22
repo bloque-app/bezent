@@ -252,6 +252,11 @@ fn versions(v: &[i64]) -> String {
 
 /// Refuses a connection whose login is a member of one of the store's service roles (or is one):
 /// the migration owner is a login of its own, and a service's login must never migrate.
+///
+/// A membership with ADMIN OPTION alone is not counted (see the query), so a login holding only
+/// ADMIN on its role is not refused here. That is not a licence: the service's own start-up check
+/// (`bezent_store::login::check_login`, tested in `crates/store/tests/logins.rs`) still refuses any
+/// login holding ADMIN OPTION on a store role, and [`catalogue_findings`] reports it.
 pub async fn refuse_service_login(pool: &PgPool) -> Result<(), String> {
     let roles: Vec<String> = sqlx::query_scalar(
         // The recorded memberships that let the login act as the role or inherit its privileges,
@@ -297,8 +302,9 @@ pub async fn catalogue_findings(
         .fetch_one(&mut *conn)
         .await
         .map_err(read)?;
-    let logins: Vec<String> = logins.iter().cloned().chain([owner]).collect();
+    let logins: Vec<String> = logins.iter().cloned().chain([owner.clone()]).collect();
     let mut found = grants::stray_grants(&mut *conn).await.map_err(read)?;
+    found.extend(separation_findings(&mut *conn, &owner).await?);
     found.extend(
         grants::stray_members(&mut *conn, &logins)
             .await
@@ -317,5 +323,67 @@ pub async fn catalogue_findings(
             "the functions PUBLIC may call are {public:?}, not the listed helpers"
         ));
     }
+    Ok(found)
+}
+
+/// The separation of the owner and the logins from the store's roles, which the migrations record
+/// but do not enforce (the owner can re-grant itself a role, or give one a password): a tripwire
+/// that makes such a change visible at the owner's next run or `--check`. Reports
+///
+/// - the owner holding SET or INHERIT on a store role, directly or through other roles it can act
+///   as (ADMIN OPTION alone is what the migrations leave it, and is expected);
+/// - a store role that can log in (the roles are NOLOGIN; only the declared logins log in);
+/// - a login other than the owner holding ADMIN OPTION on a store role, or SET or INHERIT on more
+///   than one of them (a login is brought to its role alone).
+///
+/// Lines are role names only.
+async fn separation_findings(conn: &mut PgConnection, owner: &str) -> Result<Vec<String>, String> {
+    let read = |e: sqlx::Error| format!("cannot read the catalogue: {e}");
+    let mut found: Vec<String> = sqlx::query_scalar(
+        "WITH RECURSIVE held(oid) AS ( \
+             SELECT oid FROM pg_roles WHERE rolname = $2 \
+             UNION \
+             SELECT m.roleid FROM pg_auth_members m JOIN held h ON m.member = h.oid \
+             WHERE m.set_option OR m.inherit_option) \
+         SELECT 'the owner ' || $2 || ' can act as or inherit ' || r.rolname::text \
+         FROM pg_roles r JOIN held h ON h.oid = r.oid \
+         WHERE r.rolname = ANY ($1) ORDER BY 1",
+    )
+    .bind(ROLES)
+    .bind(owner)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(read)?;
+    found.extend(
+        sqlx::query_scalar::<_, String>(
+            "SELECT 'the store role ' || rolname::text || ' can log in' \
+             FROM pg_roles WHERE rolname = ANY ($1) AND rolcanlogin ORDER BY 1",
+        )
+        .bind(ROLES)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(read)?,
+    );
+    found.extend(
+        sqlx::query_scalar::<_, String>(
+            "SELECT u.rolname::text || ' holds ADMIN OPTION on ' || g.rolname::text \
+             FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid \
+             JOIN pg_roles u ON u.oid = m.member \
+             WHERE g.rolname = ANY ($1) AND m.admin_option AND u.rolcanlogin AND u.rolname <> $2 \
+             UNION \
+             SELECT u.rolname::text || ' can act as or inherit ' || count(*) || ' store roles' \
+             FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid \
+             JOIN pg_roles u ON u.oid = m.member \
+             WHERE g.rolname = ANY ($1) AND (m.set_option OR m.inherit_option) \
+               AND u.rolcanlogin AND u.rolname <> $2 \
+             GROUP BY u.rolname HAVING count(*) > 1 \
+             ORDER BY 1",
+        )
+        .bind(ROLES)
+        .bind(owner)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(read)?,
+    );
     Ok(found)
 }
