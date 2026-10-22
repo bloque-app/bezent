@@ -13,8 +13,9 @@
 //!
 //! `sslrootcert=/path/to/bundle.pem` names a PEM file of CA certificates (for AWS RDS,
 //! `global-bundle.pem`); it is added to the bundled web roots. It is read when the connection is made.
-//! The service images carry the RDS bundle at [`DEFAULT_CA_BUNDLE`], which `verify-ca` and
-//! `verify-full` use when the URL names no `sslrootcert`.
+//! With `verify-ca` or `verify-full` and no `sslrootcert`, only the bundled web roots are trusted: no
+//! image embeds a CA bundle, so a database whose certificate a private CA signed (AWS RDS) needs its
+//! bundle supplied by the deployment (mounted, and named by `sslrootcert`).
 //!
 //! **No silent downgrade.** `allow` and `prefer` fall back to a plain connection when TLS cannot be
 //! established, so the services refuse them, and refuse a URL with no `sslmode` at all, unless the
@@ -51,22 +52,7 @@ pub fn connect_options(url: &str) -> Result<PgConnectOptions, String> {
             );
         }
     }
-    if wants_default_ca(url, mode, std::path::Path::new(DEFAULT_CA_BUNDLE).is_file()) {
-        return Ok(options.ssl_root_cert(DEFAULT_CA_BUNDLE));
-    }
     Ok(options)
-}
-
-/// Where the service images carry the AWS RDS CA bundle (`global-bundle.pem`, public;
-/// `deploy/docker/services.Dockerfile`). With `sslmode=verify-ca` or `verify-full` and no `sslrootcert`
-/// in the URL, a bundle at this path is the CA bundle. An explicit `sslrootcert` always wins, and
-/// outside the images (no file here) nothing changes.
-pub const DEFAULT_CA_BUNDLE: &str = "/usr/share/bezent/ca/rds-global-bundle.pem";
-
-fn wants_default_ca(url: &str, mode: PgSslMode, bundle_exists: bool) -> bool {
-    bundle_exists
-        && matches!(mode, PgSslMode::VerifyCa | PgSslMode::VerifyFull)
-        && !query_has(url, &["sslrootcert", "ssl-root-cert"])
 }
 
 /// Connects a pool made with `pool` to the store `url` names, over the TLS the URL asks for.
@@ -149,14 +135,12 @@ mod tests {
     }
 
     #[test]
-    fn the_images_ca_bundle_is_the_default_for_verifying_modes_only() {
-        let url = "postgres://u:p@db.example.net/b";
-        assert!(wants_default_ca(url, PgSslMode::VerifyFull, true));
-        assert!(wants_default_ca(url, PgSslMode::VerifyCa, true));
-        assert!(!wants_default_ca(url, PgSslMode::Require, true));
-        assert!(!wants_default_ca(url, PgSslMode::VerifyFull, false));
-        let own = "postgres://u:p@db.example.net/b?sslmode=verify-full&sslrootcert=/x.pem";
-        assert!(!wants_default_ca(own, PgSslMode::VerifyFull, true));
+    fn no_default_ca_bundle_is_assumed() {
+        // verify-full with no sslrootcert uses the web roots only: nothing is added to the options.
+        let options = connect_options("postgres://u:p@db.example.net/b?sslmode=verify-full")
+            .expect("verify-full without a CA file");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
+        assert!(!format!("{options:?}").contains("rds"), "{options:?}");
     }
 
     #[test]

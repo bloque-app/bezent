@@ -192,11 +192,12 @@ postgres://<login>@<host>:5432/<database>?sslmode=verify-full&sslrootcert=/etc/b
 - `sslmode=disable | require | verify-ca | verify-full`, as in libpq. `require` fails unless the server offers TLS,
   and encrypts, but does not verify the certificate (unlike libpq, even with `sslrootcert`); only `verify-ca` and
   `verify-full` do. `verify-full` checks the certificate chain against `sslrootcert` (a PEM bundle, added to the bundled web roots;
-  mount it, it is not in the image) and the host name. Production uses `verify-full`.
-- The service images carry the public AWS RDS bundle (`global-bundle.pem`, pinned by SHA-256 in the Dockerfile) at
-  `/usr/share/bezent/ca/rds-global-bundle.pem` (`bezent_store::tls::DEFAULT_CA_BUNDLE`). With `verify-ca` or
-  `verify-full` and no `sslrootcert`, that file is the CA bundle; an explicit `sslrootcert` replaces it. `require`
-  needs no bundle (it encrypts without verifying).
+  mount it, it is not in any image) and the host name. Production uses `verify-full`.
+- **No image embeds a CA bundle.** The CA bundle is a deployment specific: the deployment mounts it at a path and sets
+  `sslrootcert` in the database URL to that path (for AWS RDS, e.g. the global bundle from
+  https://truststore.pki.rds.amazonaws.com/ verified against its published checksum). With `verify-ca` or `verify-full`
+  and no `sslrootcert`, only the bundled web roots are trusted, which do not include RDS's CA, so such a database
+  needs the file. `require` needs no bundle (it encrypts without verifying).
 - **No silent downgrade.** `allow` and `prefer` fall back to a plain connection, so they are refused, and so is a URL
   with no `sslmode`, for any server that is not on this machine (a loopback address or a Unix socket). A server
   that does not offer TLS, or whose certificate does not verify, stops the service from starting.

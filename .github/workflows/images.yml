@@ -173,12 +173,11 @@ jobs:
             case "$code" in 1|2) ;; *) echo "bezent-$t exited $code, expected 1 or 2"; exit 1 ;; esac
           done
           test "$(docker image inspect -f '{{.Config.User}}' bezent-sidecar:ci)" = "65532:65532"
-          # The RDS CA bundle is in each service image, at the path bezent_store::tls defaults to.
+          # No image embeds a database CA bundle: the deployment supplies it.
           for t in ingress core signer kreivo-endpoint evm-endpoint migrate; do
             id=$(docker create "bezent-$t:ci")
-            n=$(docker cp "$id:/usr/share/bezent/ca/rds-global-bundle.pem" - | tar -xO | grep -c 'BEGIN CERTIFICATE')
+            if docker cp "$id:/usr/share/bezent/ca" - > /dev/null 2>&1; then docker rm "$id" > /dev/null; echo "bezent-$t: embeds a CA bundle"; exit 1; fi
             docker rm "$id" > /dev/null
-            test "$n" -ge 10 || { echo "bezent-$t: no RDS CA bundle ($n certificates)"; exit 1; }
           done
 
       # As a harness runs it (deploy/e2e/README.md): a PostgreSQL service, the sidecar beside it,

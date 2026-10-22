@@ -30,6 +30,8 @@
 # No secret is baked into any image. Each service reads its configuration from the file named by
 # its command (mount it at the path in `CMD`), and the files that file names (database URL, signer
 # token, keys) are mounted too (`REQ-KY-1`). The signer reads test keys only, from a mounted file.
+# No image carries a database CA bundle (a deployment specific): the deployment mounts it and names it in the
+# database URL (`sslrootcert`; crates/store/README.md, "Connecting over TLS").
 
 ARG RUST_IMAGE=docker.io/library/rust:1.99.0-slim-bookworm@sha256:2c3a22f0a5533ea2dd5a16627bc841228151faa2d4de2644ac9987e4a2f1f2fa
 ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
@@ -67,21 +69,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
        target/release/bezent-migrate target/release/bezent-sidecar /out/bin/
 
 # ---------------------------------------------------------------------------------------------
-# The AWS RDS CA bundle (public), pinned by SHA-256: a rotation of AWS's file fails this build until
-# the pin is updated on purpose. Images carry it at /usr/share/bezent/ca/rds-global-bundle.pem,
-# which `sslmode=verify-ca|verify-full` uses when the database URL names no `sslrootcert`
-# (bezent_store::tls::DEFAULT_CA_BUNDLE). `sslmode=require` needs no bundle.
-# ---------------------------------------------------------------------------------------------
-FROM ${RUST_IMAGE} AS rds-ca
-ARG RDS_CA_SHA256=90a6f1a7978a1b1b096dca6c57511ca48d3b8cf052f8e704baf358f34ea2f21b
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
- && rm -rf /var/lib/apt/lists/* \
- && mkdir -p /out/ca \
- && curl -sSfL -o /out/ca/rds-global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
- && echo "${RDS_CA_SHA256}  /out/ca/rds-global-bundle.pem" | sha256sum -c -
-
-# ---------------------------------------------------------------------------------------------
 # Runtime images.
 # ---------------------------------------------------------------------------------------------
 FROM ${RUNTIME_IMAGE} AS ingress
@@ -90,7 +77,6 @@ LABEL org.opencontainers.image.title="bezent-ingress" \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
       org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-ingress /usr/local/bin/bezent-ingress
-COPY --from=rds-ca /out/ca/rds-global-bundle.pem /usr/share/bezent/ca/rds-global-bundle.pem
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/bezent-ingress"]
@@ -102,7 +88,6 @@ LABEL org.opencontainers.image.title="bezent-core" \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
       org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-core /usr/local/bin/bezent-core
-COPY --from=rds-ca /out/ca/rds-global-bundle.pem /usr/share/bezent/ca/rds-global-bundle.pem
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/bezent-core"]
 CMD ["/etc/bezent/core.toml"]
@@ -113,7 +98,6 @@ LABEL org.opencontainers.image.title="bezent-signer" \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
       org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-signer /usr/local/bin/bezent-signer
-COPY --from=rds-ca /out/ca/rds-global-bundle.pem /usr/share/bezent/ca/rds-global-bundle.pem
 # Its own user, apart from every caller's: callers are told apart by the socket's peer credentials.
 USER 65533:65533
 ENTRYPOINT ["/usr/local/bin/bezent-signer"]
@@ -125,7 +109,6 @@ LABEL org.opencontainers.image.title="bezent-kreivo-endpoint" \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
       org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-kreivo-endpoint /usr/local/bin/bezent-kreivo-endpoint
-COPY --from=rds-ca /out/ca/rds-global-bundle.pem /usr/share/bezent/ca/rds-global-bundle.pem
 # The pinned chain spec (public data): name it as `chain_spec` in the mounted configuration.
 COPY services/kreivo-endpoint/chain-specs/kreivo.json /usr/share/bezent/chain-specs/kreivo.json
 USER 65532:65532
@@ -138,7 +121,6 @@ LABEL org.opencontainers.image.title="bezent-evm-endpoint" \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
       org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-evm-endpoint /usr/local/bin/bezent-evm-endpoint
-COPY --from=rds-ca /out/ca/rds-global-bundle.pem /usr/share/bezent/ca/rds-global-bundle.pem
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/bezent-evm-endpoint"]
 CMD ["/etc/bezent/evm-endpoint.toml"]
@@ -155,7 +137,6 @@ LABEL org.opencontainers.image.title="bezent-migrate" \
       org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
       org.opencontainers.image.licenses="GPL-3.0-or-later"
 COPY --from=build /out/bin/bezent-migrate /usr/local/bin/bezent-migrate
-COPY --from=rds-ca /out/ca/rds-global-bundle.pem /usr/share/bezent/ca/rds-global-bundle.pem
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/bezent-migrate"]
 
