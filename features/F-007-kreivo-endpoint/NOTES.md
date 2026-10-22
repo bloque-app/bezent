@@ -164,11 +164,38 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
     network's observations (one role per endpoint when F-009 lands); `event_log` stays open to every
     service; the core's own role is not separated from `bezent_service` for reading.
 
+## Follow-ups of issue #24 (formerly #33)
+
+28. **The contract's code hash is pinned and checked at start-up** (`AC-I4.1`, `REQ-IC-1`; closes review S5). The
+    configuration names `contract_code_hash`, the code hash of the build deployed at `contract` (required, like
+    `genesis`; the contract job of CI prints the hash of the public build). **The value to configure for the live Kreivo
+    contract is `0xe89943fbbed677f2e33fde16e4877c84bf339354d05c796accf97614e2fb24ad`.** It equals the code hash of the
+    public CI build of PR #40 (run 39369032023, artifact `bezent-contract`: the bundle's `source.hash`, and the BLAKE2b-256
+    of its code blob); a different value stops the endpoint at start, which is the intended failure. After the genesis check, before anything
+    is read or built, the endpoint reads `Contracts::ContractInfoOf(contract).code_hash` at the finalized head
+    (`Chain::contract_code_hash`) and refuses to start, exit 1, on another hash, on no contract there, or on a chain
+    that cannot say. It is read once, at start: a contract upgraded in place (`set_code_hash`) is a change of
+    configuration, then a restart. The light-client read goes by field name through subxt's dynamic storage, like the
+    nonce and the asset supply; its storage layout was checked read-only against Kreivo mainnet (the instance's
+    `ContractInfoOf` holds the trie id, then the 32-byte code hash), and it runs for real only in `T-013-05`.
+    The fixtures carry a test value.
+29. **The contract's own used-reference state is read before every proof** (the first item of issue #24; done by
+    item 21, and tested by `m1_bis_a_used_reference_is_never_proven_not_executed` and
+    `m1_bis_a_refunded_redemption_is_never_proven_not_executed`): `mint_reference_used` for a mint, the redemption's
+    `refunded` flag for a refund mint, at the proof's final block; a used reference writes no proof and a
+    `delivery-anomaly`.
+30. **Grants** (the third item): narrowed by migration 0045 (issues #35, #46). `bezent_service` and `bezent_endpoint`
+    hold nothing; only the two endpoint roles insert observations, outcomes and signed transactions (their guards
+    hold each to its networks, 0035, 0049); the signer reads the signed transactions' ids only. `grant_matrix` asserts
+    every role's privileges.
+31. **The core surfaces `delivery-anomaly`** (the fourth item): F-003 NOTES, "Delivery anomalies".
+
 ## Left from the review (each over the ~30-line budget, or outside this feature)
 
-- **Contract code hash at start-up** (S5): the `Chain` trait has no storage read for `ContractInfoOf`.
-- **S1 follow-up** (issue #33): done for `signed_transactions` and observations (27); per-endpoint roles remain.
-- **The core** (`F-003`) must surface `delivery-anomaly` rows (to `Needs-Review`); the endpoint only records.
+- **Contract code hash at start-up** (S5): done, item 28.
+- **S1 follow-up** (issue #33): done for `signed_transactions` and observations (27); per-endpoint roles: 0034, 0035,
+  0045.
+- **The core** (`F-003`) must surface `delivery-anomaly` rows (to `Needs-Review`): done, F-003 NOTES, "Delivery anomalies".
 - **A gap longer than `max_walk`** stays closed and stalls the follower until `max_walk` is raised.
 - **A nonce consumed before the era's birth** stays unknown. M2 makes it unreachable for anything signed now
   (at signing the nonce is at least the chain's at a finalized block at or after the birth).

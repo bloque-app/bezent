@@ -198,6 +198,25 @@ address, as the EVM endpoint requires of an admitted token there. Items 24 and 2
 Not done here (review S-5): transfers already in `Needs-Review` from `Delivering` on an origin network before this
 ships get no cancel ordered; the cancel is ordered only on the deadline transition.
 
+## Delivery anomalies (issue #24)
+
+1. **A delivery anomaly is surfaced** (F-007 review; `INV-8`, `REQ-NX-3`, `REQ-RV-1`). An endpoint
+    records a `delivery-anomaly` when what it reads contradicts itself (bytes that do not answer their rows, a nonce
+    consumed by another payload for the reference, a reference the contract says was used though the chain shows
+    the transaction not executed); it proves nothing then. The core reads them per transfer, at the start of every
+    step: an anomaly is the transfer's if it is of the transfer's destination network and names one of its intents,
+    one of its signed transactions, or, for a withdrawal only, carries its leg's `reference` (an EVM payout's own,
+    derived per transfer; any mint's reference, a refund mint's included, is scoped by its redeemer and is never
+    matched alone, the Kreivo endpoint's anomalies name the signed transaction too; `inv_8_a_mints_reference_alone_is_no_match_for_an_anomaly`). An endpoint cannot send another network's transfer to review, and a payload
+    that does not have the shape is ignored, never an error. A transfer in
+    `Source-Final`, `Delivering` or `Delivered` goes to `Needs-Review` at once, from its state, with no coordinate
+    (the store's edge needs none), instead of at its deadline; one already in review gets the event only. Either way
+    a `delivery-anomaly-surfaced` event names the anomaly (once: a resolved review is not reopened by the anomaly
+    that caused it). Nothing is refunded, retried or failed because of it (`REQ-RF-1`). **Ruled**: the §5.4 rows into
+    `Needs-Review` gain this occasion by amendment 0013 (SPEC v0.5.3, pull request #47).
+
+Tests: `services/core/tests/anomalies.rs` (`INV-8`).
+
 ## Integration points (for review)
 
 - **PR #31 (F-007).** The core implements the two-step delivery of its decision 1: order intent

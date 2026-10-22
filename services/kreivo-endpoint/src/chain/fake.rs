@@ -76,6 +76,8 @@ struct State {
     outside_refunds: Vec<(AccountId32, [u8; 32])>,
     refuse_submissions: bool,
     unavailable: bool,
+    /// The code hash of the contract instantiated at `contract`, if any (issue #24).
+    code_hash: Option<[u8; 32]>,
     /// What blocks produced from now on hold of each local asset: (contract count, issuance).
     supply: HashMap<u32, (u128, u128)>,
 }
@@ -142,6 +144,7 @@ impl FakeChain {
                 outside_refunds: Vec::new(),
                 refuse_submissions: false,
                 unavailable: false,
+                code_hash: None,
                 supply: HashMap::new(),
             }),
         }
@@ -190,6 +193,11 @@ impl FakeChain {
     /// Every call fails, as if the chain could not be reached.
     pub fn set_unavailable(&self, unavailable: bool) {
         self.lock().unavailable = unavailable;
+    }
+
+    /// Instantiates the contract with code hash `code_hash` (none: no contract is there).
+    pub fn set_code_hash(&self, code_hash: Option<[u8; 32]>) {
+        self.lock().code_hash = code_hash;
     }
 
     /// The contract emits `event` in the next block, as if a holder's call made it; its sequence
@@ -686,6 +694,21 @@ impl Chain for FakeChain {
                 .supply
                 .get(&asset)
                 .map(|(_, issuance)| *issuance))
+        })
+    }
+
+    async fn contract_code_hash(
+        &self,
+        at: &BlockRef,
+        contract: &AccountId32,
+    ) -> ChainResult<Option<[u8; 32]>> {
+        self.answer(|s| {
+            Self::block_at(s, at)?;
+            Ok(if *contract == s.contract {
+                s.code_hash
+            } else {
+                None
+            })
         })
     }
 
