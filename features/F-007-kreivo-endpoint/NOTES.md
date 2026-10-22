@@ -197,6 +197,8 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
 - **S1 follow-up** (issue #33): done for `signed_transactions` and observations (27); per-endpoint roles: 0034, 0035,
   0045.
 - **The core** (`F-003`) must surface `delivery-anomaly` rows (to `Needs-Review`): done, F-003 NOTES, "Delivery anomalies".
+- **Restart after the chain passes `start_block + max_walk`**: `start_anchor` bounds only the distance still to walk (from the lowest
+  stored anchor at or above `start_block`, else from the head), so a caught-up endpoint restarts at any height.
 - **A gap longer than `max_walk`** stays closed and stalls the follower until `max_walk` is raised.
 - **A nonce consumed before the era's birth** stays unknown. M2 makes it unreachable for anything signed now
   (at signing the nonce is at least the chain's at a finalized block at or after the birth).

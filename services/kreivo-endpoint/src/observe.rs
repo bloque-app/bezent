@@ -318,11 +318,33 @@ impl<C: Chain> Follower<'_, C> {
             Ok(f) => f,
             Err(e) => return Ok(Err(e)),
         };
-        // As far back as a look walks, no further: a start_block set far too low is refused here,
-        // not after days of walking.
-        if finalized.number.saturating_sub(self.start_block) >= self.max_walk {
+        // The walk starts at the lowest anchor at or above start_block (the finalized head if
+        // there is none), so `max_walk` bounds the distance still to walk, not how far the chain
+        // has moved since start_block: a caught-up endpoint restarts at any height, and a
+        // start_block set far too low on a first start is refused here, not after days of walking.
+        let above: Option<i64> = sqlx::query_scalar(
+            "SELECT block_number FROM observation_walk_anchors \
+             WHERE network = $1 AND block_number >= $2 ORDER BY block_number LIMIT 1",
+        )
+        .bind(self.network)
+        .bind(i64_of(self.start_block)?)
+        .fetch_optional(self.pool)
+        .await?;
+        let origin = above
+            .and_then(|n| u64::try_from(n).ok())
+            .filter(|n| *n <= finalized.number);
+        if let Some(from) = origin.filter(|from| *from > self.start_block) {
+            if from - self.start_block >= self.max_walk {
+                return Ok(Err(ChainError::Invalid(format!(
+                    "the lowest stored anchor, block {from}, is more than max_walk ({}) blocks above start_block {}; raise max_walk or set start_block to a later block",
+                    self.max_walk, self.start_block
+                ))));
+            }
+        } else if origin.is_none()
+            && finalized.number.saturating_sub(self.start_block) >= self.max_walk
+        {
             return Ok(Err(ChainError::Invalid(format!(
-                "start_block {} is more than max_walk ({}) blocks behind the finalized head {}",
+                "start_block {} is more than max_walk ({}) blocks behind the finalized head {} and nothing is stored to walk from",
                 self.start_block, self.max_walk, finalized.number
             ))));
         }

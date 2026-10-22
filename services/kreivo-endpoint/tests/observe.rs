@@ -354,12 +354,44 @@ async fn issue_49_start_block_is_anchored_to_the_finalized_chain_once(
     let mut follower = f.follower();
     follower.start_block = 99;
     assert!(follower.start_anchor().await.unwrap().is_err());
-    // One too far back for max_walk is refused at once, with no header asked for.
+    // A restart: start_block is anchored and the chain is now far past start_block + max_walk.
+    f.chain.advance(100);
     let mut follower = f.follower();
-    follower.start_block = 0;
     follower.max_walk = 26;
+    assert_eq!(follower.start_anchor().await.unwrap().unwrap(), hash);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_49_start_anchor_bounds_the_distance_still_to_walk(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    f.chain.advance(60);
+    // Nothing stored and the whole range beyond max_walk: refused up front, no header asked for.
+    let mut follower = f.follower();
+    follower.max_walk = 20;
     let asked = f.chain.header_reads().len();
     let err = follower.start_anchor().await.unwrap().unwrap_err();
     assert!(err.to_string().contains("max_walk"), "{err}");
     assert_eq!(f.chain.header_reads().len(), asked);
+    // Only an anchor more than max_walk above start_block: refused, naming the anchor.
+    let top = f.chain.block(40);
+    sqlx::query(
+        "INSERT INTO observation_walk_anchors (network, block_number, block_hash, \
+           final_block_number, final_block_hash) VALUES ($1, 40, $2, 40, $2)",
+    )
+    .bind(NETWORK)
+    .bind(top.hash.as_slice())
+    .execute(&f.endpoint)
+    .await
+    .unwrap();
+    let err = follower.start_anchor().await.unwrap().unwrap_err();
+    assert!(err.to_string().contains("lowest stored anchor"), "{err}");
+    // Within max_walk of that anchor it walks from the anchor, though the head is further.
+    follower.max_walk = 50;
+    assert_eq!(
+        follower.start_anchor().await.unwrap().unwrap(),
+        f.chain.block(1).hash
+    );
 }
