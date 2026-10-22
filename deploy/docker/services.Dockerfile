@@ -11,6 +11,8 @@
 #                     client, with the pinned Kreivo chain spec baked in      ghcr.io/bloque-app/bezent-kreivo-endpoint
 #   evm-endpoint      bezent-evm-endpoint: observes the reserve vault on an
 #                     EVM origin network; holds no key                       ghcr.io/bloque-app/bezent-evm-endpoint
+#   migrate           bezent-migrate: brings the store to the release's
+#                     migrations as the migration owner; seeds nothing        ghcr.io/bloque-app/bezent-migrate
 #   sidecar           bezent-sidecar: ingress, core and a test signer in one
 #                     container, on an external PostgreSQL, TEST networks
 #                     only, for other repositories' e2e harnesses             ghcr.io/bloque-app/bezent-sidecar
@@ -57,11 +59,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
       -p bezent-signer --bin bezent-signer \
       -p bezent-kreivo-endpoint --bin bezent-kreivo-endpoint \
       -p bezent-evm-endpoint --bin bezent-evm-endpoint \
+      -p bezent-migrate --bin bezent-migrate \
       -p bezent-sidecar --bin bezent-sidecar \
  && mkdir -p /out/bin \
  && cp target/release/bezent-ingress target/release/bezent-core target/release/bezent-signer \
        target/release/bezent-kreivo-endpoint target/release/bezent-evm-endpoint \
-       target/release/bezent-sidecar /out/bin/
+       target/release/bezent-migrate target/release/bezent-sidecar /out/bin/
 
 # ---------------------------------------------------------------------------------------------
 # The AWS RDS CA bundle (public), pinned by SHA-256: a rotation of AWS's file fails this build until
@@ -139,6 +142,18 @@ COPY --from=rds-ca /out/ca/rds-global-bundle.pem /usr/share/bezent/ca/rds-global
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/bezent-evm-endpoint"]
 CMD ["/etc/bezent/evm-endpoint.toml"]
+
+# Run once per release that carries a migration, with every service stopped (crates/store/README.md,
+# "Deploying"): `bezent-migrate --url-file /run/secrets/owner-db-url [--check] --login <name>...`. The
+# owner's URL is mounted, never baked in or passed as an argument. It seeds nothing.
+FROM ${RUNTIME_IMAGE} AS migrate
+LABEL org.opencontainers.image.title="bezent-migrate" \
+      org.opencontainers.image.description="bezent migration runner: applies the store's migrations as the migration owner, refuses a diverging history, checks the grants" \
+      org.opencontainers.image.source="https://github.com/bloque-app/bezent" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
+COPY --from=build /out/bin/bezent-migrate /usr/local/bin/bezent-migrate
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/bezent-migrate"]
 
 # Test only (deploy/e2e/README.md): signs with the published test keys, serves the test networks
 # `kreivo-local` and `polygon-amoy`, and refuses to start unless BEZENT_SIDECAR_ENVIRONMENT=test.

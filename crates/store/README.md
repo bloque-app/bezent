@@ -212,8 +212,30 @@ The order matters: running `0045` empties `bezent_service` at once, so services 
 stop working as soon as it runs. As the migration owner, on the release's store:
 
 1. **Stop** every service (core, ingress and its webhook dispatcher, both endpoints, signer).
-2. **Migrate** the store to the release (`0045`, `0046`, …). The services check the store's whole
+2. **Migrate** the store to the release (`0045`, `0046`, …) with `bezent-migrate` (the image
+   `ghcr.io/bloque-app/bezent-migrate`; `services/migrate`). The services check the store's whole
    migration set at start-up and refuse a store that is behind.
+
+   ```
+   bezent-migrate --url-file /run/secrets/owner-db-url --check   # changes nothing; exit 3 pending, 4 diverged
+   bezent-migrate --url-file /run/secrets/owner-db-url --login <each service and operator login>...
+   ```
+
+   The owner must be a superuser: from PostgreSQL 16 a role that creates a role is recorded as a member of it, and
+   migration `0009` refuses any owner that is a member of a service role, so a `CREATEROLE` login that is not a
+   superuser fails at `0009` (checked on 16). Managed servers that offer no superuser cannot run these migrations as
+   they are.
+
+   The owner's URL (`sslmode=verify-full` and `sslrootcert`, as above) is read from the file, or from the
+   environment variable `--url-env` names, and is never printed. The run prints `applied <version>` for each
+   migration it applies, and nothing else of the store. It refuses, changing nothing (exit 4), a store whose
+   history differs from the release's: an applied version the release lacks, a different checksum, a migration
+   that did not finish, a pending version below an applied one, or tables with no history. It refuses a login
+   that is a member of a service role. Once the store is at the release it runs the catalogue-wide grants check of
+   the store tests (every grant the matrix does not name, every role off its rows, every function PUBLIC may call
+   beyond the listed ones, every role that reaches a store role and is not one of the `--login` names); it exits 5
+   on a finding (`--grants report` prints and exits 0, `--grants skip` does not run it). It seeds nothing: test
+   data is the sidecar's alone.
 3. **Bring every login to its role alone**: run the block below once per service login, with the
    login's name and its role. It is safe on a login made for an earlier release, and on a new one.
 4. **Make each operator's login** (one per person, below) and bring it to `bezent_operator` the same way.

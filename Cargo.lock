@@ -1753,6 +1753,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bezent-migrate"
+version = "0.1.0"
+dependencies = [
+ "bezent-store",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "bezent-sidecar"
 version = "0.1.0"
 dependencies = [
