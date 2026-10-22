@@ -4,8 +4,8 @@
 -- table, three guards, and `attempts_unproven` replaced by itself.
 --
 -- The deadlock. After attempt n is proven not executed at finality (REQ-RF-5, REQ-NX-1), the core
--- orders attempt n+1. If its preparation never passes (a dry run that keeps failing, an endpoint
--- that is down) nothing is ever signed for it, so there is no signed transaction to prove not
+-- orders attempt n+1. If its preparation never passes (a dry run that keeps failing) nothing is
+-- ever signed for it, so there is no signed transaction to prove not
 -- executed, and `attempts_unproven()` (0015) lists the attempt for good: it has an intent and no
 -- proof. The refund edge (0015, 0048) needs every attempt with an intent proven, so the refund is
 -- closed to everyone, the approved operator's resolution included (INV-8, REQ-RF-1).
@@ -31,6 +31,10 @@
 --
 -- Nothing is refunded on a timer or on an unknown (REQ-RF-1): the refund still rests on the final
 -- proof of the last attempt that was signed, and on an operator's approved resolution.
+--
+-- Out of scope: an attempt whose preparation never happens at all (the endpoint is down, so not even
+-- a refused preparation is written) waits for the endpoint and has no deadline edge, so nothing
+-- brings it to review; issue #48 follows it up.
 
 CREATE TABLE unsigned_attempt_cancellations (
     id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

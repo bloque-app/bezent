@@ -1740,6 +1740,10 @@ impl Core {
     /// refusal that names nothing is measured: `CND-FeeShort`, `CND-MintWindow` and the gates
     /// resume by themselves (§10), and `CND-DestinationRefused` has its own deadline.
     ///
+    /// Only a refused preparation is measured. An attempt whose preparation never happens (the
+    /// endpoint is down, so no preparation row exists) does not reach here and waits for the
+    /// endpoint: issue #48.
+    ///
     /// Not for a delivery a review resolution runs: the transfer is in review already.
     async fn unprepared_deadline(
         &self,

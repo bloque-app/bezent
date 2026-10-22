@@ -75,7 +75,8 @@ Each choice below is a reading of the spec and plan, not a ruling.
 
 Still open from the review: N1 (the compromise path runs on its own connection), N4 (withdrawals with no declared
 route), N6, N7 (a transfer whose next attempt is never prepared or signed has no deadline edge, now including one
-committed to attempt n+1; closed by item 24, issue #25), N8–N10. The service role may still write observations, outcomes and signed bytes (S6
+committed to attempt n+1; closed by item 24, issue #25, for an attempt whose preparation was refused; one whose
+preparation never happens, the endpoint being down, is still open: issue #48), N8–N10. The service role may still write observations, outcomes and signed bytes (S6
 beyond final heads and proofs): a follow-up with #31's endpoint role. (Done, issues #35 and #46: migration 0045 left
 `bezent_service` with nothing, and each service role holds what its service needs; the store test `grant_matrix`
 asserts every role's grants, so only the endpoints' roles insert observations, outcomes and signed bytes.)
@@ -164,11 +165,11 @@ Still open from the verification: F3 (an attempt ordered but never signed blocks
     names nothing is measured: `CND-FeeShort`, `CND-MintWindow` and the gates resume by themselves, `CND-PayoutWindow`
     waits for the allowance (no review, amendment 0012) and `CND-DestinationRefused` has its own deadline. Time spent
     under a gate counts, since §10 gives it no restart. It is never a refund or a retry on its own (`REQ-RF-1`).
-    **Pending a ruling:** the §5.4 row `Source-Final -> Needs-Review` names only `CND-AwaitingConversion` and
-    `CND-DestinationRefused` as its occasion, and `Delivering -> Needs-Review` a leg unknown past its deadline; an
-    attempt that was never signed has no leg. `REQ-EO-3` requires such a transfer to reach review eventually, so this
-    is built on that and on the edge the store already has; the row's "When" needs an amendment (proposed text in
-    the pull request of issue #25).
+    **Not covered:** an attempt whose preparation never happens at all (the endpoint is down, so no preparation, refused
+    or not, is ever written) waits for the endpoint and has no deadline edge; only a refused preparation is measured
+    (`unprepared_deadline` returns when there is no preparation row). `REQ-EO-3` still requires such a leg to be
+    held with an owner eventually, so it is a follow-up: issue #48. **Ruled:** the §5.4 rows gain this occasion by
+    amendment 0013 (SPEC v0.5.3, pull request #47).
 25. **An attempt ordered and never signed is cancelled by the refund that needs it gone** (issue #25, the
     verification's F3; `INV-8`, `REQ-RF-1`, `REQ-GV-5`, `REQ-RV-2`; migration `0051`). Attempt n+1, ordered after
     attempt n was proven not executed and then never signed, has an intent and nothing to prove, so
@@ -181,8 +182,10 @@ Still open from the verification: F3 (an attempt ordered but never signed blocks
     share; from then on no intent, signature or signed transaction is recorded for that attempt, whoever writes, so
     a signature cannot land after the refund decision. A signed attempt is never cancelled: it is proven not executed
     or it blocks the refund as before. The evidence check of a resolution into `Refunding` leaves that one attempt
-    out of "every attempt proven". **Pending a ruling:** `INV-8` says "every payout attempt proven not executed";
-    this reads an attempt that never produced a transaction as having nothing to prove, recorded and made
+    out of "every attempt proven". **Ruled:** `INV-8` says "every payout attempt proven not executed"; amendment 0014
+    (SPEC v0.5.3, pull request #47) reads an attempt for which no signature has been recorded, and which the store has
+    closed, as proven. The store can only know that no signature is recorded; that is safe because the signer
+    releases a signature only after it is recorded (`INV-9`, amendment 0014). The cancellation is recorded and made
     irreversible by the store. Who authorises it is the refund's own approver pair (`REQ-GV-5`).
 
 Tests: `services/core/tests/cancel.rs` (named after `REQ-NX-4`, `REQ-RV-1`, `REQ-RV-2`, `REQ-GV-5`, `REQ-NX-1`,
