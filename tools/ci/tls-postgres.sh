@@ -9,7 +9,8 @@
 #
 # The server certificate is for `localhost` only, so a client that connects to 127.0.0.1 with
 # sslmode=verify-full must be refused (the test checks it). Remove the container with
-# `docker rm -f bezent-tls-pg`.
+# `docker rm -f bezent-tls-pg`. The image is $BEZENT_CI_POSTGRES_IMAGE (the CI sets it from
+# .github/ci-images.env), postgres:16 if unset.
 set -euo pipefail
 
 dir=${1:?usage: tls-postgres.sh <dir> [port]}
@@ -32,7 +33,7 @@ docker run -d --name bezent-tls-pg -p "127.0.0.1:$port:5432" \
   -v "$PWD:/tls-in:ro" \
   --health-cmd "pg_isready -U postgres" --health-interval 2s --health-retries 30 \
   --entrypoint bash \
-  postgres:16 -c '
+  "${BEZENT_CI_POSTGRES_IMAGE:-postgres:16}" -c '
     mkdir -p /tls && cp /tls-in/server.crt /tls-in/server.key /tls/ \
       && chown postgres:postgres /tls/server.* && chmod 600 /tls/server.key \
       && exec docker-entrypoint.sh postgres -c ssl=on \

@@ -66,23 +66,19 @@ jobs:
   test:
     name: tests
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
       # Each store test creates its own database on this server (#[sqlx::test]).
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/ci-postgres
+        id: pg
+        with:
+          variant: "16"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+      - run: tools/ci/pg-up.sh "${{ steps.pg.outputs.image }}"
       - run: (rustup toolchain install || rustup show) && cargo --version
       - uses: Swatinem/rust-cache@v2
       # The restore drill (T-001-05) runs pg_dump and psql; their major version must be at least
@@ -102,23 +98,21 @@ jobs:
   database-tls:
     name: database TLS
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/ci-postgres
+        id: pg
+        with:
+          variant: "16"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+      - run: tools/ci/pg-up.sh "${{ steps.pg.outputs.image }}"
       - run: (rustup toolchain install || rustup show) && cargo --version
       - uses: Swatinem/rust-cache@v2
       - name: A PostgreSQL that forces TLS
+        env:
+          BEZENT_CI_POSTGRES_IMAGE: ${{ steps.pg.outputs.image }}
         run: tools/ci/tls-postgres.sh "$RUNNER_TEMP/tls" 5433 | tee -a "$GITHUB_ENV"
       - name: TLS against both servers
         env:
@@ -133,18 +127,6 @@ jobs:
     name: evm-endpoint fork tests
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       BEZENT_EVM_FORK_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.drpc.org' }}
@@ -152,6 +134,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - uses: ./.github/actions/ci-postgres
+        id: pg
+        with:
+          variant: "16"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+      - run: tools/ci/pg-up.sh "${{ steps.pg.outputs.image }}"
       - run: (rustup toolchain install || rustup show) && cargo --version
       - uses: Swatinem/rust-cache@v2
       - uses: foundry-rs/foundry-toolchain@v1

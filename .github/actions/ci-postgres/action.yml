@@ -1,0 +1,75 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+name: CI PostgreSQL image
+description: >-
+  Pulls the PostgreSQL image the CI pins (.github/ci-images.env) from GHCR, logged in with the
+  job's token, and falls back to the upstream registry by the same digest. Tags it locally as
+  bezent-ci-postgres:<variant>. Needs the repository checked out.
+
+inputs:
+  variant:
+    description: "16 or 18-alpine"
+    required: true
+  token:
+    description: "The job's GITHUB_TOKEN, for the GHCR login"
+    required: true
+  dockerhub-username:
+    description: "Optional: authenticates the fallback pull from Docker Hub"
+    required: false
+    default: ""
+  dockerhub-token:
+    description: "Optional: the Docker Hub access token for dockerhub-username"
+    required: false
+    default: ""
+
+outputs:
+  image:
+    description: "The local tag, bezent-ci-postgres:<variant>"
+    value: ${{ steps.pull.outputs.image }}
+
+runs:
+  using: composite
+  steps:
+    - name: Log in to GHCR
+      uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+      # Pulling a public package needs no login at all; this one only lifts the anonymous limits.
+      continue-on-error: true
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.token }}
+    - name: Log in to Docker Hub
+      if: inputs.dockerhub-username != '' && inputs.dockerhub-token != ''
+      uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+      continue-on-error: true
+      with:
+        username: ${{ inputs.dockerhub-username }}
+        password: ${{ inputs.dockerhub-token }}
+    - name: Pull
+      id: pull
+      shell: bash
+      env:
+        VARIANT: ${{ inputs.variant }}
+      run: |
+        set -euo pipefail
+        . "$GITHUB_WORKSPACE/.github/ci-images.env"
+        key="BEZENT_CI_POSTGRES_$(printf '%s' "$VARIANT" | tr 'a-z-' 'A-Z_')"
+        digest="${!key:?no $key in .github/ci-images.env}"
+        mirror="ghcr.io/bloque-app/bezent-ci-postgres@$digest"
+        upstream="docker.io/library/postgres@$digest"
+        local_tag="bezent-ci-postgres:$VARIANT"
+        pull() { # <ref>: five tries, backing off
+          for i in 1 2 3 4 5; do
+            docker pull -q "$1" > /dev/null && return 0
+            sleep $((i * 10))
+          done
+          return 1
+        }
+        if pull "$mirror"; then
+          docker tag "$mirror" "$local_tag"
+        else
+          echo "::warning::$mirror is not pullable (run the Mirror CI images workflow); using $upstream"
+          pull "$upstream"
+          docker tag "$upstream" "$local_tag"
+        fi
+        echo "image=$local_tag" >> "$GITHUB_OUTPUT"
