@@ -29,6 +29,8 @@ on:
       - "crates/**"
       - "services/**"
       - "deploy/**"
+      - ".github/ci-images.env"
+      - ".github/actions/ci-postgres/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -40,6 +42,8 @@ on:
       - "crates/**"
       - "services/**"
       - "deploy/**"
+      - ".github/ci-images.env"
+      - ".github/actions/ci-postgres/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -167,14 +171,23 @@ jobs:
       # As a harness runs it (deploy/e2e/README.md): a PostgreSQL service, the sidecar beside it,
       # healthy through the image's own health check, then the query surface answers with a
       # requester's credential and refuses without one. And the guard: no test environment, no start.
+      - uses: ./.github/actions/ci-postgres
+        id: pg
+        with:
+          variant: 18-alpine
+          token: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: The sidecar as a service container
+        env:
+          PG_IMAGE: ${{ steps.pg.outputs.image }}
         run: |
           set -euo pipefail
           docker network create bz
           docker run -d --name pg --network bz \
             -e POSTGRES_DB=bezent -e POSTGRES_USER=bloque -e POSTGRES_PASSWORD=bloque \
             --health-cmd pg_isready --health-interval 2s --health-retries 30 \
-            public.ecr.aws/docker/library/postgres:18-alpine
+            "$PG_IMAGE"
           for i in $(seq 1 60); do
             [ "$(docker inspect -f '{{.State.Health.Status}}' pg)" = healthy ] && break
             [ "$i" = 60 ] && { docker logs pg; exit 1; }
