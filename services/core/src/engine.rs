@@ -497,9 +497,10 @@ impl Core {
     /// An anomaly is the transfer's only if it is of the transfer's destination network and names
     /// one of the transfer's intents or signed transactions, or its leg's `reference`: an
     /// endpoint cannot send another network's transfer to review. The `reference` an EVM
-    /// endpoint writes is a payout's own (derived per transfer, so one transfer's); a refund
-    /// mint's reference is scoped by its redeemer (amendment 0008) and is not matched on its own:
-    /// the Kreivo endpoint's anomalies name the signed transaction as well. Each is surfaced once
+    /// endpoint writes is a payout's own (derived per transfer, so one transfer's), so it is
+    /// matched for a withdrawal only; a mint's reference, a refund mint's included, is scoped by
+    /// its redeemer (amendment 0008) and is never matched on its own: the Kreivo endpoint's
+    /// anomalies name the signed transaction as well. Each is surfaced once
     /// (the event names it), so a resolved review is not reopened by the anomaly that caused it.
     /// `Some` when the transfer moved.
     async fn surface_anomalies(
@@ -514,7 +515,12 @@ impl Core {
         ) {
             return Ok(None);
         }
-        let leg = Self::leg_reference(t).map(hex0x);
+        // The `reference` match is for a withdrawal's payout reference only (see above).
+        let leg = if t.kind == "withdrawal" {
+            Self::leg_reference(t).map(hex0x)
+        } else {
+            None
+        };
         // A number in a payload is cast only when it is a whole one that fits.
         let id = |key: &str| {
             format!(

@@ -168,7 +168,10 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
 
 28. **The contract's code hash is pinned and checked at start-up** (`AC-I4.1`, `REQ-IC-1`; closes review S5). The
     configuration names `contract_code_hash`, the code hash of the build deployed at `contract` (required, like
-    `genesis`; the contract job of CI prints the hash of the public build). After the genesis check, before anything
+    `genesis`; the contract job of CI prints the hash of the public build). **The value to configure for the live Kreivo
+    contract is `0xe89943fbbed677f2e33fde16e4877c84bf339354d05c796accf97614e2fb24ad`.** It equals the code hash of the
+    public CI build of PR #40 (run 39369032023, artifact `bezent-contract`: the bundle's `source.hash`, and the BLAKE2b-256
+    of its code blob); a different value stops the endpoint at start, which is the intended failure. After the genesis check, before anything
     is read or built, the endpoint reads `Contracts::ContractInfoOf(contract).code_hash` at the finalized head
     (`Chain::contract_code_hash`) and refuses to start, exit 1, on another hash, on no contract there, or on a chain
     that cannot say. It is read once, at start: a contract upgraded in place (`set_code_hash`) is a change of

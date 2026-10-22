@@ -197,6 +197,33 @@ async fn inv_8_an_anomaly_of_the_legs_reference_reaches_its_transfer(
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_8_a_mints_reference_alone_is_no_match_for_an_anomaly(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // Only a withdrawal's payout reference is matched by `reference`. A mint's on-chain reference
+    // is scoped by its redeemer (amendment 0008), so another namespace's anomaly carrying the
+    // same bytes must not send a deposit's mint to review.
+    let w = World::new(options, connect).await;
+    let a = arrival(&w.admin, 10, 5_000).await;
+    decide(&w.admin, a, "final", 12).await;
+    let id = deposit(&w.admin, 10, 5_000).await;
+    w.cycle(t0()).await;
+    deliver(&w, id, 1, t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    let reference = format!("0x{}", hex::encode(reference_of(&w.admin, id).await));
+    anomaly(
+        &w,
+        json!({"network": ISSUING, "reference": reference,
+               "reason": "the reference is on chain, though this transaction did not execute it"}),
+    )
+    .await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    assert_eq!(surfaced(&w, id).await, 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn inv_8_a_transfer_already_in_review_gets_the_anomaly_attached_and_nothing_else(
     options: PgPoolOptions,
     connect: PgConnectOptions,

@@ -15,7 +15,7 @@
 //! relay_checkpoint = "0x…"             # BLAKE2b-256 of the relay spec's checkpoint, if it has one
 //! para_id = 2281                       # Kreivo's parachain id, as its chain spec must say
 //! contract = "0x…"                     # the bezent contract's account
-//! contract_code_hash = "0x…"           # the code hash of the build deployed there (AC-I4.1)
+//! contract_code_hash = "0x…"           # the code hash of the build deployed there (AC-I4.1); see below
 //! start_block = 7000000                # the block the contract was instantiated in
 //! database_url_file = "/run/secrets/bezent-kreivo-endpoint-db"
 //!
@@ -29,6 +29,11 @@
 //! uid = 1001
 //! token_file = "/run/secrets/bezent-kreivo-endpoint-signer-token"
 //! ```
+//!
+//! The live Kreivo contract's code hash is
+//! `0xe89943fbbed677f2e33fde16e4877c84bf339354d05c796accf97614e2fb24ad`: that is the value to configure.
+//! It equals the hash of the public CI build (PR #40, run 39369032023, artifact `bezent-contract`).
+//! A wrong value stops the endpoint at start, which is the intended failure.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
