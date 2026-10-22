@@ -13,6 +13,8 @@
 //!
 //! `sslrootcert=/path/to/bundle.pem` names a PEM file of CA certificates (for AWS RDS,
 //! `global-bundle.pem`); it is added to the bundled web roots. It is read when the connection is made.
+//! The service images carry the RDS bundle at [`DEFAULT_CA_BUNDLE`], which `verify-ca` and
+//! `verify-full` use when the URL names no `sslrootcert`.
 //!
 //! **No silent downgrade.** `allow` and `prefer` fall back to a plain connection when TLS cannot be
 //! established, so the services refuse them, and refuse a URL with no `sslmode` at all, unless the
@@ -49,7 +51,22 @@ pub fn connect_options(url: &str) -> Result<PgConnectOptions, String> {
             );
         }
     }
+    if wants_default_ca(url, mode, std::path::Path::new(DEFAULT_CA_BUNDLE).is_file()) {
+        return Ok(options.ssl_root_cert(DEFAULT_CA_BUNDLE));
+    }
     Ok(options)
+}
+
+/// Where the service images carry the AWS RDS CA bundle (`global-bundle.pem`, public;
+/// `deploy/docker/services.Dockerfile`). With `sslmode=verify-ca` or `verify-full` and no `sslrootcert`
+/// in the URL, a bundle at this path is the CA bundle. An explicit `sslrootcert` always wins, and
+/// outside the images (no file here) nothing changes.
+pub const DEFAULT_CA_BUNDLE: &str = "/usr/share/bezent/ca/rds-global-bundle.pem";
+
+fn wants_default_ca(url: &str, mode: PgSslMode, bundle_exists: bool) -> bool {
+    bundle_exists
+        && matches!(mode, PgSslMode::VerifyCa | PgSslMode::VerifyFull)
+        && !query_has(url, &["sslrootcert", "ssl-root-cert"])
 }
 
 /// Connects a pool made with `pool` to the store `url` names, over the TLS the URL asks for.
@@ -61,11 +78,16 @@ pub async fn connect(pool: PgPoolOptions, url: &str) -> Result<PgPool, String> {
 
 /// Whether the URL's query carries an `sslmode` (libpq's spelling, or sqlx's `ssl-mode`).
 fn says_sslmode(url: &str) -> bool {
+    query_has(url, &["sslmode", "ssl-mode"])
+}
+
+/// Whether the URL's query carries one of `keys`.
+fn query_has(url: &str, keys: &[&str]) -> bool {
     url.split_once('?').is_some_and(|(_, query)| {
         query
             .split('&')
             .filter_map(|pair| pair.split('=').next())
-            .any(|key| key == "sslmode" || key == "ssl-mode")
+            .any(|key| keys.contains(&key))
     })
 }
 
@@ -124,6 +146,17 @@ mod tests {
         )
         .expect("verify-full with a CA bundle");
         assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
+    }
+
+    #[test]
+    fn the_images_ca_bundle_is_the_default_for_verifying_modes_only() {
+        let url = "postgres://u:p@db.example.net/b";
+        assert!(wants_default_ca(url, PgSslMode::VerifyFull, true));
+        assert!(wants_default_ca(url, PgSslMode::VerifyCa, true));
+        assert!(!wants_default_ca(url, PgSslMode::Require, true));
+        assert!(!wants_default_ca(url, PgSslMode::VerifyFull, false));
+        let own = "postgres://u:p@db.example.net/b?sslmode=verify-full&sslrootcert=/x.pem";
+        assert!(!wants_default_ca(own, PgSslMode::VerifyFull, true));
     }
 
     #[test]

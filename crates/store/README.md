@@ -193,6 +193,10 @@ postgres://<login>@<host>:5432/<database>?sslmode=verify-full&sslrootcert=/etc/b
   and encrypts, but does not verify the certificate (unlike libpq, even with `sslrootcert`); only `verify-ca` and
   `verify-full` do. `verify-full` checks the certificate chain against `sslrootcert` (a PEM bundle, added to the bundled web roots;
   mount it, it is not in the image) and the host name. Production uses `verify-full`.
+- The service images carry the public AWS RDS bundle (`global-bundle.pem`, pinned by SHA-256 in the Dockerfile) at
+  `/usr/share/bezent/ca/rds-global-bundle.pem` (`bezent_store::tls::DEFAULT_CA_BUNDLE`). With `verify-ca` or
+  `verify-full` and no `sslrootcert`, that file is the CA bundle; an explicit `sslrootcert` replaces it. `require`
+  needs no bundle (it encrypts without verifying).
 - **No silent downgrade.** `allow` and `prefer` fall back to a plain connection, so they are refused, and so is a URL
   with no `sslmode`, for any server that is not on this machine (a loopback address or a Unix socket). A server
   that does not offer TLS, or whose certificate does not verify, stops the service from starting.
