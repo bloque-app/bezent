@@ -158,6 +158,7 @@ async fn a_service_login_is_not_the_owner(pool: PgPool) {
         .max_connections(1)
         .after_connect(|conn, _| {
             Box::pin(async move {
+                // role-switch-ok: a test acts as a service's login without its password.
                 sqlx::query("SET SESSION AUTHORIZATION migrate_test_service_login")
                     .execute(conn)
                     .await
