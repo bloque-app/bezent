@@ -144,6 +144,14 @@ mod run {
     }
 
     pub async fn run(config: Config, spec: String, relay: Option<String>) -> Result<(), String> {
+        // An earlier run's liveness file never passes for this run's (issue #61): removed before any
+        // start-up check or connection.
+        let heartbeat = std::sync::Arc::new(bezent_kreivo_endpoint::health::heartbeat(&config));
+        if let Err(e) = heartbeat.reset() {
+            // Not fatal: a read-only file system must not keep a service from starting. A beat that
+            // cannot be written is logged, and `health` reports it.
+            tracing::warn!(error = %e.kind(), "the liveness file could not be removed; `health` may read an earlier run's");
+        }
         let declared = config.declared_genesis()?;
         let pool = bezent_store::tls::connect(
             bezent_store::login::pool_options().max_connections(config.max_connections),
@@ -168,6 +176,12 @@ mod run {
             config.light_client_depth,
             Duration::from_millis(config.archive_timeout_ms),
             config.archive_max_response_bytes,
+            // The light client's first sync can outlast any start period: it beats while the warp
+            // sync advances, and goes stale when it stands still (issue #61).
+            {
+                let heartbeat = heartbeat.clone();
+                move || bezent_kreivo_endpoint::health::beat(&heartbeat)
+            },
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -257,14 +271,10 @@ mod run {
             max_walk: config.max_walk,
         };
 
-        // An earlier run's liveness file never passes for this run's (issue #61).
-        let heartbeat = bezent_kreivo_endpoint::health::heartbeat(&config);
-        if let Err(e) = heartbeat.reset() {
-            // Not fatal: a read-only file system must not keep a service from starting. A beat that
-            // cannot be written is logged, and `health` reports it.
-            tracing::warn!(error = %e.kind(), "the liveness file could not be removed; `health` may read an earlier run's");
-        }
         let mut lied_seen = 0u64;
+        // Whether the pass before failed (the store, the prover): while it did, a walk's progress is
+        // not health. False at start, so a first backlog walk beats.
+        let mut last_pass_failed = false;
         let mut tick = tokio::time::interval(Duration::from_millis(config.poll_ms));
         loop {
             tokio::select! {
@@ -274,16 +284,18 @@ mod run {
                 }
                 _ = tick.tick() => {}
             }
+            let failed_before = last_pass_failed;
             let result: Result<bool, sqlx::Error> = async {
                 // Caught up: the light client's finalized head is read, and every final block
                 // before it (issue #61).
                 let caught_up = loop {
                     match follower.step().await? {
                         Step::Read { .. } => {
-                            // A walk that moves is healthy (issue #61): blocks were read and recorded, so the
-                            // follower advanced and the store answered. A stuck one never gets here and goes stale.
-                            if let Err(e) = heartbeat.beat() {
-                                tracing::error!(error = %e.kind(), "the liveness file could not be written; `health` will report this endpoint unhealthy");
+                            // A walk that moves is healthy (issue #61): blocks were read and
+                            // recorded, so the follower advanced and the store answered, unless
+                            // the pass before failed. A stuck one never gets here and goes stale.
+                            if !failed_before {
+                                bezent_kreivo_endpoint::health::beat(&heartbeat);
                             }
                         }
                         Step::CaughtUp { .. } => break true,
@@ -312,10 +324,17 @@ mod run {
                     for id in submitter.orders_to_prepare(&finalized).await? {
                         let outcome = submitter.prepare(id).await?;
                         tracing::info!(order = id, ?outcome, "prepared");
+                        // Work done at the head is progress too, and a pass can take long (#61).
+                        if caught_up && !failed_before {
+                            bezent_kreivo_endpoint::health::beat(&heartbeat);
+                        }
                     }
                     for id in submitter.intents_to_sign(&finalized).await? {
                         let outcome = submitter.sign_and_submit(id).await?;
                         tracing::info!(intent = id, ?outcome, "signed");
+                        if caught_up && !failed_before {
+                            bezent_kreivo_endpoint::health::beat(&heartbeat);
+                        }
                     }
                 }
                 submitter.resend().await?;
@@ -323,13 +342,10 @@ mod run {
                 Ok(caught_up)
             }
             .await;
+            last_pass_failed = result.is_err();
             match result {
                 // Healthy: at the finalized head, and the store answered all the way through.
-                Ok(true) => {
-                    if let Err(e) = heartbeat.beat() {
-                        tracing::error!(error = %e.kind(), "the liveness file could not be written; `health` will report this endpoint unhealthy");
-                    }
-                }
+                Ok(true) => bezent_kreivo_endpoint::health::beat(&heartbeat),
                 Ok(false) => {}
                 Err(e) => tracing::warn!(error = %e, "the store failed; trying again next cycle"),
             }

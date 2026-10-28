@@ -63,6 +63,16 @@ async fn load(path: &Path) -> Result<(Config, Custody, Policy), String> {
 }
 
 async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Result<(), String> {
+    // An earlier run's liveness file never passes for this run's (issue #61): removed before any
+    // start-up check or connection. Not fatal: a read-only file system must not keep a service from
+    // starting. A beat that cannot be written is logged, and `health` reports it.
+    let heartbeat = bezent_signer::health::heartbeat(&config);
+    if let Err(e) = heartbeat.reset() {
+        log.line(format_args!(
+            "health: the liveness file could not be removed ({})",
+            e.kind()
+        ));
+    }
     let url_file = config
         .database_url_file
         .as_ref()
@@ -91,17 +101,7 @@ async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Resu
     // The login acts as bezent_signer, and can act as nothing else (REQ-AR-3).
     check_login(&pool).await?;
     let listener = link::bind(&config.socket).map_err(|e| e.to_string())?;
-    // Healthy from here: the login is checked and the socket bound (issue #61). An earlier run's
-    // liveness file is removed first.
-    let heartbeat = bezent_signer::health::heartbeat(&config);
-    if let Err(e) = heartbeat.reset() {
-        // Not fatal: a read-only file system must not keep a service from starting. A beat that
-        // cannot be written is logged, and `health` reports it.
-        log.line(format_args!(
-            "health: the liveness file could not be removed ({})",
-            e.kind()
-        ));
-    }
+    // Healthy from here: the login is checked and the socket bound (issue #61).
     let pulse = tokio::spawn(bezent_signer::health::pulse(
         pool.clone(),
         heartbeat,

@@ -279,6 +279,9 @@ impl Config {
             }
         };
         resolve(&mut config.socket);
+        if let Some(p) = config.health_file.as_mut() {
+            resolve(p);
+        }
         if let Some(p) = config.database_url_file.as_mut() {
             resolve(p);
         }

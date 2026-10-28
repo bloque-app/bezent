@@ -329,6 +329,12 @@ impl Config {
                 }
             }
         }
+        // A relative liveness file is the configuration directory's, as the other paths are.
+        if let Some(p) = config.health_file.as_mut()
+            && p.is_relative()
+        {
+            *p = path.parent().unwrap_or(Path::new(".")).join(&*p);
+        }
         if config.cycle_seconds == 0
             || config.retry_preparation_seconds < 0
             || config.default_deadline_seconds <= 0

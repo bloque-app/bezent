@@ -12,12 +12,13 @@
 //!
 //! A walk that moves is healthy too: each step that read and recorded blocks beats, so a first start
 //! that walks a long backlog stays healthy while the anchor advances, and a stuck walk (a gap, no
-//! head) stops beating and goes stale.
+//! head) stops beating and goes stale. The light client's first sync beats while it advances
+//! (`chain::light`), for the same reason.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use bezent_health::Heartbeat;
+use bezent_health::{Beat, Heartbeat};
 
 use crate::config::Config;
 
@@ -31,6 +32,17 @@ pub const PASS_ALLOWANCE: Duration = Duration::from_secs(120);
 /// The endpoint's liveness file.
 pub fn heartbeat(config: &Config) -> Heartbeat {
     Heartbeat::configured(config.health_file.as_deref(), "kreivo-endpoint")
+}
+
+/// Beats, and logs what is worth a line: the first failure to write the file, and the recovery.
+pub fn beat(heartbeat: &Heartbeat) {
+    match heartbeat.try_beat() {
+        Beat::Failed { kind, first: true } => {
+            tracing::error!(error = %kind, "the liveness file could not be written; `health` will report this endpoint unhealthy")
+        }
+        Beat::Recovered => tracing::info!("the liveness file is written again"),
+        _ => {}
+    }
 }
 
 /// The most the last beat may be old: three poll intervals and one pass's allowance.

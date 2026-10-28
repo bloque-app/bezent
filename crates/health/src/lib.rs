@@ -14,10 +14,13 @@
 //! file's age ([`Heartbeat::check`]). A service that stopped, hung, lost its store or fell behind its
 //! network stops beating, and the file grows stale.
 //!
-//! The file holds the time of the beat in seconds, and nothing else. Its age is read from the file's
-//! modification time, so a half-written file is still fresh or stale, never misread. The service
-//! removes the file at start ([`Heartbeat::reset`]), so a file left on a volume by an earlier run
-//! never passes.
+//! The file holds the time of the beat in seconds since the Unix epoch, and nothing else, and the age
+//! is read from that content, not from the file's modification time (which a copy, a restore or a
+//! volume can change). A beat is written to a temporary file beside it and renamed over it, so the
+//! check sees the old beat or the new one, never half of one. A beat dated more than [`SKEW`] ahead of
+//! the clock that reads it (a clock that stepped, a file from elsewhere) counts as stale, as does a file
+//! that does not hold a time. The service removes the file at start ([`Heartbeat::reset`]), so a file
+//! left on a volume by an earlier run never passes.
 //!
 //! Every message this crate produces is fixed text: a path, a URL or a configuration value never
 //! reaches the line `health` prints.
@@ -25,11 +28,16 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The longest a `health` command may take (the ECS container health check's own bound is set in the
 /// task definition; this is the one the commands keep to).
 pub const BUDGET: Duration = Duration::from_secs(5);
+
+/// How far ahead of the reading clock a beat may be dated and still count: clocks differ a little
+/// between a writer and a reader. Beyond it, the beat is stale.
+pub const SKEW: Duration = Duration::from_secs(5);
 
 /// Why an instance is not healthy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +51,8 @@ pub enum Unhealthy {
         /// The most the service allows, in whole seconds.
         limit_seconds: u64,
     },
+    /// The last beat is dated further ahead of the clock than [`SKEW`] allows.
+    FromTheFuture,
 }
 
 impl std::fmt::Display for Unhealthy {
@@ -56,20 +66,42 @@ impl std::fmt::Display for Unhealthy {
                 f,
                 "last heartbeat {age_seconds} s ago, more than the {limit_seconds} s allowed"
             ),
+            Self::FromTheFuture => f.write_str("last heartbeat is dated in the future"),
         }
     }
 }
 
+/// What one attempt to beat came to: log on [`Beat::Failed`] with `first` and on [`Beat::Recovered`],
+/// and on nothing else, so a file that stays unwritable is one line and not one per pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Beat {
+    /// Written (and the earlier one was, too).
+    Written,
+    /// Written, after attempts that failed.
+    Recovered,
+    /// Not written.
+    Failed {
+        /// Why.
+        kind: io::ErrorKind,
+        /// The first failure since the last write.
+        first: bool,
+    },
+}
+
 /// A liveness file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Heartbeat {
     path: PathBuf,
+    failing: AtomicBool,
 }
 
 impl Heartbeat {
     /// A heartbeat at `path`.
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            failing: AtomicBool::new(false),
+        }
     }
 
     /// The path a service uses when its configuration names none: `/tmp/bezent-<service>.health`.
@@ -95,10 +127,32 @@ impl Heartbeat {
     /// Records that the instance is healthy now. A failure is the caller's to log: a service that
     /// cannot write its heartbeat will be reported unhealthy, which is true of it.
     pub fn beat(&self) -> io::Result<()> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        std::fs::write(&self.path, format!("{now}\n"))
+        self.beat_at(SystemTime::now())
+    }
+
+    /// [`Heartbeat::beat`], dated `when`. Written to a temporary file in the same directory and
+    /// renamed over the beat, so a reader never sees half of one.
+    pub fn beat_at(&self, when: SystemTime) -> io::Result<()> {
+        let secs = when.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let mut name = self.path.file_name().unwrap_or_default().to_owned();
+        name.push(".tmp");
+        let temp = self.path.with_file_name(name);
+        std::fs::write(&temp, format!("{secs}\n"))?;
+        std::fs::rename(&temp, &self.path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&temp);
+        })
+    }
+
+    /// [`Heartbeat::beat`] that tells the caller what to log: the first failure, and the recovery.
+    pub fn try_beat(&self) -> Beat {
+        match self.beat() {
+            Ok(()) if self.failing.swap(false, Ordering::Relaxed) => Beat::Recovered,
+            Ok(()) => Beat::Written,
+            Err(e) => Beat::Failed {
+                kind: e.kind(),
+                first: !self.failing.swap(true, Ordering::Relaxed),
+            },
+        }
     }
 
     /// Whether the last beat is no older than `max_age`.
@@ -108,11 +162,14 @@ impl Heartbeat {
 
     /// [`Heartbeat::check`] at a given time.
     pub fn check_at(&self, max_age: Duration, now: SystemTime) -> Result<(), Unhealthy> {
-        let modified = std::fs::metadata(&self.path)
-            .and_then(|m| m.modified())
-            .map_err(|_| Unhealthy::NoHeartbeat)?;
-        // A beat in the future (the clock stepped back) is as fresh as it can be.
-        let age = now.duration_since(modified).unwrap_or_default();
+        let text = std::fs::read_to_string(&self.path).map_err(|_| Unhealthy::NoHeartbeat)?;
+        let secs: u64 = text.trim().parse().map_err(|_| Unhealthy::NoHeartbeat)?;
+        let beat = UNIX_EPOCH + Duration::from_secs(secs);
+        let age = match now.duration_since(beat) {
+            Ok(age) => age,
+            Err(ahead) if ahead.duration() <= SKEW => Duration::ZERO,
+            Err(_) => return Err(Unhealthy::FromTheFuture),
+        };
         if age > max_age {
             return Err(Unhealthy::Stale {
                 age_seconds: age.as_secs(),

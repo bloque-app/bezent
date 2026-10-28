@@ -27,6 +27,8 @@ use bezent_core_service::reserve::readings::Recorded;
 use bezent_core_service::reserve::s3::{AwsClient, S3Store, StatementSink};
 use bezent_core_service::reserve::statement::{DirectoryStore, SignerProcess, Statements};
 
+use bezent_health::Beat;
+
 const NAME: &str = "bezent-core";
 
 /// The most one cycle's statement publishing may take (PR #50 review S1).
@@ -60,6 +62,12 @@ async fn main() -> ExitCode {
     }
 
     tracing_subscriber::fmt().with_target(false).init();
+    // An earlier run's liveness file never passes for this run's (issue #61): removed before any
+    // start-up check or connection, so a file left by a run that is being replaced is gone first.
+    let heartbeat = bezent_core_service::health::heartbeat(&config);
+    if let Err(e) = heartbeat.reset() {
+        tracing::warn!(error = %e.kind(), "the liveness file could not be removed; `health` may read an earlier run's");
+    }
     let pool = match bezent_store::tls::connect(
         bezent_store::login::pool_options().max_connections(config.max_connections),
         &config.database_url,
@@ -72,11 +80,6 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // An earlier run's liveness file never passes for this run's (issue #61).
-    let heartbeat = bezent_core_service::health::heartbeat(&config);
-    if let Err(e) = heartbeat.reset() {
-        tracing::warn!(error = %e.kind(), "the liveness file could not be removed; `health` may read an earlier run's");
-    }
     // The login is a member of bezent_core and of nothing else, and holds exactly the core's
     // grants (#46, REQ-AR-3).
     if let Err(e) = bezent_store::login::check_login(&pool, bezent_store::CORE_ROLE).await {
@@ -186,10 +189,14 @@ async fn main() -> ExitCode {
                 };
                 // Healthy: the store answered the cycle and the check (issue #61). The beat comes
                 // before the statements, whose own budget the freshness limit allows for.
-                if cycle_ok && check_ok
-                    && let Err(e) = heartbeat.beat()
-                {
-                    tracing::error!(error = %e.kind(), "the liveness file could not be written; `health` will report this core unhealthy");
+                if cycle_ok && check_ok {
+                    match heartbeat.try_beat() {
+                        Beat::Failed { kind, first: true } => {
+                            tracing::error!(error = %kind, "the liveness file could not be written; `health` will report this core unhealthy")
+                        }
+                        Beat::Recovered => tracing::info!("the liveness file is written again"),
+                        _ => {}
+                    }
                 }
                 if let Some(statements) = &statements {
                     // Bounded: a signer or a store that never answers does not freeze the cycle

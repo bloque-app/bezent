@@ -24,7 +24,8 @@ fn write_config(dir: &Path) -> PathBuf {
     let mut json: serde_json::Value =
         serde_json::from_str(include_str!("../fixtures/signer.json")).unwrap();
     json["socket"] = dir.join("s.sock").to_str().unwrap().into();
-    json["health_file"] = dir.join("alive").to_str().unwrap().into();
+    // Relative: it is the configuration directory's, as the socket and the key file are.
+    json["health_file"] = "alive".into();
     json["keys"]["path"] = dir.join("no-such-keys.json").to_str().unwrap().into();
     let file = dir.join("signer.json");
     std::fs::write(&file, serde_json::to_vec(&json).unwrap()).unwrap();
@@ -52,6 +53,7 @@ fn healthy_needs_a_fresh_beat_and_the_socket() {
     let d = dir("both");
     let file = write_config(&d);
     let config = Config::load(&file).unwrap();
+    assert_eq!(config.health_file, Some(d.join("alive")));
 
     let (ok, said, _) = run(&file);
     assert!(!ok, "{said}");
@@ -75,15 +77,15 @@ fn a_stale_beat_is_not_healthy() {
     let file = write_config(&d);
     let config = Config::load(&file).unwrap();
     let _listener = UnixListener::bind(d.join("s.sock")).unwrap();
-    heartbeat(&config).beat().unwrap();
-    let beat = std::fs::File::options()
-        .write(true)
-        .open(d.join("alive"))
+    let hb = heartbeat(&config);
+    hb.beat().unwrap();
+    assert!(run(&file).0);
+    hb.beat_at(SystemTime::now() - MAX_AGE - Duration::from_secs(20))
         .unwrap();
-    beat.set_modified(SystemTime::now() - MAX_AGE - Duration::from_secs(20))
-        .unwrap();
-    let (ok, said, _) = run(&file);
+    let (ok, said, took) = run(&file);
     assert!(!ok);
+    // The unhealthy answer comes within the bound too.
+    assert!(took < Duration::from_secs(5), "{took:?}");
     assert!(said.contains("unhealthy"), "{said}");
 }
 

@@ -98,3 +98,55 @@ async fn the_check_reads_the_port_from_the_configuration_and_prints_none_of_it()
     let err = check(&dir.join("missing.toml")).await.unwrap_err();
     assert!(!err.contains("missing"), "{err}");
 }
+
+/// `GET /health` as the router answers it, on a pool of one connection that waits 300 ms.
+async fn health_status(pool: &sqlx::PgPool, hold: bool) -> (axum::http::StatusCode, String) {
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
+
+    let mine = bezent_store::login::connect_login(
+        pool,
+        "ingress_health_tests_login",
+        bezent_store::INGRESS_ROLE,
+        "test-only-ingress-health-login",
+        PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(300)),
+    )
+    .await
+    .unwrap();
+    let app = bezent_ingress::App::new(
+        mine.clone(),
+        bezent_ingress::Limits {
+            max_in_flight: 4,
+            log_page: 50,
+        },
+    );
+    let held = if hold {
+        Some(mine.acquire().await.unwrap())
+    } else {
+        None
+    };
+    let answer = bezent_ingress::router(app)
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    drop(held);
+    let status = answer.status();
+    let body = answer.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn a_saturated_pool_is_alive_and_a_free_one_is_ok(pool: sqlx::PgPool) {
+    let (status, body) = health_status(&pool, false).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("ok"), "{body}");
+    // Every connection in use: alive and loaded, not unhealthy (issue #61).
+    let (status, body) = health_status(&pool, true).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("busy"), "{body}");
+}

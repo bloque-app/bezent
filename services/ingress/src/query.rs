@@ -531,14 +531,23 @@ pub(crate) async fn log(
     }))
 }
 
-/// Liveness and the store's readiness.
+/// Liveness and the store's readiness. A pool that is saturated (`PoolTimedOut`) answers 200
+/// `busy`: the instance is alive and loaded, which is not a reason to replace it.
 #[utoipa::path(
     get, path = "/health", tag = "service",
     responses((status = 200, body = Health), (status = 503, body = ErrorBody))
 )]
 pub(crate) async fn health(State(app): State<App>) -> Result<Json<Health>, ApiError> {
-    sqlx::query("SELECT 1").execute(app.pool()).await?;
-    Ok(Json(Health {
-        status: "ok".into(),
-    }))
+    match sqlx::query("SELECT 1").execute(app.pool()).await {
+        Ok(_) => Ok(Json(Health {
+            status: "ok".into(),
+        })),
+        // Every connection is busy with requests: the instance is alive and serving, and a
+        // container health check must not replace a task for being loaded (issue #61). A store
+        // that cannot be reached at all is still a 503.
+        Err(sqlx::Error::PoolTimedOut) => Ok(Json(Health {
+            status: "busy".into(),
+        })),
+        Err(e) => Err(e.into()),
+    }
 }

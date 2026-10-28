@@ -29,8 +29,8 @@ fn write_config(dir: &Path) -> PathBuf {
     std::fs::write(
         &file,
         format!(
-            "health_file = \"{}\"\n{FIXTURE}",
-            dir.join("alive").display()
+            "health_file = \"alive\"
+{FIXTURE}"
         ),
     )
     .unwrap();
@@ -58,6 +58,7 @@ fn no_heartbeat_is_not_healthy_a_fresh_one_is() {
     let d = dir("fresh");
     let file = write_config(&d);
     let config = Config::from_file(&file).unwrap();
+    assert_eq!(config.health_file, Some(d.join("alive")));
 
     let (ok, said, _) = run(&file);
     assert!(!ok, "{said}");
@@ -74,19 +75,17 @@ fn a_stale_beat_is_not_healthy() {
     let d = dir("stale");
     let file = write_config(&d);
     let config = Config::from_file(&file).unwrap();
-    heartbeat(&config).beat().unwrap();
-    let beat = std::fs::File::options()
-        .write(true)
-        .open(d.join("alive"))
-        .unwrap();
+    let hb = heartbeat(&config);
     // Well inside the limit (a slow machine must not tip it), then past it.
-    beat.set_modified(SystemTime::now() - max_age(&config) / 2)
+    hb.beat_at(SystemTime::now() - max_age(&config) / 2)
         .unwrap();
     assert!(run(&file).0);
-    beat.set_modified(SystemTime::now() - max_age(&config) - Duration::from_secs(20))
+    hb.beat_at(SystemTime::now() - max_age(&config) - Duration::from_secs(20))
         .unwrap();
-    let (ok, said, _) = run(&file);
+    let (ok, said, took) = run(&file);
     assert!(!ok);
+    // The unhealthy answer comes within the bound too.
+    assert!(took < Duration::from_secs(5), "{took:?}");
     assert!(said.contains("unhealthy"), "{said}");
 }
 

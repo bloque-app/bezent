@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use bezent_health::Heartbeat;
+use bezent_health::{Beat, Heartbeat};
 use sqlx::PgPool;
 
 use crate::config::Config;
@@ -49,11 +49,13 @@ pub async fn pulse(pool: PgPool, heartbeat: Heartbeat, log: Log) {
             log.line(format_args!("health: the store did not answer"));
             continue;
         }
-        if let Err(e) = heartbeat.beat() {
-            log.line(format_args!(
-                "health: the liveness file could not be written ({})",
-                e.kind()
-            ));
+        // One line at the first failure and one at the recovery, not one per beat.
+        match heartbeat.try_beat() {
+            Beat::Failed { kind, first: true } => log.line(format_args!(
+                "health: the liveness file could not be written ({kind})"
+            )),
+            Beat::Recovered => log.line(format_args!("health: the liveness file is written again")),
+            _ => {}
         }
     }
 }

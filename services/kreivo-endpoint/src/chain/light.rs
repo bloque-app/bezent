@@ -57,6 +57,36 @@ use crate::kreivo::{AccountId32, blake2_256};
 
 // ------------------------------------------------------------------------------ the light client
 
+/// What the light client's bootstrap has shown so far, to tell progress from standing still.
+#[derive(Default)]
+struct WarmUp {
+    at: Option<u64>,
+    ready: bool,
+    started: bool,
+}
+
+impl WarmUp {
+    /// Whether `state` is a step forward: the first state with peers, a warp sync that reached a
+    /// higher block, or the sync that finished. A stalled chain (no peers, a warp sync that does not
+    /// advance) and a state that only changes the peer count are not.
+    fn advanced(&mut self, state: &smoldot_light::lifecycle_service::LifecycleState) -> bool {
+        use smoldot_light::lifecycle_service::{Health, Phase};
+        if state.health != Health::Ok {
+            return false;
+        }
+        match state.phase {
+            Phase::Connecting => !std::mem::replace(&mut self.started, true),
+            Phase::Syncing { at, .. } => {
+                self.started = true;
+                let forward = self.at.is_none_or(|last| at > last);
+                self.at = Some(at.max(self.at.unwrap_or(0)));
+                forward
+            }
+            Phase::Ready => !std::mem::replace(&mut self.ready, true),
+        }
+    }
+}
+
 type Client = smoldot_light::Client<Arc<DefaultPlatform>, ()>;
 type Notifications = mpsc::UnboundedSender<Result<Box<RawValue>, RpcError>>;
 
@@ -128,6 +158,12 @@ fn error_of(raw: &RawValue) -> RpcError {
 }
 
 impl LightRpc {
+    /// The light client's bootstrap state: the phase, the peers and the stall verdict, current
+    /// first and then at each change (the pinned smoldot fork's lifecycle service).
+    pub fn lifecycle(&self) -> smoldot_light::lifecycle_service::Subscription {
+        lock(&self.inner.client).lifecycle_state(self.inner.chain)
+    }
+
     /// Starts a light client for `chain_spec`, a parachain of `relay_chain_spec` when one is
     /// given. Must be called inside a Tokio runtime.
     pub fn new(chain_spec: &str, relay_chain_spec: Option<&str>) -> Result<LightRpc, String> {
@@ -636,6 +672,10 @@ async fn either<T>(
 impl LightChain {
     /// Starts the light client on `chain_spec` (Kreivo), a parachain of `relay_chain_spec`, with
     /// `archive_rpc` for history older than `depth` blocks (issue #49).
+    ///
+    /// `progress` is called while the light client warms up, each time its bootstrap moves
+    /// forward (a warp sync that reached a higher block, the sync that finished), and never while
+    /// it is stalled or still: the container's health check counts those calls (issue #61).
     pub async fn start(
         chain_spec: &str,
         relay_chain_spec: Option<&str>,
@@ -643,12 +683,23 @@ impl LightChain {
         depth: u64,
         timeout: Duration,
         max_response: u32,
+        progress: impl Fn() + Send + 'static,
     ) -> ChainResult<LightChain> {
         let rpc = LightRpc::new(chain_spec, relay_chain_spec).map_err(unavailable)?;
+        let mut states = rpc.lifecycle();
+        let watcher = tokio::spawn(async move {
+            let mut seen = WarmUp::default();
+            while let Some(state) = states.next().await {
+                if seen.advanced(&state) {
+                    progress();
+                }
+            }
+        });
         let rpc_client = RpcClient::new(rpc);
-        let client = OnlineClient::<PolkadotConfig>::from_rpc_client(rpc_client.clone())
-            .await
-            .map_err(unavailable)?;
+        let client = OnlineClient::<PolkadotConfig>::from_rpc_client(rpc_client.clone()).await;
+        // The warm-up is over, or failed: nothing is counted after it.
+        watcher.abort();
+        let client = client.map_err(unavailable)?;
         Ok(LightChain {
             client,
             rpc: LegacyRpcMethods::<PolkadotConfig>::new(rpc_client),
@@ -1513,5 +1564,50 @@ mod tests {
         let roomy = WsSource::new(&mock.url(""), Duration::from_secs(2), 1 << 20);
         assert!(matches!(roomy.header(&[1; 32]).await, Err(Fail::Lied(_))));
         mock.stop();
+    }
+}
+
+#[cfg(test)]
+mod warm_up_tests {
+    use super::WarmUp;
+    use smoldot_light::lifecycle_service::{Health, LifecycleState, Phase, StallReason};
+
+    fn state(phase: Phase, health: Health) -> LifecycleState {
+        LifecycleState {
+            phase,
+            num_peers: 3,
+            health,
+        }
+    }
+
+    #[test]
+    fn a_warp_sync_that_advances_is_progress_and_one_that_stands_still_is_not() {
+        let mut w = WarmUp::default();
+        let syncing = |at| state(Phase::Syncing { at, target: 1000 }, Health::Ok);
+        assert!(w.advanced(&syncing(10)));
+        assert!(w.advanced(&syncing(20)));
+        assert!(!w.advanced(&syncing(20)));
+        assert!(!w.advanced(&syncing(15)));
+        assert!(w.advanced(&syncing(21)));
+    }
+
+    #[test]
+    fn a_stalled_chain_is_never_progress() {
+        let mut w = WarmUp::default();
+        let stalled = Health::Stalled {
+            reason: StallReason::NoProgress,
+        };
+        assert!(!w.advanced(&state(Phase::Syncing { at: 5, target: 9 }, stalled)));
+        assert!(!w.advanced(&state(Phase::Connecting, stalled)));
+        assert!(!w.advanced(&state(Phase::Ready, stalled)));
+    }
+
+    #[test]
+    fn connecting_and_ready_count_once() {
+        let mut w = WarmUp::default();
+        assert!(w.advanced(&state(Phase::Connecting, Health::Ok)));
+        assert!(!w.advanced(&state(Phase::Connecting, Health::Ok)));
+        assert!(w.advanced(&state(Phase::Ready, Health::Ok)));
+        assert!(!w.advanced(&state(Phase::Ready, Health::Ok)));
     }
 }

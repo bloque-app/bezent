@@ -232,6 +232,11 @@ impl Config {
                 *p = base.join(&*p);
             }
         }
+        if let Some(p) = config.health_file.as_mut()
+            && p.is_relative()
+        {
+            *p = base.join(&*p);
+        }
         config.check()?;
         Ok(config)
     }

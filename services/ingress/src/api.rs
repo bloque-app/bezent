@@ -374,7 +374,7 @@ pub struct LogPage {
 /// The health answer.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Health {
-    /// `ok` when the store answers.
+    /// `ok` when the store answers; `busy` when every store connection is in use (alive, loaded).
     pub status: String,
 }
 
