@@ -5,13 +5,14 @@
 //! The Kreivo endpoint serves no port, so the running endpoint says it is well: at the end of each pass
 //! of its loop that reached the head of the network it observes (the light client follows the declared network and the follower reached the finalized head (`CaughtUp`)) and
 //! met the store throughout, it rewrites its liveness file ([`bezent_health::Heartbeat`]). A pass
-//! that read a block but is still behind the head, one that found a gap or no final point, and one
+//! that is stuck behind the head, one that found a gap or no final point, and one
 //! that failed on the store do not beat. The check reads that file's age, with the cadence of the same
 //! configuration. It opens no store connection, no provider connection and no signer link, and reads
 //! no secret file.
 //!
-//! A first start can take longer than a container health check's start period (a backlog is walked
-//! before the head is reached): the deployment sets the start period to cover it.
+//! A walk that moves is healthy too: each step that read and recorded blocks beats, so a first start
+//! that walks a long backlog stays healthy while the anchor advances, and a stuck walk (a gap, no
+//! head) stops beating and goes stale.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

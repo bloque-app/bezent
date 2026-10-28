@@ -212,7 +212,13 @@ async fn run(config: Config) -> Result<(), String> {
         let result: Result<bool, sqlx::Error> = async {
             let caught_up = loop {
                 match follower.step().await? {
-                    Step::Read { .. } => continue,
+                    Step::Read { .. } => {
+                        // A walk that moves is healthy (issue #61): blocks were read and recorded, so the
+                        // follower advanced and the store answered. A stuck one never gets here and goes stale.
+                        if let Err(e) = heartbeat.beat() {
+                            tracing::error!(error = %e.kind(), "the liveness file could not be written; `health` will report this endpoint unhealthy");
+                        }
+                    }
                     Step::CaughtUp { .. } => break true,
                     other => {
                         tracing::warn!(?other, "the follower stopped");

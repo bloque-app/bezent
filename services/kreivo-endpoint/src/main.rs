@@ -279,7 +279,13 @@ mod run {
                 // before it (issue #61).
                 let caught_up = loop {
                     match follower.step().await? {
-                        Step::Read { .. } => {}
+                        Step::Read { .. } => {
+                            // A walk that moves is healthy (issue #61): blocks were read and recorded, so the
+                            // follower advanced and the store answered. A stuck one never gets here and goes stale.
+                            if let Err(e) = heartbeat.beat() {
+                                tracing::error!(error = %e.kind(), "the liveness file could not be written; `health` will report this endpoint unhealthy");
+                            }
+                        }
                         Step::CaughtUp { .. } => break true,
                         _ => break false,
                     }
