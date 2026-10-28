@@ -209,14 +209,10 @@ mod run {
         // light client's head, not any source's word. A first start walks the backlog for it (its
         // anchors are kept, and the follower resumes from them); a failed walk is tried again
         // next start.
-        // It beats while the walk's anchors go down (issue #61), and stops with it.
-        let walking = tokio::spawn(bezent_kreivo_endpoint::health::walk_progress(
-            pool.clone(),
-            config.network.clone(),
-            heartbeat.clone(),
-        ));
-        let walked = follower.start_anchor().await;
-        walking.abort();
+        // It beats as the walk moves (issue #61): every WALK_PROGRESS_EVERY headers.
+        let walked = follower
+            .start_anchor_with(&mut || bezent_kreivo_endpoint::health::beat(&heartbeat))
+            .await;
         let start_hash = match walked {
             Ok(Ok(hash)) => hash,
             Ok(Err(e)) => {

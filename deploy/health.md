@@ -17,7 +17,7 @@ itself to 4 s; the file-based ones only read a small file, and ECS's `timeout` b
 
 | Service | Mechanism | Healthy means |
 |---|---|---|
-| `bezent-ingress` | `GET /health` on the loopback, at the port of `listen` in the same configuration file | The running ingress answers 200: it bound its address only after reaching the store and checking its login, and `/health` asks the store a query. A pool whose connections are all busy answers 200 `busy` (alive and loaded, not a reason to replace it); a store that cannot be reached answers 503 |
+| `bezent-ingress` | `GET /health` on the loopback, at the port of `listen` in the same configuration file | The running ingress answers 200: it bound its address only after reaching the store and checking its login, and `/health` asks the store a query. A pool whose connections are all busy answers 200 `busy` (alive and loaded, not a reason to replace it) only if the store answered something in the last 60 s (a `/health` query, or any request that succeeded); otherwise, and when the store cannot be reached, it answers 503. Statements on the ingress's connections end after 30 s (`statement_timeout`) |
 | `bezent-core` | A liveness file the cycle rewrites | The last cycle and the reserve check's listing both completed against the store, within three cycles plus 120 s |
 | `bezent-signer` | A liveness file the signer rewrites every 10 s while its store answers, and the link socket | Login checked, socket bound and still there, store answering within the last 35 s |
 | `bezent-kreivo-endpoint` | A liveness file each pass rewrites, and the light client's warm-up | The pass reached the finalized head through the light client (`CaughtUp`), or a walk toward it advanced (a step read and recorded blocks), and the store answered, within three poll intervals plus 120 s. During the light client's first sync it beats while the sync advances |
@@ -49,9 +49,9 @@ make progress.
   both chains and beats when either moves forward: the first state with peers, a warp sync that reached a
   higher block, the sync that finished with peers. A bootstrap without peers, a stalled one (no peers, or
   a warp sync that has not advanced for 45 s) and one that stands still do not beat.
-- **The walk from the finalized head to `start_block`.** The walk keeps an anchor every few blocks in the
-  store as it goes, so every 5 s the endpoint reads the lowest anchor stored, and beats when it went
-  down (the query answering also shows the store is up). A walk that stands still does not beat.
+- **The walk from the finalized head to `start_block`.** The walk calls back every 256 headers it reads
+  (it keeps an anchor in the store every 4096 blocks, `WALK_RUNG`), and each call beats. A walk that
+  stands still does not beat.
 
 A warm-up with no progress for the usual window (three poll intervals plus 120 s) goes stale and the
 task is replaced. The evm-endpoint has no comparable warm-up: its start-up is a handful of HTTP calls to
@@ -66,8 +66,8 @@ by their own timeouts, but `startPeriod` should leave room for them.
 - **The signer**: healthy means its store answers and its socket exists. It does not mean the keys sign,
   or that a caller can complete a round trip.
 - **The ingress** ignores the webhook dispatcher: a dispatcher that is stuck or failing does not make
-  `/health` fail. And `busy` (every store connection in use) cannot tell load from a store that hangs
-  with all the connections checked out.
+  `/health` fail. And `busy` (every store connection in use) is bounded to 60 s since the store last answered, so a
+  store that hangs with all the connections checked out is reported after a minute, not never.
 - **A poisoned row** (one an endpoint or the core fails on every pass) makes the task fail its check and
   be replaced, and the replacement fails on the same row: a restart loop. The remedy is to find and fix
   the row on the alert, not to restart.
@@ -86,6 +86,9 @@ Each service takes an optional `health_file` in its configuration (TOML for the 
 JSON for the signer). Left out, it is `/tmp/bezent-<service>.health`, which exists in the images
 and is writable by their users. A task definition that sets `readonlyRootFilesystem` must mount a
 writable volume and name a path on it as `health_file`. A relative path is resolved against the configuration file's directory, like the other path fields.
+`health_file` must not be a single-file bind mount: a beat is written to a temporary file beside it and
+renamed over it, which a bind-mounted file cannot take. Mount a directory and name a file in it. The
+service removes a temporary file an earlier run left, as it removes the file itself, at start.
 A beat that cannot be written is logged at error level once, and again on recovery, not on every pass,
 and the check then reports the service unhealthy, which is true of it. The file holds the time of the
 beat, written to a temporary file beside it and renamed over it; `health` reads the time from the

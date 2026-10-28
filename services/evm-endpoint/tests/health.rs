@@ -64,7 +64,7 @@ fn no_heartbeat_is_not_healthy_a_fresh_one_is() {
     heartbeat(&config).beat().unwrap();
     let (ok, said, took) = run(&file);
     assert!(ok, "{said}");
-    assert!(took < Duration::from_secs(5), "{took:?}");
+    assert!(took < bezent_health::BUDGET, "{took:?}");
     assert_eq!(said.trim(), "bezent-evm-endpoint: healthy");
 }
 
@@ -83,7 +83,7 @@ fn a_stale_beat_is_not_healthy() {
     let (ok, said, took) = run(&file);
     assert!(!ok);
     // The unhealthy answer comes within the bound too.
-    assert!(took < Duration::from_secs(5), "{took:?}");
+    assert!(took < bezent_health::BUDGET, "{took:?}");
     assert!(said.contains("unhealthy"), "{said}");
 }
 
@@ -108,6 +108,6 @@ fn an_unreadable_configuration_is_not_healthy_and_prints_nothing_of_it() {
     );
     let (ok, said, took) = run(&d.join("missing.toml"));
     assert!(!ok);
-    assert!(took < Duration::from_secs(5), "{took:?}");
+    assert!(took < bezent_health::BUDGET, "{took:?}");
     assert!(!said.contains("missing"), "{said}");
 }

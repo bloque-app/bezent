@@ -57,6 +57,17 @@ use crate::kreivo::{AccountId32, blake2_256};
 
 // ------------------------------------------------------------------------------ the light client
 
+/// Tasks that stop when this is dropped, however the owner is left (an error, a cancelled future).
+struct AbortOnDrop(Vec<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 /// What the light client's bootstrap has shown so far, to tell progress from standing still.
 #[derive(Default)]
 struct WarmUp {
@@ -699,27 +710,27 @@ impl LightChain {
         let rpc = LightRpc::new(chain_spec, relay_chain_spec).map_err(unavailable)?;
         // Either chain moving forward is progress: the relay chain's warp sync is the long part.
         let progress = Arc::new(progress);
-        let watchers: Vec<_> = rpc
-            .lifecycle()
-            .into_iter()
-            .map(|mut states| {
-                let progress = progress.clone();
-                tokio::spawn(async move {
-                    let mut seen = WarmUp::default();
-                    while let Some(state) = states.next().await {
-                        if seen.advanced(&state) {
-                            progress();
+        let watchers = AbortOnDrop(
+            rpc.lifecycle()
+                .into_iter()
+                .map(|mut states| {
+                    let progress = progress.clone();
+                    tokio::spawn(async move {
+                        let mut seen = WarmUp::default();
+                        while let Some(state) = states.next().await {
+                            if seen.advanced(&state) {
+                                progress();
+                            }
                         }
-                    }
+                    })
                 })
-            })
-            .collect();
+                .collect(),
+        );
         let rpc_client = RpcClient::new(rpc);
         let client = OnlineClient::<PolkadotConfig>::from_rpc_client(rpc_client.clone()).await;
-        // The warm-up is over, or failed: nothing is counted after it.
-        for watcher in watchers {
-            watcher.abort();
-        }
+        // The warm-up is over, or failed: nothing is counted after it (`watchers` stop when
+        // dropped, here or if this future is).
+        drop(watchers);
         let client = client.map_err(unavailable)?;
         Ok(LightChain {
             client,

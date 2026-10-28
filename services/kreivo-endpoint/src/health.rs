@@ -16,7 +16,6 @@
 //! (`chain::light`), for the same reason.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use bezent_health::{Beat, Heartbeat};
@@ -64,64 +63,4 @@ pub fn check(config: &Path) -> Result<(), String> {
 /// `config` as `health` is given it, or the image's default.
 pub fn config_path(arg: Option<&String>) -> PathBuf {
     arg.map_or_else(|| PathBuf::from(DEFAULT_CONFIG), PathBuf::from)
-}
-
-/// How often the first start's walk to `start_block` is looked at.
-pub const WALK_POLL: Duration = Duration::from_secs(5);
-
-/// Whether the walk moved: the lowest anchor stored is lower than the lowest seen before. The first
-/// reading only sets the mark.
-pub fn walk_moved(lowest: &mut Option<i64>, now: Option<i64>) -> bool {
-    let Some(now) = now else { return false };
-    match lowest {
-        Some(before) if now >= *before => false,
-        Some(before) => {
-            *before = now;
-            true
-        }
-        None => {
-            *lowest = Some(now);
-            false
-        }
-    }
-}
-
-/// Beats while the first start's walk to `start_block` moves (issue #61). The walk keeps an anchor
-/// every few blocks as it goes (`observation_walk_anchors`), so the lowest one stored going down is
-/// progress, and a query that answers shows the store is up. Runs until it is dropped or aborted;
-/// a walk that stands still, or a store that does not answer, leaves the file to go stale.
-pub async fn walk_progress(pool: sqlx::PgPool, network: String, heartbeat: Arc<Heartbeat>) {
-    let mut lowest = None;
-    let mut tick = tokio::time::interval(WALK_POLL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tick.tick().await;
-        let now: Result<Option<i64>, _> = sqlx::query_scalar(
-            "SELECT min(block_number) FROM observation_walk_anchors WHERE network = $1",
-        )
-        .bind(&network)
-        .fetch_one(&pool)
-        .await;
-        if let Ok(now) = now
-            && walk_moved(&mut lowest, now)
-        {
-            beat(&heartbeat);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::walk_moved;
-
-    #[test]
-    fn a_walk_that_goes_down_is_progress_and_one_that_stands_still_is_not() {
-        let mut lowest = None;
-        assert!(!walk_moved(&mut lowest, None));
-        assert!(!walk_moved(&mut lowest, Some(900)));
-        assert!(walk_moved(&mut lowest, Some(800)));
-        assert!(!walk_moved(&mut lowest, Some(800)));
-        assert!(!walk_moved(&mut lowest, Some(850)));
-        assert!(walk_moved(&mut lowest, Some(700)));
-    }
 }

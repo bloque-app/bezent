@@ -16,7 +16,8 @@
 //!
 //! The file holds the time of the beat in seconds since the Unix epoch, and nothing else, and the age
 //! is read from that content, not from the file's modification time (which a copy, a restore or a
-//! volume can change). A beat is written to a temporary file beside it and renamed over it, so the
+//! volume can change). A beat is written to a temporary file beside it (a name of its own, so beats
+//! from two threads do not meet) and renamed over it, so the
 //! check sees the old beat or the new one, never half of one. A beat dated more than [`SKEW`] ahead of
 //! the clock that reads it (a clock that stepped, a file from elsewhere) counts as stale, as does a file
 //! that does not hold a time. The service removes the file at start ([`Heartbeat::reset`]), so a file
@@ -28,12 +29,15 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The longest a `health` command may take (the ECS container health check's own bound is set in the
 /// task definition; this is the one the commands keep to).
 pub const BUDGET: Duration = Duration::from_secs(5);
+
+/// Makes the temporary names of concurrent beats (two warm-up watchers beat at once) differ.
+static TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
 /// How far ahead of the reading clock a beat may be dated and still count: clocks differ a little
 /// between a writer and a reader. Beyond it, the beat is stale.
@@ -115,9 +119,24 @@ impl Heartbeat {
         Self::new(path.map_or_else(|| Self::default_path(service), Path::to_path_buf))
     }
 
-    /// Removes an earlier run's file. Call it at start, before the first beat. A file that is not
-    /// there is not an error.
+    /// Removes an earlier run's file, and any temporary file a beat of it left. Call it at start,
+    /// before the first beat. A file that is not there is not an error.
     pub fn reset(&self) -> io::Result<()> {
+        if let (Some(dir), Some(name)) = (self.path.parent(), self.path.file_name()) {
+            let prefix = format!("{}.", name.to_string_lossy());
+            let dir = if dir.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                dir
+            };
+            // A directory that cannot be listed is the removal's to report, below.
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let file = entry.file_name().to_string_lossy().into_owned();
+                if file.starts_with(&prefix) && file.ends_with(".tmp") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
         match std::fs::remove_file(&self.path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -135,12 +154,18 @@ impl Heartbeat {
     pub fn beat_at(&self, when: SystemTime) -> io::Result<()> {
         let secs = when.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let mut name = self.path.file_name().unwrap_or_default().to_owned();
-        name.push(".tmp");
+        name.push(format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            TEMPORARY.fetch_add(1, Ordering::Relaxed)
+        ));
         let temp = self.path.with_file_name(name);
-        std::fs::write(&temp, format!("{secs}\n"))?;
-        std::fs::rename(&temp, &self.path).inspect_err(|_| {
+        let written = std::fs::write(&temp, format!("{secs}\n"))
+            .and_then(|()| std::fs::rename(&temp, &self.path));
+        if written.is_err() {
             let _ = std::fs::remove_file(&temp);
-        })
+        }
+        written
     }
 
     /// [`Heartbeat::beat`] that tells the caller what to log: the first failure, and the recovery.

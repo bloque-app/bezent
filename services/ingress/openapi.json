@@ -14,7 +14,7 @@
         "tags": [
           "service"
         ],
-        "summary": "Liveness and the store's readiness. A pool that is saturated (`PoolTimedOut`) answers 200\n`busy`: the instance is alive and loaded, which is not a reason to replace it.",
+        "summary": "Liveness and the store's readiness.",
         "operationId": "health",
         "responses": {
           "200": {
@@ -1439,7 +1439,7 @@
         "properties": {
           "status": {
             "type": "string",
-            "description": "`ok` when the store answers; `busy` when every store connection is in use (alive, loaded)."
+            "description": "`ok` when the store answers; `busy` when every store connection is in use but the store answered in the last minute."
           }
         }
       },

@@ -69,7 +69,12 @@ fn a_beat_leaves_no_temporary_file_and_replaces_the_last() {
     let hb = Heartbeat::new(&path);
     hb.beat().unwrap();
     hb.beat().unwrap();
-    assert!(!path.with_file_name("atomic.tmp").exists());
+    let left: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("atomic."))
+        .collect();
+    assert!(left.is_empty());
     assert_eq!(hb.check(Duration::from_secs(30)), Ok(()));
 }
 
@@ -127,4 +132,41 @@ fn the_default_path_names_the_service_and_the_limit_is_three_intervals_and_a_pas
         max_age(Duration::from_secs(10), Duration::from_secs(60)),
         Duration::from_secs(90)
     );
+}
+
+#[test]
+fn concurrent_beats_all_land_and_leave_no_temporary_file() {
+    let path = temp("concurrent");
+    let hb = std::sync::Arc::new(Heartbeat::new(&path));
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let hb = hb.clone();
+            std::thread::spawn(move || {
+                for _ in 0..100 {
+                    hb.beat().unwrap();
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    assert_eq!(hb.check(Duration::from_secs(30)), Ok(()));
+    let left = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("concurrent."))
+        .count();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn reset_removes_the_temporary_files_a_beat_left() {
+    let path = temp("leftover");
+    std::fs::write(path.with_file_name("leftover.1.2.tmp"), "x").unwrap();
+    let hb = Heartbeat::new(&path);
+    hb.beat().unwrap();
+    hb.reset().unwrap();
+    assert!(!path.exists());
+    assert!(!path.with_file_name("leftover.1.2.tmp").exists());
 }

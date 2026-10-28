@@ -68,7 +68,7 @@ fn healthy_needs_a_fresh_beat_and_the_socket() {
     let _listener = UnixListener::bind(d.join("s.sock")).unwrap();
     let (ok, said, took) = run(&file);
     assert!(ok, "{said}");
-    assert!(took < Duration::from_secs(5), "{took:?}");
+    assert!(took < bezent_health::BUDGET, "{took:?}");
     assert_eq!(said.trim(), "bezent-signer: healthy");
 }
 
@@ -86,7 +86,7 @@ fn a_stale_beat_is_not_healthy() {
     let (ok, said, took) = run(&file);
     assert!(!ok);
     // The unhealthy answer comes within the bound too.
-    assert!(took < Duration::from_secs(5), "{took:?}");
+    assert!(took < bezent_health::BUDGET, "{took:?}");
     assert!(said.contains("unhealthy"), "{said}");
 }
 
@@ -110,6 +110,6 @@ fn an_unreadable_configuration_is_not_healthy_and_prints_nothing_of_it() {
     assert!(!said.contains("hunter2"), "{said}");
     let (ok, said, took) = run(&d.join("missing.json"));
     assert!(!ok);
-    assert!(took < Duration::from_secs(5), "{took:?}");
+    assert!(took < bezent_health::BUDGET, "{took:?}");
     assert!(!said.contains("missing"), "{said}");
 }

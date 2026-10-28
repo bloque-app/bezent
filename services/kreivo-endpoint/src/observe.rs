@@ -40,6 +40,9 @@ use sqlx::PgPool;
 use crate::chain::{BlockRef, Chain, ChainError, ancestry};
 use crate::kreivo::{self, AccountId32, Backend, ContractEvent, Payout};
 
+/// How many headers a walk reads between two calls of its `progress` callback.
+pub const WALK_PROGRESS_EVERY: u64 = 256;
+
 /// One observation to record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewObservation {
@@ -224,6 +227,19 @@ impl<C: Chain> Follower<'_, C> {
         finalized: &BlockRef,
         number: u64,
     ) -> Result<Result<[u8; 32], ChainError>, sqlx::Error> {
+        self.anchor_with(finalized, number, &mut || {}).await
+    }
+
+    /// [`Follower::anchor`] that calls `progress` every [`WALK_PROGRESS_EVERY`] headers it walks: a
+    /// walk over a long backlog can take minutes, and a caller that watches it (the container's
+    /// health check, issue #61) hears that it moves.
+    pub async fn anchor_with(
+        &self,
+        finalized: &BlockRef,
+        number: u64,
+        progress: &mut (dyn FnMut() + Send),
+    ) -> Result<Result<[u8; 32], ChainError>, sqlx::Error> {
+        let mut headers = 0u64;
         let rung = self.rung.max(1);
         let above: Option<(i64, Vec<u8>)> = sqlx::query_as(
             "SELECT block_number, block_hash FROM observation_walk_anchors \
@@ -269,6 +285,10 @@ impl<C: Chain> Follower<'_, C> {
                 number: at.number - 1,
                 hash: header.parent,
             };
+            headers += 1;
+            if headers.is_multiple_of(WALK_PROGRESS_EVERY) {
+                progress();
+            }
         }
     }
 
@@ -314,6 +334,15 @@ impl<C: Chain> Follower<'_, C> {
     /// the start-up check holds each history source's `start_block` to. A first start walks the
     /// whole backlog to get it, which the follower would walk next anyway.
     pub async fn start_anchor(&self) -> Result<Result<[u8; 32], ChainError>, sqlx::Error> {
+        self.start_anchor_with(&mut || {}).await
+    }
+
+    /// [`Follower::start_anchor`], calling `progress` as the walk moves (see
+    /// [`Follower::anchor_with`]).
+    pub async fn start_anchor_with(
+        &self,
+        progress: &mut (dyn FnMut() + Send),
+    ) -> Result<Result<[u8; 32], ChainError>, sqlx::Error> {
         let finalized = match self.chain.finalized().await {
             Ok(f) => f,
             Err(e) => return Ok(Err(e)),
@@ -348,7 +377,8 @@ impl<C: Chain> Follower<'_, C> {
                 self.start_block, self.max_walk, finalized.number
             ))));
         }
-        self.anchor(&finalized, self.start_block).await
+        self.anchor_with(&finalized, self.start_block, progress)
+            .await
     }
 
     async fn gap(
