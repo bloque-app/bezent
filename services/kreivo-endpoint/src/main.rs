@@ -6,7 +6,12 @@
 //! ```text
 //! bezent-kreivo-endpoint <config.toml>           run
 //! bezent-kreivo-endpoint --check <config.toml>   check the configuration and the pinned chain spec, then exit
+//! bezent-kreivo-endpoint health [<config.toml>]  the container's health check (issue #61)
 //! ```
+//!
+//! `health` exits 0 only when the running endpoint's last pass reached the finalized head through the
+//! light client, recently (`health.rs`). It reads a liveness file the pass rewrites and opens no
+//! connection. The path defaults to the image's `/etc/bezent/kreivo-endpoint.toml`.
 //!
 //! At start-up, before anything is read or built (`AC-I4.1`): the pinned chain spec must describe
 //! the declared network, its relay chain spec the declared relay chain with the declared
@@ -26,11 +31,18 @@ const NAME: &str = "bezent-kreivo-endpoint";
 fn main() -> ExitCode {
     tracing_subscriber::fmt().with_target(false).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [cmd, rest @ ..] = args.as_slice()
+        && cmd == "health"
+        && rest.len() <= 1
+    {
+        let path = bezent_kreivo_endpoint::health::config_path(rest.first());
+        return bezent_health::report(NAME, bezent_kreivo_endpoint::health::check(&path));
+    }
     let (check, path) = match args.as_slice() {
         [flag, path] if flag == "--check" => (true, path),
         [path] if !path.starts_with('-') => (false, path),
         _ => {
-            eprintln!("usage: {NAME} [--check] <config.toml>");
+            eprintln!("usage: {NAME} [--check] <config.toml> | {NAME} health [<config.toml>]");
             return ExitCode::from(2);
         }
     };
@@ -245,6 +257,11 @@ mod run {
             max_walk: config.max_walk,
         };
 
+        // An earlier run's liveness file never passes for this run's (issue #61).
+        let heartbeat = bezent_kreivo_endpoint::health::heartbeat(&config);
+        heartbeat
+            .reset()
+            .map_err(|e| format!("cannot remove the liveness file: {}", e.kind()))?;
         let mut lied_seen = 0u64;
         let mut tick = tokio::time::interval(Duration::from_millis(config.poll_ms));
         loop {
@@ -255,8 +272,16 @@ mod run {
                 }
                 _ = tick.tick() => {}
             }
-            let result: Result<(), sqlx::Error> = async {
-                while let Step::Read { .. } = follower.step().await? {}
+            let result: Result<bool, sqlx::Error> = async {
+                // Caught up: the light client's finalized head is read, and every final block
+                // before it (issue #61).
+                let caught_up = loop {
+                    match follower.step().await? {
+                        Step::Read { .. } => {}
+                        Step::CaughtUp { .. } => break true,
+                        _ => break false,
+                    }
+                };
                 let counts = chain.history_counts();
                 let lied: u64 = counts.iter().map(|c| c.lied).sum();
                 if lied > lied_seen {
@@ -287,11 +312,18 @@ mod run {
                 }
                 submitter.resend().await?;
                 prover.step().await?;
-                Ok(())
+                Ok(caught_up)
             }
             .await;
-            if let Err(e) = result {
-                tracing::warn!(error = %e, "the store failed; trying again next cycle");
+            match result {
+                // Healthy: at the finalized head, and the store answered all the way through.
+                Ok(true) => {
+                    if let Err(e) = heartbeat.beat() {
+                        tracing::error!(error = %e.kind(), "the liveness file could not be written; `health` will report this endpoint unhealthy");
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(error = %e, "the store failed; trying again next cycle"),
             }
         }
     }

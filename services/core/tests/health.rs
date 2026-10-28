@@ -1,0 +1,116 @@
+// Copyright (c) 2026 Pagos Cube LLC
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! `bezent-core health` (issue #61), through the binary: healthy only while the running core's
+//! liveness file is fresh, and nothing secret on the one line it prints.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant, SystemTime};
+
+use bezent_core_service::Config;
+use bezent_core_service::health::{heartbeat, max_age};
+
+fn dir(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("bezent-core-health-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn write_config(dir: &Path, cycle_seconds: u64) -> PathBuf {
+    let file = dir.join("core.toml");
+    std::fs::write(
+        &file,
+        format!(
+            "database_url = \"postgres://core:hunter2@db/bezent\"\n\
+             cycle_seconds = {cycle_seconds}\n\
+             environment = \"test\"\n\
+             statement = \"disabled-test-only\"\n\
+             health_file = \"{}\"\n",
+            dir.join("alive").display()
+        ),
+    )
+    .unwrap();
+    file
+}
+
+fn run(config: &Path) -> (bool, String, Duration) {
+    let started = Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_bezent-core"))
+        .arg("health")
+        .arg(config)
+        .output()
+        .unwrap();
+    let took = started.elapsed();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), said, took)
+}
+
+#[test]
+fn no_heartbeat_is_not_healthy_a_fresh_one_is() {
+    let d = dir("fresh");
+    let file = write_config(&d, 5);
+    let config = Config::from_file(&file).unwrap();
+
+    let (ok, said, took) = run(&file);
+    assert!(!ok, "{said}");
+    assert!(took < Duration::from_secs(5));
+    assert_eq!(said.lines().count(), 1, "{said}");
+
+    heartbeat(&config).beat().unwrap();
+    let (ok, said, _) = run(&file);
+    assert!(ok, "{said}");
+    assert_eq!(said.trim(), "bezent-core: healthy");
+}
+
+#[test]
+fn a_heartbeat_older_than_the_cycle_allows_is_not_healthy() {
+    let d = dir("stale");
+    let file = write_config(&d, 5);
+    let config = Config::from_file(&file).unwrap();
+    heartbeat(&config).beat().unwrap();
+    let beat = std::fs::File::options()
+        .write(true)
+        .open(d.join("alive"))
+        .unwrap();
+    // Just inside the limit, then just past it.
+    beat.set_modified(SystemTime::now() - max_age(&config) + Duration::from_secs(20))
+        .unwrap();
+    assert!(run(&file).0);
+    beat.set_modified(SystemTime::now() - max_age(&config) - Duration::from_secs(20))
+        .unwrap();
+    let (ok, said, _) = run(&file);
+    assert!(!ok);
+    assert!(said.contains("unhealthy"), "{said}");
+}
+
+#[test]
+fn the_limit_follows_the_configured_cycle() {
+    let d = dir("cycle");
+    let slow = Config::from_file(&write_config(&d, 60)).unwrap();
+    let quick = Config::from_file(&write_config(&d, 5)).unwrap();
+    assert!(max_age(&slow) > max_age(&quick));
+}
+
+#[test]
+fn an_unreadable_configuration_is_not_healthy_and_prints_nothing_of_it() {
+    let d = dir("unreadable");
+    let file = d.join("core.toml");
+    std::fs::write(
+        &file,
+        "database_url = \"postgres://core:hunter2@db/bezent\"\ncycle_seconds = \"x\"\n",
+    )
+    .unwrap();
+    let (ok, said, _) = run(&file);
+    assert!(!ok);
+    assert!(
+        !said.contains("hunter2") && !said.contains("postgres"),
+        "{said}"
+    );
+    let (ok, said, _) = run(&d.join("missing.toml"));
+    assert!(!ok);
+    assert!(!said.contains("missing"), "{said}");
+}

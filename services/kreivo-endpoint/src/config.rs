@@ -133,6 +133,11 @@ pub struct Config {
     pub lane: LaneConfig,
     /// The signer link.
     pub signer: SignerConfig,
+    /// The liveness file the running endpoint rewrites after each pass that reached the head of the
+    /// network it observes and `bezent-kreivo-endpoint health` reads (issue #61). Left out,
+    /// `/tmp/bezent-kreivo-endpoint.health`; a task whose root file system is read-only names a writable path here.
+    #[serde(default)]
+    pub health_file: Option<PathBuf>,
 }
 
 /// The delivery key's signing lane (`REQ-EO-4`).

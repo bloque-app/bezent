@@ -17,6 +17,7 @@ name = "bezent-signer"
 path = "src/main.rs"
 
 [dependencies]
+bezent-health = { path = "../../crates/health" }
 bezent-store = { path = "../../crates/store" }
 sqlx.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "signal", "fs"] }

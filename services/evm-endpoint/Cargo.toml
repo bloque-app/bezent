@@ -17,6 +17,7 @@ name = "bezent-evm-endpoint"
 path = "src/main.rs"
 
 [dependencies]
+bezent-health = { path = "../../crates/health" }
 bezent-store = { path = "../../crates/store" }
 # The signer link's client, and the check of a returned or observed signature (F-005, AC-I1.2).
 # The endpoint holds no key: it never builds a key backend (REQ-AR-3).

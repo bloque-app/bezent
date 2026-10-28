@@ -6,6 +6,11 @@
 //! checks the configuration and the keys, prints the key ids and public keys, and exits. Keys are
 //! read from the file the configuration names, never from the environment (`REQ-KY-1`).
 //!
+//! `bezent-signer health [<config-path>]` is the container's health check (issue #61): exit 0 only
+//! when the running signer has reached its store recently and its socket is there. It reads the
+//! configuration and a liveness file, loads no key and connects to nothing (`health.rs`). The path
+//! defaults to the image's `/etc/bezent-signer/signer.json`.
+//!
 //! At start, before any key is read, the process forbids its own core dumps (`REQ-CU-1`). To
 //! serve, it refuses a caller that runs as its own user id (`REQ-CU-1`, `REQ-AR-3`), and a store
 //! login that can act as anything but `bezent_signer` (`REQ-AR-3`).
@@ -86,6 +91,17 @@ async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Resu
     // The login acts as bezent_signer, and can act as nothing else (REQ-AR-3).
     check_login(&pool).await?;
     let listener = link::bind(&config.socket).map_err(|e| e.to_string())?;
+    // Healthy from here: the login is checked and the socket bound (issue #61). An earlier run's
+    // liveness file is removed first.
+    let heartbeat = bezent_signer::health::heartbeat(&config);
+    heartbeat
+        .reset()
+        .map_err(|e| format!("cannot remove the liveness file: {}", e.kind()))?;
+    let pulse = tokio::spawn(bezent_signer::health::pulse(
+        pool.clone(),
+        heartbeat,
+        log.clone(),
+    ));
     log.line(format_args!(
         "{} serving {} with keys {:?}",
         env!("CARGO_PKG_VERSION"),
@@ -93,19 +109,29 @@ async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Resu
         backend
     ));
     let signer = Arc::new(Signer::new(pool, policy, backend, log));
-    tokio::select! {
+    let result = tokio::select! {
         served = link::serve(listener, callers, signer) => served.map_err(|e| e.to_string()),
         _ = tokio::signal::ctrl_c() => Ok(()),
-    }
+    };
+    pulse.abort();
+    result
 }
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    // Before anything is loaded: `health` touches no key, no KMS and no Vault (issue #61).
+    if let [cmd, rest @ ..] = args.as_slice()
+        && cmd == "health"
+        && rest.len() <= 1
+    {
+        let path = bezent_signer::health::config_path(rest.first());
+        return bezent_health::report(NAME, bezent_signer::health::check(&path));
+    }
     let (check, path) = match args.as_slice() {
         [flag, path] if flag == "--check" => (true, path),
         [path] => (false, path),
         _ => {
-            eprintln!("usage: {NAME} [--check] <config-path>");
+            eprintln!("usage: {NAME} [--check] <config-path> | {NAME} health [<config-path>]");
             return ExitCode::from(2);
         }
     };

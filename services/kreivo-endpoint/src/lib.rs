@@ -20,6 +20,7 @@
 
 pub mod chain;
 pub mod config;
+pub mod health;
 pub mod kreivo;
 pub mod network;
 pub mod observe;

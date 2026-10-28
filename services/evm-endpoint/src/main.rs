@@ -6,7 +6,12 @@
 //! ```text
 //! bezent-evm-endpoint <config.toml>           run
 //! bezent-evm-endpoint --check <config.toml>   check the configuration, then exit
+//! bezent-evm-endpoint health [<config.toml>]  the container's health check (issue #61)
 //! ```
+//!
+//! `health` exits 0 only when the running endpoint's last pass reached the final point both providers
+//! agree on, recently (`health.rs`). It reads a liveness file the pass rewrites and opens no
+//! connection. The path defaults to the image's `/etc/bezent/evm-endpoint.toml`.
 //!
 //! At start-up, before anything is read or built (`AC-I4.1`, `DEC-12`): both providers must serve
 //! the declared chain id, hold the pinned block at its pinned hash, and agree on the finalized head
@@ -29,11 +34,18 @@ const NAME: &str = "bezent-evm-endpoint";
 fn main() -> ExitCode {
     tracing_subscriber::fmt().with_target(false).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [cmd, rest @ ..] = args.as_slice()
+        && cmd == "health"
+        && rest.len() <= 1
+    {
+        let path = bezent_evm_endpoint::health::config_path(rest.first());
+        return bezent_health::report(NAME, bezent_evm_endpoint::health::check(&path));
+    }
     let (check, path) = match args.as_slice() {
         [flag, path] if flag == "--check" => (true, path),
         [path] if !path.starts_with('-') => (false, path),
         _ => {
-            eprintln!("usage: {NAME} [--check] <config.toml>");
+            eprintln!("usage: {NAME} [--check] <config.toml> | {NAME} health [<config.toml>]");
             return ExitCode::from(2);
         }
     };
@@ -181,6 +193,11 @@ async fn run(config: Config) -> Result<(), String> {
         contracts: checked.contracts,
     };
 
+    // An earlier run's liveness file never passes for this run's (issue #61).
+    let heartbeat = bezent_evm_endpoint::health::heartbeat(&config);
+    heartbeat
+        .reset()
+        .map_err(|e| format!("cannot remove the liveness file: {}", e.kind()))?;
     let mut tick = tokio::time::interval(Duration::from_millis(config.poll_ms));
     loop {
         tokio::select! {
@@ -190,17 +207,17 @@ async fn run(config: Config) -> Result<(), String> {
             }
             _ = tick.tick() => {}
         }
-        let result: Result<(), sqlx::Error> = async {
-            loop {
+        let result: Result<bool, sqlx::Error> = async {
+            let caught_up = loop {
                 match follower.step().await? {
                     Step::Read { .. } => continue,
-                    Step::CaughtUp { .. } => break,
+                    Step::CaughtUp { .. } => break true,
                     other => {
                         tracing::warn!(?other, "the follower stopped");
-                        break;
+                        break false;
                     }
                 }
-            }
+            };
             for id in submitter.orders_to_prepare().await? {
                 let outcome = submitter.prepare(id).await?;
                 tracing::info!(order = id, ?outcome, "prepared");
@@ -211,11 +228,19 @@ async fn run(config: Config) -> Result<(), String> {
             }
             submitter.resend().await?;
             prover.step().await?;
-            Ok(())
+            Ok(caught_up)
         }
         .await;
-        if let Err(e) = result {
-            tracing::warn!(error = %e, "the store failed; trying again next cycle");
+        match result {
+            // Healthy: at the final point both providers agree on, and the store answered all
+            // the way through (issue #61).
+            Ok(true) => {
+                if let Err(e) = heartbeat.beat() {
+                    tracing::error!(error = %e.kind(), "the liveness file could not be written; `health` will report this endpoint unhealthy");
+                }
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "the store failed; trying again next cycle"),
         }
     }
 }

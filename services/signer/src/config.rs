@@ -112,6 +112,11 @@ pub struct Config {
     /// The statement key: an ed25519 key that signs statement intents only (`REQ-PR-1`).
     #[serde(default)]
     pub statement_key: Option<String>,
+    /// The liveness file the running signer rewrites and `bezent-signer health` reads (issue #61).
+    /// Left out, `/tmp/bezent-signer.health`; a task whose root file system is read-only names a
+    /// writable path here.
+    #[serde(default)]
+    pub health_file: Option<PathBuf>,
 }
 
 /// A caller of the signer: its peer user id and the SHA-256 of its tokens (two while one rotates).
