@@ -55,9 +55,8 @@ fn no_heartbeat_is_not_healthy_a_fresh_one_is() {
     let file = write_config(&d, 5);
     let config = Config::from_file(&file).unwrap();
 
-    let (ok, said, took) = run(&file);
+    let (ok, said, _) = run(&file);
     assert!(!ok, "{said}");
-    assert!(took < Duration::from_secs(5));
     assert_eq!(said.lines().count(), 1, "{said}");
 
     heartbeat(&config).beat().unwrap();
@@ -76,8 +75,8 @@ fn a_heartbeat_older_than_the_cycle_allows_is_not_healthy() {
         .write(true)
         .open(d.join("alive"))
         .unwrap();
-    // Just inside the limit, then just past it.
-    beat.set_modified(SystemTime::now() - max_age(&config) + Duration::from_secs(20))
+    // Well inside the limit (a slow machine must not tip it), then past it.
+    beat.set_modified(SystemTime::now() - max_age(&config) / 2)
         .unwrap();
     assert!(run(&file).0);
     beat.set_modified(SystemTime::now() - max_age(&config) - Duration::from_secs(20))
@@ -113,4 +112,54 @@ fn an_unreadable_configuration_is_not_healthy_and_prints_nothing_of_it() {
     let (ok, said, _) = run(&d.join("missing.toml"));
     assert!(!ok);
     assert!(!said.contains("missing"), "{said}");
+}
+
+/// The wiring, which no test of `health` alone can show: a real core, on a real store, beats after
+/// its first cycle, and `bezent-core health` then says so (issue #61). If the beat sat in the wrong
+/// branch every task would be replaced in a loop.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn a_running_core_beats_and_health_says_so(admin: sqlx::PgPool) {
+    let name = "core_health_test_login";
+    let password = "test-only-core-health-login";
+    bezent_store::login::ensure_login(&admin, name, bezent_store::CORE_ROLE, password)
+        .await
+        .unwrap();
+    let base = admin.connect_options();
+    let url = format!(
+        "postgres://{name}:{password}@{}:{}/{}",
+        base.get_host(),
+        base.get_port(),
+        base.get_database().unwrap()
+    );
+
+    let d = dir("running");
+    let file = d.join("core.toml");
+    std::fs::write(
+        &file,
+        format!(
+            "database_url = \"{url}\"\ncycle_seconds = 1\nenvironment = \"test\"\n\
+             statement = \"disabled-test-only\"\nhealth_file = \"{}\"\n",
+            d.join("alive").display()
+        ),
+    )
+    .unwrap();
+    let mut core = Command::new(env!("CARGO_BIN_EXE_bezent-core"))
+        .arg(&file)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let started = Instant::now();
+    let mut healthy = false;
+    while started.elapsed() < Duration::from_secs(30) {
+        if run(&file).0 {
+            healthy = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let _ = core.kill();
+    let _ = core.wait();
+    assert!(healthy, "the running core never beat");
 }

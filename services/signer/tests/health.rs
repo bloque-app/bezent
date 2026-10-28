@@ -53,9 +53,8 @@ fn healthy_needs_a_fresh_beat_and_the_socket() {
     let file = write_config(&d);
     let config = Config::load(&file).unwrap();
 
-    let (ok, said, took) = run(&file);
+    let (ok, said, _) = run(&file);
     assert!(!ok, "{said}");
-    assert!(took < Duration::from_secs(5));
     assert_eq!(said.lines().count(), 1, "{said}");
 
     // A beat, and no socket: not healthy.

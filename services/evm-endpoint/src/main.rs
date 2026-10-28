@@ -195,9 +195,11 @@ async fn run(config: Config) -> Result<(), String> {
 
     // An earlier run's liveness file never passes for this run's (issue #61).
     let heartbeat = bezent_evm_endpoint::health::heartbeat(&config);
-    heartbeat
-        .reset()
-        .map_err(|e| format!("cannot remove the liveness file: {}", e.kind()))?;
+    if let Err(e) = heartbeat.reset() {
+        // Not fatal: a read-only file system must not keep a service from starting. A beat that
+        // cannot be written is logged, and `health` reports it.
+        tracing::warn!(error = %e.kind(), "the liveness file could not be removed; `health` may read an earlier run's");
+    }
     let mut tick = tokio::time::interval(Duration::from_millis(config.poll_ms));
     loop {
         tokio::select! {

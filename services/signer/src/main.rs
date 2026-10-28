@@ -94,9 +94,14 @@ async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Resu
     // Healthy from here: the login is checked and the socket bound (issue #61). An earlier run's
     // liveness file is removed first.
     let heartbeat = bezent_signer::health::heartbeat(&config);
-    heartbeat
-        .reset()
-        .map_err(|e| format!("cannot remove the liveness file: {}", e.kind()))?;
+    if let Err(e) = heartbeat.reset() {
+        // Not fatal: a read-only file system must not keep a service from starting. A beat that
+        // cannot be written is logged, and `health` reports it.
+        log.line(format_args!(
+            "health: the liveness file could not be removed ({})",
+            e.kind()
+        ));
+    }
     let pulse = tokio::spawn(bezent_signer::health::pulse(
         pool.clone(),
         heartbeat,
