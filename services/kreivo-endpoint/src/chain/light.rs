@@ -67,11 +67,11 @@ struct WarmUp {
 
 impl WarmUp {
     /// Whether `state` is a step forward: the first state with peers, a warp sync that reached a
-    /// higher block, or the sync that finished. A stalled chain (no peers, a warp sync that does not
-    /// advance) and a state that only changes the peer count are not.
+    /// higher block, or the sync that finished with peers. A stalled chain (no peers, a warp sync
+    /// that does not advance) and a state that only changes the peer count are not.
     fn advanced(&mut self, state: &smoldot_light::lifecycle_service::LifecycleState) -> bool {
         use smoldot_light::lifecycle_service::{Health, Phase};
-        if state.health != Health::Ok {
+        if state.health != Health::Ok || state.num_peers == 0 {
             return false;
         }
         match state.phase {
@@ -98,6 +98,9 @@ struct Pending {
 struct Inner {
     client: Mutex<Client>,
     chain: smoldot_light::ChainId,
+    /// The relay chain, whose warp sync is the long part of a first start: a parachain's own sync
+    /// service reports ready at once.
+    relay: Option<smoldot_light::ChainId>,
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, Pending>>,
     subscriptions: Mutex<HashMap<String, Notifications>>,
@@ -158,10 +161,17 @@ fn error_of(raw: &RawValue) -> RpcError {
 }
 
 impl LightRpc {
-    /// The light client's bootstrap state: the phase, the peers and the stall verdict, current
-    /// first and then at each change (the pinned smoldot fork's lifecycle service).
-    pub fn lifecycle(&self) -> smoldot_light::lifecycle_service::Subscription {
-        lock(&self.inner.client).lifecycle_state(self.inner.chain)
+    /// The light client's bootstrap state of the relay chain (when there is one) and of Kreivo: the
+    /// phase, the peers and the stall verdict, current first and then at each change (the pinned
+    /// smoldot fork's lifecycle service).
+    pub fn lifecycle(&self) -> Vec<smoldot_light::lifecycle_service::Subscription> {
+        let client = lock(&self.inner.client);
+        self.inner
+            .relay
+            .into_iter()
+            .chain([self.inner.chain])
+            .map(|id| client.lifecycle_state(id))
+            .collect()
     }
 
     /// Starts a light client for `chain_spec`, a parachain of `relay_chain_spec` when one is
@@ -207,6 +217,7 @@ impl LightRpc {
         let inner = Arc::new(Inner {
             client: Mutex::new(client),
             chain: added.chain_id,
+            relay,
             next_id: AtomicU64::new(1),
             pending: Mutex::default(),
             subscriptions: Mutex::default(),
@@ -683,22 +694,32 @@ impl LightChain {
         depth: u64,
         timeout: Duration,
         max_response: u32,
-        progress: impl Fn() + Send + 'static,
+        progress: impl Fn() + Send + Sync + 'static,
     ) -> ChainResult<LightChain> {
         let rpc = LightRpc::new(chain_spec, relay_chain_spec).map_err(unavailable)?;
-        let mut states = rpc.lifecycle();
-        let watcher = tokio::spawn(async move {
-            let mut seen = WarmUp::default();
-            while let Some(state) = states.next().await {
-                if seen.advanced(&state) {
-                    progress();
-                }
-            }
-        });
+        // Either chain moving forward is progress: the relay chain's warp sync is the long part.
+        let progress = Arc::new(progress);
+        let watchers: Vec<_> = rpc
+            .lifecycle()
+            .into_iter()
+            .map(|mut states| {
+                let progress = progress.clone();
+                tokio::spawn(async move {
+                    let mut seen = WarmUp::default();
+                    while let Some(state) = states.next().await {
+                        if seen.advanced(&state) {
+                            progress();
+                        }
+                    }
+                })
+            })
+            .collect();
         let rpc_client = RpcClient::new(rpc);
         let client = OnlineClient::<PolkadotConfig>::from_rpc_client(rpc_client.clone()).await;
         // The warm-up is over, or failed: nothing is counted after it.
-        watcher.abort();
+        for watcher in watchers {
+            watcher.abort();
+        }
         let client = client.map_err(unavailable)?;
         Ok(LightChain {
             client,
@@ -1600,6 +1621,16 @@ mod warm_up_tests {
         assert!(!w.advanced(&state(Phase::Syncing { at: 5, target: 9 }, stalled)));
         assert!(!w.advanced(&state(Phase::Connecting, stalled)));
         assert!(!w.advanced(&state(Phase::Ready, stalled)));
+    }
+
+    #[test]
+    fn nothing_counts_without_peers() {
+        let mut w = WarmUp::default();
+        let mut s = state(Phase::Ready, Health::Ok);
+        s.num_peers = 0;
+        assert!(!w.advanced(&s));
+        s.num_peers = 2;
+        assert!(w.advanced(&s));
     }
 
     #[test]

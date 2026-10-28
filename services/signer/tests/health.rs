@@ -66,8 +66,9 @@ fn healthy_needs_a_fresh_beat_and_the_socket() {
 
     // Both: healthy, with no key file anywhere.
     let _listener = UnixListener::bind(d.join("s.sock")).unwrap();
-    let (ok, said, _) = run(&file);
+    let (ok, said, took) = run(&file);
     assert!(ok, "{said}");
+    assert!(took < Duration::from_secs(5), "{took:?}");
     assert_eq!(said.trim(), "bezent-signer: healthy");
 }
 
@@ -107,7 +108,8 @@ fn an_unreadable_configuration_is_not_healthy_and_prints_nothing_of_it() {
     let (ok, said, _) = run(&file);
     assert!(!ok);
     assert!(!said.contains("hunter2"), "{said}");
-    let (ok, said, _) = run(&d.join("missing.json"));
+    let (ok, said, took) = run(&d.join("missing.json"));
     assert!(!ok);
+    assert!(took < Duration::from_secs(5), "{took:?}");
     assert!(!said.contains("missing"), "{said}");
 }

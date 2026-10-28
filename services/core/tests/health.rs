@@ -60,8 +60,9 @@ fn no_heartbeat_is_not_healthy_a_fresh_one_is() {
     assert_eq!(said.lines().count(), 1, "{said}");
 
     heartbeat(&config).beat().unwrap();
-    let (ok, said, _) = run(&file);
+    let (ok, said, took) = run(&file);
     assert!(ok, "{said}");
+    assert!(took < Duration::from_secs(5), "{took:?}");
     assert_eq!(said.trim(), "bezent-core: healthy");
 }
 
@@ -107,8 +108,9 @@ fn an_unreadable_configuration_is_not_healthy_and_prints_nothing_of_it() {
         !said.contains("hunter2") && !said.contains("postgres"),
         "{said}"
     );
-    let (ok, said, _) = run(&d.join("missing.toml"));
+    let (ok, said, took) = run(&d.join("missing.toml"));
     assert!(!ok);
+    assert!(took < Duration::from_secs(5), "{took:?}");
     assert!(!said.contains("missing"), "{said}");
 }
 

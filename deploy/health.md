@@ -39,28 +39,35 @@ beating and the file goes stale. A stuck endpoint needs the alarm, not restarts:
 provider disagreement is not mended by replacing the task, so the remedy is to act on the alert, and the
 task is replaced meanwhile only because its check fails.
 
-## The light client's warm-up (kreivo-endpoint)
+## The first start of the kreivo-endpoint
 
-The first sync of the light client can outlast ECS's longest `startPeriod` (300 s). The endpoint
-watches the light client's own bootstrap state and beats when it moves forward: the warp sync reached
-a higher block, the first state with peers, or the sync finished. A stalled bootstrap (no peers, or a
-warp sync that has not advanced for 45 s) and one that stands still do not beat, so a warm-up with no
-progress for the usual window (three poll intervals plus 120 s) goes stale and the task is replaced.
-The evm-endpoint has no comparable warm-up: its start-up is a handful of HTTP calls to the providers,
-each with its own timeout, and no multi-minute sync.
+A first start can outlast ECS's longest `startPeriod` (300 s), in two stretches, and both beat while they
+make progress.
 
-What is not covered: after the light client is ready, the start-up checks of the chain and contract and
-the walk to `start_block` (`start_anchor`, over the archive sources) run before the endpoint's loop and
-do not beat. `startPeriod` must cover them, so size `start_block` and `max_walk` such that a first start
-fits in it, or enable the check after the first catch-up. A restart resumes from the anchors the store
-keeps.
+- **The light client's first sync.** Kreivo is a parachain: its own sync reports ready at once, and the
+  long part is the relay chain's warp sync. The endpoint watches the light client's bootstrap state of
+  both chains and beats when either moves forward: the first state with peers, a warp sync that reached a
+  higher block, the sync that finished with peers. A bootstrap without peers, a stalled one (no peers, or
+  a warp sync that has not advanced for 45 s) and one that stands still do not beat.
+- **The walk from the finalized head to `start_block`.** The walk keeps an anchor every few blocks in the
+  store as it goes, so every 5 s the endpoint reads the lowest anchor stored, and beats when it went
+  down (the query answering also shows the store is up). A walk that stands still does not beat.
+
+A warm-up with no progress for the usual window (three poll intervals plus 120 s) goes stale and the
+task is replaced. The evm-endpoint has no comparable warm-up: its start-up is a handful of HTTP calls to
+the providers, each with its own timeout, and no multi-minute sync.
+
+What is not covered: the start-up checks between the two (the chain and the contract) and the history
+sources' check after the walk (`check_history`, over the archive nodes) do not beat. They are bounded
+by their own timeouts, but `startPeriod` should leave room for them.
 
 ## What the checks do not cover
 
 - **The signer**: healthy means its store answers and its socket exists. It does not mean the keys sign,
   or that a caller can complete a round trip.
 - **The ingress** ignores the webhook dispatcher: a dispatcher that is stuck or failing does not make
-  `/health` fail.
+  `/health` fail. And `busy` (every store connection in use) cannot tell load from a store that hangs
+  with all the connections checked out.
 - **A poisoned row** (one an endpoint or the core fails on every pass) makes the task fail its check and
   be replaced, and the replacement fails on the same row: a restart loop. The remedy is to find and fix
   the row on the alert, not to restart.
@@ -102,5 +109,4 @@ Pass the path your task actually mounts; the ones above are the images' defaults
 "/usr/local/bin/bezent-<service>", "health"]` alone uses them. Suggested timings: `interval` 30,
 `timeout` 5, `retries` 3.
 
-`startPeriod` is bounded by ECS at 300 s. See "The light client's warm-up" for what it has to cover on the
-Kreivo endpoint's first start.
+`startPeriod` is bounded by ECS at 300 s. See "The first start of the kreivo-endpoint" for what it has to cover there.

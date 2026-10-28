@@ -30,8 +30,22 @@ use bezent_signer::signer::{Signer, check_login, pool_options};
 
 const NAME: &str = "bezent-signer";
 
-async fn load(path: &Path) -> Result<(Config, Custody, Policy), String> {
+/// Reads the configuration and sets up the keys. `serve` is false for `--check`, which must not
+/// touch a running signer's liveness file.
+async fn load(path: &Path, log: &Log, serve: bool) -> Result<(Config, Custody, Policy), String> {
     let config = Config::load(path).map_err(|e| e.to_string())?;
+    if serve {
+        // An earlier run's liveness file never passes for this run's (issue #61): removed right
+        // after the configuration is parsed, before the keys, KMS, Vault or the store. Not fatal:
+        // a read-only file system must not keep a service from starting. A beat that cannot be
+        // written is logged, and `health` reports it.
+        if let Err(e) = bezent_signer::health::heartbeat(&config).reset() {
+            log.line(format_args!(
+                "health: the liveness file could not be removed ({})",
+                e.kind()
+            ));
+        }
+    }
     let backend = match &config.keys {
         KeySource::File { path } => {
             Custody::File(FileBackend::load(path).map_err(|e| e.to_string())?)
@@ -63,16 +77,7 @@ async fn load(path: &Path) -> Result<(Config, Custody, Policy), String> {
 }
 
 async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Result<(), String> {
-    // An earlier run's liveness file never passes for this run's (issue #61): removed before any
-    // start-up check or connection. Not fatal: a read-only file system must not keep a service from
-    // starting. A beat that cannot be written is logged, and `health` reports it.
     let heartbeat = bezent_signer::health::heartbeat(&config);
-    if let Err(e) = heartbeat.reset() {
-        log.line(format_args!(
-            "health: the liveness file could not be removed ({})",
-            e.kind()
-        ));
-    }
     let url_file = config
         .database_url_file
         .as_ref()
@@ -155,7 +160,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (config, backend, policy) = match runtime.block_on(load(Path::new(path))) {
+    let (config, backend, policy) = match runtime.block_on(load(Path::new(path), &log, !check)) {
         Ok(loaded) => loaded,
         Err(e) => {
             log.line(format_args!("{e}"));
