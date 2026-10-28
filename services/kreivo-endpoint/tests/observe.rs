@@ -337,6 +337,22 @@ async fn issue_49_a_walk_that_fails_late_keeps_its_anchors_and_resumes_from_them
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_61_a_walk_tells_its_caller_it_moves(pool: PgPoolOptions, connect: PgConnectOptions) {
+    let f = Fixture::new(pool, connect).await;
+    f.chain.advance(600);
+    let mut moved = 0u32;
+    let hash = f
+        .follower()
+        .start_anchor_with(&mut || moved += 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(hash, f.chain.block(1).hash);
+    // About 600 headers walked, a call every 256.
+    assert_eq!(moved, 2);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn issue_49_start_block_is_anchored_to_the_finalized_chain_once(
     pool: PgPoolOptions,
     connect: PgConnectOptions,

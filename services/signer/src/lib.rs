@@ -32,6 +32,7 @@ pub mod compromise;
 pub mod config;
 pub mod custody;
 pub mod delivery;
+pub mod health;
 pub mod intent;
 pub mod keys;
 pub mod kms;

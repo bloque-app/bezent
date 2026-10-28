@@ -6,6 +6,11 @@
 //! checks the configuration and the keys, prints the key ids and public keys, and exits. Keys are
 //! read from the file the configuration names, never from the environment (`REQ-KY-1`).
 //!
+//! `bezent-signer health [<config-path>]` is the container's health check (issue #61): exit 0 only
+//! when the running signer has reached its store recently and its socket is there. It reads the
+//! configuration and a liveness file, loads no key and connects to nothing (`health.rs`). The path
+//! defaults to the image's `/etc/bezent-signer/signer.json`.
+//!
 //! At start, before any key is read, the process forbids its own core dumps (`REQ-CU-1`). To
 //! serve, it refuses a caller that runs as its own user id (`REQ-CU-1`, `REQ-AR-3`), and a store
 //! login that can act as anything but `bezent_signer` (`REQ-AR-3`).
@@ -25,8 +30,22 @@ use bezent_signer::signer::{Signer, check_login, pool_options};
 
 const NAME: &str = "bezent-signer";
 
-async fn load(path: &Path) -> Result<(Config, Custody, Policy), String> {
+/// Reads the configuration and sets up the keys. `serve` is false for `--check`, which must not
+/// touch a running signer's liveness file.
+async fn load(path: &Path, log: &Log, serve: bool) -> Result<(Config, Custody, Policy), String> {
     let config = Config::load(path).map_err(|e| e.to_string())?;
+    if serve {
+        // An earlier run's liveness file never passes for this run's (issue #61): removed right
+        // after the configuration is parsed, before the keys, KMS, Vault or the store. Not fatal:
+        // a read-only file system must not keep a service from starting. A beat that cannot be
+        // written is logged, and `health` reports it.
+        if let Err(e) = bezent_signer::health::heartbeat(&config).reset() {
+            log.line(format_args!(
+                "health: the liveness file could not be removed ({})",
+                e.kind()
+            ));
+        }
+    }
     let backend = match &config.keys {
         KeySource::File { path } => {
             Custody::File(FileBackend::load(path).map_err(|e| e.to_string())?)
@@ -58,6 +77,7 @@ async fn load(path: &Path) -> Result<(Config, Custody, Policy), String> {
 }
 
 async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Result<(), String> {
+    let heartbeat = bezent_signer::health::heartbeat(&config);
     let url_file = config
         .database_url_file
         .as_ref()
@@ -86,6 +106,12 @@ async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Resu
     // The login acts as bezent_signer, and can act as nothing else (REQ-AR-3).
     check_login(&pool).await?;
     let listener = link::bind(&config.socket).map_err(|e| e.to_string())?;
+    // Healthy from here: the login is checked and the socket bound (issue #61).
+    let pulse = tokio::spawn(bezent_signer::health::pulse(
+        pool.clone(),
+        heartbeat,
+        log.clone(),
+    ));
     log.line(format_args!(
         "{} serving {} with keys {:?}",
         env!("CARGO_PKG_VERSION"),
@@ -93,19 +119,29 @@ async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Resu
         backend
     ));
     let signer = Arc::new(Signer::new(pool, policy, backend, log));
-    tokio::select! {
+    let result = tokio::select! {
         served = link::serve(listener, callers, signer) => served.map_err(|e| e.to_string()),
         _ = tokio::signal::ctrl_c() => Ok(()),
-    }
+    };
+    pulse.abort();
+    result
 }
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    // Before anything is loaded: `health` touches no key, no KMS and no Vault (issue #61).
+    if let [cmd, rest @ ..] = args.as_slice()
+        && cmd == "health"
+        && rest.len() <= 1
+    {
+        let path = bezent_signer::health::config_path(rest.first());
+        return bezent_health::report(NAME, bezent_signer::health::check(&path));
+    }
     let (check, path) = match args.as_slice() {
         [flag, path] if flag == "--check" => (true, path),
         [path] => (false, path),
         _ => {
-            eprintln!("usage: {NAME} [--check] <config-path>");
+            eprintln!("usage: {NAME} [--check] <config-path> | {NAME} health [<config-path>]");
             return ExitCode::from(2);
         }
     };
@@ -124,7 +160,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (config, backend, policy) = match runtime.block_on(load(Path::new(path))) {
+    let (config, backend, policy) = match runtime.block_on(load(Path::new(path), &log, !check)) {
         Ok(loaded) => loaded,
         Err(e) => {
             log.line(format_args!("{e}"));

@@ -7,14 +7,17 @@ use crate::error::ApiError;
 use crate::webhooks::{self, Dispatcher, SealingKey, Webhooks};
 use crate::{intake, query};
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Request};
+use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Request, State};
 use axum::http::request::Parts;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{get, post, put};
 use serde::de::DeserializeOwned;
 use sqlx::PgPool;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
@@ -37,6 +40,21 @@ pub struct App {
     permits: Arc<Semaphore>,
     log_page: i64,
     webhooks: Option<Arc<Webhooks>>,
+    /// When the store last answered (seconds since the epoch): a `/health` query, or a request that
+    /// succeeded. `/health` may call a saturated pool alive only while this is recent (issue #61).
+    store_answered: Arc<AtomicU64>,
+}
+
+/// How long ago the store may last have answered for a saturated pool to still count as alive.
+pub const BUSY_WINDOW: Duration = Duration::from_secs(60);
+
+/// The longest one statement may run on the ingress's connections.
+const STATEMENT_TIMEOUT: &str = "30s";
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 impl App {
@@ -47,7 +65,26 @@ impl App {
             permits: Arc::new(Semaphore::new(limits.max_in_flight)),
             log_page: limits.log_page.max(1),
             webhooks: None,
+            store_answered: Arc::new(AtomicU64::new(now_secs())),
         }
+    }
+
+    /// Notes that the store answered just now.
+    pub(crate) fn store_answered(&self) {
+        self.store_answered.store(now_secs(), Ordering::Relaxed);
+    }
+
+    /// Whether the store answered within [`BUSY_WINDOW`].
+    pub(crate) fn store_answered_recently(&self) -> bool {
+        let at = self.store_answered.load(Ordering::Relaxed);
+        now_secs().saturating_sub(at) <= BUSY_WINDOW.as_secs()
+    }
+
+    /// For tests: dates the store's last answer `ago` back.
+    #[doc(hidden)]
+    pub fn set_store_answered_ago(&self, ago: Duration) {
+        self.store_answered
+            .store(now_secs().saturating_sub(ago.as_secs()), Ordering::Relaxed);
     }
 
     /// The service with webhooks (`REQ-ST-5`): it takes registrations and hands out signing
@@ -145,7 +182,18 @@ pub fn router(app: App) -> Router {
         )
         .route("/v0/webhooks/deliveries", get(webhooks::api::deliveries))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
+        .layer(middleware::from_fn_with_state(app.clone(), note_answers))
         .with_state(app)
+}
+
+/// A request that succeeded had the store answer it: noted for `/health` (issue #61).
+async fn note_answers(State(app): State<App>, request: Request, next: Next) -> Response {
+    let health = request.uri().path() == "/health";
+    let response = next.run(request).await;
+    if !health && response.status().is_success() {
+        app.store_answered();
+    }
+    response
 }
 
 /// Connects to the store, checks it answers, and checks the login is a member of `bezent_ingress`
@@ -155,7 +203,16 @@ pub async fn connect(config: &Config) -> Result<PgPool, String> {
     let pool = bezent_store::tls::connect(
         bezent_store::login::pool_options()
             .max_connections(config.max_connections)
-            .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms)),
+            .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
+            // A statement that hangs ends, and frees its connection (issue #61).
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query(&format!("SET statement_timeout = '{STATEMENT_TIMEOUT}'"))
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            }),
         &config.database_url,
     )
     .await

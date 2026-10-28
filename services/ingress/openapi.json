@@ -1439,7 +1439,7 @@
         "properties": {
           "status": {
             "type": "string",
-            "description": "`ok` when the store answers."
+            "description": "`ok` when the store answers; `busy` when every store connection is in use but the store answered in the last minute."
           }
         }
       },

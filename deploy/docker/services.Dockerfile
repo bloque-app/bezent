@@ -32,6 +32,9 @@
 # token, keys) are mounted too (`REQ-KY-1`). The signer reads test keys only, from a mounted file.
 # No image carries a database CA bundle (a deployment specific): the deployment mounts it and names it in the
 # database URL (`sslrootcert`; crates/store/README.md, "Connecting over TLS").
+#
+# Container health checks (issue #61): every service binary has a `health` subcommand, so no shell or curl is
+# needed; deploy/health.md gives each image's ECS `healthCheck.command`.
 
 ARG RUST_IMAGE=docker.io/library/rust:1.99.0-slim-bookworm@sha256:2c3a22f0a5533ea2dd5a16627bc841228151faa2d4de2644ac9987e4a2f1f2fa
 ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f

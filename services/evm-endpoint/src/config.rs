@@ -160,6 +160,11 @@ pub struct Config {
     pub gas: GasConfig,
     /// The signer link.
     pub signer: SignerConfig,
+    /// The liveness file the running endpoint rewrites after each pass that reached the head of the
+    /// network it observes and `bezent-evm-endpoint health` reads (issue #61). Left out,
+    /// `/tmp/bezent-evm-endpoint.health`; a task whose root file system is read-only names a writable path here.
+    #[serde(default)]
+    pub health_file: Option<PathBuf>,
 }
 
 fn default_role() -> String {
@@ -213,6 +218,9 @@ impl Config {
             };
             resolve(&mut c.database_url_file);
             resolve(&mut c.signer.token_file);
+            if let Some(p) = c.health_file.as_mut() {
+                resolve(p);
+            }
             for p in &mut c.providers {
                 if let Some(f) = &mut p.url_file {
                     resolve(f);

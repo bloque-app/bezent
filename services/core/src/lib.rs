@@ -21,6 +21,7 @@
 pub mod config;
 pub mod cutoff;
 pub mod engine;
+pub mod health;
 pub mod refs;
 pub mod reserve;
 pub mod store;

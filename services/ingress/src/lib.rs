@@ -31,6 +31,7 @@ mod app;
 mod auth;
 pub mod config;
 mod error;
+pub mod health;
 mod intake;
 pub mod openapi;
 mod query;

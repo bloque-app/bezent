@@ -13,6 +13,10 @@
 //!   test statement key are refused, at start and every cycle, while the store declares any
 //!   production network (PR #50 re-check M-1; the sidecar's rule, `bezent_store::environment`).
 //! - `bezent-core --check <config-path>` reads and checks the configuration, and exits.
+//! - `bezent-core health [<config-path>]` is the container's health check: exit 0 only when the
+//!   running core has completed a cycle recently (`health.rs`; issue #61). It reads the liveness
+//!   file the cycle rewrites, and opens no connection. The path defaults to the image's
+//!   `/etc/bezent/core.toml`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -23,6 +27,8 @@ use bezent_core_service::reserve::readings::Recorded;
 use bezent_core_service::reserve::s3::{AwsClient, S3Store, StatementSink};
 use bezent_core_service::reserve::statement::{DirectoryStore, SignerProcess, Statements};
 
+use bezent_health::Beat;
+
 const NAME: &str = "bezent-core";
 
 /// The most one cycle's statement publishing may take (PR #50 review S1).
@@ -32,10 +38,14 @@ const STATEMENT_BUDGET: Duration = Duration::from_secs(60);
 async fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let (check, path) = match args.as_slice() {
+        [cmd] if cmd == "health" => return health(None),
+        [cmd, path] if cmd == "health" => return health(Some(path)),
         [flag, path] if flag == "--check" => (true, path),
         [path] => (false, path),
         _ => {
-            eprintln!("usage: {NAME} <config-path> | {NAME} --check <config-path>");
+            eprintln!(
+                "usage: {NAME} <config-path> | {NAME} --check <config-path> | {NAME} health [<config-path>]"
+            );
             return ExitCode::from(2);
         }
     };
@@ -52,6 +62,12 @@ async fn main() -> ExitCode {
     }
 
     tracing_subscriber::fmt().with_target(false).init();
+    // An earlier run's liveness file never passes for this run's (issue #61): removed before any
+    // start-up check or connection, so a file left by a run that is being replaced is gone first.
+    let heartbeat = bezent_core_service::health::heartbeat(&config);
+    if let Err(e) = heartbeat.reset() {
+        tracing::warn!(error = %e.kind(), "the liveness file could not be removed; `health` may read an earlier run's");
+    }
     let pool = match bezent_store::tls::connect(
         bezent_store::login::pool_options().max_connections(config.max_connections),
         &config.database_url,
@@ -149,17 +165,38 @@ async fn main() -> ExitCode {
                     tracing::error!(error = %e, "stopping: the store no longer holds only test networks");
                     return ExitCode::from(2);
                 }
-                match core.cycle(chrono::Utc::now()).await {
-                    Ok(report) => tracing::debug!(?report, "cycle"),
-                    Err(e) => tracing::warn!(error = %e, "cycle failed; the next one starts from the store"),
-                }
-                match check.tick(&SystemClock).await {
+                let cycle_ok = match core.cycle(chrono::Utc::now()).await {
+                    Ok(report) => {
+                        tracing::debug!(?report, "cycle");
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "cycle failed; the next one starts from the store");
+                        false
+                    }
+                };
+                let check_ok = match check.tick(&SystemClock).await {
                     Ok(evaluations) => {
                         for e in &evaluations {
                             tracing::debug!(asset = %e.asset, outcome = ?e.outcome, "reserve check");
                         }
+                        true
                     }
-                    Err(e) => tracing::warn!(error = %e, "NFR-5: the reserve check could not list the assets; tried again next cycle"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "NFR-5: the reserve check could not list the assets; tried again next cycle");
+                        false
+                    }
+                };
+                // Healthy: the store answered the cycle and the check (issue #61). The beat comes
+                // before the statements, whose own budget the freshness limit allows for.
+                if cycle_ok && check_ok {
+                    match heartbeat.try_beat() {
+                        Beat::Failed { kind, first: true } => {
+                            tracing::error!(error = %kind, "the liveness file could not be written; `health` will report this core unhealthy")
+                        }
+                        Beat::Recovered => tracing::info!("the liveness file is written again"),
+                        _ => {}
+                    }
                 }
                 if let Some(statements) = &statements {
                     // Bounded: a signer or a store that never answers does not freeze the cycle
@@ -185,6 +222,12 @@ async fn main() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// `bezent-core health [<config-path>]`: the container's health check (issue #61).
+fn health(path: Option<&std::ffi::OsString>) -> ExitCode {
+    let path = bezent_core_service::health::config_path(path);
+    bezent_health::report(NAME, bezent_core_service::health::check(&path))
 }
 
 /// Confirms `config` against the networks the store declares ([`bezent_store::environment`], the

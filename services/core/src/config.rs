@@ -43,6 +43,11 @@ pub struct Config {
     /// Required. Only a test deployment may leave the statement out, and only by saying so:
     /// `statement = "disabled-test-only"` with `environment = "test"` (PR #50 review M2).
     pub statement: Option<Statement>,
+    /// The liveness file the running core rewrites after each healthy cycle and `bezent-core
+    /// health` reads (issue #61). Left out, `/tmp/bezent-core.health`; a task whose root file
+    /// system is read-only names a writable path here.
+    #[serde(default)]
+    pub health_file: Option<PathBuf>,
 }
 
 /// The deployment's environment (PR #50 review M2).
@@ -324,6 +329,12 @@ impl Config {
                 }
             }
         }
+        // A relative liveness file is the configuration directory's, as the other paths are.
+        if let Some(p) = config.health_file.as_mut()
+            && p.is_relative()
+        {
+            *p = path.parent().unwrap_or(Path::new(".")).join(&*p);
+        }
         if config.cycle_seconds == 0
             || config.retry_preparation_seconds < 0
             || config.default_deadline_seconds <= 0
@@ -397,6 +408,7 @@ impl fmt::Debug for Config {
             )
             .field("environment", &self.environment)
             .field("statement", &self.statement)
+            .field("health_file", &self.health_file)
             .finish()
     }
 }

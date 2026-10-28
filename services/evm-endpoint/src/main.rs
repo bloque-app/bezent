@@ -6,7 +6,12 @@
 //! ```text
 //! bezent-evm-endpoint <config.toml>           run
 //! bezent-evm-endpoint --check <config.toml>   check the configuration, then exit
+//! bezent-evm-endpoint health [<config.toml>]  the container's health check (issue #61)
 //! ```
+//!
+//! `health` exits 0 only when the running endpoint's last pass reached the final point both providers
+//! agree on, recently (`health.rs`). It reads a liveness file the pass rewrites and opens no
+//! connection. The path defaults to the image's `/etc/bezent/evm-endpoint.toml`.
 //!
 //! At start-up, before anything is read or built (`AC-I4.1`, `DEC-12`): both providers must serve
 //! the declared chain id, hold the pinned block at its pinned hash, and agree on the finalized head
@@ -29,11 +34,18 @@ const NAME: &str = "bezent-evm-endpoint";
 fn main() -> ExitCode {
     tracing_subscriber::fmt().with_target(false).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [cmd, rest @ ..] = args.as_slice()
+        && cmd == "health"
+        && rest.len() <= 1
+    {
+        let path = bezent_evm_endpoint::health::config_path(rest.first());
+        return bezent_health::report(NAME, bezent_evm_endpoint::health::check(&path));
+    }
     let (check, path) = match args.as_slice() {
         [flag, path] if flag == "--check" => (true, path),
         [path] if !path.starts_with('-') => (false, path),
         _ => {
-            eprintln!("usage: {NAME} [--check] <config.toml>");
+            eprintln!("usage: {NAME} [--check] <config.toml> | {NAME} health [<config.toml>]");
             return ExitCode::from(2);
         }
     };
@@ -86,6 +98,14 @@ fn read_secret(path: &std::path::Path, what: &str) -> Result<String, String> {
 }
 
 async fn run(config: Config) -> Result<(), String> {
+    // An earlier run's liveness file never passes for this run's (issue #61): removed before any start-up check or
+    // connection.
+    let heartbeat = bezent_evm_endpoint::health::heartbeat(&config);
+    if let Err(e) = heartbeat.reset() {
+        // Not fatal: a read-only file system must not keep a service from starting. A beat that
+        // cannot be written is logged, and `health` reports it.
+        tracing::warn!(error = %e.kind(), "the liveness file could not be removed; `health` may read an earlier run's");
+    }
     let checked = config.check()?;
     let provider = |i: usize| -> Result<Http, String> {
         let p = &config.providers[i];
@@ -182,6 +202,9 @@ async fn run(config: Config) -> Result<(), String> {
     };
 
     let mut tick = tokio::time::interval(Duration::from_millis(config.poll_ms));
+    // Whether the pass before failed (the store, the prover): while it did, a walk's progress is not
+    // health. False at start, so a first backlog walk beats.
+    let mut last_pass_failed = false;
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -190,32 +213,52 @@ async fn run(config: Config) -> Result<(), String> {
             }
             _ = tick.tick() => {}
         }
-        let result: Result<(), sqlx::Error> = async {
-            loop {
+        let failed_before = last_pass_failed;
+        let result: Result<bool, sqlx::Error> = async {
+            let caught_up = loop {
                 match follower.step().await? {
-                    Step::Read { .. } => continue,
-                    Step::CaughtUp { .. } => break,
+                    Step::Read { .. } => {
+                        // A walk that moves is healthy (issue #61): blocks were read and recorded,
+                        // so the follower advanced and the store answered, unless the pass before
+                        // failed. A stuck one never gets here and goes stale.
+                        if !failed_before {
+                            bezent_evm_endpoint::health::beat(&heartbeat);
+                        }
+                    }
+                    Step::CaughtUp { .. } => break true,
                     other => {
                         tracing::warn!(?other, "the follower stopped");
-                        break;
+                        break false;
                     }
                 }
-            }
+            };
             for id in submitter.orders_to_prepare().await? {
                 let outcome = submitter.prepare(id).await?;
                 tracing::info!(order = id, ?outcome, "prepared");
+                // Work done at the head is progress too, and a pass can take long (issue #61).
+                if caught_up && !failed_before {
+                    bezent_evm_endpoint::health::beat(&heartbeat);
+                }
             }
             for id in submitter.intents_to_sign().await? {
                 let outcome = submitter.sign_and_submit(id).await?;
                 tracing::info!(intent = id, ?outcome, "signed");
+                if caught_up && !failed_before {
+                    bezent_evm_endpoint::health::beat(&heartbeat);
+                }
             }
             submitter.resend().await?;
             prover.step().await?;
-            Ok(())
+            Ok(caught_up)
         }
         .await;
-        if let Err(e) = result {
-            tracing::warn!(error = %e, "the store failed; trying again next cycle");
+        last_pass_failed = result.is_err();
+        match result {
+            // Healthy: at the final point both providers agree on, and the store answered all
+            // the way through (issue #61).
+            Ok(true) => bezent_evm_endpoint::health::beat(&heartbeat),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "the store failed; trying again next cycle"),
         }
     }
 }

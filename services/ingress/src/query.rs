@@ -537,8 +537,20 @@ pub(crate) async fn log(
     responses((status = 200, body = Health), (status = 503, body = ErrorBody))
 )]
 pub(crate) async fn health(State(app): State<App>) -> Result<Json<Health>, ApiError> {
-    sqlx::query("SELECT 1").execute(app.pool()).await?;
-    Ok(Json(Health {
-        status: "ok".into(),
-    }))
+    match sqlx::query("SELECT 1").execute(app.pool()).await {
+        Ok(_) => {
+            app.store_answered();
+            Ok(Json(Health {
+                status: "ok".into(),
+            }))
+        }
+        // Every connection is busy with requests: the instance is alive and serving, and a
+        // container health check must not replace a task for being loaded (issue #61), but only
+        // while the store has answered something in the last minute. A store that cannot be
+        // reached at all, or that has not answered for longer, is a 503.
+        Err(sqlx::Error::PoolTimedOut) if app.store_answered_recently() => Ok(Json(Health {
+            status: "busy".into(),
+        })),
+        Err(e) => Err(e.into()),
+    }
 }

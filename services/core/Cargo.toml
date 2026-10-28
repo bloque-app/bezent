@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 bezent-core.workspace = true
+bezent-health = { path = "../../crates/health" }
 bezent-store = { path = "../../crates/store" }
 # The compromise path and signature checks (F-005); the core holds no key.
 bezent-signer = { path = "../signer" }

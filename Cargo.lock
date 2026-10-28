@@ -1765,6 +1765,7 @@ dependencies = [
  "aws-smithy-http-client",
  "base64 0.22.1",
  "bezent-core",
+ "bezent-health",
  "bezent-signer",
  "bezent-store",
  "blake2",
@@ -1790,6 +1791,7 @@ name = "bezent-evm-endpoint"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "bezent-health",
  "bezent-signer",
  "bezent-store",
  "hex",
@@ -1806,11 +1808,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bezent-health"
+version = "0.1.0"
+
+[[package]]
 name = "bezent-ingress"
 version = "0.1.0"
 dependencies = [
  "axum",
  "bezent-core",
+ "bezent-health",
  "bezent-store",
  "blake2",
  "bs58",
@@ -1840,6 +1847,7 @@ name = "bezent-kreivo-endpoint"
 version = "0.1.0"
 dependencies = [
  "bezent-core-service",
+ "bezent-health",
  "bezent-signer",
  "bezent-store",
  "blake2",
@@ -1902,6 +1910,7 @@ version = "0.1.0"
 dependencies = [
  "aws-config",
  "aws-sdk-kms",
+ "bezent-health",
  "bezent-store",
  "blake2",
  "ed25519-dalek",
