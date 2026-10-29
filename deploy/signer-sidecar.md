@@ -151,12 +151,13 @@ path "signer/keys/bezent-polygon-delivery/sign/hash" {
 `update` alone signs with an existing key (the plugin's `sign/hash` is an update of an existing key; a create would
 need a key that does not exist). Everything else is refused to this role: reading or listing keys, creating or
 deleting one, `sign/message`, `sign/batch`, the transaction and typed-data routes, and every other key. The AWS
-auth role binds the task role's principal, with a token of a minute:
+auth role binds the task role's principal, with a token of a minute that carries this policy alone (not even
+Vault's `default` policy):
 
 ```sh
 vault write auth/<aws-mount>/role/bezent-evm-signer-plugin auth_type=iam \
   bound_iam_principal_arn=<task role ARN> token_policies=bezent-evm-signer-plugin \
-  token_ttl=60s token_max_ttl=120s
+  token_ttl=60s token_max_ttl=120s token_no_default_policy=true
 ```
 
 The administrator's policy (create, read, list and delete under `signer/keys/`) belongs to a separate, human role,

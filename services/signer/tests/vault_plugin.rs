@@ -228,7 +228,7 @@ async fn req_cu_1_inv_9_the_plugin_engine_against_the_plugin_in_vault() {
         serde_json::json!({
             "auth_type": "iam", "bound_iam_principal_arn": CALLER,
             "resolve_aws_unique_ids": false, "token_policies": POLICY,
-            "token_ttl": "60s", "token_max_ttl": "120s",
+            "token_ttl": "60s", "token_max_ttl": "120s", "token_no_default_policy": true,
         }),
     )
     .await;
@@ -324,6 +324,23 @@ async fn req_cu_1_inv_9_the_plugin_engine_against_the_plugin_in_vault() {
     assert!(
         matches!(&err, KeyError::Backend(m) if m.contains("INV-9")),
         "{err}"
+    );
+
+    // The role's tokens carry its policy alone: not Vault's `default` policy either.
+    let (status, role) = call(
+        &address,
+        &root,
+        reqwest::Method::GET,
+        &format!("auth/{AUTH}/role/{ROLE}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{role}");
+    assert_eq!(role["data"]["token_no_default_policy"], true, "{role}");
+    assert_eq!(
+        role["data"]["token_policies"],
+        serde_json::json!([POLICY]),
+        "{role}"
     );
 
     // The role signs its own key and nothing else.
