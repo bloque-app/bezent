@@ -1795,6 +1795,7 @@ dependencies = [
  "bezent-health",
  "bezent-signer",
  "bezent-store",
+ "bezent-vault",
  "hex",
  "k256",
  "serde",
