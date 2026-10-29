@@ -759,6 +759,7 @@ fn usage_errors_exit_2() {
         vec![],
         vec!["--check"],
         vec!["--url-file", "a", "--url-env", "B"],
+        vec!["--config", "c", "--url-env", "B"],
         vec!["--url-env", "B", "--grants", "sometimes"],
         vec!["--url-env", "B", "extra"],
         vec!["--url-env", "B", "--lock-timeout", "soon"],

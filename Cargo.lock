@@ -1880,8 +1880,11 @@ name = "bezent-migrate"
 version = "0.1.0"
 dependencies = [
  "bezent-store",
+ "bezent-vault",
+ "serde",
  "sqlx",
  "tokio",
+ "toml 0.8.23",
 ]
 
 [[package]]
