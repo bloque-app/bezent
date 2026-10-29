@@ -74,6 +74,9 @@ pub fn blake2_256(bytes: &[u8]) -> [u8; 32] {
 /// How the delivery key signs (`signatures.scheme`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scheme {
+    /// Ed25519 (RFC 8032) over the payload: a native ed25519 account, whose Vault Transit key
+    /// signs the payload itself. The account is the public key.
+    Ed25519,
     /// Schnorrkel over the payload, in the `substrate` context. The account is the public key.
     Sr25519,
     /// ECDSA over secp256k1, over the payload's BLAKE2b-256, recoverable. The account is the
@@ -85,6 +88,7 @@ impl Scheme {
     /// From the signer's scheme name; `None` for a scheme Kreivo accounts do not use here.
     pub fn parse(name: &str) -> Option<Scheme> {
         match name {
+            "ed25519" => Some(Scheme::Ed25519),
             "sr25519" => Some(Scheme::Sr25519),
             "ecdsa" => Some(Scheme::Ecdsa),
             _ => None,
@@ -94,6 +98,7 @@ impl Scheme {
     /// The signer's name for it.
     pub fn name(self) -> &'static str {
         match self {
+            Scheme::Ed25519 => "ed25519",
             Scheme::Sr25519 => "sr25519",
             Scheme::Ecdsa => "ecdsa",
         }
@@ -102,6 +107,7 @@ impl Scheme {
     /// Its `MultiSignature` variant.
     pub fn variant(self) -> u8 {
         match self {
+            Scheme::Ed25519 => 0,
             Scheme::Sr25519 => 1,
             Scheme::Ecdsa => 2,
         }
@@ -110,7 +116,7 @@ impl Scheme {
     /// The length of its signature.
     pub fn signature_len(self) -> usize {
         match self {
-            Scheme::Sr25519 => 64,
+            Scheme::Ed25519 | Scheme::Sr25519 => 64,
             Scheme::Ecdsa => 65,
         }
     }
@@ -118,7 +124,7 @@ impl Scheme {
     /// The account of `public_key`, if it has this scheme's length.
     pub fn account(self, public_key: &[u8]) -> Option<AccountId32> {
         match self {
-            Scheme::Sr25519 => public_key.try_into().ok(),
+            Scheme::Ed25519 | Scheme::Sr25519 => public_key.try_into().ok(),
             Scheme::Ecdsa => (public_key.len() == 33).then(|| blake2_256(public_key)),
         }
     }
@@ -1225,6 +1231,7 @@ pub fn decode_extrinsic(bytes: &[u8]) -> Option<Decoded> {
     }
     let account = <[u8; 32]>::decode(&mut b).ok()?;
     let scheme = match u8::decode(&mut b).ok()? {
+        0 => Scheme::Ed25519,
         1 => Scheme::Sr25519,
         2 => Scheme::Ecdsa,
         _ => return None,
@@ -1451,6 +1458,14 @@ mod tests {
             },
             &mint_data(AssetId::Here(101), &[6; 32], 1, &[7; 32]),
         );
+        // A native ed25519 account is MultiSignature variant 0, a 64-byte signature, and the
+        // public key as its account.
+        let x = extrinsic(&[3; 32], Scheme::Ed25519, &[4; 64], &p, &call);
+        let d = decode_extrinsic(&x).unwrap();
+        assert_eq!((d.scheme, d.signature.len()), (Scheme::Ed25519, 64));
+        assert_eq!(Scheme::Ed25519.account(&[3; 32]), Some([3; 32]));
+        assert_eq!(Scheme::parse("ed25519"), Some(Scheme::Ed25519));
+        assert_eq!(Scheme::Ed25519.variant(), 0);
         let x = extrinsic(&[3; 32], Scheme::Sr25519, &[4; 64], &p, &call);
         let d = decode_extrinsic(&x).unwrap();
         assert_eq!(d.account, [3; 32]);

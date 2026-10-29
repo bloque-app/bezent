@@ -9,9 +9,9 @@
 //! - [`link`]: the core sends an intent id over a Unix socket; the caller is authenticated by its
 //!   peer user id and a token, the signer by its own user id (`T-005-02`).
 //! - [`keys`]: the key backend trait and the file backend, test keys only (`T-005-03`); [`kms`]
-//!   (delivery keys in AWS KMS), [`vault`] (the other keys) and [`custody`] (which one runs) are
-//!   `DEC-11`'s. sr25519 and ECDSA for Kreivo accounts, secp256k1 for
-//!   EVM networks.
+//!   (delivery keys in AWS KMS), [`transit`] (delivery keys in Vault Transit: ed25519 Kreivo
+//!   accounts), [`vault`] (the other keys) and [`custody`] (which one runs) are `DEC-11`'s.
+//!   sr25519, ECDSA and ed25519 for Kreivo accounts, secp256k1 for EVM networks.
 //! - [`signer`]: reads the recorded intent through the `bezent_signer` store role, applies the
 //!   guards (`DEC-3`, a second line), signs, and records the signature append-only (`T-005-04`,
 //!   `T-005-05`). A restart returns the recorded signature and signs nothing new (`AC-D2.1`).
@@ -21,6 +21,9 @@
 //! - [`compromise`]: run by the core, not the signer: a signature seen on chain, or returned by the
 //!   signer, that does not verify over a recorded intent's bytes starts the compromise path
 //!   (`AC-I1.2`, `INV-9`). [`verify`] holds the checks.
+//! - [`prepare`]: the `prepare` subcommand of a signer that runs beside its one caller (a sidecar):
+//!   the caller's token, the signer's configuration and the socket directory, each given to the
+//!   user who reads it.
 //! - [`process`]: the signer forbids its own core dumps at start (`REQ-CU-1`).
 //!
 //! No key material appears in any log line, error or configuration dump (`REQ-KY-1`): keys are
@@ -38,8 +41,10 @@ pub mod keys;
 pub mod kms;
 pub mod link;
 pub mod log;
+pub mod prepare;
 pub mod process;
 pub mod signer;
+pub mod transit;
 pub mod vault;
 pub mod verify;
 

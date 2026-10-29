@@ -14,6 +14,10 @@
 //! At start, before any key is read, the process forbids its own core dumps (`REQ-CU-1`). To
 //! serve, it refuses a caller that runs as its own user id (`REQ-CU-1`, `REQ-AR-3`), and a store
 //! login that can act as anything but `bezent_signer` (`REQ-AR-3`).
+//!
+//! `bezent-signer prepare <spec-path>` sets up a signer that runs beside its one caller (a
+//! sidecar): the caller's token, the signer's configuration with that token's hash, and the socket
+//! directory (`prepare.rs`). It runs as root in an init container, before the signer starts.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -27,6 +31,7 @@ use bezent_signer::link::{self, Callers};
 use bezent_signer::log::Log;
 use bezent_signer::process;
 use bezent_signer::signer::{Signer, check_login, pool_options};
+use bezent_signer::transit::{TransitBackend, VaultTransit};
 use bezent_vault::Resolver;
 
 const NAME: &str = "bezent-signer";
@@ -75,6 +80,28 @@ async fn load(path: &Path, log: &Log, serve: bool) -> Result<(Config, Custody, P
                 None => None,
             };
             Custody::Kms(Mixed::new(kms, vault).map_err(|e| e.to_string())?)
+        }
+        KeySource::Transit {
+            environment,
+            mount,
+            keys,
+            vault,
+        } => {
+            let resolver =
+                Arc::new(Resolver::new(config.vault.as_ref()).map_err(|e| e.to_string())?);
+            let api = VaultTransit::new(resolver.clone(), mount);
+            let transit = TransitBackend::connect(api, *environment, keys)
+                .await
+                .map_err(|e| e.to_string())?;
+            let vault = match vault {
+                Some(source) => Some(
+                    bezent_signer::vault::load(source, *environment, &resolver)
+                        .await
+                        .map_err(|e| e.to_string())?,
+                ),
+                None => None,
+            };
+            Custody::Transit(Mixed::new(transit, vault).map_err(|e| e.to_string())?)
         }
     };
     let policy = config.policy(&backend).map_err(|e| e.to_string())?;
@@ -151,11 +178,34 @@ fn main() -> ExitCode {
         let path = bezent_signer::health::config_path(rest.first());
         return bezent_health::report(NAME, bezent_signer::health::check(&path));
     }
+    // Before the process forbids core dumps or starts a runtime: it only writes files (as root).
+    if let [cmd, spec] = args.as_slice()
+        && cmd == "prepare"
+    {
+        return match bezent_signer::prepare::run_file(Path::new(spec)) {
+            Ok(spec) => {
+                Log::stderr().line(format_args!(
+                    "prepared: token {}, configuration {}, socket directory {}",
+                    spec.token_file.display(),
+                    spec.config.display(),
+                    spec.socket_dir.display()
+                ));
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                Log::stderr().line(format_args!("{e}"));
+                ExitCode::FAILURE
+            }
+        };
+    }
     let (check, path) = match args.as_slice() {
         [flag, path] if flag == "--check" => (true, path),
         [path] => (false, path),
         _ => {
-            eprintln!("usage: {NAME} [--check] <config-path> | {NAME} health [<config-path>]");
+            eprintln!(
+                "usage: {NAME} [--check] <config-path> | {NAME} health [<config-path>] | \
+                 {NAME} prepare <spec-path>"
+            );
             return ExitCode::from(2);
         }
     };

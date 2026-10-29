@@ -3,8 +3,10 @@
 //! Keys (`T-005-03`; `REQ-CU-1`, `REQ-KY-1`, `REQ-KY-6`; PLAN `DEC-11`).
 //!
 //! [`KeyBackend`] is what the signer asks of a key custody: a key's scheme and public key, and a
-//! signature over a message. `DEC-11` puts delivery keys in AWS KMS and the others in Vault; both
-//! are `M-1` backends behind this trait. The only `M-0` backend is [`FileBackend`]: test keys from
+//! signature over a message. `DEC-11` puts delivery keys in a key-management service and the
+//! others in Vault: AWS KMS ([`crate::kms`]) or Vault Transit ([`crate::transit`], an ed25519 key
+//! that never leaves Vault) hold the delivery keys, Vault KV the others; all are `M-1` backends
+//! behind this trait. The only `M-0` backend is [`FileBackend`]: test keys from
 //! a file whose path the configuration names (never the environment, `REQ-KY-1`), tagged
 //! `"environment": "test"`. It refuses a file with any other tag, so a key it holds is always a
 //! test key, and the signer refuses to use one for a production network (`REQ-KY-6`, `AC-I4.2`).
@@ -12,9 +14,11 @@
 //! The schemes: `sr25519` (a Kreivo account; the `substrate` signing context), `ecdsa` (a Kreivo
 //! ECDSA account: secp256k1 over the BLAKE2b-256 of the message, 65 bytes `r ‖ s ‖ v`) and
 //! `secp256k1-evm` (secp256k1 over the Keccak-256 of the message, 65 bytes `r ‖ s ‖ v`, `v` the
-//! recovery id 0 or 1), and `ed25519` (RFC 8032 over the message itself, 64 bytes): the statement key
-//! of `REQ-PR-1` (`F-004`), which signs nothing else, so the policy refuses to bind it to a network. ECDSA signatures are deterministic (RFC 6979) and low-`s`; sr25519 ones are
-//! randomised, which is why a replay returns the recorded signature rather than signing again
+//! recovery id 0 or 1), and `ed25519` (RFC 8032 over the message itself, 64 bytes): the statement
+//! key of `REQ-PR-1` (`F-004`), which signs nothing else, so the policy refuses to bind it to a
+//! network; or a native Kreivo ed25519 account, a delivery key held by a custody that never
+//! releases it ([`KeyBackend::non_exportable`]). ECDSA signatures are deterministic (RFC 6979) and
+//! low-`s`; sr25519 ones are randomised, which is why a replay returns the recorded signature rather than signing again
 //! (`AC-D2.1`). The message is the network's signing payload as the core recorded it.
 
 use std::collections::BTreeMap;
@@ -41,7 +45,8 @@ pub enum Scheme {
     /// An EVM account (secp256k1 over Keccak-256).
     #[serde(rename = "secp256k1-evm")]
     Secp256k1Evm,
-    /// The statement key (`REQ-PR-1`): ed25519 over the message (RFC 8032).
+    /// The statement key (`REQ-PR-1`), or a Kreivo ed25519 delivery key: ed25519 over the message
+    /// (RFC 8032).
     #[serde(rename = "ed25519")]
     Ed25519,
 }
@@ -111,8 +116,15 @@ pub trait KeyBackend: Send + Sync + 'static {
     /// The scheme of key `id`.
     fn scheme(&self, id: &str) -> Result<Scheme, KeyError>;
 
-    /// The public key of key `id`: 32 bytes for sr25519, 33 (compressed) for secp256k1.
+    /// The public key of key `id`: 32 bytes for sr25519 and ed25519, 33 (compressed) for secp256k1.
     fn public_key(&self, id: &str) -> Result<Vec<u8>, KeyError>;
+
+    /// Whether key `id` is held where it signs on request and is never released (`REQ-CU-1`): in
+    /// a key-management service. A key read into this process, from a file or from Vault KV, is
+    /// not. Only a key that is can be the ed25519 key of a delivery lane.
+    fn non_exportable(&self, _id: &str) -> bool {
+        false
+    }
 
     /// Signs `message` with key `id`.
     fn sign(

@@ -11,10 +11,12 @@ definitions (accounts, roles, key identifiers) are not part of this repository.
 
 - **Delivery keys** (those that mint, pay out from a reserve, or refund) live in a key-management service that signs
   on request and never releases them. The signer's configuration names each key by its identifier
-  (`keys.backend = "kms"`); credentials come from the platform's default credential chain (a task or instance role),
+  (`keys.backend = "kms"`), or, for a Kreivo ed25519 account, by the Vault Transit key it is (`keys.backend =
+  "transit"`: Vault signs, the key is not exportable, and each signature is verified against the public key
+  before it is used); credentials come from the platform's default credential chain (a task or instance role),
   never from the configuration or from an environment variable (`REQ-KY-1`).
 - **One key per delivery lane** (`REQ-KY-4`): an EVM payout key per origin network, and a Kreivo mint key. Keys are
-  elliptic-curve signing keys (secp256k1) with the signing usage only.
+  signing keys with the signing usage only: secp256k1 in KMS, ed25519 in Vault Transit.
 - **Tagged with an environment.** Every key carries the tag `bezent:environment` = `test` or `production`. The signer
   refuses a key with no tag, or whose tag differs from the environment in its configuration, and refuses a custody
   whose environment differs from the networks it signs for or from the networks the store declares (`REQ-KY-6`,
@@ -30,3 +32,5 @@ definitions (accounts, roles, key identifiers) are not part of this repository.
   in a production environment (`REQ-KY-6`).
 - **Every key is bounded on chain** (`REQ-KY-3`): the contract's per-asset bounds and the vault's roles limit what a
   compromised key can do.
+- **A signer beside its caller** (`deploy/signer-sidecar.md`) is the same signer with a configuration naming one caller
+  and the keys that caller may use.

@@ -49,6 +49,11 @@
 //! The statement key (`REQ-PR-1`; PLAN `DEC-16`, 2026-10-14; issue #42) is named apart, by
 //! `"statement_key": "<key id>"`: an ed25519 key that signs intents of purpose `statement` and
 //! nothing else. It is bound to no network, and no binding may name it or the purpose `statement`.
+//!
+//! Any other ed25519 key is a native Kreivo delivery account (the public key is the account): it
+//! may be bound to a network that is not an EVM network, and only when its custody never releases
+//! it ([`KeyBackend::non_exportable`]: Vault Transit or KMS, `REQ-CU-1`; the test file's keys are
+//! test keys). Its public key must not be the statement key's.
 
 use bezent_vault::{StoreSource, VaultConfig};
 use std::collections::{BTreeMap, BTreeSet};
@@ -188,7 +193,7 @@ pub struct DeliveryContracts {
     pub role: String,
 }
 
-/// Where the keys come from (`DEC-11`). Only the file backend exists in `M-0`.
+/// Where the keys come from (`DEC-11`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "backend", rename_all = "lowercase", deny_unknown_fields)]
 pub enum KeySource {
@@ -211,6 +216,21 @@ pub enum KeySource {
         /// The KMS keys.
         keys: Vec<crate::kms::KmsKey>,
         /// The non-delivery keys, from Vault.
+        #[serde(default)]
+        vault: Option<crate::vault::VaultSource>,
+    },
+    /// Delivery keys in Vault Transit: ed25519 keys that never leave Vault (the Kreivo delivery
+    /// account), the other keys (statement, pause) optionally from Vault KV. The signer logs in
+    /// to Vault under its task role (`vault` table).
+    Transit {
+        /// The environment of every key here; the Vault KV secret must match it, and so must
+        /// the networks the keys are bound to.
+        environment: Environment,
+        /// The Transit engine's mount, for example `transit-bezent-signer`.
+        mount: String,
+        /// The Transit keys.
+        keys: Vec<crate::transit::TransitKey>,
+        /// The non-delivery keys, from Vault KV.
         #[serde(default)]
         vault: Option<crate::vault::VaultSource>,
     },
@@ -302,7 +322,7 @@ impl Config {
         }
         match &mut config.keys {
             KeySource::File { path } => resolve(path),
-            KeySource::Kms { .. } => {}
+            KeySource::Kms { .. } | KeySource::Transit { .. } => {}
         }
         Ok(config)
     }
@@ -337,7 +357,10 @@ impl Config {
             .store
             .as_ref()
             .is_some_and(|s| s.login.is_vault() || s.password.is_vault())
-            || matches!(&self.keys, KeySource::Kms { vault: Some(_), .. });
+            || matches!(
+                &self.keys,
+                KeySource::Kms { vault: Some(_), .. } | KeySource::Transit { .. }
+            );
         if from_vault && self.vault.is_none() {
             return refuse("a secret is read from Vault but there is no vault table");
         }
@@ -478,11 +501,23 @@ impl Config {
             let scheme = backend
                 .scheme(&b.key)
                 .map_err(|e| ConfigError(format!("binding of key {}: {e}", b.key)))?;
-            if scheme == crate::keys::Scheme::Ed25519 {
-                return refuse(format!(
-                    "key {} is an ed25519 statement key, used for nothing else (REQ-PR-1)",
-                    b.key
-                ));
+            if scheme == Scheme::Ed25519 {
+                // The statement key signs nothing else (REQ-PR-1). Any other ed25519 key is a
+                // native Kreivo delivery account, and only a custody that never releases the key
+                // may hold one (REQ-CU-1); the test file's keys are test keys (REQ-KY-6).
+                if self.statement_key.as_deref() == Some(b.key.as_str()) {
+                    return refuse(format!(
+                        "key {} is an ed25519 statement key, used for nothing else (REQ-PR-1)",
+                        b.key
+                    ));
+                }
+                if !backend.non_exportable(&b.key) && backend.environment() != Environment::Test {
+                    return refuse(format!(
+                        "key {} is an ed25519 delivery key held where the signer can read it; \
+                         delivery keys live in a key-management service (REQ-CU-1)",
+                        b.key
+                    ));
+                }
             }
             if !network.takes(scheme) {
                 return refuse(format!(
@@ -606,6 +641,20 @@ impl Config {
                     "statement key {key} is a {} key; the statement key is ed25519 (REQ-PR-1)",
                     scheme.as_str()
                 ));
+            }
+            // Used for nothing else, by its public key as well as its id: no delivery key is
+            // the same key under another id (REQ-PR-1).
+            let public = backend
+                .public_key(key)
+                .map_err(|e| ConfigError(format!("statement key {key}: {e}")))?;
+            for b in &self.bindings {
+                if backend.public_key(&b.key).is_ok_and(|p| p == public) {
+                    return refuse(format!(
+                        "statement key {key} is also key {}, bound to network {}; it signs \
+                         statements only (REQ-PR-1)",
+                        b.key, b.network
+                    ));
+                }
             }
             if self.bindings.iter().any(|b| &b.key == key) {
                 return refuse(format!(

@@ -36,7 +36,7 @@ k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std",
 # The statement key (REQ-PR-1, F-004): ed25519.
 ed25519-dalek = { version = "2", features = ["zeroize"] }
 # Safe wrappers for setrlimit, PR_SET_DUMPABLE and geteuid (REQ-CU-1; the workspace forbids unsafe).
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["process", "fs"] }
 aws-sdk-kms = { version = "1.123.0", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 aws-config = { version = "1.12.0", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
 
@@ -44,4 +44,5 @@ aws-config = { version = "1.12.0", default-features = false, features = ["rt-tok
 workspace = true
 
 [dev-dependencies]
+base64 = "0.22"
 aws-credential-types = "1.3.0"

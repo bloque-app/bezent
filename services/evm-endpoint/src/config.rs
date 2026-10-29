@@ -499,6 +499,39 @@ mod tests {
         assert!(Config::parse(&key).unwrap_err().contains("lane.public_key"));
     }
 
+    /// The sidecar signer's layout (`deploy/signer-sidecar.md`): the socket on the task's shared
+    /// volume, the signer's user id, and the token file `bezent-signer prepare` wrote (64 hex digits,
+    /// no newline, for this container's user alone).
+    #[tokio::test]
+    async fn req_ky_1_the_signer_is_a_sidecar_socket_with_a_token_file() {
+        let dir = std::env::temp_dir().join(format!("bze-evm-sidecar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = "ab".repeat(32);
+        std::fs::write(dir.join("token"), &token).unwrap();
+        let sidecar = FIXTURE
+            .replace(
+                "token_file = \"/run/secrets/bezent-evm-polygon-signer-token\"",
+                &format!("token_file = \"{}\"", dir.join("token").display()),
+            )
+            .replace(
+                "socket = \"/run/bezent-signer/signer.sock\"",
+                "socket = \"/run/bezent/signer/signer.sock\"",
+            );
+        let c = Config::parse(&sidecar).unwrap();
+        c.check().unwrap();
+        assert_eq!(
+            c.signer.socket,
+            PathBuf::from("/run/bezent/signer/signer.sock")
+        );
+        assert!(c.signer.token_file.is_some() && c.signer.token.is_none());
+        let resolver = Resolver::new(None).unwrap();
+        assert_eq!(
+            c.signer_token(&resolver).await.unwrap().as_str(),
+            token.as_str()
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     const VAULT: &str = "\n[vault_login]\naddress = \"https://vault.example:8200\"\nmount = \"bezent\"\nrole = \"bezent-evm-endpoint-iam\"\nsts_region = \"us-east-2\"\nserver_id = \"vault.example\"\n";
     const STORE: &str = "\n[store]\nhost = \"db.example\"\ndatabase = \"bezent\"\nlogin = { vault = { path = \"secret/bezent/evm-endpoint\", field = \"db_login\" } }\npassword = { vault = { path = \"secret/bezent/evm-endpoint\", field = \"db_password\" } }\n";
 

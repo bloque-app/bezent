@@ -6,7 +6,7 @@
 //! `GetCallerIdentity` request to its configured `sts_endpoint` and trusts the answer. Here that
 //! endpoint is a local server that answers with a made-up caller, so the whole path runs without
 //! AWS: signature construction, the login body Vault accepts, the server-ID check, KV v1 and v2,
-//! and PKI issue. Everything is a throwaway test value on a dev server.
+//! PKI issue, and Transit signing with an ed25519 key. Everything is a throwaway test value on a dev server.
 //!
 //! Ignored by default; the `vault-dev` job of CI runs it with `--include-ignored`, with
 //! `BEZENT_VAULT_DEV_ADDR` (for example `http://127.0.0.1:8200`) and `BEZENT_VAULT_DEV_TOKEN` (the
@@ -121,7 +121,7 @@ async fn req_ky_1_login_kv_and_pki_against_a_dev_server() {
     .await;
     a(
         "sys/policies/acl/bezent-test",
-        serde_json::json!({"policy": "path \"bezentkv/*\" { capabilities = [\"read\"] }\npath \"secret/data/bezent/*\" { capabilities = [\"read\"] }\npath \"pki-link/issue/core\" { capabilities = [\"update\"] }\n"}),
+        serde_json::json!({"policy": "path \"bezentkv/*\" { capabilities = [\"read\"] }\npath \"secret/data/bezent/*\" { capabilities = [\"read\"] }\npath \"pki-link/issue/core\" { capabilities = [\"update\"] }\npath \"transit-bezent/keys/*\" { capabilities = [\"read\"] }\npath \"transit-bezent/sign/kreivo-delivery\" { capabilities = [\"update\"] }\n"}),
     )
     .await;
 
@@ -157,6 +157,29 @@ async fn req_ky_1_login_kv_and_pki_against_a_dev_server() {
             "key_type": "ec", "key_bits": 256, "client_flag": true, "server_flag": false,
             "ttl": "720h", "max_ttl": "720h",
         }),
+    )
+    .await;
+
+    // A Transit engine with the delivery key's shape: ed25519, not exportable (the default), and
+    // two keys that are not what the signer requires.
+    a(
+        "sys/mounts/transit-bezent",
+        serde_json::json!({"type": "transit"}),
+    )
+    .await;
+    a(
+        "transit-bezent/keys/kreivo-delivery",
+        serde_json::json!({"type": "ed25519"}),
+    )
+    .await;
+    a(
+        "transit-bezent/keys/releasable",
+        serde_json::json!({"type": "ed25519", "exportable": true}),
+    )
+    .await;
+    a(
+        "transit-bezent/keys/symmetric",
+        serde_json::json!({"type": "aes256-gcm96"}),
     )
     .await;
 
@@ -241,6 +264,66 @@ async fn req_ky_1_login_kv_and_pki_against_a_dev_server() {
     assert_eq!(
         resolver.resolve(&field("db_login")).await.unwrap().as_str(),
         "bezent_core"
+    );
+
+    // Transit: the public key is read, Vault signs the message itself, and the signature verifies
+    // as RFC 8032 over those bytes with that key.
+    let key = session
+        .transit_key("transit-bezent", "kreivo-delivery")
+        .await
+        .unwrap();
+    assert_eq!(key.version, 1);
+    let message = b"the SCALE signing payload";
+    let signature = session
+        .transit_sign("transit-bezent", "kreivo-delivery", 1, message)
+        .await
+        .unwrap();
+    let verifies = |public: &[u8; 32], message: &[u8], signature: &[u8; 64]| {
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public)
+            .verify(message, signature)
+            .is_ok()
+    };
+    assert!(verifies(&key.public_key, message, &signature));
+    assert!(!verifies(&key.public_key, b"other bytes", &signature));
+    // A key Vault would export, and one that does not sign, are refused before they are trusted.
+    for refused in ["releasable", "symmetric"] {
+        let err = session
+            .transit_key("transit-bezent", refused)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Transit(_)), "{refused}: {err:?}");
+    }
+    // The policy lets the role sign with one key only.
+    assert!(matches!(
+        session
+            .transit_sign("transit-bezent", "releasable", 1, message)
+            .await,
+        Err(Error::Status { status: 403, .. })
+    ));
+    // A rotation is a new key: the newest version is a new public key, and the old version still
+    // signs for the old one, which is how a signer holds to the version it read at start.
+    a(
+        "transit-bezent/keys/kreivo-delivery/rotate",
+        serde_json::json!({}),
+    )
+    .await;
+    let rotated = session
+        .transit_key("transit-bezent", "kreivo-delivery")
+        .await
+        .unwrap();
+    assert_eq!(rotated.version, 2);
+    assert_ne!(rotated.public_key, key.public_key);
+    let old = session
+        .transit_sign("transit-bezent", "kreivo-delivery", 1, message)
+        .await
+        .unwrap();
+    assert!(verifies(&key.public_key, message, &old));
+    assert!(!verifies(&rotated.public_key, message, &old));
+    assert!(
+        session
+            .transit_sign("transit-bezent", "kreivo-delivery", 3, message)
+            .await
+            .is_err()
     );
 
     // A login that names another Vault in the server-ID header is refused.

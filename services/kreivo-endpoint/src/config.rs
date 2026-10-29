@@ -166,7 +166,7 @@ pub struct Config {
 pub struct LaneConfig {
     /// The signer's id for the key.
     pub key: String,
-    /// Its scheme: `sr25519` or `ecdsa`.
+    /// Its scheme: `sr25519`, `ecdsa` or `ed25519`.
     pub scheme: String,
     /// Its public key, `0x` hex.
     pub public_key: String,
@@ -415,8 +415,12 @@ impl Config {
 
     /// The lane's scheme, public key and account.
     pub fn lane_account(&self) -> Result<(Scheme, Vec<u8>, AccountId32), String> {
-        let scheme = Scheme::parse(&self.lane.scheme)
-            .ok_or_else(|| format!("lane.scheme {} is not sr25519 or ecdsa", self.lane.scheme))?;
+        let scheme = Scheme::parse(&self.lane.scheme).ok_or_else(|| {
+            format!(
+                "lane.scheme {} is not sr25519, ecdsa or ed25519",
+                self.lane.scheme
+            )
+        })?;
         let public = self
             .lane
             .public_key

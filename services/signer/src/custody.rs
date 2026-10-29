@@ -1,35 +1,63 @@
 // Copyright (c) 2026 Pagos Cube LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The custody the signer runs on, chosen by configuration (`DEC-11`): test keys from a file, or
-//! delivery keys in AWS KMS with the other keys (statement, pause) from Vault, behind one
-//! [`KeyBackend`].
+//! delivery keys in a key-management service, AWS KMS or Vault Transit, with the other keys
+//! (statement, pause) from Vault, behind one [`KeyBackend`].
 
 use std::fmt;
 use std::future::Future;
 
 use crate::keys::{Environment, FileBackend, KeyBackend, KeyError, Scheme};
-use crate::kms::KmsBackend;
-use crate::kms::{AwsKms, KmsApi};
+use crate::kms::{AwsKms, KmsApi, KmsBackend};
+use crate::transit::{TransitApi, TransitBackend, VaultTransit};
 
-/// Delivery keys in KMS and, optionally, the other keys from Vault, of one environment.
-pub struct Mixed<A: KmsApi> {
-    kms: KmsBackend<A>,
+/// A key-management service that holds delivery keys and signs for them, never releasing them.
+pub trait Delivery: KeyBackend + fmt::Debug {
+    /// What the configuration calls it, for a refusal.
+    const NAME: &'static str;
+
+    /// The ids of the keys held.
+    fn key_ids(&self) -> Vec<String>;
+}
+
+impl<A: KmsApi> Delivery for KmsBackend<A> {
+    const NAME: &'static str = "KMS";
+
+    fn key_ids(&self) -> Vec<String> {
+        self.ids().map(str::to_owned).collect()
+    }
+}
+
+impl<A: TransitApi> Delivery for TransitBackend<A> {
+    const NAME: &'static str = "Vault Transit";
+
+    fn key_ids(&self) -> Vec<String> {
+        self.ids().map(str::to_owned).collect()
+    }
+}
+
+/// Delivery keys in a key-management service ([`KmsBackend`] or [`TransitBackend`]) and,
+/// optionally, the other keys from Vault, of one environment.
+pub struct Mixed<D: Delivery> {
+    kms: D,
     vault: Option<FileBackend>,
 }
 
-impl<A: KmsApi> Mixed<A> {
+impl<D: Delivery> Mixed<D> {
     /// Joins the two custodies. They must be of one environment and share no key id.
-    pub fn new(kms: KmsBackend<A>, vault: Option<FileBackend>) -> Result<Self, KeyError> {
+    pub fn new(kms: D, vault: Option<FileBackend>) -> Result<Self, KeyError> {
         if let Some(vault) = &vault {
             if vault.environment() != kms.environment() {
-                return Err(KeyError::Refused(
-                    "the KMS keys and the Vault keys are of different environments (REQ-KY-6)"
-                        .to_owned(),
-                ));
+                return Err(KeyError::Refused(format!(
+                    "the {} keys and the Vault keys are of different environments (REQ-KY-6)",
+                    D::NAME
+                )));
             }
-            if let Some(id) = vault.ids().find(|id| kms.ids().any(|k| k == *id)) {
+            let held = kms.key_ids();
+            if let Some(id) = vault.ids().find(|id| held.iter().any(|k| k == id)) {
                 return Err(KeyError::Source(format!(
-                    "key {id} is in both KMS and Vault"
+                    "key {id} is in both {} and Vault",
+                    D::NAME
                 )));
             }
         }
@@ -41,7 +69,7 @@ impl<A: KmsApi> Mixed<A> {
     }
 }
 
-impl<A: KmsApi> KeyBackend for Mixed<A> {
+impl<D: Delivery> KeyBackend for Mixed<D> {
     fn environment(&self) -> Environment {
         self.kms.environment()
     }
@@ -60,6 +88,12 @@ impl<A: KmsApi> KeyBackend for Mixed<A> {
         }
     }
 
+    /// A key of the key-management service is never released; one read from Vault is in the
+    /// signer's memory.
+    fn non_exportable(&self, id: &str) -> bool {
+        self.vault_for(id).is_none()
+    }
+
     fn sign(
         &self,
         id: &str,
@@ -75,7 +109,7 @@ impl<A: KmsApi> KeyBackend for Mixed<A> {
     }
 }
 
-impl<A: KmsApi> fmt::Debug for Mixed<A> {
+impl<D: Delivery> fmt::Debug for Mixed<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self.kms)?;
         if let Some(v) = &self.vault {
@@ -90,7 +124,9 @@ pub enum Custody {
     /// Test keys from a file (`M-0`).
     File(FileBackend),
     /// KMS (and Vault).
-    Kms(Mixed<AwsKms>),
+    Kms(Mixed<KmsBackend<AwsKms>>),
+    /// Vault Transit (and Vault KV for the other keys).
+    Transit(Mixed<TransitBackend<VaultTransit>>),
 }
 
 impl KeyBackend for Custody {
@@ -98,6 +134,7 @@ impl KeyBackend for Custody {
         match self {
             Self::File(b) => b.environment(),
             Self::Kms(b) => b.environment(),
+            Self::Transit(b) => b.environment(),
         }
     }
 
@@ -105,6 +142,7 @@ impl KeyBackend for Custody {
         match self {
             Self::File(b) => b.scheme(id),
             Self::Kms(b) => b.scheme(id),
+            Self::Transit(b) => b.scheme(id),
         }
     }
 
@@ -112,6 +150,15 @@ impl KeyBackend for Custody {
         match self {
             Self::File(b) => b.public_key(id),
             Self::Kms(b) => b.public_key(id),
+            Self::Transit(b) => b.public_key(id),
+        }
+    }
+
+    fn non_exportable(&self, id: &str) -> bool {
+        match self {
+            Self::File(b) => b.non_exportable(id),
+            Self::Kms(b) => b.non_exportable(id),
+            Self::Transit(b) => b.non_exportable(id),
         }
     }
 
@@ -119,6 +166,7 @@ impl KeyBackend for Custody {
         match self {
             Self::File(b) => b.sign(id, message).await,
             Self::Kms(b) => b.sign(id, message).await,
+            Self::Transit(b) => b.sign(id, message).await,
         }
     }
 }
@@ -128,6 +176,7 @@ impl fmt::Debug for Custody {
         match self {
             Self::File(b) => b.fmt(f),
             Self::Kms(b) => b.fmt(f),
+            Self::Transit(b) => b.fmt(f),
         }
     }
 }

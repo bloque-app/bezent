@@ -60,7 +60,7 @@ impl fmt::Debug for Client {
 }
 
 /// Whether a path (a mount, a secret, a role) can go into a URL as it is.
-fn plain_path(path: &str) -> bool {
+pub(crate) fn plain_path(path: &str) -> bool {
     !path.is_empty()
         && path.split('/').all(|segment| {
             !segment.is_empty()
@@ -192,7 +192,7 @@ impl Client {
     }
 
     /// One request to `/v1/<path>`. Returns the body of a 2xx answer, never anything of a failure.
-    async fn send(
+    pub(crate) async fn send(
         &self,
         operation: &'static str,
         method: Method,
@@ -280,8 +280,8 @@ async fn read_body(response: &mut reqwest::Response) -> Result<Zeroizing<Vec<u8>
 /// it is dropped, and never printed.
 #[derive(Clone)]
 pub struct Session {
-    client: Client,
-    token: Zeroizing<String>,
+    pub(crate) client: Client,
+    pub(crate) token: Zeroizing<String>,
     lease: Duration,
     born: Instant,
 }

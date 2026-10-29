@@ -1918,6 +1918,7 @@ dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-kms",
+ "base64 0.22.1",
  "bezent-health",
  "bezent-store",
  "bezent-vault",
