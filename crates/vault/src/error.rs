@@ -52,6 +52,8 @@ pub enum Error {
     Pki(&'static str),
     /// A Transit key, or a signature it made, is not what the client requires ([`crate::transit`]).
     Transit(&'static str),
+    /// A request to the signing plugin, or its answer, is refused ([`crate::plugin`]).
+    Plugin(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -71,6 +73,7 @@ impl fmt::Display for Error {
             Error::File { path, kind } => write!(f, "cannot read the secret file {path}: {kind}"),
             Error::Pki(why) => write!(f, "Vault issued an unusable certificate: {why}"),
             Error::Transit(why) => write!(f, "the Vault Transit key is refused: {why}"),
+            Error::Plugin(why) => write!(f, "the Vault signing plugin request is refused: {why}"),
         }
     }
 }

@@ -771,3 +771,85 @@ fn a_certificate_that_is_not_x509_is_refused() {
         assert!(crate::pki::Certificate::parse(&junk).is_none());
     }
 }
+
+// ------------------------------------------------------------ the signing plugin
+
+const DER: &str = "3044022001020304050607080910111213141516171819202122232425262728293031320220\
+                   1111111111111111111111111111111111111111111111111111111111111111";
+
+#[tokio::test]
+async fn req_ky_1_plugin_sign_hash_sends_the_hash_alone_once_and_returns_the_der() {
+    let (address, seen) = mock(vec![
+        login_ok(),
+        ok(&format!(r#"{{"data":{{"signature":"{DER}"}}}}"#)),
+    ])
+    .await;
+    let session = client(&address).login().await.unwrap();
+    let der = session
+        .plugin_sign_hash("signer-bezent", "polygon-delivery", &[0xab; 32])
+        .await
+        .unwrap();
+    assert_eq!(der.len(), 70);
+    let seen = seen.lock().unwrap();
+    let request = &seen[1];
+    assert!(
+        request.starts_with("POST /v1/signer-bezent/keys/polygon-delivery/sign/hash "),
+        "{request}"
+    );
+    assert!(
+        request
+            .to_lowercase()
+            .contains(&format!("x-vault-token: {}\r\n", TOKEN.to_lowercase()))
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body, serde_json::json!({ "hash": "ab".repeat(32) }));
+}
+
+#[tokio::test]
+async fn req_ky_1_plugin_sign_hash_refuses_a_hash_that_is_not_32_bytes_before_any_request() {
+    let (address, seen) = mock(vec![login_ok()]).await;
+    let session = client(&address).login().await.unwrap();
+    for hash in [&[1u8; 31][..], &[1u8; 33][..], &[][..], &[1u8; 1][..]] {
+        let err = session
+            .plugin_sign_hash("signer-bezent", "polygon-delivery", hash)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Plugin(_)), "{err:?}");
+    }
+    assert_eq!(seen.lock().unwrap().len(), 1, "the login only");
+}
+
+#[tokio::test]
+async fn req_ky_1_plugin_sign_hash_is_not_retried_and_carries_no_value_in_an_error() {
+    let (address, seen) = mock(vec![login_ok(), status(500, "boom"), status(500, "boom")]).await;
+    let session = client(&address).login().await.unwrap();
+    let err = session
+        .plugin_sign_hash("signer-bezent", "polygon-delivery", &[0xcd; 32])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        Error::Status {
+            operation: "sign",
+            status: 500
+        }
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2, "one signing request");
+    let shown = format!("{err} {err:?}");
+    assert!(!shown.contains(&"cd".repeat(32)) && !shown.contains(TOKEN));
+    // A malformed answer is refused without quoting it.
+    let (address, _) = mock(vec![
+        login_ok(),
+        ok(r#"{"data":{"signature":"not-hex-SECRETISH"}}"#),
+    ])
+    .await;
+    let err = client(&address)
+        .login()
+        .await
+        .unwrap()
+        .plugin_sign_hash("signer-bezent", "polygon-delivery", &[0xcd; 32])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Malformed(_)) && !err.to_string().contains("SECRETISH"));
+}

@@ -9,8 +9,9 @@
 //!   `sts:GetCallerIdentity` with AWS Signature Version 4, the server-ID header among the signed
 //!   headers, and posts it to `auth/<mount>/login`.
 //! - [`Session`] reads KV secrets, version 1 or 2, with field selection, and issues certificates
-//!   from a PKI engine, checking what came back ([`pki`]), and asks a Transit engine to sign with an
-//!   ed25519 key that stays in Vault ([`transit`]).
+//!   from a PKI engine, checking what came back ([`pki`]), asks a Transit engine to sign with an
+//!   ed25519 key that stays in Vault ([`transit`]), and asks a signing plugin to sign a 32-byte
+//!   hash with a secp256k1 key that stays in Vault ([`plugin`]).
 //! - [`SecretRef`] is the configuration type for a secret: `{ file = "<path>" }` or
 //!   `{ vault = { path, field } }`, with the `[vault]` table ([`VaultConfig`]) that says where Vault
 //!   is. [`Resolver`] turns one into its value, and [`StoreSource`] builds the store's URL from a
@@ -29,6 +30,7 @@ mod error;
 mod kv;
 mod login;
 pub mod pki;
+pub mod plugin;
 mod resolve;
 #[cfg(test)]
 mod tests;

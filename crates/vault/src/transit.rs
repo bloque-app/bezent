@@ -4,9 +4,10 @@
 //! ruling `d-delivery-keys`): [`Session::transit_key`] reads a key's public half and
 //! [`Session::transit_sign`] asks Vault to sign.
 //!
-//! The client checks what a signing service owes (`REQ-CU-1`: signs on request and never releases
-//! the key) before it trusts the key: it must be an `ed25519` key that is not exportable, not
-//! derived, not allowed a plaintext backup, and that signs. What is signed is the message itself
+//! The client checks that Vault is the signing service the plan asks for (one that signs on request
+//! and never releases the key, so the key is never readable outside it, `REQ-CU-1`) before it
+//! trusts the key: it must be an `ed25519` key that is not exportable, not derived, not allowed a
+//! plaintext backup, and that signs. What is signed is the message itself
 //! (`prehashed` false: pure Ed25519, RFC 8032), with the key version the caller names, and the
 //! answer must be a signature of that version. The caller verifies the signature against the
 //! public key (`INV-9`); this module only parses what Vault answers.
