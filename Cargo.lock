@@ -1852,6 +1852,7 @@ dependencies = [
  "bezent-health",
  "bezent-signer",
  "bezent-store",
+ "bezent-vault",
  "blake2",
  "chrono",
  "ed25519-zebra",

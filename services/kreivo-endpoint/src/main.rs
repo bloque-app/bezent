@@ -137,12 +137,6 @@ mod run {
     use bezent_kreivo_endpoint::submit::{Lane, SignerLink, Submitter};
     use bezent_kreivo_endpoint::supply::{Recorded, Supplies};
 
-    fn read_secret(path: &std::path::Path, what: &str) -> Result<String, String> {
-        std::fs::read_to_string(path)
-            .map(|s| s.trim().to_owned())
-            .map_err(|e| format!("cannot read the {what} file {}: {e}", path.display()))
-    }
-
     pub async fn run(config: Config, spec: String, relay: Option<String>) -> Result<(), String> {
         // An earlier run's liveness file never passes for this run's (issue #61): removed before any
         // start-up check or connection.
@@ -153,9 +147,11 @@ mod run {
             tracing::warn!(error = %e.kind(), "the liveness file could not be removed; `health` may read an earlier run's");
         }
         let declared = config.declared_genesis()?;
+        // One login to Vault for the secrets read at start (issue #64); `--check` never gets here.
+        let resolver = config.resolver()?;
         let pool = bezent_store::tls::connect(
             bezent_store::login::pool_options().max_connections(config.max_connections),
-            &read_secret(&config.database_url_file, "database URL")?,
+            &config.store_url(&resolver).await?,
         )
         .await
         .map_err(|e| format!("the store: {e}"))?;
@@ -166,13 +162,14 @@ mod run {
             .map_err(|e| format!("refusing to start: {e}"))?;
         // Issue #49: history comes from archive nodes, verified; the light client's peers keep
         // only recent state. Without one, a first start or a restart after downtime cannot read.
-        if config.archive_rpc.is_empty() {
+        let archive_rpc = config.archive_sources(&resolver).await?;
+        if archive_rpc.is_empty() {
             return Err("issue #49: archive_rpc is empty; at least one history source is required; refusing to start".into());
         }
         let chain = LightChain::start(
             &spec,
             relay.as_deref(),
-            &config.archive_rpc,
+            &archive_rpc,
             config.light_client_depth,
             Duration::from_millis(config.archive_timeout_ms),
             config.archive_max_response_bytes,
@@ -249,7 +246,7 @@ mod run {
         let signer = SignerLink {
             socket: config.signer.socket.clone(),
             uid: config.signer.uid,
-            token: read_secret(&config.signer.token_file, "signer token")?,
+            token: config.signer_token(&resolver).await?.to_string(),
         };
         let supplies = Supplies {
             chain: &chain,

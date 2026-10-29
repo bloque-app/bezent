@@ -6,6 +6,11 @@
 //! token are read from files the configuration names, and the delivery key is named by the signer's
 //! key id and its public key only. `Debug` prints nothing secret.
 //!
+//! A secret can also be a `SecretRef` (issue #64): a file (`{ file = "…" }`) or a field in Vault
+//! (`{ vault = { path, field } }`, which needs the `[vault]` table). The store is then a `[store]`
+//! (host, and login and password as `SecretRef`s; the URL is built in the process), the signer
+//! token is `signer.token`, and an archive node whose URL carries a key is `archive_rpc_secrets`.
+//!
 //! ```toml
 //! network = "kreivo"
 //! genesis = "0xc710…5b01"              # the declared network's genesis hash (AC-I4.1)
@@ -50,6 +55,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use bezent_vault::{Resolver, SecretRef, StoreSource, VaultConfig, Zeroizing};
 use serde::Deserialize;
 
 use crate::kreivo::{AccountId32, Scheme};
@@ -99,7 +105,17 @@ pub struct Config {
     /// only (which inherits `bezent_endpoint`, itself a member of `bezent_service`): only it may
     /// record proofs (review S1), and it records the issuing network's observations and nothing
     /// else (migration 0034, issue #30).
-    pub database_url_file: PathBuf,
+    ///
+    /// Exactly one of `database_url_file` and `[store]`.
+    #[serde(default)]
+    pub database_url_file: Option<PathBuf>,
+    /// The store as a host and a login and password from files or Vault, in place of
+    /// `database_url_file`; the login is the same.
+    #[serde(default)]
+    pub store: Option<StoreSource>,
+    /// Where Vault is and how to log in to it, when any secret is read from it.
+    #[serde(default)]
+    pub vault: Option<VaultConfig>,
     /// The largest number of store connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
@@ -118,6 +134,10 @@ pub struct Config {
     /// `--check`.
     #[serde(default)]
     pub archive_rpc: Vec<String>,
+    /// History sources whose URL carries a key, so it is a `SecretRef` (a file, or a field in
+    /// Vault) and not written here: tried after `archive_rpc`, and held to the same rules.
+    #[serde(default)]
+    pub archive_rpc_secrets: Vec<SecretRef>,
     /// Blocks at most this far behind the finalized head are read through the light client, older
     /// ones from `archive_rpc`. Below 256, the state its peers keep.
     #[serde(default = "default_light_client_depth")]
@@ -160,8 +180,12 @@ pub struct SignerConfig {
     pub socket: PathBuf,
     /// The user id the signer runs as.
     pub uid: u32,
-    /// A file holding the endpoint's token for the link.
-    pub token_file: PathBuf,
+    /// A file holding the endpoint's token for the link. Exactly one of `token_file` and `token`.
+    #[serde(default)]
+    pub token_file: Option<PathBuf>,
+    /// The same token as a `SecretRef`: a file, or a field in Vault.
+    #[serde(default)]
+    pub token: Option<SecretRef>,
 }
 
 fn default_max_connections() -> u32 {
@@ -221,8 +245,8 @@ impl Config {
         for p in [
             Some(&mut config.chain_spec),
             config.relay_chain_spec.as_mut(),
-            Some(&mut config.database_url_file),
-            Some(&mut config.signer.token_file),
+            config.database_url_file.as_mut(),
+            config.signer.token_file.as_mut(),
             Some(&mut config.signer.socket),
         ]
         .into_iter()
@@ -236,6 +260,15 @@ impl Config {
             && p.is_relative()
         {
             *p = base.join(&*p);
+        }
+        if let Some(store) = config.store.as_mut() {
+            store.rebase(base);
+        }
+        if let Some(token) = config.signer.token.as_mut() {
+            token.rebase(base);
+        }
+        for secret in &mut config.archive_rpc_secrets {
+            secret.rebase(base);
         }
         config.check()?;
         Ok(config)
@@ -270,7 +303,75 @@ impl Config {
                 source_name(u)
             ));
         }
+        self.check_secrets()
+    }
+
+    /// The checks of the secrets' sources, which touch no network: one source for the store and
+    /// for the signer token, a valid `[vault]` table, and one wherever a secret comes from Vault.
+    fn check_secrets(&self) -> Result<(), String> {
+        if self.database_url_file.is_some() == self.store.is_some() {
+            return Err("set exactly one of database_url_file and [store]".into());
+        }
+        if self.signer.token_file.is_some() == self.signer.token.is_some() {
+            return Err("set exactly one of signer.token_file and signer.token".into());
+        }
+        if let Some(vault) = &self.vault {
+            vault.check().map_err(|e| e.to_string())?;
+        }
+        if let Some(store) = &self.store {
+            store.check().map_err(|e| e.to_string())?;
+        }
+        let from_vault = self
+            .store
+            .as_ref()
+            .is_some_and(|s| s.login.is_vault() || s.password.is_vault())
+            || self.signer.token.as_ref().is_some_and(SecretRef::is_vault)
+            || self.archive_rpc_secrets.iter().any(SecretRef::is_vault);
+        if from_vault && self.vault.is_none() {
+            return Err("a secret is read from Vault but there is no [vault] table".into());
+        }
         Ok(())
+    }
+
+    /// The resolver for this configuration's `[vault]` table. Contacts nothing until a secret is
+    /// read from Vault.
+    pub fn resolver(&self) -> Result<Resolver, String> {
+        Resolver::new(self.vault.as_ref()).map_err(|e| e.to_string())
+    }
+
+    /// The store's URL: read from `database_url_file`, or built from `[store]`. Never printed.
+    pub async fn store_url(&self, resolver: &Resolver) -> Result<Zeroizing<String>, String> {
+        match (&self.database_url_file, &self.store) {
+            (Some(file), _) => bezent_vault::read_file(file).map_err(|e| e.to_string()),
+            (None, Some(store)) => resolver.store_url(store).await.map_err(|e| e.to_string()),
+            (None, None) => Err("no store is configured".to_owned()),
+        }
+    }
+
+    /// The endpoint's token for the signer link.
+    pub async fn signer_token(&self, resolver: &Resolver) -> Result<Zeroizing<String>, String> {
+        match (&self.signer.token_file, &self.signer.token) {
+            (Some(file), _) => bezent_vault::read_file(file).map_err(|e| e.to_string()),
+            (None, Some(token)) => resolver.resolve(token).await.map_err(|e| e.to_string()),
+            (None, None) => Err("no signer token is configured".to_owned()),
+        }
+    }
+
+    /// Every history source: `archive_rpc`, then `archive_rpc_secrets` as they resolve. Each must be
+    /// a `ws://` or `wss://` URL; the error names the source by scheme and host only.
+    pub async fn archive_sources(&self, resolver: &Resolver) -> Result<Vec<String>, String> {
+        let mut sources = self.archive_rpc.clone();
+        for secret in &self.archive_rpc_secrets {
+            let url = resolver.resolve(secret).await.map_err(|e| e.to_string())?;
+            if !(url.starts_with("ws://") || url.starts_with("wss://")) {
+                return Err(format!(
+                    "archive_rpc_secrets {} is not a ws:// or wss:// URL",
+                    source_name(&url)
+                ));
+            }
+            sources.push(url.to_string());
+        }
+        Ok(sources)
     }
 
     /// The declared genesis hash.
@@ -344,6 +445,9 @@ impl fmt::Debug for Config {
             .field("start_block", &self.start_block)
             .field("first_seq", &self.first_seq)
             .field("database_url_file", &self.database_url_file)
+            .field("store", &self.store)
+            .field("vault", &self.vault)
+            .field("archive_rpc_secrets", &self.archive_rpc_secrets)
             .field(
                 "archive_rpc",
                 &self
@@ -423,5 +527,94 @@ mod tests {
                 .unwrap_err()
                 .contains("archive_max_response_bytes")
         );
+    }
+
+    const VAULT: &str = "\n[vault]\naddress = \"https://vault.example:8200\"\nmount = \"bezent\"\nrole = \"bezent-kreivo-endpoint-iam\"\nsts_region = \"us-east-2\"\nserver_id = \"vault.example\"\n";
+    const STORE: &str = "\n[store]\nhost = \"db.example\"\ndatabase = \"bezent\"\nlogin = { vault = { path = \"secret/bezent/kreivo-endpoint\", field = \"db_login\" } }\npassword = { vault = { path = \"secret/bezent/kreivo-endpoint\", field = \"db_password\" } }\n";
+
+    /// The fixture with `edit` applied to its text, parsed and checked.
+    fn parse(edit: impl FnOnce(String) -> String) -> Result<Config, String> {
+        let text = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/endpoint.toml"),
+        )
+        .unwrap();
+        let config: Config = toml::from_str(&edit(text)).map_err(|e| e.to_string())?;
+        config.check()?;
+        Ok(config)
+    }
+
+    fn with_vault_sources(text: String) -> String {
+        text.replace("database_url_file = \"/run/secrets/bezent-kreivo-endpoint-db\"\n", "")
+            .replace(
+                "token_file = \"/run/secrets/bezent-kreivo-endpoint-signer-token\"",
+                "token = { vault = { path = \"secret/bezent/kreivo-endpoint\", field = \"signer_token\" } }",
+            )
+            + STORE
+            + VAULT
+    }
+
+    #[test]
+    fn req_ky_1_the_store_signer_token_and_history_sources_can_come_from_vault() {
+        let c = parse(|t| {
+            with_vault_sources(t).replace(
+                "light_client_depth",
+                "archive_rpc_secrets = [{ vault = { path = \"secret/bezent/kreivo-endpoint\", field = \"archive_rpc\" } }]\nlight_client_depth",
+            )
+        })
+        .unwrap();
+        assert!(c.database_url_file.is_none() && c.store.is_some());
+        assert_eq!(c.archive_rpc_secrets.len(), 1);
+        let debug = format!("{c:?}");
+        assert!(debug.contains("archive_rpc") && !debug.contains("hunter2"));
+    }
+
+    #[test]
+    fn req_ky_1_one_source_each_and_a_vault_table_for_a_vault_secret() {
+        // The existing file forms are the fixture itself.
+        assert!(parse(|t| t).is_ok());
+        assert!(
+            parse(|t| t.replace(
+                "database_url_file = \"/run/secrets/bezent-kreivo-endpoint-db\"\n",
+                ""
+            ))
+            .is_err()
+        );
+        assert!(parse(|t| t + STORE + VAULT).is_err(), "both store forms");
+        assert!(
+            parse(|t| with_vault_sources(t).replace(VAULT, "")).is_err(),
+            "no [vault]"
+        );
+        assert!(
+            parse(|t| with_vault_sources(t).replace("token = {", "token_file = \"t\"\ntoken = {"))
+                .is_err(),
+            "both token forms"
+        );
+    }
+
+    #[tokio::test]
+    async fn req_ky_1_history_sources_resolve_and_are_held_to_websocket_urls() {
+        let dir = std::env::temp_dir().join(format!("bze-secrets-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("good"), "wss://archive.example/ws/KEY123\n").unwrap();
+        std::fs::write(dir.join("bad"), "https://user:KEY123@archive.example/\n").unwrap();
+        let file = |name: &str| SecretRef::File(dir.join(name));
+        let mut c = sample();
+        let resolver = c.resolver().unwrap();
+        c.archive_rpc_secrets = vec![file("good")];
+        let sources = c.archive_sources(&resolver).await.unwrap();
+        assert_eq!(
+            sources,
+            [
+                "wss://rpc.kreivo.bloque.sh",
+                "wss://archive.example/ws/KEY123"
+            ]
+        );
+        c.archive_rpc_secrets = vec![file("bad")];
+        let err = c.archive_sources(&resolver).await.unwrap_err();
+        assert!(
+            err.contains("https://archive.example") && !err.contains("KEY123"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
