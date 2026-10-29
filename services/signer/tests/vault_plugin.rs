@@ -183,17 +183,30 @@ async fn req_cu_1_inv_9_the_plugin_engine_against_the_plugin_in_vault() {
     let name = env("BEZENT_VAULT_PLUGIN_NAME");
     let sha256 = env("BEZENT_VAULT_PLUGIN_SHA256");
 
-    // The plugin mounted is the one registered with the job's SHA-256.
-    let (status, entry) = call(
+    // The plugin mounted is the one registered with the job's SHA-256. Vault takes the version
+    // the binary reports, so the entry is found in the detailed catalog, not by name alone.
+    let (status, catalog) = call(
         &address,
         &root,
         reqwest::Method::GET,
-        &format!("sys/plugins/catalog/secret/{name}"),
+        "sys/plugins/catalog",
         None,
     )
     .await;
-    assert_eq!(status, 200, "{entry}");
-    assert_eq!(entry["data"]["sha256"], sha256);
+    assert_eq!(status, 200, "{catalog}");
+    let entries: Vec<_> = catalog["data"]["detailed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"] == name.as_str() && e["type"] == "secret")
+        .collect();
+    assert!(!entries.is_empty(), "{name} is in the catalog");
+    assert!(
+        entries
+            .iter()
+            .all(|e| e["sha256"] == sha256.as_str() && e["builtin"] == false),
+        "{entries:?}"
+    );
     let (_, mounts) = call(&address, &root, reqwest::Method::GET, "sys/mounts", None).await;
     let mounted = &mounts["data"][format!("{mount}/")];
     assert!(
