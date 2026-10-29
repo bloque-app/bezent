@@ -19,6 +19,7 @@ by @olanod on 2026-10-17.**
 | The Kreivo contract (source) | `contracts/bezent/**` | **GPL-3.0-or-later** (source) | DEC-20. The *built* contract is a GPL-3.0-only combined work: §4.3 |
 | Reusable crate | `crates/core/**` | **Apache-2.0 OR MIT** | Types for amounts, ids, references and coordinates; depends on no GPL code |
 | Reusable crate | `crates/health/**` | **Apache-2.0 OR MIT** | The liveness heartbeat the services' `health` subcommands read; std only, depends on no GPL code |
+| Reusable crate | `crates/vault/**` | **Apache-2.0 OR MIT** | The Vault client and `SecretRef` the services read their secrets with; depends on no GPL code |
 | EVM contracts | `contracts/evm/{src,script,test}/**` | **Apache-2.0 OR MIT** | Reusable vault glue; the libraries under `lib/` are submodules with their own licences |
 | Test bed, tooling, workflows, research scripts | `e2e/**`, `tools/**`, `.github/**`, `deploy/**`, `research/**-scripts` | **Apache-2.0 OR MIT** | Nothing in them links GPL code |
 | Documents | `*.md`, `docs/*.html` | **CC-BY-4.0** | Prose, wherever it lives |

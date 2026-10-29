@@ -8,6 +8,7 @@
 #
 #   crates/core              F-001   types: amounts, asset and network ids, references, coordinates
 #   crates/health            #61     the liveness heartbeat the services' `health` subcommands read
+#   crates/vault             #64     the Vault client (IAM login, KV, PKI) and `SecretRef`, which the services read their secrets with
 #   crates/store             F-001   the PostgreSQL schema of `DEC-4` (sqlx migrations) and its store tests
 #   services/ingress         F-001   empty binary; behaviour from F-002
 #   services/kreivo-endpoint F-001   empty binary
@@ -25,6 +26,7 @@ members = [
     "crates/core",
     "crates/health",
     "crates/store",
+    "crates/vault",
     "services/ingress",
     "services/kreivo-endpoint",
     "services/evm-endpoint",
