@@ -108,7 +108,7 @@ scope</a></li>
       <div class="kicker">SPEC.md</div>
       <h1>bezent Spec</h1>
       <p class="summary">A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger&#x27;s contract.</p>
-      <dl class="meta"><div><dt>Version</dt><dd>0.5.3</dd></div><div><dt>Status</dt><dd>draft</dd></div><div><dt>Date</dt><dd>2026-10-13</dd></div><div><dt>Source</dt><dd><code>bezent/SPEC.md</code> · b57024e 2026-10-17 + local changes</dd></div></dl>
+      <dl class="meta"><div><dt>Version</dt><dd>0.5.4</dd></div><div><dt>Status</dt><dd>draft</dd></div><div><dt>Date</dt><dd>2026-10-13</dd></div><div><dt>Source</dt><dd><code>bezent/SPEC.md</code> · 2862649 2026-10-21 + local changes</dd></div></dl>
     </header>
     
 <h1 id="bezent--system-specification">bezent — System Specification</h1>
@@ -119,7 +119,7 @@ does not say how bezent is built, which technologies implement it, which
 networks it serves today, or why the project exists. <code>notes/</code>
 says why, and <code>notes/CONSTRAINTS-FOR-PLAN.md</code> says what the
 plan is expected to bind.</p>
-<p>Amendments 0001 to 0014 are applied (see
+<p>Amendments 0001 to 0015 are applied (see
 <code>amendments/</code>).</p>
 <h3 id="change-history">Change history</h3>
 <div class="scroll"><table>
@@ -132,6 +132,16 @@ plan is expected to bind.</p>
 </thead>
 <tbody>
 <tr class="odd">
+<td>0.5.4</td>
+<td>2026-10-29</td>
+<td>Amendment 0015 (decision item <code>sp-custody-boundary</code>,
+ruled by @pandres95 in chat): <a class="ref" href="#REQ-CU-1"><code>REQ-CU-1</code></a> names a boundary and
+its properties, not a store. Key material is never readable outside the
+component that signs with it, which is separate from the state and
+auditable on its own; the sentences naming a key-management service, a
+hardware security module and a secrets vault are removed.</td>
+</tr>
+<tr class="even">
 <td>0.5.3</td>
 <td>2026-10-22</td>
 <td>Amendment 0013 (decision item <code>sp-needs-review-when</code>,
@@ -145,7 +155,7 @@ approved resolution that refunds, counts as proven not executed for
 <code>INV-8</code>; and the signer releases a signature only once it is
 recorded (<code>INV-9</code>).</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>0.5.2</td>
 <td>2026-10-15</td>
 <td>Amendment 0012 (decision item <code>sp-payout-window</code>): new
@@ -153,7 +163,7 @@ named condition <code>CND-PayoutWindow</code> — a withdrawal waits while
 the reserve's outflow allowance is spent and resumes when it
 refills.</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>0.5.1</td>
 <td>2026-10-13</td>
 <td>Amendment 0011 (decision item <code>sp-refund-dest</code>, ruled in
@@ -161,7 +171,7 @@ chat): a withdrawal's refund always goes to its redeemer; the refund
 destination leaves a redemption's extras (<a class="ref" href="#REQ-RQ-4"><code>REQ-RQ-4</code></a>), and
 <a class="ref" href="#REQ-RF-2"><code>REQ-RF-2</code></a> binds deposits.</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>0.5.0</td>
 <td>2026-10-13</td>
 <td>Amendment 0008 (decision item <code>sp-redemption-ref</code>): a
@@ -182,7 +192,7 @@ refusals (<code>ERR-Malformed</code>,
 <code>Needs-Review</code> state's meaning matches the transition
 table.</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>0.4.0</td>
 <td>2026-10-13</td>
 <td>Amendment 0007 (decision items <code>pl-scope</code>,
@@ -1131,12 +1141,9 @@ clawed back. If the shortfall takes the surplus below its floor
 reserve is restored.</p>
 <h4 id="c-custody">(c) Custody</h4>
 <p><strong id="REQ-CU-1" class="def"><code>REQ-CU-1</code></strong> Key material MUST never be
-readable outside the component that signs with it. <strong>Delivery
-keys</strong> (those that mint, pay out from a reserve, or refund) MUST
-live in a key-management service or hardware security module that signs
-on request and never releases them. Other keys (pause, statements) MAY
-be held in a secrets vault and loaded only by the signer process
-(<a class="ref" href="#REQ-AR-3"><code>REQ-AR-3</code></a>).</p>
+readable outside the component that signs with it. That component MUST
+be separate from the component that holds bezent's state
+(<a class="ref" href="#REQ-AR-3"><code>REQ-AR-3</code></a>), and MUST be auditable on its own.</p>
 <p><strong id="REQ-CU-2" class="def"><code>REQ-CU-2</code></strong> The custody capability MUST
 support separate keys per network and per role, and rotation without
 stranding transfers in flight (<a class="ref" href="#REQ-KY-4"><code>REQ-KY-4</code></a>).</p>

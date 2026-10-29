@@ -715,7 +715,8 @@ it in (in `amendments/`); a ruling that binds only how bezent is built names its
 | 2026-10-13 | Bloque keeps each surplus above a declared floor, with an alert, and tops it up | Current (amendment 0005) |
 | 2026-10-13 | A daily statement, signed by a key used for nothing else | Current (amendment 0005) |
 | 2026-10-13 | bezent must sustain ten times Swaps' volume at the start of V0 without redesign | Current (amendment 0005) |
-| 2026-10-13 | Keys that mint, pay out or refund sign inside a key-management service; others may come from a secrets vault | Current (amendment 0006; AWS KMS and Vault, `DEC-11`) |
+| 2026-10-13 | Keys that mint, pay out or refund sign inside a key-management service; others may come from a secrets vault | Superseded on 2026-10-29 (amendment 0015) |
+| 2026-10-29 | Key custody is a boundary: no key readable outside the component that signs with it, which is apart from the state and auditable on its own; where each key rests is the plan's | Current (amendment 0015) |
 | 2026-10-13 | bezent moves value only between reserves and Kreivo; Swaps converts inside the vault under a role | Current (amendment 0007) |
 | 2026-10-13 | A fiat payment reversed after Swaps reported it final is Swaps' to cover; mints pause under the floor | Current (amendment 0007) |
 | 2026-10-13 | Payouts only on the reserve's network; Swaps bridges onward from its own funds | Current (amendment 0007, ruled in chat) |
