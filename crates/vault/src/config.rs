@@ -163,8 +163,12 @@ impl StoreSource {
     /// percent-encoded, whatever they hold.
     pub fn url(&self, login: &str, password: &str) -> Result<Zeroizing<String>, Error> {
         self.check()?;
-        if login.is_empty() {
-            return Err(Error::Config("the store login is empty".to_owned()));
+        for (what, value) in [("store login", login), ("store password", password)] {
+            if value.is_empty() {
+                return Err(Error::Empty {
+                    what: what.to_owned(),
+                });
+            }
         }
         let host = self.host.trim_matches(['[', ']']);
         let host = if host.contains(':') {
@@ -173,7 +177,16 @@ impl StoreSource {
             host.to_owned()
         };
         // Pushed piece by piece into a zeroizing string: no intermediate copy of the password.
-        let mut url = Zeroizing::new(String::from("postgres://"));
+        // Sized up front so the buffer never grows, and so never leaves a copy of the password behind.
+        let worst = 3 * (login.len() + password.len() + self.database.len());
+        let root = self
+            .sslrootcert
+            .as_ref()
+            .map_or(0, |p| 3 * p.as_os_str().len());
+        let mut url = Zeroizing::new(String::with_capacity(
+            64 + worst + root + host.len() + self.sslmode.len(),
+        ));
+        url.push_str("postgres://");
         push_encoded(&mut url, login, COMPONENT);
         url.push(':');
         push_encoded(&mut url, password, COMPONENT);
@@ -312,6 +325,7 @@ mod tests {
         let mut s = source();
         s.host = "[::1]".into();
         assert!(s.url("l", "p").unwrap().contains("@[::1]:5432/"));
-        assert!(source().url("", "p").is_err());
+        assert!(matches!(source().url("", "p"), Err(Error::Empty { .. })));
+        assert!(matches!(source().url("l", ""), Err(Error::Empty { .. })));
     }
 }

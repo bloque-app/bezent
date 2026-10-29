@@ -3,14 +3,15 @@
 //! The Vault client: a [`Client`] logs in under the process's AWS credentials and returns a
 //! [`Session`], which reads KV secrets and issues PKI certificates.
 //!
-//! The roles the services log in to have a token TTL of a minute, so a token is never kept: a
-//! caller logs in, uses the [`Session`] in a burst, and drops it (its token is zeroized on drop).
-//! The next use logs in again.
+//! The roles the services log in to have a token TTL of a minute, so a token is used in a burst and
+//! not kept: a caller logs in, uses the [`Session`], and drops it (its token is zeroized on drop). The
+//! [`Resolver`](crate::Resolver) is the one holder that outlives a call, and only for the burst: a
+//! third of the token's lease, at most 20 seconds. The next use logs in again.
 //!
 //! The transport is HTTPS (plain HTTP only on loopback), follows no redirect (a standby node's
 //! redirect must not carry a token anywhere), and has bounded connect and request times. A login
-//! or read is retried a few times on a transport failure or a 5xx; a certificate request is not
-//! (it would issue twice). A 4xx is never retried.
+//! or read is retried a few times on a transport failure, a 5xx or a 429; a certificate request is
+//! not (it would issue twice). Any other 4xx is never retried.
 
 use std::fmt;
 use std::sync::Arc;
@@ -123,6 +124,8 @@ impl Client {
         config.check()?;
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // The environment's proxy settings must not see the token.
+            .no_proxy()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
             .build()
@@ -225,7 +228,7 @@ impl Client {
                     if status.is_success() {
                         return read_body(&mut response).await;
                     }
-                    if !status.is_server_error() || last {
+                    if !(status.is_server_error() || status.as_u16() == 429) || last {
                         return Err(Error::Status {
                             operation,
                             status: status.as_u16(),
@@ -305,13 +308,20 @@ impl Session {
         kv::secret(&body)
     }
 
-    /// The string field `field` of the secret at `path` (KV version 1 or 2).
+    /// The string field `field` of the secret at `path` (KV version 1 or 2). An empty field is an
+    /// [`Error::Empty`].
     pub async fn read_field(&self, path: &str, field: &str) -> Result<Zeroizing<String>, Error> {
         let body = self.read_body(path).await?;
-        kv::field(&body, field)?.ok_or_else(|| Error::NoField {
+        let value = kv::field(&body, field)?.ok_or_else(|| Error::NoField {
             path: path.to_owned(),
             field: field.to_owned(),
-        })
+        })?;
+        if value.is_empty() {
+            return Err(Error::Empty {
+                what: format!("{path} {field}"),
+            });
+        }
+        Ok(value)
     }
 
     async fn read_body(&self, path: &str) -> Result<Zeroizing<Vec<u8>>, Error> {

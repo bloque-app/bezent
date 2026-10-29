@@ -6,7 +6,14 @@
 //! on trust: [`verify`] checks that a private key came back, that it is the key the certificate
 //! names, and that the certificate lives as long as it was asked to (a role's `max_ttl` shortens a
 //! request without an error, and a certificate shorter than planned must not be mistaken for the
-//! one that was). The TLS link that uses these (PUB-1b) is not here.
+//! one that was). It also checks what the certificate says: the subject's common name is the name
+//! asked for and the only subject alternative name is that DNS name (no other name, no IP address),
+//! the extended key usage is the one the role is for (server or client, nothing else) when the
+//! certificate carries one, the key usage allows signatures and not signing certificates, and the
+//! certificate is not a CA. Last, the leaf's signature is verified against the issuing CA Vault
+//! returned, so the pair is consistent; but that CA arrives over the same TLS connection as the
+//! leaf, so trust in the chain still rests on TLS to Vault (the link's root is pinned separately,
+//! by the caller of PUB-1b). The TLS link that uses these is not here.
 
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -28,6 +35,15 @@ use crate::Error;
 /// allowed to be early but not late.
 pub const TOLERANCE: Duration = Duration::from_secs(120);
 
+/// What a role is for: the extended key usage its certificates may carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Usage {
+    /// `serverAuth`: the signer's role.
+    Server,
+    /// `clientAuth`: the callers' roles.
+    Client,
+}
+
 /// What to ask a role to issue.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IssueRequest {
@@ -35,6 +51,8 @@ pub struct IssueRequest {
     pub common_name: String,
     /// How long the certificate should live.
     pub ttl: Duration,
+    /// What the role is for.
+    pub usage: Usage,
 }
 
 /// The body of `POST <mount>/issue/<role>`.
@@ -147,6 +165,16 @@ pub(crate) fn verify(
             "the expiration Vault states is not the certificate's",
         ));
     }
+    check_name_and_use(&certificate, request)?;
+    let issuing = data
+        .issuing_ca
+        .as_deref()
+        .and_then(|pem| pem_block(pem, "CERTIFICATE"))
+        .ok_or(Error::Pki("Vault returned no issuing CA"))?;
+    let issuer = Certificate::parse(&issuing).ok_or(Error::Pki(
+        "the issuing CA is not a valid X.509 certificate",
+    ))?;
+    certificate.verify_signed_by(&issuer)?;
     let ca_chain_pem = if data.ca_chain.is_empty() {
         data.issuing_ca.into_iter().collect()
     } else {
@@ -203,12 +231,37 @@ fn public_key(pkcs8: &[u8]) -> Option<Vec<u8>> {
         .map(|pair| pair.public_key().as_ref().to_vec())
 }
 
+/// A name in the subject alternative names.
+#[derive(Debug, PartialEq, Eq)]
+enum San {
+    /// A DNS name.
+    Dns(String),
+    /// Anything else: an IP address, an e-mail address, a URI.
+    Other,
+}
+
 /// The few fields of an X.509 certificate that are checked.
 pub(crate) struct Certificate<'a> {
     not_before: SystemTime,
     not_after: SystemTime,
     /// The `subjectPublicKey` bits, without the unused-bits byte.
     public_key: &'a [u8],
+    /// The `tbsCertificate`, whole, which the signature covers.
+    tbs: &'a [u8],
+    /// The OID (content bytes) of the signature algorithm.
+    signature_algorithm: &'a [u8],
+    /// The signature bits, without the unused-bits byte.
+    signature: &'a [u8],
+    /// Every common name in the subject.
+    common_names: Vec<String>,
+    /// The subject alternative names, if the extension is there.
+    sans: Option<Vec<San>>,
+    /// The extended key usage OIDs (content bytes), if the extension is there.
+    extended_key_usage: Option<Vec<&'a [u8]>>,
+    /// The first byte of the key usage bits, if the extension is there.
+    key_usage: Option<u8>,
+    /// Whether basicConstraints says this is a CA.
+    ca: bool,
 }
 
 /// Reads one DER element of a single-byte tag: `(tag, content, rest)`.
@@ -239,19 +292,42 @@ fn expect(input: &[u8], tag: u8) -> Option<(&[u8], &[u8])> {
     (found == tag).then_some((content, rest))
 }
 
-#[cfg(test)]
-impl Certificate<'_> {
-    pub(crate) fn parse_for_tests(der: &[u8]) -> Option<Certificate<'_>> {
-        Certificate::parse(der)
+/// The elements of a sequence's content, as `(tag, content)`.
+fn elements(mut input: &[u8]) -> Option<Vec<(u8, &[u8])>> {
+    let mut out = Vec::new();
+    while !input.is_empty() {
+        let (tag, content, rest) = element(input)?;
+        out.push((tag, content));
+        input = rest;
     }
+    Some(out)
 }
 
+const OID_CN: &[u8] = &[0x55, 0x04, 0x03];
+const OID_KEY_USAGE: &[u8] = &[0x55, 0x1d, 0x0f];
+const OID_SAN: &[u8] = &[0x55, 0x1d, 0x11];
+const OID_BASIC_CONSTRAINTS: &[u8] = &[0x55, 0x1d, 0x13];
+const OID_EKU: &[u8] = &[0x55, 0x1d, 0x25];
+const OID_SERVER_AUTH: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01];
+const OID_CLIENT_AUTH: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02];
+
 impl<'a> Certificate<'a> {
-    fn parse(der: &'a [u8]) -> Option<Self> {
+    pub(crate) fn parse(der: &'a [u8]) -> Option<Self> {
         let (certificate, _) = expect(der, 0x30)?;
-        let (tbs, _) = expect(certificate, 0x30)?;
-        // [0] version (optional), serial, signature algorithm, issuer.
-        let mut rest = tbs;
+        let (tag, tbs_content, after_tbs) = element(certificate)?;
+        if tag != 0x30 {
+            return None;
+        }
+        let tbs = &certificate[..certificate.len() - after_tbs.len()];
+        let (algorithm, rest) = expect(after_tbs, 0x30)?;
+        let (signature_algorithm, _) = expect(algorithm, 0x06)?;
+        let (signature_bits, _) = expect(rest, 0x03)?;
+        let (&unused, signature) = signature_bits.split_first()?;
+        if unused != 0 {
+            return None;
+        }
+        // [0] version (optional), serial, signature algorithm, issuer, validity, subject, spki.
+        let mut rest = tbs_content;
         if rest.first() == Some(&0xa0) {
             rest = expect(rest, 0xa0)?.1;
         }
@@ -259,19 +335,155 @@ impl<'a> Certificate<'a> {
         let (_, rest) = expect(rest, 0x30)?;
         let (_, rest) = expect(rest, 0x30)?;
         let (validity, rest) = expect(rest, 0x30)?;
-        let (_, rest) = expect(rest, 0x30)?;
-        let (spki, _) = expect(rest, 0x30)?;
+        let (subject, rest) = expect(rest, 0x30)?;
+        let (spki, mut rest) = expect(rest, 0x30)?;
         let (not_before, validity) = time(validity)?;
         let (not_after, _) = time(validity)?;
         let (_, spki) = expect(spki, 0x30)?;
         let (bits, _) = expect(spki, 0x03)?;
         let (&unused, public_key) = bits.split_first()?;
-        (unused == 0).then_some(Self {
+        if unused != 0 {
+            return None;
+        }
+        let mut common_names = Vec::new();
+        for (set_tag, set) in elements(subject)? {
+            if set_tag != 0x31 {
+                return None;
+            }
+            for (seq_tag, attribute) in elements(set)? {
+                let (oid, value) = expect(attribute, 0x06).filter(|_| seq_tag == 0x30)?;
+                if oid == OID_CN {
+                    let (_, text, _) = element(value)?;
+                    common_names.push(String::from_utf8(text.to_vec()).ok()?);
+                }
+            }
+        }
+        // Optional unique ids ([1], [2]), then the extensions ([3]).
+        while matches!(rest.first(), Some(0x81 | 0x82)) {
+            rest = element(rest)?.2;
+        }
+        let mut found = Self {
             not_before,
             not_after,
             public_key,
-        })
+            tbs,
+            signature_algorithm,
+            signature,
+            common_names,
+            sans: None,
+            extended_key_usage: None,
+            key_usage: None,
+            ca: false,
+        };
+        if rest.first() == Some(&0xa3) {
+            let (extensions, _) = expect(rest, 0xa3)?;
+            let (extensions, _) = expect(extensions, 0x30)?;
+            for (tag, extension) in elements(extensions)? {
+                if tag != 0x30 {
+                    return None;
+                }
+                let (oid, mut after) = expect(extension, 0x06)?;
+                if after.first() == Some(&0x01) {
+                    after = element(after)?.2; // critical
+                }
+                let (value, _) = expect(after, 0x04)?;
+                match oid {
+                    OID_SAN => {
+                        let (names, _) = expect(value, 0x30)?;
+                        found.sans = Some(
+                            elements(names)?
+                                .into_iter()
+                                .map(|(tag, name)| match tag {
+                                    0x82 => String::from_utf8(name.to_vec()).ok().map(San::Dns),
+                                    _ => Some(San::Other),
+                                })
+                                .collect::<Option<_>>()?,
+                        );
+                    }
+                    OID_EKU => {
+                        let (usages, _) = expect(value, 0x30)?;
+                        found.extended_key_usage = Some(
+                            elements(usages)?
+                                .into_iter()
+                                .map(|(tag, oid)| (tag == 0x06).then_some(oid))
+                                .collect::<Option<_>>()?,
+                        );
+                    }
+                    OID_KEY_USAGE => {
+                        let (bits, _) = expect(value, 0x03)?;
+                        found.key_usage = Some(bits.get(1).copied().unwrap_or(0));
+                    }
+                    OID_BASIC_CONSTRAINTS => {
+                        let (constraints, _) = expect(value, 0x30)?;
+                        found.ca = matches!(element(constraints), Some((0x01, [0xff], _)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Some(found)
     }
+
+    /// Verifies this certificate's signature with `issuer`'s key.
+    fn verify_signed_by(&self, issuer: &Certificate<'_>) -> Result<(), Error> {
+        use ring::signature as sig;
+        let algorithm: &dyn sig::VerificationAlgorithm = match self.signature_algorithm {
+            [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02] => &sig::ECDSA_P256_SHA256_ASN1,
+            [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03] => &sig::ECDSA_P384_SHA384_ASN1,
+            [0x2b, 0x65, 0x70] => &sig::ED25519,
+            [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b] => {
+                &sig::RSA_PKCS1_2048_8192_SHA256
+            }
+            _ => {
+                return Err(Error::Pki(
+                    "the certificate's signature algorithm is not supported",
+                ));
+            }
+        };
+        sig::UnparsedPublicKey::new(algorithm, issuer.public_key)
+            .verify(self.tbs, self.signature)
+            .map_err(|_| Error::Pki("the certificate is not signed by the issuing CA"))
+    }
+}
+
+/// The name and the use: the subject, the names, the usages and the CA flag.
+fn check_name_and_use(certificate: &Certificate<'_>, request: &IssueRequest) -> Result<(), Error> {
+    let name = request.common_name.as_str();
+    if certificate.common_names.len() != 1
+        || !certificate.common_names[0].eq_ignore_ascii_case(name)
+    {
+        return Err(Error::Pki("the common name is not the name asked for"));
+    }
+    match certificate.sans.as_deref() {
+        Some([San::Dns(dns)]) if dns.eq_ignore_ascii_case(name) => {}
+        _ => {
+            return Err(Error::Pki(
+                "the subject alternative names are not exactly the name asked for",
+            ));
+        }
+    }
+    if let Some(usages) = &certificate.extended_key_usage {
+        let wanted = match request.usage {
+            Usage::Server => OID_SERVER_AUTH,
+            Usage::Client => OID_CLIENT_AUTH,
+        };
+        if usages.as_slice() != [wanted] {
+            return Err(Error::Pki(
+                "the extended key usage is not the one the role is for",
+            ));
+        }
+    }
+    // digitalSignature (bit 0) set; keyCertSign (bit 5) and cRLSign (bit 6) clear.
+    if certificate
+        .key_usage
+        .is_some_and(|bits| bits & 0x80 == 0 || bits & 0x06 != 0)
+    {
+        return Err(Error::Pki("the key usage does not fit a leaf that signs"));
+    }
+    if certificate.ca {
+        return Err(Error::Pki("the certificate is a CA"));
+    }
+    Ok(())
 }
 
 /// A `UTCTime` or `GeneralizedTime`, in Zulu, to a time, and the rest.

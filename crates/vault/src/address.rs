@@ -22,14 +22,25 @@ pub fn loopback(address: &str) -> bool {
     }
 }
 
-/// The base URL of the server, without a trailing slash, refusing plain HTTP off loopback.
+/// The base URL of the server, without a trailing slash, refusing plain HTTP off loopback, and an
+/// address with userinfo, a query or a fragment (a path prefix is kept: every URL is built as
+/// `<base>/v1/<path>`).
 pub fn base(address: &str) -> Result<String, Error> {
-    if !(address.starts_with("https://") || loopback(address)) {
-        return Err(Error::Config(
-            "the Vault address must be https (REQ-KY-1)".to_owned(),
-        ));
+    let refused = |why: &str| Error::Config(format!("the Vault address {why} (REQ-KY-1)"));
+    let url = url::Url::parse(address).map_err(|_| refused("is not a URL"))?;
+    if !(url.scheme() == "https" || loopback(address)) {
+        return Err(refused("must be https"));
     }
-    Ok(address.trim_end_matches('/').to_owned())
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(refused("has no host"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(refused("must not carry a user name or password"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(refused("must not carry a query or a fragment"));
+    }
+    Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
 #[cfg(test)]
@@ -78,6 +89,29 @@ mod tests {
         ] {
             assert!(!loopback(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn req_ky_1_the_address_carries_no_userinfo_query_or_fragment() {
+        for bad in [
+            "https://user:pw@vault.example:8200",
+            "https://user@vault.example",
+            "https://vault.example?x=1",
+            "https://vault.example/#frag",
+            "https://",
+            "not a url",
+            "",
+        ] {
+            assert!(base(bad).is_err(), "{bad}");
+        }
+        assert_eq!(
+            base("https://vault.example:8200/prefix/").unwrap(),
+            "https://vault.example:8200/prefix"
+        );
+        assert_eq!(
+            base("HTTPS://Vault.Example").unwrap(),
+            "https://vault.example"
+        );
     }
 
     #[test]

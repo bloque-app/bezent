@@ -15,8 +15,9 @@
 //!   is. [`Resolver`] turns one into its value, and [`StoreSource`] builds the store's URL from a
 //!   login and a password in the process.
 //!
-//! The roles the services log in to have tokens that live for a minute, so a token is never kept: a
-//! burst of reads shares one login, and the next burst logs in again. Tokens and values are
+//! The roles the services log in to have tokens that live for a minute, so none is kept beyond a
+//! burst: the reads of a start share one login (held for at most 20 seconds), and the next burst
+//! logs in again. Vault namespaces are not supported. Tokens and values are
 //! [`zeroize::Zeroizing`], plain HTTP is refused off loopback, no redirect is followed, and no
 //! error carries a value ([`Error`]).
 
@@ -35,6 +36,6 @@ pub use address::loopback;
 pub use client::{Client, Session};
 pub use config::{SecretRef, StoreSource, VaultConfig, VaultField};
 pub use error::Error;
-pub use pki::{IssueRequest, Issued};
+pub use pki::{IssueRequest, Issued, Usage};
 pub use resolve::{Resolver, read_file};
 pub use zeroize::Zeroizing;

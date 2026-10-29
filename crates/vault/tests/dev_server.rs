@@ -15,7 +15,9 @@
 use std::time::Duration;
 
 use aws_credential_types::Credentials;
-use bezent_vault::{Client, Error, IssueRequest, Resolver, SecretRef, VaultConfig, VaultField};
+use bezent_vault::{
+    Client, Error, IssueRequest, Resolver, SecretRef, Usage, VaultConfig, VaultField,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const CALLER: &str = "arn:aws:iam::000000000000:user/bezent-test";
@@ -192,6 +194,7 @@ async fn req_ky_1_login_kv_and_pki_against_a_dev_server() {
             &IssueRequest {
                 common_name: "core.link.example".into(),
                 ttl: Duration::from_secs(720 * 3600),
+                usage: Usage::Client,
             },
         )
         .await
@@ -205,6 +208,7 @@ async fn req_ky_1_login_kv_and_pki_against_a_dev_server() {
             &IssueRequest {
                 common_name: "other.link.example".into(),
                 ttl: Duration::from_secs(720 * 3600),
+                usage: Usage::Client,
             },
         )
         .await;
@@ -217,6 +221,7 @@ async fn req_ky_1_login_kv_and_pki_against_a_dev_server() {
             &IssueRequest {
                 common_name: "core.link.example".into(),
                 ttl: Duration::from_secs(1440 * 3600),
+                usage: Usage::Client,
             },
         )
         .await;

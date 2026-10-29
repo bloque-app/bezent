@@ -34,6 +34,13 @@ pub enum Error {
         /// The field that was asked for.
         field: String,
     },
+    /// A secret is the empty string (after trimming, for a file): a token, key, URL, login or
+    /// password that is empty is a mistake to stop at, never a value to use. Names the secret, never
+    /// a value.
+    Empty {
+        /// The Vault `path` and field, the file, or the store part.
+        what: String,
+    },
     /// A secret file could not be read.
     File {
         /// The file.
@@ -58,6 +65,7 @@ impl fmt::Display for Error {
             Error::NoField { path, field } => {
                 write!(f, "the Vault secret {path} has no string field {field}")
             }
+            Error::Empty { what } => write!(f, "the secret {what} is empty"),
             Error::File { path, kind } => write!(f, "cannot read the secret file {path}: {kind}"),
             Error::Pki(why) => write!(f, "Vault issued an unusable certificate: {why}"),
         }

@@ -69,11 +69,18 @@ impl Resolver {
     }
 }
 
-/// The contents of a secret file, surrounding whitespace removed.
+/// The contents of a secret file, surrounding whitespace removed. A file with nothing in it is an
+/// [`Error::Empty`].
 pub fn read_file(path: &Path) -> Result<Zeroizing<String>, Error> {
     let text = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| Error::File {
         path: path.display().to_string(),
         kind: e.kind(),
     })?);
-    Ok(Zeroizing::new(text.trim().to_owned()))
+    let value = Zeroizing::new(text.trim().to_owned());
+    if value.is_empty() {
+        return Err(Error::Empty {
+            what: path.display().to_string(),
+        });
+    }
+    Ok(value)
 }

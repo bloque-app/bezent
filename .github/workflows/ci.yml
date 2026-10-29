@@ -152,13 +152,16 @@ jobs:
   # STS the test starts itself: Vault forwards the signed GetCallerIdentity call to its configured
   # sts_endpoint and trusts the answer, so the login, KV v1 and v2 and PKI issue run end to end
   # without AWS (crates/vault/tests/dev_server.rs). The binary is verified against HashiCorp's
-  # signed-release checksum list for the pinned version.
+  # checksum list for the pinned version, and that list against its detached signature, made with
+  # HashiCorp's release key (pinned by fingerprint below).
   vault-dev:
     name: Vault client against vault server -dev
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       VAULT_VERSION: "1.20.4"
+      # HashiCorp Security's release-signing key, https://www.hashicorp.com/trust/security
+      HASHICORP_KEY_FPR: 798AEC654E5C15428C8E42EEAA16FCBCA621E701
       # A dev server's throwaway root token, on loopback, for this job only.
       BEZENT_VAULT_DEV_TOKEN: bezent-ci-dev-root
       BEZENT_VAULT_DEV_ADDR: http://127.0.0.1:8200
@@ -171,6 +174,13 @@ jobs:
           cd "$RUNNER_TEMP"
           curl -fsSLO "$base/vault_${VAULT_VERSION}_linux_amd64.zip"
           curl -fsSLO "$base/vault_${VAULT_VERSION}_SHA256SUMS"
+          curl -fsSLO "$base/vault_${VAULT_VERSION}_SHA256SUMS.sig"
+          curl -fsSL https://www.hashicorp.com/.well-known/pgp-key.txt -o hashicorp.asc
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          install -d -m 700 "$GNUPGHOME"
+          gpg --batch --import hashicorp.asc
+          gpg --batch --with-colons --fingerprint | grep "^fpr:::::::::$HASHICORP_KEY_FPR:"
+          gpg --batch --verify "vault_${VAULT_VERSION}_SHA256SUMS.sig" "vault_${VAULT_VERSION}_SHA256SUMS"
           sha256sum -c --ignore-missing "vault_${VAULT_VERSION}_SHA256SUMS"
           unzip -q "vault_${VAULT_VERSION}_linux_amd64.zip" vault
           nohup ./vault server -dev -dev-root-token-id="$BEZENT_VAULT_DEV_TOKEN" \

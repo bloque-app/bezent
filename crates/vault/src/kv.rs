@@ -110,6 +110,14 @@ impl<'de, S: DeserializeSeed<'de>> DeserializeSeed<'de> for Inner<S> {
     }
 }
 
+/// KV version 2's `metadata`: an object with a `version`. A version 1 secret that merely has
+/// fields named `data` and `metadata` is not mistaken for one.
+#[derive(serde::Deserialize)]
+struct Metadata {
+    #[allow(dead_code)]
+    version: IgnoredAny,
+}
+
 struct InnerVisitor<S>(S);
 
 impl<'de, S: DeserializeSeed<'de>> Visitor<'de> for InnerVisitor<S> {
@@ -127,7 +135,7 @@ impl<'de, S: DeserializeSeed<'de>> Visitor<'de> for InnerVisitor<S> {
                 ("data", Some(s)) => value = Some(map.next_value_seed(s)?),
                 ("metadata", s) => {
                     seed = s;
-                    map.next_value::<IgnoredAny>()?;
+                    map.next_value::<Metadata>()?;
                     metadata = true;
                 }
                 (_, s) => {
@@ -221,6 +229,30 @@ mod tests {
             field(body.as_bytes(), "data").unwrap().unwrap().as_str(),
             "d"
         );
+    }
+
+    #[test]
+    fn a_v1_secret_with_object_fields_data_and_metadata_is_v1_unless_metadata_has_a_version() {
+        use std::collections::HashMap;
+        type Fields = HashMap<String, String>;
+        #[derive(serde::Deserialize)]
+        struct Wrap {
+            data: Fields,
+            metadata: Fields,
+        }
+        let v1 = br#"{"data":{"data":{"a":"b"},"metadata":{"x":"y"}}}"#;
+        let wrap: Wrap = secret(v1).unwrap();
+        assert_eq!(
+            (wrap.data["a"].as_str(), wrap.metadata["x"].as_str()),
+            ("b", "y")
+        );
+        // With a version, it is KV v2's envelope: the secret is the inner `data`.
+        let v2 = br#"{"data":{"data":{"a":"b"},"metadata":{"version":2}}}"#;
+        let inner: Fields = secret(v2).unwrap();
+        assert_eq!(inner["a"], "b");
+        // A metadata that is not an object is not v2's.
+        let odd = br#"{"data":{"data":{"a":"b"},"metadata":"m"}}"#;
+        assert!(secret::<Fields>(odd).is_err());
     }
 
     #[test]
