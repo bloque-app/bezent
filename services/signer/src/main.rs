@@ -83,11 +83,16 @@ async fn load(path: &Path, log: &Log, serve: bool) -> Result<(Config, Custody, P
 
 async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Result<(), String> {
     let heartbeat = bezent_signer::health::heartbeat(&config);
+    if config.database_url_file.is_none() && config.store.is_none() {
+        return Err(
+            "configuration refused: database_url_file or store is required to serve".into(),
+        );
+    }
     // The core and the signer never run as one user (REQ-CU-1, REQ-AR-3).
     let callers =
         Arc::new(Callers::new(&config.callers, process::euid()).map_err(|e| e.to_string())?);
     let url = match (&config.database_url_file, &config.store) {
-        (Some(url_file), None) => zeroize::Zeroizing::new(
+        (Some(url_file), _) => zeroize::Zeroizing::new(
             std::fs::read_to_string(url_file)
                 .map_err(|e| format!("cannot read {}: {}", url_file.display(), e.kind()))?,
         ),
@@ -96,11 +101,7 @@ async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Resu
             .store_url(store)
             .await
             .map_err(|e| e.to_string())?,
-        _ => {
-            return Err(
-                "configuration refused: database_url_file or store is required to serve".into(),
-            );
-        }
+        (None, None) => unreachable!("checked above"),
     };
     let pool = bezent_store::tls::connect(pool_options(), url.trim())
         .await
