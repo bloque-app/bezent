@@ -1,117 +1,133 @@
 // Copyright (c) 2026 Pagos Cube LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The custody the signer runs on, chosen by configuration (`DEC-11`): test keys from a file, or
-//! delivery keys in a key-management service, AWS KMS or Vault Transit, with the other keys
-//! (statement, pause) from Vault, behind one [`KeyBackend`].
+//! The engines the signer runs on, chosen by configuration (`keys.backend`, PLAN `DEC-11` and the
+//! ruling `d-delivery-keys`), joined into one [`SigningEngine`]: test keys from a file; or delivery
+//! keys in a signing service (AWS KMS, Vault Transit or a Vault signing plugin), with the other keys
+//! (statement, pause) optionally from Vault KV. The configuration names which engine holds each
+//! key: a key is the signing service's if its list names it, Vault KV's otherwise, and no id may be
+//! in both.
 
 use std::fmt;
 use std::future::Future;
 
-use crate::keys::{Environment, FileBackend, KeyBackend, KeyError, Scheme};
-use crate::kms::{AwsKms, KmsApi, KmsBackend};
-use crate::transit::{TransitApi, TransitBackend, VaultTransit};
+use crate::engine::{EngineKind, Health, Signable, SigningEngine};
+use crate::keys::{Environment, FileBackend, KeyError, Scheme};
+use crate::kms::{AwsKms, KmsBackend};
+use crate::transit::{TransitBackend, VaultTransit};
+use crate::vault_plugin::{PluginBackend, VaultPlugin};
 
-/// A key-management service that holds delivery keys and signs for them, never releasing them.
-pub trait Delivery: KeyBackend + fmt::Debug {
-    /// What the configuration calls it, for a refusal.
-    const NAME: &'static str;
-
-    /// The ids of the keys held.
-    fn key_ids(&self) -> Vec<String>;
-}
-
-impl<A: KmsApi> Delivery for KmsBackend<A> {
-    const NAME: &'static str = "KMS";
-
-    fn key_ids(&self) -> Vec<String> {
-        self.ids().map(str::to_owned).collect()
-    }
-}
-
-impl<A: TransitApi> Delivery for TransitBackend<A> {
-    const NAME: &'static str = "Vault Transit";
-
-    fn key_ids(&self) -> Vec<String> {
-        self.ids().map(str::to_owned).collect()
-    }
-}
-
-/// Delivery keys in a key-management service ([`KmsBackend`] or [`TransitBackend`]) and,
-/// optionally, the other keys from Vault, of one environment.
-pub struct Mixed<D: Delivery> {
-    kms: D,
+/// Delivery keys in a signing service and, optionally, the other keys from Vault KV, of one
+/// environment.
+pub struct Mixed<D: SigningEngine> {
+    service: D,
     vault: Option<FileBackend>,
 }
 
-impl<D: Delivery> Mixed<D> {
-    /// Joins the two custodies. They must be of one environment and share no key id.
-    pub fn new(kms: D, vault: Option<FileBackend>) -> Result<Self, KeyError> {
+impl<D: SigningEngine + fmt::Debug> Mixed<D> {
+    /// Joins the two engines. They must be of one environment and share no key id.
+    pub fn new(service: D, vault: Option<FileBackend>) -> Result<Self, KeyError> {
         if let Some(vault) = &vault {
-            if vault.environment() != kms.environment() {
+            if vault.environment() != service.environment() {
                 return Err(KeyError::Refused(format!(
-                    "the {} keys and the Vault keys are of different environments (REQ-KY-6)",
-                    D::NAME
+                    "the {} keys and the {} keys are of different environments (REQ-KY-6)",
+                    service.name(),
+                    vault.name()
                 )));
             }
-            let held = kms.key_ids();
+            let held = service.key_ids();
             if let Some(id) = vault.ids().find(|id| held.iter().any(|k| k == id)) {
                 return Err(KeyError::Source(format!(
-                    "key {id} is in both {} and Vault",
-                    D::NAME
+                    "key {id} is in both {} and {}",
+                    service.name(),
+                    vault.name()
                 )));
             }
         }
-        Ok(Self { kms, vault })
+        Ok(Self { service, vault })
     }
+}
 
+impl<D: SigningEngine> Mixed<D> {
     fn vault_for(&self, id: &str) -> Option<&FileBackend> {
         self.vault.as_ref().filter(|v| v.ids().any(|k| k == id))
     }
 }
 
-impl<D: Delivery> KeyBackend for Mixed<D> {
+impl<D: SigningEngine> SigningEngine for Mixed<D> {
+    fn kind(&self) -> EngineKind {
+        self.service.kind()
+    }
+
+    fn name(&self) -> &'static str {
+        self.service.name()
+    }
+
     fn environment(&self) -> Environment {
-        self.kms.environment()
+        self.service.environment()
+    }
+
+    fn key_ids(&self) -> Vec<String> {
+        let mut ids = self.service.key_ids();
+        if let Some(v) = &self.vault {
+            ids.extend(v.key_ids());
+        }
+        ids
     }
 
     fn scheme(&self, id: &str) -> Result<Scheme, KeyError> {
         match self.vault_for(id) {
             Some(v) => v.scheme(id),
-            None => self.kms.scheme(id),
+            None => self.service.scheme(id),
         }
     }
 
     fn public_key(&self, id: &str) -> Result<Vec<u8>, KeyError> {
         match self.vault_for(id) {
             Some(v) => v.public_key(id),
-            None => self.kms.public_key(id),
+            None => self.service.public_key(id),
         }
     }
 
-    /// A key of the key-management service is never released; one read from Vault is in the
-    /// signer's memory.
-    fn non_exportable(&self, id: &str) -> bool {
-        self.vault_for(id).is_none()
+    fn address(&self, id: &str) -> Result<Vec<u8>, KeyError> {
+        match self.vault_for(id) {
+            Some(v) => v.address(id),
+            None => self.service.address(id),
+        }
     }
 
-    fn sign(
+    /// A key of the signing service is never released; one read from Vault KV is in the signer's
+    /// memory.
+    fn non_exportable(&self, id: &str) -> bool {
+        match self.vault_for(id) {
+            Some(_) => false,
+            None => self.service.non_exportable(id),
+        }
+    }
+
+    fn sign_prepared(
         &self,
         id: &str,
-        message: &[u8],
+        scheme: Scheme,
+        input: Signable<'_>,
     ) -> impl Future<Output = Result<Vec<u8>, KeyError>> + Send {
         let vault = self.vault_for(id);
         async move {
             match vault {
-                Some(v) => v.sign(id, message).await,
-                None => self.kms.sign(id, message).await,
+                Some(v) => v.sign_prepared(id, scheme, input).await,
+                None => self.service.sign_prepared(id, scheme, input).await,
             }
         }
     }
+
+    async fn health(&self) -> Health {
+        // The Vault KV keys are in memory: the service's health is the custody's.
+        self.service.health().await
+    }
 }
 
-impl<D: Delivery> fmt::Debug for Mixed<D> {
+impl<D: SigningEngine + fmt::Debug> fmt::Debug for Mixed<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.kms)?;
+        write!(f, "{:?}", self.service)?;
         if let Some(v) = &self.vault {
             write!(f, " + {v:?}")?;
         }
@@ -119,64 +135,79 @@ impl<D: Delivery> fmt::Debug for Mixed<D> {
     }
 }
 
-/// The custody the configuration names.
+/// The custody the configuration names (`keys.backend`).
 pub enum Custody {
-    /// Test keys from a file (`M-0`).
+    /// `file`: test keys from a file.
     File(FileBackend),
-    /// KMS (and Vault).
+    /// `kms`: AWS KMS (and Vault KV).
     Kms(Mixed<KmsBackend<AwsKms>>),
-    /// Vault Transit (and Vault KV for the other keys).
+    /// `transit`: Vault Transit (and Vault KV for the other keys).
     Transit(Mixed<TransitBackend<VaultTransit>>),
+    /// `vault-plugin`: a Vault signing plugin (and Vault KV for the other keys).
+    VaultPlugin(Mixed<PluginBackend<VaultPlugin>>),
 }
 
-impl KeyBackend for Custody {
-    fn environment(&self) -> Environment {
-        match self {
-            Self::File(b) => b.environment(),
-            Self::Kms(b) => b.environment(),
-            Self::Transit(b) => b.environment(),
+/// The same call on whichever engine the custody is.
+macro_rules! each {
+    ($self:expr, $b:ident => $call:expr) => {
+        match $self {
+            Custody::File($b) => $call,
+            Custody::Kms($b) => $call,
+            Custody::Transit($b) => $call,
+            Custody::VaultPlugin($b) => $call,
         }
+    };
+}
+
+impl SigningEngine for Custody {
+    fn kind(&self) -> EngineKind {
+        each!(self, b => b.kind())
+    }
+
+    fn name(&self) -> &'static str {
+        each!(self, b => b.name())
+    }
+
+    fn environment(&self) -> Environment {
+        each!(self, b => b.environment())
+    }
+
+    fn key_ids(&self) -> Vec<String> {
+        each!(self, b => b.key_ids())
     }
 
     fn scheme(&self, id: &str) -> Result<Scheme, KeyError> {
-        match self {
-            Self::File(b) => b.scheme(id),
-            Self::Kms(b) => b.scheme(id),
-            Self::Transit(b) => b.scheme(id),
-        }
+        each!(self, b => b.scheme(id))
     }
 
     fn public_key(&self, id: &str) -> Result<Vec<u8>, KeyError> {
-        match self {
-            Self::File(b) => b.public_key(id),
-            Self::Kms(b) => b.public_key(id),
-            Self::Transit(b) => b.public_key(id),
-        }
+        each!(self, b => b.public_key(id))
+    }
+
+    fn address(&self, id: &str) -> Result<Vec<u8>, KeyError> {
+        each!(self, b => b.address(id))
     }
 
     fn non_exportable(&self, id: &str) -> bool {
-        match self {
-            Self::File(b) => b.non_exportable(id),
-            Self::Kms(b) => b.non_exportable(id),
-            Self::Transit(b) => b.non_exportable(id),
-        }
+        each!(self, b => b.non_exportable(id))
     }
 
-    async fn sign(&self, id: &str, message: &[u8]) -> Result<Vec<u8>, KeyError> {
-        match self {
-            Self::File(b) => b.sign(id, message).await,
-            Self::Kms(b) => b.sign(id, message).await,
-            Self::Transit(b) => b.sign(id, message).await,
-        }
+    async fn sign_prepared(
+        &self,
+        id: &str,
+        scheme: Scheme,
+        input: Signable<'_>,
+    ) -> Result<Vec<u8>, KeyError> {
+        each!(self, b => b.sign_prepared(id, scheme, input).await)
+    }
+
+    async fn health(&self) -> Health {
+        each!(self, b => b.health().await)
     }
 }
 
 impl fmt::Debug for Custody {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::File(b) => b.fmt(f),
-            Self::Kms(b) => b.fmt(f),
-            Self::Transit(b) => b.fmt(f),
-        }
+        each!(self, b => b.fmt(f))
     }
 }

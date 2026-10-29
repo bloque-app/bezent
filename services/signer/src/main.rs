@@ -3,8 +3,10 @@
 //! `bezent-signer`: signs only intents the core recorded and holds no state (DEC-3, REQ-AR-3).
 //!
 //! `bezent-signer <config-path>` serves the link; `bezent-signer --check <config-path>` loads and
-//! checks the configuration and the keys, prints the key ids and public keys, and exits. Keys are
-//! read from the file the configuration names, never from the environment (`REQ-KY-1`).
+//! checks the configuration and the keys, asks the signing engine whether it can sign now (its
+//! health, which signs nothing), prints the key ids and public keys, and exits. A signer that is
+//! about to serve asks the same, and does not serve an engine that is not ready. Keys are read
+//! from the file the configuration names, never from the environment (`REQ-KY-1`).
 //!
 //! `bezent-signer health [<config-path>]` is the container's health check (issue #61): exit 0 only
 //! when the running signer has reached its store recently and its socket is there. It reads the
@@ -25,13 +27,15 @@ use std::sync::Arc;
 
 use bezent_signer::config::{Config, KeySource, Policy};
 use bezent_signer::custody::{Custody, Mixed};
-use bezent_signer::keys::{FileBackend, KeyBackend};
+use bezent_signer::engine::SigningEngine;
+use bezent_signer::keys::FileBackend;
 use bezent_signer::kms::{AwsKms, KmsBackend};
 use bezent_signer::link::{self, Callers};
 use bezent_signer::log::Log;
 use bezent_signer::process;
 use bezent_signer::signer::{Signer, check_login, pool_options};
 use bezent_signer::transit::{TransitBackend, VaultTransit};
+use bezent_signer::vault_plugin::{PluginBackend, VaultPlugin};
 use bezent_vault::Resolver;
 
 const NAME: &str = "bezent-signer";
@@ -103,8 +107,43 @@ async fn load(path: &Path, log: &Log, serve: bool) -> Result<(Config, Custody, P
             };
             Custody::Transit(Mixed::new(transit, vault).map_err(|e| e.to_string())?)
         }
+        KeySource::VaultPlugin {
+            environment,
+            mount,
+            role,
+            keys,
+            vault,
+        } => {
+            let table = config.vault.as_ref().ok_or(
+                "configuration refused: a secret is read from Vault but there is no vault table",
+            )?;
+            let api = VaultPlugin::with_role(table, role, mount).map_err(|e| e.to_string())?;
+            let plugin = PluginBackend::new(api, *environment, keys).map_err(|e| e.to_string())?;
+            let vault = match vault {
+                Some(source) => {
+                    let resolver =
+                        Resolver::new(config.vault.as_ref()).map_err(|e| e.to_string())?;
+                    Some(
+                        bezent_signer::vault::load(source, *environment, &resolver)
+                            .await
+                            .map_err(|e| e.to_string())?,
+                    )
+                }
+                None => None,
+            };
+            Custody::VaultPlugin(Mixed::new(plugin, vault).map_err(|e| e.to_string())?)
+        }
     };
     let policy = config.policy(&backend).map_err(|e| e.to_string())?;
+    // The engine can sign now, or the signer does not start (nothing is signed to find out).
+    let health = backend.health().await;
+    if !health.ready {
+        return Err(format!(
+            "the {} engine is not ready: {}",
+            backend.name(),
+            health.detail
+        ));
+    }
     Ok((config, backend, policy))
 }
 

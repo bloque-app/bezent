@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Pagos Cube LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The Vault Transit key backend (the Fargate design's ruling `d-delivery-keys`; `REQ-CU-1`,
+//! The Vault Transit signing engine (the plan's ruling `d-delivery-keys`; `REQ-CU-1`,
 //! `REQ-KY-1`, `REQ-KY-3`, `REQ-KY-4`, `REQ-KY-6`, `INV-9`).
 //!
 //! A delivery key of the Kreivo network is a native ed25519 account whose key lives in a Vault
@@ -19,8 +19,11 @@
 //!
 //! The signer logs in under its task role for each signature ([`bezent_vault::Resolver::session`]
 //! reuses a login for a few seconds at most, so a token is never used past its lease). Any failure
-//! is an error and the intent is retried later; nothing falls back to another key. No message,
-//! signature or token is logged or put in an error.
+//! is an error and the intent is retried later; nothing falls back to another key. A Vault that
+//! does not answer is [`KeyError::Unavailable`], a wrong answer or a refusal [`KeyError::Backend`]
+//! ([`crate::engine::vault_failure`]). No message, signature or token is logged or put in an error.
+//! The engine's health reads the key again: it must still be one Vault will not export, with the
+//! public key read at start.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -31,7 +34,8 @@ use bezent_vault::Resolver;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 
-use crate::keys::{Environment, KeyBackend, KeyError, Scheme};
+use crate::engine::{EngineKind, Health, Signable, SigningEngine, check_input, vault_failure};
+use crate::keys::{Environment, KeyError, Scheme};
 
 /// The Transit calls the backend needs. [`VaultTransit`] is the real one; tests implement it with
 /// a local key.
@@ -79,26 +83,22 @@ impl VaultTransit {
     }
 }
 
-fn failed(e: bezent_vault::Error) -> KeyError {
-    KeyError::Backend(e.to_string())
-}
-
 impl TransitApi for VaultTransit {
     async fn public_key(&self, key: &str) -> Result<(u32, [u8; 32]), KeyError> {
-        let session = self.resolver.session().await.map_err(failed)?;
+        let session = self.resolver.session().await.map_err(vault_failure)?;
         let key = session
             .transit_key(&self.mount, key)
             .await
-            .map_err(failed)?;
+            .map_err(vault_failure)?;
         Ok((key.version, key.public_key))
     }
 
     async fn sign(&self, key: &str, version: u32, message: &[u8]) -> Result<[u8; 64], KeyError> {
-        let session = self.resolver.session().await.map_err(failed)?;
+        let session = self.resolver.session().await.map_err(vault_failure)?;
         session
             .transit_sign(&self.mount, key, version, message)
             .await
-            .map_err(failed)
+            .map_err(vault_failure)
     }
 }
 
@@ -184,6 +184,11 @@ impl<A: TransitApi> TransitBackend<A> {
         self.keys.keys().map(String::as_str)
     }
 
+    /// The engine's API, for tests that inspect it or make it fail.
+    pub fn api(&self) -> &A {
+        &self.api
+    }
+
     fn held(&self, id: &str) -> Result<&Held, KeyError> {
         self.keys
             .get(id)
@@ -191,9 +196,21 @@ impl<A: TransitApi> TransitBackend<A> {
     }
 }
 
-impl<A: TransitApi> KeyBackend for TransitBackend<A> {
+impl<A: TransitApi> SigningEngine for TransitBackend<A> {
+    fn kind(&self) -> EngineKind {
+        EngineKind::SigningService
+    }
+
+    fn name(&self) -> &'static str {
+        "Vault Transit"
+    }
+
     fn environment(&self) -> Environment {
         self.environment
+    }
+
+    fn key_ids(&self) -> Vec<String> {
+        self.keys.keys().cloned().collect()
     }
 
     fn scheme(&self, id: &str) -> Result<Scheme, KeyError> {
@@ -204,14 +221,21 @@ impl<A: TransitApi> KeyBackend for TransitBackend<A> {
         self.held(id).map(|k| k.public_key.to_vec())
     }
 
-    fn sign(
+    fn sign_prepared(
         &self,
         id: &str,
-        message: &[u8],
+        scheme: Scheme,
+        input: Signable<'_>,
     ) -> impl Future<Output = Result<Vec<u8>, KeyError>> + Send {
-        let held = self.held(id);
+        let held = self.held(id).and_then(|k| {
+            check_input(id, Scheme::Ed25519, scheme, &input)?;
+            match input {
+                Signable::Message(message) => Ok((k, message)),
+                Signable::Digest(_) => unreachable!("check_input refuses a digest"),
+            }
+        });
         async move {
-            let held = held?;
+            let (held, message) = held?;
             let signature = self.api.sign(&held.key, held.version, message).await?;
             // INV-9: what leaves is what the key's public half verifies, strictly (RFC 8032).
             let parsed = Signature::from_bytes(&signature);
@@ -222,6 +246,23 @@ impl<A: TransitApi> KeyBackend for TransitBackend<A> {
             }
             Ok(signature.to_vec())
         }
+    }
+
+    /// Each key is read again: still one Vault will not export ([`TransitApi::public_key`]), and,
+    /// while the version read at start is the newest, with the same public key.
+    async fn health(&self) -> Health {
+        for (id, k) in &self.keys {
+            match self.api.public_key(&k.key).await {
+                Ok((version, public)) if version == k.version && public != k.public_key => {
+                    return Health::not_ready(format!(
+                        "key {id}: Transit now returns another public key for version {version}"
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) => return Health::not_ready(format!("key {id}: {e}")),
+            }
+        }
+        Health::ready()
     }
 }
 
@@ -303,7 +344,7 @@ mod tests {
         ) -> Result<[u8; 64], KeyError> {
             self.asked.lock().unwrap().push((key.to_owned(), version));
             if *self.down.lock().unwrap() {
-                return Err(KeyError::Backend("Vault is unreachable".into()));
+                return Err(KeyError::Unavailable("Vault is unreachable".into()));
             }
             Ok(self
                 .rogue
@@ -409,7 +450,7 @@ mod tests {
         *backend.api.down.lock().unwrap() = true;
         assert!(matches!(
             backend.sign("kreivo-delivery", b"payload").await,
-            Err(KeyError::Backend(_))
+            Err(KeyError::Unavailable(_))
         ));
         *backend.api.down.lock().unwrap() = false;
         assert!(backend.sign("kreivo-delivery", b"payload").await.is_ok());
@@ -723,15 +764,21 @@ mod tests {
         let other = signing_key(2);
         let wrong = other.sign(b"payload").to_bytes();
         let good = key.sign(b"payload").to_bytes();
+        // Vault answering that it cannot now is worth retrying (Unavailable); a refusal or a wrong
+        // answer is not (Backend). Neither returns a signature.
         let cases = [
-            ("a 403", failed(403)),
-            ("a 500", failed(500)),
-            ("another key's signature", signature_answer(&wrong, 1)),
-            ("another version", signature_answer(&good, 2)),
-            ("no signature", ok(r#"{"data":{}}"#)),
-            ("a short signature", signature_answer(&good[..60], 1)),
+            ("a 403", failed(403), false),
+            ("a 500", failed(500), true),
+            (
+                "another key's signature",
+                signature_answer(&wrong, 1),
+                false,
+            ),
+            ("another version", signature_answer(&good, 2), false),
+            ("no signature", ok(r#"{"data":{}}"#), false),
+            ("a short signature", signature_answer(&good[..60], 1), false),
         ];
-        for (name, answer) in cases {
+        for (name, answer, transient) in cases {
             // A 500 is retried for a read but a signature is never retried: one answer is enough.
             let (address, seen) =
                 mock(vec![login("hvs.t", 60), key_answer(&key, false), answer]).await;
@@ -746,7 +793,12 @@ mod tests {
                 .sign("kreivo-delivery", b"payload")
                 .await
                 .unwrap_err();
-            assert!(matches!(err, KeyError::Backend(_)), "{name}: {err}");
+            if transient {
+                assert!(matches!(err, KeyError::Unavailable(_)), "{name}: {err}");
+            } else {
+                assert!(matches!(err, KeyError::Backend(_)), "{name}: {err}");
+            }
+            assert_eq!(err.is_transient(), transient, "{name}");
             let shown = format!("{err} {backend:?}");
             assert!(!shown.contains("hvs.t"), "{name}");
             assert_eq!(seen.lock().unwrap().len(), 3, "{name}: one signing request");

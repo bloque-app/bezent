@@ -8,10 +8,13 @@
 //!
 //! - [`link`]: the core sends an intent id over a Unix socket; the caller is authenticated by its
 //!   peer user id and a token, the signer by its own user id (`T-005-02`).
-//! - [`keys`]: the key backend trait and the file backend, test keys only (`T-005-03`); [`kms`]
-//!   (delivery keys in AWS KMS), [`transit`] (delivery keys in Vault Transit: ed25519 Kreivo
-//!   accounts), [`vault`] (the other keys) and [`custody`] (which one runs) are `DEC-11`'s.
-//!   sr25519, ECDSA and ed25519 for Kreivo accounts, secp256k1 for EVM networks.
+//! - [`engine`]: the one interface every signing engine implements ([`engine::SigningEngine`]):
+//!   a key's scheme, public key and address, a signature over a prepared message or digest, and a
+//!   health check. The engines: [`keys`] (the file of test keys, `T-005-03`), [`vault`] (the other
+//!   keys, read from Vault KV), [`kms`] (AWS KMS), [`transit`] (Vault Transit: ed25519 Kreivo
+//!   accounts) and [`vault_plugin`] (a Vault signing plugin: the Polygon key); [`custody`] joins
+//!   the ones the configuration names. sr25519, ECDSA and ed25519 for Kreivo accounts, secp256k1
+//!   for EVM networks.
 //! - [`signer`]: reads the recorded intent through the `bezent_signer` store role, applies the
 //!   guards (`DEC-3`, a second line), signs, and records the signature append-only (`T-005-04`,
 //!   `T-005-05`). A restart returns the recorded signature and signs nothing new (`AC-D2.1`).
@@ -35,6 +38,7 @@ pub mod compromise;
 pub mod config;
 pub mod custody;
 pub mod delivery;
+pub mod engine;
 pub mod health;
 pub mod intent;
 pub mod keys;
@@ -46,6 +50,7 @@ pub mod process;
 pub mod signer;
 pub mod transit;
 pub mod vault;
+pub mod vault_plugin;
 pub mod verify;
 
 pub use signer::{Outcome, Refusal, Signed, Signer};

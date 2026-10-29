@@ -1,14 +1,16 @@
 // Copyright (c) 2026 Pagos Cube LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The AWS KMS key backend (`T-005-03`, issue #5; `REQ-CU-1`, `REQ-KY-1`, `REQ-KY-3`, `REQ-KY-4`,
-//! `REQ-KY-6`; PLAN `DEC-11`).
+//! The AWS KMS signing engine (`T-005-03`, issue #5; `REQ-CU-1`, `REQ-KY-1`, `REQ-KY-3`, `REQ-KY-4`,
+//! `REQ-KY-6`; PLAN `DEC-11`). Kept working, and not used by the deployment, whose delivery keys
+//! are in Vault ([`crate::transit`], [`crate::vault_plugin`]).
 //!
-//! Delivery keys (mint, payout, refund) live inside AWS KMS as `ECC_SECG_P256K1` keys and never
-//! leave it. The signer hashes the message itself, as [`crate::keys::FileBackend`] does
-//! ([`ecdsa_digest`] for a Kreivo ECDSA account, [`evm_digest`] for an EVM key), asks KMS to
-//! `Sign` that digest (`MessageType = DIGEST`, `ECDSA_SHA_256`), turns the DER answer into
-//! `r ‖ s ‖ v` with a low `s` (the `v` found by recovering the expected public key) and checks
-//! the result before it returns it.
+//! Delivery keys live inside AWS KMS as `ECC_SECG_P256K1` keys and never leave it. The signer
+//! hashes the message itself ([`crate::engine::prepare`]: [`crate::keys::ecdsa_digest`] for a
+//! Kreivo ECDSA account, [`crate::keys::evm_digest`] for an EVM key), asks KMS to `Sign` that
+//! digest (`MessageType = DIGEST`, `ECDSA_SHA_256`), turns the DER answer into `r ‖ s ‖ v` with a
+//! low `s` (the `v` found by recovering the expected public key) and verifies the result before
+//! it returns it ([`crate::engine::recoverable_from_der`]). A KMS that cannot be reached is
+//! [`KeyError::Unavailable`]; one that answers with an error is [`KeyError::Backend`].
 //!
 //! At start [`KmsBackend::connect`] fetches every configured key's public key once
 //! (`GetPublicKey`), requires the key spec and usage, compares the public key with the address
@@ -29,13 +31,16 @@ use std::future::Future;
 use blake2::Blake2b;
 use blake2::digest::consts::U32;
 use k256::PublicKey;
-use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::pkcs8::DecodePublicKey;
 use serde::Deserialize;
 use sha3::{Digest, Keccak256};
 
-use crate::keys::{Environment, KeyBackend, KeyError, Scheme, ecdsa_digest, evm_digest};
+use crate::engine::{
+    EngineKind, Health, Signable, SigningEngine, check_input, recoverable_from_der,
+};
+use crate::keys::{Environment, KeyError, Scheme};
 
 /// The tag every bezent KMS key carries, `test` or `production`.
 pub const ENVIRONMENT_TAG: &str = "bezent:environment";
@@ -249,6 +254,11 @@ impl<A: KmsApi> KmsBackend<A> {
         self.keys.keys().map(String::as_str)
     }
 
+    /// The engine's API, for tests that inspect it or make it fail.
+    pub fn api(&self) -> &A {
+        &self.api
+    }
+
     fn held(&self, id: &str) -> Result<&Held, KeyError> {
         self.keys
             .get(id)
@@ -256,37 +266,32 @@ impl<A: KmsApi> KmsBackend<A> {
     }
 }
 
-/// DER → `r ‖ s ‖ v`, low `s`, `v` found by recovering `expected` from `digest`.
+/// DER → `r ‖ s ‖ v`, low `s`, `v` found by recovering `expected` from `digest`, verified
+/// ([`recoverable_from_der`]).
 pub fn der_to_recoverable(
     id: &str,
     der: &[u8],
     digest: &[u8; 32],
     expected: &VerifyingKey,
 ) -> Result<Vec<u8>, KeyError> {
-    let signature = Signature::from_der(der)
-        .map_err(|_| KeyError::Backend(format!("key {id}: KMS returned an unusable signature")))?;
-    let signature = signature.normalize_s().unwrap_or(signature);
-    for v in 0..=1u8 {
-        let Some(recovery) = RecoveryId::from_byte(v) else {
-            continue;
-        };
-        if let Ok(found) = VerifyingKey::recover_from_prehash(digest, &signature, recovery)
-            && &found == expected
-        {
-            let mut out = signature.to_bytes().to_vec();
-            out.push(v);
-            return Ok(out);
-        }
-    }
-    // KMS signed with another key than the one the signer checked at start.
-    Err(KeyError::Backend(format!(
-        "key {id}: the signature does not recover the key's public key"
-    )))
+    recoverable_from_der(id, "KMS", der, digest, expected, |k| k == expected)
 }
 
-impl<A: KmsApi> KeyBackend for KmsBackend<A> {
+impl<A: KmsApi> SigningEngine for KmsBackend<A> {
+    fn kind(&self) -> EngineKind {
+        EngineKind::SigningService
+    }
+
+    fn name(&self) -> &'static str {
+        "AWS KMS"
+    }
+
     fn environment(&self) -> Environment {
         self.environment
+    }
+
+    fn key_ids(&self) -> Vec<String> {
+        self.keys.keys().cloned().collect()
     }
 
     fn scheme(&self, id: &str) -> Result<Scheme, KeyError> {
@@ -297,23 +302,41 @@ impl<A: KmsApi> KeyBackend for KmsBackend<A> {
         self.held(id).map(|k| k.public_key.clone())
     }
 
-    fn sign(
+    fn sign_prepared(
         &self,
         id: &str,
-        message: &[u8],
+        scheme: Scheme,
+        input: Signable<'_>,
     ) -> impl Future<Output = Result<Vec<u8>, KeyError>> + Send {
-        let held = self.held(id).map(|k| {
-            let digest = match k.scheme {
-                Scheme::Ecdsa => ecdsa_digest(message),
-                _ => evm_digest(message),
-            };
-            (k, digest)
+        let held = self.held(id).and_then(|k| {
+            check_input(id, k.scheme, scheme, &input)?;
+            match input {
+                Signable::Digest(digest) => Ok((k, digest)),
+                Signable::Message(_) => unreachable!("check_input refuses a message"),
+            }
         });
         async move {
             let (k, digest) = held?;
             let der = self.api.sign_digest(&k.key, digest).await?;
             der_to_recoverable(id, &der, &digest, &k.verifying)
         }
+    }
+
+    /// Each key's public key is fetched again and must be the one read at start.
+    async fn health(&self) -> Health {
+        for (id, k) in &self.keys {
+            let same = match self.api.public_key_der(&k.key).await {
+                Ok(der) => PublicKey::from_public_key_der(&der)
+                    .is_ok_and(|p| VerifyingKey::from(&p) == k.verifying),
+                Err(e) => return Health::not_ready(format!("key {id}: {e}")),
+            };
+            if !same {
+                return Health::not_ready(format!(
+                    "key {id}: KMS now returns another public key than at start"
+                ));
+            }
+        }
+        Health::ready()
     }
 }
 
@@ -358,9 +381,28 @@ fn failed(what: &str, e: impl fmt::Display) -> KeyError {
     KeyError::Backend(format!("KMS {what} failed: {e}"))
 }
 
+/// An SDK error as a key error: no answer (dispatch, timeout, an unreadable response) is
+/// [`KeyError::Unavailable`], an answer that is an error is [`KeyError::Backend`].
+fn sdk_failed<E, R>(what: &str, e: aws_sdk_kms::error::SdkError<E, R>) -> KeyError
+where
+    E: std::error::Error + 'static,
+    R: fmt::Debug,
+{
+    use aws_sdk_kms::error::{DisplayErrorContext, SdkError};
+    let transient = matches!(
+        e,
+        SdkError::DispatchFailure(_) | SdkError::TimeoutError(_) | SdkError::ResponseError(_)
+    );
+    let text = format!("KMS {what} failed: {}", DisplayErrorContext(e));
+    if transient {
+        KeyError::Unavailable(text)
+    } else {
+        KeyError::Backend(text)
+    }
+}
+
 impl KmsApi for AwsKms {
     async fn public_key_der(&self, key: &str) -> Result<Vec<u8>, KeyError> {
-        use aws_sdk_kms::error::DisplayErrorContext;
         use aws_sdk_kms::types::{KeySpec, KeyUsageType};
         let out = self
             .client
@@ -368,7 +410,7 @@ impl KmsApi for AwsKms {
             .key_id(key)
             .send()
             .await
-            .map_err(|e| failed("GetPublicKey", DisplayErrorContext(e)))?;
+            .map_err(|e| sdk_failed("GetPublicKey", e))?;
         if out.key_spec() != Some(&KeySpec::EccSecgP256K1)
             || out.key_usage() != Some(&KeyUsageType::SignVerify)
         {
@@ -382,14 +424,13 @@ impl KmsApi for AwsKms {
     }
 
     async fn environment_tag(&self, key: &str) -> Result<Option<String>, KeyError> {
-        use aws_sdk_kms::error::DisplayErrorContext;
         let out = self
             .client
             .list_resource_tags()
             .key_id(key)
             .send()
             .await
-            .map_err(|e| failed("ListResourceTags", DisplayErrorContext(e)))?;
+            .map_err(|e| sdk_failed("ListResourceTags", e))?;
         Ok(out
             .tags()
             .iter()
@@ -398,7 +439,6 @@ impl KmsApi for AwsKms {
     }
 
     async fn sign_digest(&self, key: &str, digest: [u8; 32]) -> Result<Vec<u8>, KeyError> {
-        use aws_sdk_kms::error::DisplayErrorContext;
         use aws_sdk_kms::primitives::Blob;
         use aws_sdk_kms::types::{MessageType, SigningAlgorithmSpec};
         let out = self
@@ -410,7 +450,7 @@ impl KmsApi for AwsKms {
             .signing_algorithm(SigningAlgorithmSpec::EcdsaSha256)
             .send()
             .await
-            .map_err(|e| failed("Sign", DisplayErrorContext(e)))?;
+            .map_err(|e| sdk_failed("Sign", e))?;
         out.signature()
             .map(|b| b.as_ref().to_vec())
             .ok_or_else(|| failed("Sign", "no signature"))

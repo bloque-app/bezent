@@ -40,7 +40,7 @@ use zeroize::Zeroizing;
 
 use crate::compromise::{self, Answer, Returned};
 use crate::config::Caller;
-use crate::keys::KeyBackend;
+use crate::keys::SigningEngine;
 use crate::signer::{Outcome, Signer};
 
 /// The largest frame either side accepts.
@@ -312,7 +312,7 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 }
 
 /// Serves `listener` until it fails.
-pub async fn serve<B: KeyBackend>(
+pub async fn serve<B: SigningEngine>(
     listener: UnixListener,
     callers: Arc<Callers>,
     signer: Arc<Signer<B>>,
@@ -324,7 +324,7 @@ pub async fn serve<B: KeyBackend>(
     }
 }
 
-async fn handle<B: KeyBackend>(mut stream: UnixStream, callers: &Callers, signer: &Signer<B>) {
+async fn handle<B: SigningEngine>(mut stream: UnixStream, callers: &Callers, signer: &Signer<B>) {
     let uid = stream.peer_cred().ok().map(|c| c.uid());
     let hello = tokio::time::timeout(HELLO_TIMEOUT, read_frame::<Request>(&mut stream)).await;
     let caller = match hello {

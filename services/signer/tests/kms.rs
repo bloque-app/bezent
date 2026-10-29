@@ -8,73 +8,14 @@
 use bezent_signer::config::{Network, confirm_store_environment};
 use bezent_signer::custody::Mixed;
 use bezent_signer::keys::{
-    Environment, FileBackend, KeyBackend, KeyError, Scheme, ecdsa_digest, evm_digest,
+    Environment, FileBackend, KeyError, Scheme, SigningEngine, ecdsa_digest, evm_digest,
 };
-use bezent_signer::kms::{
-    ENVIRONMENT_TAG, KmsApi, KmsBackend, KmsKey, evm_address, kreivo_account,
-};
-use k256::PublicKey;
-use k256::ecdsa::signature::hazmat::PrehashSigner;
+use bezent_signer::kms::{ENVIRONMENT_TAG, KmsBackend, KmsKey, evm_address, kreivo_account};
 use k256::ecdsa::{RecoveryId, Signature, SigningKey, VerifyingKey};
-use k256::pkcs8::EncodePublicKey;
 
-fn signing_key(n: u8) -> SigningKey {
-    SigningKey::from_slice(&[n; 32]).unwrap()
-}
+mod conformance;
 
-/// A KMS stand-in: one key, its tag, and optionally a flip of `s` to the high half (KMS does not
-/// normalise) or a signature by another key.
-struct LocalKms {
-    key: SigningKey,
-    other: SigningKey,
-    tag: Option<String>,
-    high_s: bool,
-    wrong_signer: bool,
-}
-
-impl LocalKms {
-    fn new(n: u8, tag: Option<&str>) -> Self {
-        Self {
-            key: signing_key(n),
-            other: signing_key(n + 100),
-            tag: tag.map(str::to_owned),
-            high_s: false,
-            wrong_signer: false,
-        }
-    }
-    fn public(&self) -> PublicKey {
-        PublicKey::from(self.key.verifying_key())
-    }
-}
-
-impl KmsApi for LocalKms {
-    async fn public_key_der(&self, _key: &str) -> Result<Vec<u8>, KeyError> {
-        Ok(self
-            .public()
-            .to_public_key_der()
-            .unwrap()
-            .as_bytes()
-            .to_vec())
-    }
-    async fn environment_tag(&self, _key: &str) -> Result<Option<String>, KeyError> {
-        Ok(self.tag.clone())
-    }
-    async fn sign_digest(&self, _key: &str, digest: [u8; 32]) -> Result<Vec<u8>, KeyError> {
-        let key = if self.wrong_signer {
-            &self.other
-        } else {
-            &self.key
-        };
-        let signature: Signature = key.sign_prehash(&digest).unwrap();
-        let signature = if self.high_s {
-            let (r, s) = signature.split_scalars();
-            Signature::from_scalars(r.to_bytes(), (-*s).to_bytes()).unwrap()
-        } else {
-            signature
-        };
-        Ok(signature.to_der().as_bytes().to_vec())
-    }
-}
+use conformance::doubles::LocalKms;
 
 fn evm_entry(kms: &LocalKms) -> KmsKey {
     KmsKey {

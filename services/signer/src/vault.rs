@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The Vault loader for the keys that are not delivery keys (`T-005-03`, issue #5; PLAN `DEC-11`):
 //! the statement key (`REQ-PR-1`) and the pause key. They are read once at start, by the signer
-//! process only, and held by a [`FileBackend`], so they sit behind the same [`KeyBackend`] trait.
+//! process only, and held by a [`FileBackend`], so they sit behind the same [`SigningEngine`](crate::engine::SigningEngine) interface.
 //!
 //! The signer logs in to Vault itself under its task role (the AWS auth method, `bezent-vault`;
 //! issue #64): no token is read from a file or the environment (`REQ-KY-1`), and the one the login
@@ -71,7 +71,7 @@ fn build_secret(secret: Secret, environment: Environment) -> Result<FileBackend,
     if environment == Environment::Production {
         let fixture = crate::kms::fixture_public_keys();
         for id in backend.ids() {
-            use crate::keys::KeyBackend as _;
+            use crate::keys::SigningEngine as _;
             if backend.public_key(id).is_ok_and(|k| fixture.contains(&k)) {
                 return Err(KeyError::Refused(format!(
                     "key {id}: a published test fixture's key, refused in production (REQ-KY-6)"
@@ -102,7 +102,7 @@ pub async fn load(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::KeyBackend;
+    use crate::keys::SigningEngine;
 
     const SEED: &str = "0x0202020202020202020202020202020202020202020202020202020202020202";
 

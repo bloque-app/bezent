@@ -12,7 +12,7 @@ use bezent_kreivo_endpoint::kreivo::{self, MAX_ERA, Mortality, TxParams};
 use bezent_kreivo_endpoint::proof::{Disposition, ProofKind};
 use bezent_kreivo_endpoint::signal::ANOMALY;
 use bezent_kreivo_endpoint::submit::{Prepared, Submitted, extrinsic_from_payload};
-use bezent_signer::keys::KeyBackend;
+use bezent_signer::keys::SigningEngine;
 use common::*;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 

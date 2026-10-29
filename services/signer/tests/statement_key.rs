@@ -10,7 +10,7 @@
 mod common;
 
 use bezent_signer::config::Config;
-use bezent_signer::keys::{FileBackend, KeyBackend, Scheme};
+use bezent_signer::keys::{FileBackend, Scheme, SigningEngine};
 use bezent_signer::signer::{Outcome, Refusal};
 use common::*;
 use sha2::Digest;

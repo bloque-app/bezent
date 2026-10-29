@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use bezent_signer::config::Config;
 use bezent_signer::custody::Mixed;
-use bezent_signer::keys::{Environment, FileBackend, KeyBackend, KeyError, Scheme};
+use bezent_signer::keys::{Environment, FileBackend, KeyError, Scheme, SigningEngine};
 use bezent_signer::link::{self, Callers, Client, Response};
 use bezent_signer::transit::{TransitApi, TransitBackend, TransitKey};
 use common::*;
@@ -175,7 +175,7 @@ async fn req_cu_1_in_production_only_a_key_the_custody_never_releases_is_a_deliv
         "kreivo-ed"
     );
 
-    // The same key read into the signer from Vault KV: refused (REQ-CU-1).
+    // The same key read into the signer from Vault KV: refused (the plan's d-delivery-keys).
     let kv = FileBackend::from_seeds(
         Environment::Production,
         vec![(
@@ -187,7 +187,7 @@ async fn req_cu_1_in_production_only_a_key_the_custody_never_releases_is_a_deliv
     .unwrap();
     let err = config(production).policy(&kv).unwrap_err();
     assert!(
-        err.0.contains("REQ-CU-1") && err.0.contains("key-management"),
+        err.0.contains("d-delivery-keys") && err.0.contains("signing service"),
         "{err}"
     );
     std::fs::remove_dir_all(dir).ok();
