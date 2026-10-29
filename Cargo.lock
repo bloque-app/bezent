@@ -1820,6 +1820,7 @@ dependencies = [
  "bezent-core",
  "bezent-health",
  "bezent-store",
+ "bezent-vault",
  "blake2",
  "bs58",
  "chacha20poly1305",
