@@ -154,10 +154,16 @@ jobs:
   # without AWS (crates/vault/tests/dev_server.rs). The binary is verified against HashiCorp's
   # checksum list for the pinned version, and that list against its detached signature, made with
   # HashiCorp's release key (pinned by fingerprint below).
+  #
+  # The same server runs the signer's Vault signing-plugin engine against the plugin itself
+  # (services/signer/tests/vault_plugin.rs): blockchain-signer-vault-plugin is fetched at a pinned,
+  # reviewed commit, its golang.org/x/net and google.golang.org/grpc are bumped past the
+  # vulnerabilities govulncheck reported for that commit, it is built here, registered in the
+  # catalog by the SHA-256 of what was built, and mounted.
   vault-dev:
-    name: Vault client against vault server -dev
+    name: Vault client and signing plugin against vault server -dev
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       VAULT_VERSION: "1.20.4"
       # HashiCorp Security's release-signing key, https://www.hashicorp.com/trust/security
@@ -165,8 +171,43 @@ jobs:
       # A dev server's throwaway root token, on loopback, for this job only.
       BEZENT_VAULT_DEV_TOKEN: bezent-ci-dev-root
       BEZENT_VAULT_DEV_ADDR: http://127.0.0.1:8200
+      PLUGIN_REPO: https://github.com/MaximFischuk/blockchain-signer-vault-plugin.git
+      PLUGIN_COMMIT: 6c5921761f5939aa5adb042e6fd30b48a68bf6da
+      # Fixed versions of what govulncheck found in the commit's modules (GO-2026-6603, 6610, 6611,
+      # 6612, 6617 in x/net v0.58.0; GO-2026-6348, 6443 in grpc v1.83.0).
+      PLUGIN_X_NET: v0.60.0
+      PLUGIN_GRPC: v1.83.2
+      PLUGIN_COMMAND: blockchain-signer-vault-plugin
+      BEZENT_VAULT_PLUGIN_NAME: bezent-evm-signer
+      BEZENT_VAULT_PLUGIN_MOUNT: signer-bezent
     steps:
       - uses: actions/checkout@v4
+      - name: The signing plugin at its pinned commit
+        run: |
+          set -euo pipefail
+          git init -q "$RUNNER_TEMP/plugin-src"
+          cd "$RUNNER_TEMP/plugin-src"
+          git remote add origin "$PLUGIN_REPO"
+          git fetch -q --depth 1 origin "$PLUGIN_COMMIT"
+          git checkout -q --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$PLUGIN_COMMIT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ runner.temp }}/plugin-src/go.mod
+          cache: false
+      - name: Build the signing plugin, with the dependency bumps
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/plugin-src"
+          go get "golang.org/x/net@$PLUGIN_X_NET" "google.golang.org/grpc@$PLUGIN_GRPC"
+          go mod tidy
+          go list -m golang.org/x/net google.golang.org/grpc
+          mkdir -p "$RUNNER_TEMP/vault-plugins"
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+            -o "$RUNNER_TEMP/vault-plugins/$PLUGIN_COMMAND" .
+          sha=$(sha256sum "$RUNNER_TEMP/vault-plugins/$PLUGIN_COMMAND" | cut -d' ' -f1)
+          echo "BEZENT_VAULT_PLUGIN_SHA256=$sha" >> "$GITHUB_ENV"
+          echo "plugin sha256: $sha"
       - name: vault server -dev
         run: |
           set -euo pipefail
@@ -184,16 +225,39 @@ jobs:
           sha256sum -c --ignore-missing "vault_${VAULT_VERSION}_SHA256SUMS"
           unzip -q "vault_${VAULT_VERSION}_linux_amd64.zip" vault
           nohup ./vault server -dev -dev-root-token-id="$BEZENT_VAULT_DEV_TOKEN" \
-            -dev-listen-address=127.0.0.1:8200 > vault.log 2>&1 &
+            -dev-listen-address=127.0.0.1:8200 \
+            -dev-plugin-dir="$RUNNER_TEMP/vault-plugins" > vault.log 2>&1 &
           for i in $(seq 1 30); do
             curl -fs "$BEZENT_VAULT_DEV_ADDR/v1/sys/health" > /dev/null && exit 0
             sleep 1
           done
           cat vault.log
           exit 1
+      - name: Register the signing plugin by its SHA-256 and mount it
+        run: |
+          set -euo pipefail
+          v() { curl -fsS -H "X-Vault-Token: $BEZENT_VAULT_DEV_TOKEN" "$@"; }
+          catalog="$BEZENT_VAULT_DEV_ADDR/v1/sys/plugins/catalog/secret"
+          v -X PUT "$catalog/$BEZENT_VAULT_PLUGIN_NAME" \
+            -d "{\"sha256\":\"$BEZENT_VAULT_PLUGIN_SHA256\",\"command\":\"$PLUGIN_COMMAND\"}"
+          v -X POST "$BEZENT_VAULT_DEV_ADDR/v1/sys/mounts/$BEZENT_VAULT_PLUGIN_MOUNT" \
+            -d "{\"type\":\"$BEZENT_VAULT_PLUGIN_NAME\"}"
+          # The same binary registered under a SHA-256 that is not its own does not mount.
+          v -X PUT "$catalog/bezent-wrong-sha" \
+            -d "{\"sha256\":\"$(printf '0%.0s' $(seq 1 64))\",\"command\":\"$PLUGIN_COMMAND\"}"
+          if v -X POST "$BEZENT_VAULT_DEV_ADDR/v1/sys/mounts/signer-wrong-sha" \
+            -d '{"type":"bezent-wrong-sha"}'; then
+            echo "a plugin whose SHA-256 does not match was mounted" >&2
+            exit 1
+          fi
       - run: (rustup toolchain install || rustup show) && cargo --version
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p bezent-vault --locked -- --include-ignored
+      - name: The signer's signing-plugin engine against the plugin
+        run: cargo test -p bezent-signer --locked --test vault_plugin --test engines -- --include-ignored
+      - name: Vault's log
+        if: failure()
+        run: cat "$RUNNER_TEMP/vault.log"
 
   # F-009: the EVM endpoint against an anvil fork of Polygon at the block e2e/evm/forks.env pins,
   # with F-008's vault deployed by its own script and Foundry's test keys (services/evm-endpoint/
