@@ -86,6 +86,8 @@ pub const TEST_STATEMENT_KEY: &str =
 /// only, the explicit [`STATEMENT_DISABLED`].
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
+// One value, read once at start: boxing the table would only change how the tests spell it.
+#[allow(clippy::large_enum_variant)]
 pub enum Statement {
     /// `statement = "disabled-test-only"`.
     Disabled(String),
