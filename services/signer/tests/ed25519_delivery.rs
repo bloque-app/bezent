@@ -7,12 +7,17 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use bezent_signer::config::Config;
 use bezent_signer::custody::Mixed;
 use bezent_signer::keys::{Environment, FileBackend, KeyBackend, KeyError, Scheme};
+use bezent_signer::link::{self, Callers, Client, Response};
 use bezent_signer::transit::{TransitApi, TransitBackend, TransitKey};
 use common::*;
 use ed25519_dalek::Signer as _;
+use sha2::Digest;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 /// The fixture's keys, a delivery key `kreivo-ed` and the statement key, all ed25519 or as KEYS.
 fn backend(dir: &std::path::Path, extra: &[(&str, &str)]) -> FileBackend {
@@ -217,4 +222,105 @@ async fn req_ky_1_a_transit_configuration_needs_the_vault_table_and_takes_nothin
     json["vault"] = serde_json::json!({"address": "https://vault.example", "mount": "aws",
         "role": "bezent-signer-iam", "sts_region": "us-east-2", "server_id": "vault.example"});
     assert!(parse(&json).is_err());
+}
+
+/// Records a signature as the signer would, with the public key of test key `id`.
+async fn record(f: &Fixture, intent: i64, scheme: &str, id: &str) -> Result<(), sqlx::Error> {
+    let public = ed25519_dalek::SigningKey::from_bytes(&seed(id)).verifying_key();
+    sqlx::query(&format!(
+        "INSERT INTO signatures (intent_id, key_id, scheme, public_key, signature) \
+         VALUES ({intent}, '{id}', '{scheme}', '\\x{}', '\\x{}')",
+        hex::encode(public.to_bytes()),
+        hex::encode([9u8; 64])
+    ))
+    .execute(&f.admin)
+    .await
+    .map(|_| ())
+}
+
+fn bzs_refused(result: Result<(), sqlx::Error>) -> bool {
+    matches!(result, Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("BZ001"))
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_ky_4_an_ed25519_delivery_key_signs_a_mint_through_the_store_and_the_link(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    // The fixture's keys, a Kreivo ed25519 delivery key and the statement key; the mint is the
+    // delivery key's.
+    backend(&f.dir, EXTRA);
+    let mut json = config_json(&f.dir, my_uid(), TOKEN);
+    json["bindings"][0]["key"] = "kreivo-ed".into();
+    json["statement_key"] = "statement".into();
+    let path = f.dir.join("ed.json");
+    std::fs::write(&path, json.to_string()).unwrap();
+    let config = Config::load(&path).unwrap();
+    let (signer, _log, _) = Fixture::start(&config, &f.connect).await;
+
+    let listener = link::bind(&config.socket).unwrap();
+    let callers = Arc::new(Callers::sharing_the_signer_uid_in_tests(&config.callers));
+    tokio::spawn(link::serve(listener, callers, signer));
+    let uid = my_uid();
+    let core = f.core_pool().await;
+    let mut client = Client::connect(&config.socket, TOKEN, uid).await.unwrap();
+
+    // The core verifies what comes back over the recorded bytes (INV-9) and the store records it.
+    let mint = f.intent("kreivo-test", "mint", None, "100", None).await;
+    let response = client.sign(&core, mint).await.unwrap();
+    let Response::Signed {
+        key,
+        scheme,
+        public_key,
+        signature,
+        ..
+    } = response
+    else {
+        panic!("not signed: {response:?}");
+    };
+    assert_eq!((key.as_str(), scheme.as_str()), ("kreivo-ed", "ed25519"));
+    assert_eq!(signature.len(), 2 + 128);
+    assert_eq!(
+        public_key,
+        format!(
+            "0x{}",
+            hex::encode(
+                ed25519_dalek::SigningKey::from_bytes(&seed("kreivo-ed"))
+                    .verifying_key()
+                    .to_bytes()
+            )
+        )
+    );
+    assert_eq!(f.signatures().await, 1);
+
+    // The key is the delivery key's: it signs no statement (REQ-PR-1, in the store).
+    let doc = b"a statement";
+    let sha = format!("0x{}", hex::encode(sha2::Sha256::digest(doc)));
+    let payload = serde_json::json!({
+        "message": format!("0x{}", hex::encode(doc)), "amount": "0",
+        "statement": {"asset": ASSET, "sequence": 1, "sha256": sha},
+    });
+    let statement: i64 = sqlx::query_scalar(
+        "INSERT INTO intents (network, purpose, payload) VALUES ('kreivo-test', 'statement', \
+         $1::text::jsonb) RETURNING id",
+    )
+    .bind(payload.to_string())
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    assert!(bzs_refused(
+        record(&f, statement, "ed25519", "kreivo-ed").await
+    ));
+    // The statement key signs it, and then no other intent; a statement is signed by ed25519 only.
+    assert!(bzs_refused(
+        record(&f, statement, "ecdsa", "kreivo-destroy").await
+    ));
+    record(&f, statement, "ed25519", "statement").await.unwrap();
+    let another = f.intent("kreivo-test", "mint", None, "100", None).await;
+    assert!(bzs_refused(
+        record(&f, another, "ed25519", "statement").await
+    ));
+    // A second delivery signature by the delivery key stands.
+    record(&f, another, "ed25519", "kreivo-ed").await.unwrap();
 }
