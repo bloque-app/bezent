@@ -161,7 +161,7 @@ jobs:
     env:
       VAULT_VERSION: "1.20.4"
       # HashiCorp Security's release-signing key, https://www.hashicorp.com/trust/security
-      HASHICORP_KEY_FPR: 798AEC654E5C15428C8E42EEAA16FCBCA621E701
+      HASHICORP_KEY_FPR: C874011F0AB405110D02105534365D9472D7468F
       # A dev server's throwaway root token, on loopback, for this job only.
       BEZENT_VAULT_DEV_TOKEN: bezent-ci-dev-root
       BEZENT_VAULT_DEV_ADDR: http://127.0.0.1:8200

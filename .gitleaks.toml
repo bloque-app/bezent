@@ -26,3 +26,7 @@ paths = [
   '''^services/ingress/tests/webhooks\.rs$''',
   '''^services/signer/fixtures/''',
 ]
+
+[[allowlists]]
+description = "HashiCorp's published release-signing key fingerprint (the vault-dev job pins it)"
+regexes = ['''C874011F0AB405110D02105534365D9472D7468F''']
