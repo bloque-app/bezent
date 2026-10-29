@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The core's configuration, read from a TOML file named on the command line.
 //!
-//! The database URL may carry the core login's password, so the configuration never prints it.
+//! The database URL may carry the core login's password, so the configuration never prints it. The
+//! password can also stay out of the file: `[store]` names the host, and the login and password as
+//! `SecretRef`s (a file or a field in Vault, issue #64), and the URL is built in the process.
 //! No key lives here, and the core holds none (`REQ-AR-3`, `REQ-KY-1`).
 
+use bezent_vault::{Resolver, SecretRef, StoreSource, VaultConfig, Zeroizing};
 use serde::Deserialize;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -15,7 +18,16 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     /// The store, as the core's login: a member of `bezent_core` and of nothing else, checked at
     /// start-up (F-001 NOTES S1, F-005 review S5, #46). One pool, one login (issue #27).
-    pub database_url: String,
+    /// Exactly one of `database_url` and `[store]`.
+    #[serde(default)]
+    pub database_url: Option<String>,
+    /// The store as a host and a login and password from files or Vault, in place of
+    /// `database_url`. The login is the core's, as above.
+    #[serde(default)]
+    pub store: Option<StoreSource>,
+    /// Where Vault is and how to log in to it, when any secret is read from it.
+    #[serde(default)]
+    pub vault: Option<VaultConfig>,
     /// The largest number of store connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
@@ -100,7 +112,11 @@ pub struct StatementConfig {
     /// The user id the signer runs as; the core refuses a socket served by anyone else.
     pub signer_uid: u32,
     /// A file holding the core's token for the signer link (never the environment, `REQ-KY-1`).
-    pub signer_token_file: PathBuf,
+    pub signer_token_file: Option<PathBuf>,
+    /// The same token as a `SecretRef` (a file, or a field in Vault), in place of
+    /// `signer_token_file`.
+    #[serde(default)]
+    pub signer_token: Option<SecretRef>,
     /// The statement key's ed25519 public key, `0x` and 64 hex digits: what every signature the
     /// signer returns is verified with before anything is published.
     pub public_key: String,
@@ -213,6 +229,16 @@ impl S3Config {
 }
 
 impl StatementConfig {
+    /// The core's token for the signer link: from `signer_token_file` or `signer_token`.
+    pub async fn token(&self, resolver: &Resolver) -> Result<Zeroizing<String>, String> {
+        match (&self.signer_token_file, &self.signer_token) {
+            (Some(file), _) => bezent_vault::read_file(file),
+            (None, Some(token)) => resolver.resolve(token).await,
+            (None, None) => return Err("no signer token is configured".to_owned()),
+        }
+        .map_err(|e| e.to_string())
+    }
+
     /// The public key's bytes, if it is 32 bytes of hex.
     pub fn public_key_bytes(&self) -> Option<Vec<u8>> {
         let digits = self.public_key.strip_prefix("0x")?;
@@ -226,6 +252,7 @@ impl fmt::Debug for StatementConfig {
             .field("signer_socket", &self.signer_socket)
             .field("signer_uid", &self.signer_uid)
             .field("signer_token_file", &self.signer_token_file)
+            .field("signer_token", &self.signer_token)
             .field("public_key", &self.public_key)
             .field("directory", &self.directory)
             .field("s3", &self.s3)
@@ -317,18 +344,28 @@ impl Config {
                 (Some(_), None) => {}
             }
             let base = path.parent().unwrap_or(Path::new("."));
-            for p in [
-                &mut statement.signer_socket,
-                &mut statement.signer_token_file,
-            ]
-            .into_iter()
-            .chain(statement.directory.as_mut())
+            for p in [&mut statement.signer_socket]
+                .into_iter()
+                .chain(statement.signer_token_file.as_mut())
+                .chain(statement.directory.as_mut())
             {
                 if p.is_relative() {
                     *p = base.join(&*p);
                 }
             }
+            if let Some(token) = statement.signer_token.as_mut() {
+                token.rebase(base);
+            }
+            if statement.signer_token_file.is_some() == statement.signer_token.is_some() {
+                return Err(format!(
+                    "invalid configuration {}: set exactly one of statement.signer_token_file and statement.signer_token",
+                    path.display()
+                ));
+            }
         }
+        config
+            .check_secrets(path)
+            .map_err(|e| format!("invalid configuration {}: {e}", path.display()))?;
         // A relative liveness file is the configuration directory's, as the other paths are.
         if let Some(p) = config.health_file.as_mut()
             && p.is_relative()
@@ -346,6 +383,51 @@ impl Config {
             ));
         }
         Ok(config)
+    }
+
+    /// The checks of the secrets' sources, which touch no network: exactly one of `database_url`
+    /// and `[store]`, a valid `[vault]` table, and one wherever a secret comes from Vault.
+    fn check_secrets(&mut self, path: &Path) -> Result<(), String> {
+        let base = path.parent().unwrap_or(Path::new("."));
+        if self.database_url.is_some() == self.store.is_some() {
+            return Err("set exactly one of database_url and [store]".to_owned());
+        }
+        if let Some(vault) = &self.vault {
+            vault.check().map_err(|e| e.to_string())?;
+        }
+        if let Some(store) = self.store.as_mut() {
+            store.rebase(base);
+            store.check().map_err(|e| e.to_string())?;
+        }
+        let from_vault = self
+            .store
+            .as_ref()
+            .is_some_and(|s| s.login.is_vault() || s.password.is_vault())
+            || self
+                .statement
+                .as_ref()
+                .and_then(Statement::configured)
+                .and_then(|s| s.signer_token.as_ref())
+                .is_some_and(SecretRef::is_vault);
+        if from_vault && self.vault.is_none() {
+            return Err("a secret is read from Vault but there is no [vault] table".to_owned());
+        }
+        Ok(())
+    }
+
+    /// The resolver for this configuration's `[vault]` table. Contacts nothing until a secret is
+    /// read from Vault.
+    pub fn resolver(&self) -> Result<Resolver, String> {
+        Resolver::new(self.vault.as_ref()).map_err(|e| e.to_string())
+    }
+
+    /// The store's URL: `database_url`, or built from `[store]`. Never printed.
+    pub async fn store_url(&self, resolver: &Resolver) -> Result<Zeroizing<String>, String> {
+        match (&self.database_url, &self.store) {
+            (Some(url), _) => Ok(Zeroizing::new(url.clone())),
+            (None, Some(store)) => resolver.store_url(store).await.map_err(|e| e.to_string()),
+            (None, None) => Err("no store is configured".to_owned()),
+        }
     }
 
     /// Whether this configuration relies on the store being a test one: `environment = "test"`
@@ -397,7 +479,12 @@ impl Config {
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
-            .field("database_url", &"<redacted>")
+            .field(
+                "database_url",
+                &self.database_url.as_ref().map(|_| "<redacted>"),
+            )
+            .field("store", &self.store)
+            .field("vault", &self.vault)
             .field("max_connections", &self.max_connections)
             .field("cycle_seconds", &self.cycle_seconds)
             .field("retry_preparation_seconds", &self.retry_preparation_seconds)
@@ -694,5 +781,109 @@ mod tests {
             assert!(load("", &sink).is_err(), "{bad}");
         }
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    const VAULT: &str = "[vault]\naddress = \"https://vault.example:8200\"\nmount = \"bezent\"\nrole = \"bezent-core-iam\"\nsts_region = \"us-east-2\"\nserver_id = \"vault.example\"\n";
+    const STORE: &str = "[store]\nhost = \"db.example\"\ndatabase = \"bezent\"\nlogin = { vault = { path = \"secret/bezent/core\", field = \"db_login\" } }\npassword = { vault = { path = \"secret/bezent/core\", field = \"db_password\" } }\n";
+    const STATEMENT: &str = "[statement]\nsigner_socket = \"s\"\nsigner_uid = 1000\n{token}\npublic_key = \"0x66d5b675e8fddf84c70c76d1815d6a5d531bbc96de157b591489be0cdbe5f615\"\ndirectory = \"d\"\n";
+
+    /// Writes `text` as a core.toml in a directory of its own and reads it.
+    fn read(tag: &str, text: &str) -> Result<Config, String> {
+        let dir = std::env::temp_dir().join(format!("bzc-secrets-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("core.toml");
+        std::fs::write(&path, text).unwrap();
+        let result = Config::from_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+
+    fn statement(token: &str) -> String {
+        STATEMENT.replace("{token}", token)
+    }
+
+    #[test]
+    fn req_ky_1_the_store_and_the_signer_token_can_come_from_vault() {
+        let text = format!(
+            "environment = \"test\"\n{STORE}{VAULT}{}",
+            statement(
+                "signer_token = { vault = { path = \"secret/bezent/core\", field = \"signer_token\" } }"
+            )
+        );
+        let config = read("ok", &text).unwrap();
+        assert!(config.database_url.is_none() && config.store.is_some());
+        let printed = format!("{config:?}");
+        assert!(printed.contains("db_password"), "references are printed");
+        assert!(!printed.contains("hunter2"));
+    }
+
+    #[test]
+    fn req_ky_1_one_store_source_one_token_source_and_a_vault_table_for_a_vault_secret() {
+        let token_file = statement("signer_token_file = \"t\"");
+        let url = "database_url = \"postgres://core@db/bezent\"\n";
+        // Both store forms, or neither.
+        assert!(
+            read(
+                "both",
+                &format!("environment = \"test\"\n{url}{STORE}{VAULT}{token_file}")
+            )
+            .is_err()
+        );
+        assert!(read("neither", &format!("environment = \"test\"\n{token_file}")).is_err());
+        // A vault reference with no [vault] table.
+        assert!(
+            read(
+                "novault",
+                &format!("environment = \"test\"\n{STORE}{token_file}")
+            )
+            .is_err()
+        );
+        // Both token forms, or neither.
+        let both = statement("signer_token_file = \"t\"\nsigner_token = { file = \"t\" }");
+        assert!(read("tokens", &format!("environment = \"test\"\n{url}{both}")).is_err());
+        assert!(
+            read(
+                "notoken",
+                &format!("environment = \"test\"\n{url}{}", statement(""))
+            )
+            .is_err()
+        );
+        // The existing forms still read.
+        assert!(read("old", &format!("environment = \"test\"\n{url}{token_file}")).is_ok());
+        // A file reference needs no [vault] table.
+        let file_store = "[store]\nhost = \"db.example\"\ndatabase = \"bezent\"\nlogin = { file = \"l\" }\npassword = { file = \"p\" }\n";
+        assert!(
+            read(
+                "files",
+                &format!("environment = \"test\"\n{file_store}{token_file}")
+            )
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn req_ky_1_the_store_url_is_built_from_files_in_the_process() {
+        let dir = std::env::temp_dir().join(format!("bzc-secrets-url-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("l"), "bezent_core\n").unwrap();
+        std::fs::write(dir.join("p"), "p@ss/word\n").unwrap();
+        let text = "environment = \"test\"\n[store]\nhost = \"db.example\"\ndatabase = \"bezent\"\nlogin = { file = \"l\" }\npassword = { file = \"p\" }\nsslrootcert = \"ca.pem\"\n[statement]\nsigner_socket = \"s\"\nsigner_uid = 1\nsigner_token = { file = \"t\" }\npublic_key = \"0x66d5b675e8fddf84c70c76d1815d6a5d531bbc96de157b591489be0cdbe5f615\"\ndirectory = \"d\"\n";
+        let path = dir.join("core.toml");
+        std::fs::write(&path, text).unwrap();
+        std::fs::write(dir.join("t"), "tok\n").unwrap();
+        let config = Config::from_file(&path).unwrap();
+        let resolver = config.resolver().unwrap();
+        let url = config.store_url(&resolver).await.unwrap();
+        // The URL parses as the store layer reads it, and keeps verify-full and the root certificate.
+        assert!(bezent_store::tls::connect_options(&url).is_ok());
+        assert!(url.contains("sslmode=verify-full") && url.contains("ca.pem"));
+        assert!(url.starts_with("postgres://bezent_core:p%40ss%2Fword@db.example:5432/bezent?"));
+        let statement = config
+            .statement
+            .as_ref()
+            .and_then(Statement::configured)
+            .unwrap();
+        assert_eq!(statement.token(&resolver).await.unwrap().as_str(), "tok");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

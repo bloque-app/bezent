@@ -68,9 +68,24 @@ async fn main() -> ExitCode {
     if let Err(e) = heartbeat.reset() {
         tracing::warn!(error = %e.kind(), "the liveness file could not be removed; `health` may read an earlier run's");
     }
+    // One login to Vault for the secrets read at start (issue #64); `--check` never gets here.
+    let resolver = match config.resolver() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{NAME}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let url = match config.store_url(&resolver).await {
+        Ok(url) => url,
+        Err(e) => {
+            eprintln!("{NAME}: store: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let pool = match bezent_store::tls::connect(
         bezent_store::login::pool_options().max_connections(config.max_connections),
-        &config.database_url,
+        &url,
     )
     .await
     {
@@ -93,14 +108,10 @@ async fn main() -> ExitCode {
     }
     let statements = match config.statement.as_ref().and_then(|s| s.configured()) {
         Some(s) => {
-            let token = match std::fs::read_to_string(&s.signer_token_file) {
+            let token = match s.token(&resolver).await {
                 Ok(t) => t.trim().to_owned(),
                 Err(e) => {
-                    eprintln!(
-                        "{NAME}: cannot read the signer token file {}: {}",
-                        s.signer_token_file.display(),
-                        e.kind()
-                    );
+                    eprintln!("{NAME}: signer token: {e}");
                     return ExitCode::from(2);
                 }
             };

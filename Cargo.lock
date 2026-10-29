@@ -1768,6 +1768,7 @@ dependencies = [
  "bezent-health",
  "bezent-signer",
  "bezent-store",
+ "bezent-vault",
  "blake2",
  "bs58",
  "chrono",
@@ -1909,14 +1910,15 @@ name = "bezent-signer"
 version = "0.1.0"
 dependencies = [
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-kms",
  "bezent-health",
  "bezent-store",
+ "bezent-vault",
  "blake2",
  "ed25519-dalek",
  "hex",
  "k256",
- "reqwest",
  "rustix",
  "schnorrkel",
  "serde",
@@ -1926,7 +1928,6 @@ dependencies = [
  "sqlx",
  "subtle",
  "tokio",
- "url",
  "zeroize",
 ]
 

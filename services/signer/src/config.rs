@@ -3,7 +3,9 @@
 //! The signer's configuration: a JSON file whose path is the process's only argument.
 //!
 //! It names where keys come from, never a key (`REQ-KY-1`): the file backend's key file is a path.
-//! The database URL is read from a file too, so a dump of the configuration carries no secret.
+//! The database URL is read from a file too, so a dump of the configuration carries no secret. Or
+//! the store is named by `store`: its host, and a login and password that are `SecretRef`s (a file
+//! or a field in Vault), from which the URL is built in the process (issue #64).
 //!
 //! ```json
 //! {
@@ -48,6 +50,7 @@
 //! `"statement_key": "<key id>"`: an ed25519 key that signs intents of purpose `statement` and
 //! nothing else. It is bound to no network, and no binding may name it or the purpose `statement`.
 
+use bezent_vault::{StoreSource, VaultConfig};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -101,6 +104,15 @@ pub struct Config {
     /// A file holding the database URL of a login role that is a member of `bezent_signer` only.
     #[serde(default)]
     pub database_url_file: Option<PathBuf>,
+    /// The store as a host and a login and password from files or Vault, in place of
+    /// `database_url_file` (exactly one of them serves). The login is a member of `bezent_signer`
+    /// only.
+    #[serde(default)]
+    pub store: Option<StoreSource>,
+    /// Where Vault is and how to log in to it, when any secret is read from it: the store's login
+    /// or password, or `keys.vault`.
+    #[serde(default)]
+    pub vault: Option<VaultConfig>,
     /// Who may ask for signatures.
     pub callers: Vec<Caller>,
     /// The networks the signer signs for.
@@ -279,6 +291,9 @@ impl Config {
             }
         };
         resolve(&mut config.socket);
+        if let Some(store) = config.store.as_mut() {
+            store.rebase(base);
+        }
         if let Some(p) = config.health_file.as_mut() {
             resolve(p);
         }
@@ -287,25 +302,46 @@ impl Config {
         }
         match &mut config.keys {
             KeySource::File { path } => resolve(path),
-            KeySource::Kms { vault, .. } => {
-                if let Some(v) = vault {
-                    resolve(&mut v.token_file);
-                }
-            }
+            KeySource::Kms { .. } => {}
         }
         Ok(config)
     }
 
-    /// Parses a configuration.
+    /// Parses a configuration, and checks what needs no key: the Vault table and the store, and
+    /// that every secret read from Vault has a table to log in with. Contacts nothing.
     pub fn parse(bytes: &[u8]) -> Result<Self, ConfigError> {
-        serde_json::from_slice(bytes).map_err(|e| {
+        let config: Self = serde_json::from_slice(bytes).map_err(|e| {
             ConfigError(format!(
                 "not a valid configuration ({:?} error at line {}, column {})",
                 e.classify(),
                 e.line(),
                 e.column()
             ))
-        })
+        })?;
+        config.check_secrets()?;
+        Ok(config)
+    }
+
+    fn check_secrets(&self) -> Result<(), ConfigError> {
+        let refuse_with = |e: bezent_vault::Error| ConfigError(e.to_string());
+        if let Some(vault) = &self.vault {
+            vault.check().map_err(refuse_with)?;
+        }
+        if let Some(store) = &self.store {
+            store.check().map_err(refuse_with)?;
+            if self.database_url_file.is_some() {
+                return refuse("set one of database_url_file and store, not both");
+            }
+        }
+        let from_vault = self
+            .store
+            .as_ref()
+            .is_some_and(|s| s.login.is_vault() || s.password.is_vault())
+            || matches!(&self.keys, KeySource::Kms { vault: Some(_), .. });
+        if from_vault && self.vault.is_none() {
+            return refuse("a secret is read from Vault but there is no vault table");
+        }
+        Ok(())
     }
 
     /// Checks the configuration against the key backend and resolves it. Refuses, at start, a
@@ -643,4 +679,87 @@ pub fn parse_minor_units(text: &str) -> Option<u128> {
         return None;
     }
     text.parse().ok()
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    /// The published fixture, with `edit` applied to it.
+    fn parse(edit: impl FnOnce(&mut serde_json::Value)) -> Result<Config, ConfigError> {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/signer.json")).unwrap();
+        edit(&mut json);
+        Config::parse(json.to_string().as_bytes())
+    }
+
+    const VAULT: &str = r#"{"address":"https://vault.example:8200","mount":"bezent","role":"bezent-signer-iam","sts_region":"us-east-2","server_id":"vault.example"}"#;
+
+    fn store(login: &str) -> serde_json::Value {
+        serde_json::from_str(&format!(
+            r#"{{"host":"db.example","database":"bezent","login":{login},"password":{{"vault":{{"path":"secret/bezent/signer","field":"db_password"}}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn req_ky_1_the_store_is_a_host_with_a_login_and_password_from_files_or_vault() {
+        let config = parse(|j| {
+            j["store"] = store(r#"{"file":"login"}"#);
+            j["vault"] = serde_json::from_str(VAULT).unwrap();
+        })
+        .unwrap();
+        assert!(config.store.is_some() && config.vault.is_some());
+        // Debug prints references, never values.
+        assert!(!format!("{config:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn req_ky_1_a_vault_secret_needs_the_vault_table_and_the_store_one_source() {
+        assert!(parse(|j| j["store"] = store(r#"{"file":"login"}"#)).is_err());
+        assert!(
+            parse(|j| {
+                j["store"] = store(r#"{"file":"login"}"#);
+                j["vault"] = serde_json::from_str(VAULT).unwrap();
+                j["database_url_file"] = "url".into();
+            })
+            .is_err()
+        );
+        assert!(
+            parse(|j| {
+                j["vault"] = serde_json::from_str(&VAULT.replace("https", "http")).unwrap();
+            })
+            .is_err(),
+            "plain http off loopback"
+        );
+    }
+
+    #[test]
+    fn req_ky_1_keys_vault_logs_in_and_no_longer_takes_a_token_file() {
+        let kms = |vault: serde_json::Value| {
+            move |j: &mut serde_json::Value| {
+                j["keys"] = serde_json::json!({
+                    "backend": "kms", "environment": "test", "region": "us-east-2",
+                    "keys": [], "vault": vault,
+                });
+            }
+        };
+        assert!(
+            parse(kms(serde_json::json!({"path": "secret/bezent/signer"}))).is_err(),
+            "keys.vault with no vault table"
+        );
+        assert!(
+            parse(|j| {
+                kms(serde_json::json!({"path": "secret/bezent/signer"}))(j);
+                j["vault"] = serde_json::from_str(VAULT).unwrap();
+            })
+            .is_ok()
+        );
+        assert!(
+            parse(kms(
+                serde_json::json!({"path": "p", "address": "https://v.example", "token_file": "t"})
+            ))
+            .is_err()
+        );
+    }
 }

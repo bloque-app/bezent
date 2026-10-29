@@ -37,3 +37,4 @@ pub use config::{SecretRef, StoreSource, VaultConfig, VaultField};
 pub use error::Error;
 pub use pki::{IssueRequest, Issued};
 pub use resolve::{Resolver, read_file};
+pub use zeroize::Zeroizing;
