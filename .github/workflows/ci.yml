@@ -165,7 +165,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      VAULT_VERSION: "1.20.4"
+      VAULT_VERSION: "2.0.3"
       # HashiCorp Security's release-signing key, https://www.hashicorp.com/trust/security
       HASHICORP_KEY_FPR: C874011F0AB405110D02105534365D9472D7468F
       # A dev server's throwaway root token, on loopback, for this job only.
