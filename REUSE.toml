@@ -14,6 +14,7 @@ path = [
   "**/.gitkeep",
   "e2e/evm/forks.env",
   "e2e/scripts/checksums.sha256",
+  "deploy/vault-plugin.sha256",
   "contracts/evm/.gitignore",
   ".gitmodules",
   "crates/core/tests/ui/*.rs",
