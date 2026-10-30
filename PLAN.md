@@ -1,9 +1,9 @@
 ---
 name: bezent
-plan_version: 0.6.1
-status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22
-date: 2026-10-22
-binds: SPEC.md v0.5.3
+plan_version: 0.6.2
+status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`)
+date: 2026-10-29
+binds: SPEC.md v0.5.4
 ---
 
 # bezent — Implementation Plan
@@ -21,7 +21,7 @@ that serves nothing in the spec is not in this plan.
 | `M-*` | A milestone: a set of features that together make a stated claim true, with exit criteria |
 | `RISK-*` | A risk to the plan, with its mitigation |
 
-1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.3. If a technical fact makes a requirement
+1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.4. If a technical fact makes a requirement
    impossible to meet, that becomes a spec amendment first (`amendments/`), and the plan follows it. A gap in the spec
    is handled the same way: we stop, propose an amendment, and do not fill the gap in code.
 2. **Facts come from the notes.** Numbers and properties of Kreivo, the EVM networks, CCTP, evmhot and Swaps come from
@@ -36,6 +36,7 @@ that serves nothing in the spec is not in this plan.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.6.2 | 2026-10-29 | The plan binds `SPEC.md` v0.5.4 (amendment 0015: `REQ-CU-1` names a boundary, not a store). @pandres95's ruling `d-delivery-keys` (2026-10-29) moves both delivery keys off AWS KMS: `DEC-11` names the store per key, and `RISK-7` is closed. The signer gets one `SigningEngine` interface (`F-005`) |
 | 0.6.1 | 2026-10-22 | The plan binds `SPEC.md` v0.5.3 (amendments 0013 and 0014; no requirement the plan relies on changes). @pandres95's rulings of 2026-10-22: the 48-hour mainnet soak exercises tiny synthetic transfers within the bounds between Polygon and Kreivo (his option A; `DEC-19`, `M-4`); the vault guard's bounds are confirmed: a delay cooldown from 1 hour to 30 days and an expiration from 1 day to 90 days, with a deployment default of a 24-hour cooldown and a 7-day expiration (`DEC-10`); and the guardian key is replaced by a key held by an independent party before the vault is funded, the holder still to be decided, a hot key until then (`DEC-10`, `RISK-10`) |
 | 0.6.0 | 2026-10-20 | @pandres95's rulings of 2026-10-15 to 2026-10-20; `SPEC.md` is unchanged. The repository is public now, and one mainnet instance serves Bloque Test and Bloque: the separate test environment is gone, the test bed stays, and a 48-hour soak runs on mainnet before bUSDC goes live (`DEC-15`, `DEC-18`, `DEC-19`, `DEC-20`, `F-014`, `F-017`, `M-1`, `M-4`, `M-5`). Kreivo is set up with no Root referendum: community 4243, the contract's roles and the hand-over of the asset roles (`DEC-6`, `DEC-7`, `F-015`; `RISK-6` closed). The vault gains a guardian (`DEC-10`). Polygon conversions move before the bUSDC launch gate (`DEC-13`, `F-010`, `M-2`, `M-4`). The delivery account carries a KSM float (`DEC-18`, `F-014`). Block-denominated constants use 41,739 blocks a day (`DEC-6`). New `RISK-9` and `RISK-10` |
 | 0.1.0 to 0.5.0 | 2026-10-13 | The first draft (0.1.0), the plan rulings (0.2.0), the sign-off, the EVM test harness and the open-source release (0.3.0), the scope narrowed to the reserves and Kreivo (0.4.0), and the bounds, the vault guard and delay, and USDT0 only (0.5.0). `git log -- PLAN.md` has each |
@@ -90,7 +91,7 @@ is the core, the observers are the endpoints, and the signer is the signer (`DEC
 | The on-chain component, §7.F | One ink! contract on pallet-contracts 49, deployed through ContractsStore by a community dedicated to it (community 4243, contract app 5, set up on 2026-10-20; `DEC-6`) |
 | Network backends, §4.4(b), all public | Polygon (bUSDC, native USDC), Base (bEURC, EURC), BNB Chain (bBTC, BTCB). Each has one reserve vault; value reaches it from Swaps and from evmhot's sweeps, never through bezent (`DEC-8`, `DEC-9`, `DEC-10`, `DEC-12`) |
 | The attested backend, §4.4(b) | Swaps' bank rails, for COPM, MXNB and BRLB; Swaps' signed reports are the observations (`DEC-14`) |
-| Custody, §4.4(c) | AWS KMS for delivery keys, Vault for the others, behind the signer process (`DEC-11`) |
+| Custody, §4.4(c) | Vault for every key, behind the signer process: Transit for the Kreivo delivery key, a signing plugin for the Polygon one (`DEC-11`) |
 | Protocol venues, §4.4(d) | Uniswap v3 on Polygon for USDT0 → USDC conversions, run by Swaps under its role on the vault; bUSDC for Base users bridged by Swaps itself (`DEC-13`) |
 | The requester, §3 | Swaps (`the Swaps platform's swap service`), through a `bezent` instruction module (`DEC-15`) |
 | The test network, §15 | zombienet from aledgent's harness, with Polygon Amoy, Base Sepolia and BNB Chain testnet, and local anvil forks (`DEC-19`) |
@@ -216,7 +217,7 @@ contract for every bridged asset, with per-asset bounds.
     compare. Bloque's production escrow account was then added as the community's only member, and the community was set
     as its own admin, so the first-admin account kept no control. Last, the roles of `Here(101)`–`Here(103)` were handed
     to the community account by signed calls from the Bloque account that held them (`DEC-7`).
-  - Roles on the contract: delivery is the Kreivo delivery account, whose key lives in KMS (`DEC-11`); pause is
+  - Roles on the contract: delivery is the Kreivo delivery account, whose key moves from KMS to Vault Transit (`DEC-11`); pause is
     @pandres95's account for now; governance is the community account. The raise delay is 24 hours, 41,739 blocks.
   - Launch mints bUSDC only: the ceilings for bEURC and bBTC start at 0 (`DEC-17`).
 - **Block time.** Kreivo makes a block about every 2.07 s, as measured; the first draft of the contract assumed 6 s (fixed;
@@ -338,23 +339,31 @@ addresses (`REQ-VN-4`), named upgrade authority (`REQ-GV-3`), a pause by one par
 
 ### DEC-11 Custody
 
-**Delivery keys (mint, payout from a reserve, refund) sign inside AWS KMS (secp256k1, for EVM keys and ECDSA Kreivo
-accounts); every other key comes from Vault and is loaded only by the signer process.** Ruled by @pandres95
-(`pl-custody`, 2026-10-13); amendment 0006 rewrote `REQ-CU-1` to match.
+**No delivery key stays on AWS KMS. The Kreivo delivery key is a Vault Transit ed25519 key, and the Polygon delivery
+key is held by the Vault signing plugin `blockchain-signer-vault-plugin`.** Ruled by @pandres95 (`d-delivery-keys`,
+2026-10-29), who replaced the ruling of 2026-10-13 (`pl-custody`, amendment 0006): DevOps asked to avoid KMS where Vault
+offers the capability, and KMS rotation is hard. Amendment 0015 rewrote `REQ-CU-1` as a boundary, so this is a plan
+change and no store is named in the specification.
 
-- Options: (a) AWS KMS secp256k1 for EVM keys and for ECDSA Kreivo accounts; (b) keys from Vault, loaded only by the
-  signer process; (c) KMS for delivery keys, Vault for the rest. The spec, as written, names a key-management service
-  or hardware module that never releases key material. Until the ruling, the plan builds against that text, which only
-  (a) satisfies.
-- aledgent ruled that its requirement is the property, not the product: no key material in the stateful process and
-  none readable from a process environment (in this spec, `REQ-AR-3` and `REQ-KY-1`). Choosing (b) or (c) needs an
-  amendment that rewords `REQ-CU-1` to name that property.
-- Kreivo accounts can be ECDSA, so one KMS key type could serve both kinds of network. The plan must still check the
-  account type per role, and that ContractsStore and the asset roles accept it.
+| Key | Store |
+|---|---|
+| Kreivo delivery key | Vault Transit, ed25519. A new key and so a new account, because the current one is ECDSA in KMS; the contract's delivery role moves to it |
+| Polygon delivery key | The Vault signing plugin (secp256k1, which Transit cannot hold), behind the sidecar signer in the EVM endpoint's task. Vault KV read by the sidecar stays only as a fallback |
+| Pause and statement keys | Unchanged: read from Vault by the signer process |
+| Existing KMS keys | Left unused, not deleted |
+
+- The signer holds every engine behind one `SigningEngine` interface (`services/signer/src/engine.rs` in the public
+  repository, PR #65), modelled on aledgent's signature engines (`F-042`). An engine answers a key's scheme, public key
+  and address, and signs; it has no way to be asked for a secret. Engines: the test-key file, Vault KV, Vault Transit,
+  the Vault plugin and, for the keys already made, AWS KMS. Changing where a key rests is a change of engine, and
+  a later move of the Polygon key to a full signing service needs no new interface.
+- A key that never leaves a signing service meets `REQ-CU-1` more strictly than one read into a signer. Whichever the
+  store, `REQ-AR-3`, `REQ-KY-1` and `REQ-KY-3` bound the key as before.
 
 *Serves:* keys in the custody capability (`REQ-CU-1`, `REQ-KY-1`), separate keys per network and role with rotation
 (`REQ-CU-2`, `REQ-KY-4`), no test key with production power (`REQ-KY-6`), and the isolated signer (`REQ-AR-3`).
-*Cost:* (a) ties every signature to AWS, with its latency and price; (b) and (c) need the amendment first.
+*Cost:* a new Kreivo delivery account and the hand-over of its roles; the plugin is third-party code, built from a pinned
+commit in CI.
 
 ### DEC-12 RPC for EVM networks
 
@@ -641,7 +650,7 @@ and page on divergence, the surplus floor alert, and the daily signed statement 
 (`REQ-AS-9`).
 
 **`F-005` Signer and guards.** The stateless signer and its guards (`DEC-3`) on the custody of `DEC-11`: a stub with
-test keys in `M-0`, signing for both kinds of network by `M-1`. Done when no unrecorded intent is signed (`INV-9`), a
+test keys in `M-0`, and the Transit and plugin engines behind the `SigningEngine` interface by `M-1`. Done when no unrecorded intent is signed (`INV-9`), a
 restart re-sends recorded bytes (`AC-D2.1`), an unrecorded signature starts the compromise path (`AC-I1.2`), and a
 test key holds no production authority (`AC-I4.2`).
 
@@ -728,7 +737,7 @@ longer a gate that waits for production.
 | `RISK-4` | BTCB's issuer (Binance) freezes, depegs or changes the token | bBTC is backed only by BTCB (`REQ-AS-3`), and the statement names the backend and the token (`REQ-BE-3`). The asset's own bounds cap the exposure |
 | `RISK-5` | The fiat assets rest on Swaps' reports | The mint window and supply ceiling bound what a wrong report can mint (`REQ-BE-5`). The statement says the reserve is attested (`REQ-BE-4`). A reversal is Swaps' to cover, with mints paused under the floor (`REQ-BE-6`) |
 | `RISK-6` | *Closed 2026-10-20 (no referendum):* Issuer and Admin of `Here(101)`–`Here(103)` sat with a Bloque account | That account handed the four roles of each asset to the community account by signed calls, once the community was its own admin and the contract was live; the supply was zero. The reserve check still sees any supply minted outside the contract as divergence and pauses (`INV-1`) |
-| `RISK-7` | The key custody choice is still open, and two of its options need an amendment | The signer is the only process that touches keys under every option. If (b) or (c) is ruled, the amendment to `REQ-CU-1` comes before `F-005` is complete |
+| `RISK-7` | *Closed 2026-10-29:* The key custody choice was open, and two of its options needed an amendment | Ruled (`d-delivery-keys`); amendment 0015 reworded `REQ-CU-1` to a boundary, so the plan names the store per key (`DEC-11`) and needs no further amendment |
 | `RISK-8` | Changes to the Swaps platform land on someone else's review schedule | Keep the module small and put it up for review early. bezent's own suite drives the request surface directly, so `M-0` to `M-2` do not wait on it |
 | `RISK-9` | A community with one member on the default voting track can pass a vote, for example a contract upgrade, within a few blocks. | Accepted by @pandres95 (2026-10-20). Optional hardening for later: a second voting member, Bloque Test, in a separate cloud account. The raise delay holds any raise of a bound for 24 hours (`REQ-GV-3`) |
 | `RISK-10` | The starting guardian of the vaults is a hot key held by @pandres95, so one stolen key could veto a pending change or pause a vault | A guardian can only veto a queued change or pause; it cannot move value (`DEC-10`). It is replaced by a key held by an independent party, a 2-of-N multisig or a hardware key, before real funds |
@@ -754,7 +763,7 @@ No ruling is pending; all three steps are under way (2026-10-13).
 | Architecture rules (§4.1, `REQ-AR-*`) | Layout, runtime and process shape (`DEC-1`, `DEC-2`, `DEC-3`), the signer (`F-005`) |
 | The issuing network (§4.4(a), `REQ-HN-*`) | Kreivo endpoint, contract and assets (`DEC-5`, `DEC-6`, `DEC-7`), built in `F-006`, `F-007`, `F-015` |
 | Backends (§4.4(b), `REQ-RN-*`, `REQ-BE-*`) | EVM endpoint, vault, providers, attested reports (`DEC-8`, `DEC-9`, `DEC-10`, `DEC-12`, `DEC-14`), built in `F-008`, `F-009`, `F-011` |
-| Custody (§4.4(c), `REQ-CU-*`) | Key service behind the signer (`DEC-11`), built in `F-005` |
+| Custody (§4.4(c), `REQ-CU-*`) | Signing engines behind the signer (`DEC-11`), built in `F-005` |
 | Venues and conversions (§4.4(d), §5.10, `REQ-VN-*`, `REQ-CV-*`) | Swaps' conversion role (`DEC-10`, `DEC-13`), built in `F-008`, `F-010` |
 | Privacy (§4.5, `REQ-PV-*`) | Fiat instructions only as a commitment (`DEC-14`), checked in `F-011` and the contract (`F-006`) |
 | Provability (§4.6, `REQ-PR-*`) | Daily signed statement and its host (`DEC-16`), built in `F-004` |
