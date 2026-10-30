@@ -11,7 +11,7 @@
 # commit: GO-2026-6603, 6610, 6611, 6612, 6617 in golang.org/x/net v0.58.0; GO-2026-6348, 6443 in
 # google.golang.org/grpc v1.83.0), the Go toolchain (exactly, no download), the target
 # (GOOS/GOARCH/GOAMD64), no cgo, no VCS stamping, no build paths, no build id. Module and build
-# caches are fresh, inside a scratch directory.
+# caches are fresh, inside a scratch directory at a fixed path.
 set -euo pipefail
 
 out=${1:?usage: build-vault-plugin.sh OUTDIR}
@@ -22,7 +22,12 @@ PLUGIN_GRPC=v1.83.2
 PLUGIN_COMMAND=blockchain-signer-vault-plugin
 GO_VERSION=go1.26.1
 
-scratch=$(mktemp -d)
+# A fixed path, not mktemp: some of the plugin's dependencies (gnark-crypto's assembly) leave the
+# absolute path of the module cache in the binary even with -trimpath, so a random scratch directory
+# gives different bytes on each run.
+scratch=${BEZENT_PLUGIN_BUILD_ROOT:-/tmp/bezent-vault-plugin-build}
+rm -rf "$scratch"
+mkdir -p "$scratch"
 trap 'chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
 
 export GOTOOLCHAIN=local GOFLAGS= GOWORK=off GOENV=off GOPATH="$scratch/gopath" \
