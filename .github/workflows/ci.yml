@@ -171,43 +171,24 @@ jobs:
       # A dev server's throwaway root token, on loopback, for this job only.
       BEZENT_VAULT_DEV_TOKEN: bezent-ci-dev-root
       BEZENT_VAULT_DEV_ADDR: http://127.0.0.1:8200
-      PLUGIN_REPO: https://github.com/MaximFischuk/blockchain-signer-vault-plugin.git
-      PLUGIN_COMMIT: 6c5921761f5939aa5adb042e6fd30b48a68bf6da
-      # Fixed versions of what govulncheck found in the commit's modules (GO-2026-6603, 6610, 6611,
-      # 6612, 6617 in x/net v0.58.0; GO-2026-6348, 6443 in grpc v1.83.0).
-      PLUGIN_X_NET: v0.60.0
-      PLUGIN_GRPC: v1.83.2
       PLUGIN_COMMAND: blockchain-signer-vault-plugin
       BEZENT_VAULT_PLUGIN_NAME: bezent-evm-signer
       BEZENT_VAULT_PLUGIN_MOUNT: signer-bezent
     steps:
       - uses: actions/checkout@v4
-      - name: The signing plugin at its pinned commit
-        run: |
-          set -euo pipefail
-          git init -q "$RUNNER_TEMP/plugin-src"
-          cd "$RUNNER_TEMP/plugin-src"
-          git remote add origin "$PLUGIN_REPO"
-          git fetch -q --depth 1 origin "$PLUGIN_COMMIT"
-          git checkout -q --detach FETCH_HEAD
-          test "$(git rev-parse HEAD)" = "$PLUGIN_COMMIT"
       - uses: actions/setup-go@v5
         with:
-          go-version-file: ${{ runner.temp }}/plugin-src/go.mod
+          go-version: "1.26.1"
           cache: false
-      - name: Build the signing plugin, with the dependency bumps
+      - name: Build the signing plugin (the reproducible build CI publishes) and check its pin
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP/plugin-src"
-          go get "golang.org/x/net@$PLUGIN_X_NET" "google.golang.org/grpc@$PLUGIN_GRPC"
-          go mod tidy
-          go list -m golang.org/x/net google.golang.org/grpc
+          tools/ci/build-vault-plugin.sh "$RUNNER_TEMP/plugin-build"
+          (cd "$RUNNER_TEMP/plugin-build" && sha256sum -c "$GITHUB_WORKSPACE/deploy/vault-plugin.sha256")
           mkdir -p "$RUNNER_TEMP/vault-plugins"
-          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
-            -o "$RUNNER_TEMP/vault-plugins/$PLUGIN_COMMAND" .
-          sha=$(sha256sum "$RUNNER_TEMP/vault-plugins/$PLUGIN_COMMAND" | cut -d' ' -f1)
+          cp "$RUNNER_TEMP/plugin-build/$PLUGIN_COMMAND" "$RUNNER_TEMP/vault-plugins/"
+          sha=$(cut -d' ' -f1 "$RUNNER_TEMP/plugin-build/SHA256SUMS")
           echo "BEZENT_VAULT_PLUGIN_SHA256=$sha" >> "$GITHUB_ENV"
-          echo "plugin sha256: $sha"
       - name: vault server -dev
         run: |
           set -euo pipefail

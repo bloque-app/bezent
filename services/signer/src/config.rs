@@ -62,9 +62,9 @@
 //! sidecar, in a Vault signing plugin:
 //!
 //! ```json
-//! "keys": { "backend": "vault-plugin", "environment": "production", "mount": "signer",
+//! "keys": { "backend": "vault-plugin", "environment": "production", "mount": "signer-bezent",
 //!           "role": "bezent-evm-signer-plugin",
-//!           "keys": [ { "id": "polygon-delivery", "key": "polygon-delivery",
+//!           "keys": [ { "id": "polygon-delivery", "key": "bezent-polygon-delivery",
 //!                       "address": "0x…", "public_key": "0x02…" } ] }
 //! ```
 

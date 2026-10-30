@@ -119,14 +119,14 @@ that returns or imports a key. The signer asks it for `sign/hash` and nothing el
 The template's `keys`:
 
 ```json
-"keys": { "backend": "vault-plugin", "environment": "production", "mount": "signer",
+"keys": { "backend": "vault-plugin", "environment": "production", "mount": "signer-bezent",
           "role": "bezent-evm-signer-plugin",
           "keys": [ { "id": "polygon-delivery", "key": "bezent-polygon-delivery",
                       "address": "0x…", "public_key": "0x02…" } ] }
 ```
 
 `address` and `public_key` are what the plugin reported when the key was created (`vault read
-signer/keys/bezent-polygon-delivery`, by an administrator, once). The signer checks at start, offline, that the one
+signer-bezent/keys/bezent-polygon-delivery`, by an administrator, once). The signer checks at start, offline, that the one
 is the other's, and refuses a published test fixture's key in production. It reads nothing from Vault to learn the
 key, so its role needs no read. A key in Vault that is not the declared one is found at the first signature, which
 is refused; nothing is released or recorded. The engine's health at start is a login under its role: it signs
@@ -143,7 +143,7 @@ AWS auth mount, server ID) under two roles, each with one job:
 The configuration refuses one role for both. The signing role's policy, in full:
 
 ```hcl
-path "signer/keys/bezent-polygon-delivery/sign/hash" {
+path "signer-bezent/keys/bezent-polygon-delivery/sign/hash" {
   capabilities = ["update"]
 }
 ```
@@ -160,24 +160,31 @@ vault write auth/<aws-mount>/role/bezent-evm-signer-plugin auth_type=iam \
   token_ttl=60s token_max_ttl=120s token_no_default_policy=true
 ```
 
-The administrator's policy (create, read, list and delete under `signer/keys/`) belongs to a separate, human role,
+The administrator's policy (create, read, list and delete under `signer-bezent/keys/`) belongs to a separate, human role,
 never to the signer. Keep Vault's audit device on: it records each signature and each refusal.
 
-**The plugin build.** Build it from a pinned, reviewed commit, never an automatic upgrade; bump `golang.org/x/net`
-and `google.golang.org/grpc` past the vulnerabilities `govulncheck` reports for that commit; build it for the nodes'
-architecture with `CGO_ENABLED=0`; and register that binary by its SHA-256:
+**The plugin build.** Build it from a pinned, reviewed commit, never an automatic upgrade, for the nodes'
+architecture (linux/amd64), and register that binary by its SHA-256. CI builds it for you, byte for byte the same
+every time: `tools/ci/build-vault-plugin.sh` fetches commit `6c5921761f5939aa5adb042e6fd30b48a68bf6da`, bumps
+`golang.org/x/net` and `google.golang.org/grpc` past the vulnerabilities `govulncheck` reports for it, and builds with
+Go 1.26.1, `CGO_ENABLED=0 -trimpath -buildvcs=false -ldflags="-s -w -buildid="`. The workflow `Vault signing plugin`
+(`.github/workflows/vault-plugin.yml`) builds it twice on two runners, requires the two to be identical and equal to
+the SHA-256 pinned in `deploy/vault-plugin.sha256`, and uploads the binary with a `SHA256SUMS` file as the artifact
+`vault-signing-plugin-linux-amd64`; a manual run also attaches both to the release `vault-signing-plugin-<short sha>`.
+Putting that binary on the Vault image is the infrastructure repository's job (the bytes are pinned there by the same
+SHA-256). Changing the commit or a bump changes the SHA-256: update the pin in the same change.
 
 ```sh
 vault plugin register -sha256=<sha256 of the binary> -command=blockchain-signer-vault-plugin \
-  secret bezent-evm-signer
-vault secrets enable -path=signer bezent-evm-signer
+  -version=v0.0.1 secret bezent-evm-signer
+vault secrets enable -path=signer-bezent -plugin-version=v0.0.1 bezent-evm-signer
 ```
 
-Vault refuses to run a binary whose SHA-256 is not the registered one. The `vault-dev` job of CI
-(`.github/workflows/ci.yml`) does exactly this, at commit `6c5921761f5939aa5adb042e6fd30b48a68bf6da` with the two
-bumps, and runs the signer's engine against the plugin (`services/signer/tests/vault_plugin.rs`): the policy above
-signs and refuses everything else, and every signature recovers the declared address with an implementation other
-than the signer's. Every Vault node needs `plugin_directory` set and the same binary.
+Vault refuses to run a binary whose SHA-256 is not the registered one (`v0.0.1` is the version the binary reports;
+Vault refuses any other). The `vault-dev` job of CI (`.github/workflows/ci.yml`) registers and mounts that same build
+(mount `signer-bezent`), and runs the signer's engine against the plugin (`services/signer/tests/vault_plugin.rs`): the
+policy above signs and refuses everything else, and every signature recovers the declared address with an
+implementation other than the signer's. Every Vault node needs `plugin_directory` set and the same binary.
 
 **What the plugin does not do.** It has no key versions, no rotation, no export and no import. A rotation is a new
 key and a new address: create the key, register the address where its outflow is bounded on chain (`REQ-KY-3`), move
