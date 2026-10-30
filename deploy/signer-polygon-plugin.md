@@ -2,94 +2,18 @@
 Copyright (c) 2026 Pagos Cube LLC
 SPDX-License-Identifier: CC-BY-4.0
 -->
-# The signer beside its caller (sidecar)
+# The signer's Polygon key in the Vault signing plugin
 
-A signer can run in the task of the one service that asks it to sign, as a sidecar container, and
-serve it over a Unix socket on a volume the two containers share. The service is the evm-endpoint,
-whose Polygon delivery key the sidecar holds (the mechanism does not depend on which service it is;
-the kreivo-endpoint uses the central signer). The endpoint reads `[signer]` as before (`socket`,
-`uid`, `token_file`), and nothing in it changes. The link is the one `services/signer/src/link.rs` describes: the signer
-authenticates the caller by the user id the kernel reports for the socket's peer and by a token
-whose SHA-256 its configuration lists, and the caller authenticates the signer by the user id that
-serves the socket. The signer and its caller never share a user id (`REQ-CU-1`, `REQ-AR-3`).
+The central signer, which has its own task role, holds the Polygon delivery key through the Vault signing plugin
+engine (`services/signer/src/engine.rs`, `services/signer/src/vault_plugin.rs`). There is no signer sidecar: the
+evm-endpoint reaches the signer over the mutual-TLS signer link like every other caller (PLAN `DEC-11`,
+`d-polygon-central-signer`). Containers in one task share one cloud IAM role, so a sidecar in the evm-endpoint's task
+would let the endpoint authenticate as the plugin role and sign arbitrary hashes, bypassing the signer's intent
+check (`REQ-AR-3`). Polygon delivery therefore needs the signer link (`PUB-1b`).
 
-The images are distroless, so a third container prepares the volumes: `bezent-signer prepare`
-(`services/signer/src/prepare.rs`). The values below are public defaults; use your own ids and
-paths if the images do.
-
-## Containers
-
-| Container | Image | User | Essential | Starts when | Mounts |
-|---|---|---|---|---|---|
-| `config` | the signer's | `0` (root), command `prepare /etc/bezent-signer/prepare.json` | no | first | `signer-config` rw, `caller-token` rw, `signer-socket` rw |
-| `signer` | the signer's | `65533:65533` (image default) | yes | `config` is `COMPLETE` | `signer-config` rw, `signer-socket` rw |
-| the caller (`evm-endpoint`) | its own | `65532:65532` (image default) | yes | `signer` is `HEALTHY` | `caller-token` ro, `signer-socket` rw |
-
-ECS `dependsOn`: `signer` on `config` with condition `COMPLETE`; the caller on `signer` with
-condition `HEALTHY`. The signer's health check is
-`["CMD", "/usr/local/bin/bezent-signer", "health", "/run/bezent/signer-config/signer.json"]`: healthy
-when its store login is checked, the socket is bound and the store answered within the last 35 s,
-so the caller never starts before there is a signer to reach. If the signer stops, the task stops
-(essential), and a new task prepares everything again.
-
-## Volumes
-
-Three task-scoped volumes (ephemeral storage, no host path). A new volume is root's, which is why
-`config` runs as root; it gives each directory to the one user who reads it.
-
-| Volume | Path | Owner and mode after `prepare` | Holds | Who reads it |
-|---|---|---|---|---|
-| `signer-config` | `/run/bezent/signer-config` | `65533:65533`, `0700` | `signer.json` (`0400`), the liveness file | the signer |
-| `caller-token` | `/run/bezent/caller-token` | `65532:65532`, `0700` | `token` (`0600`): 64 hex digits, no newline | the caller |
-| `signer-socket` | `/run/bezent/signer` | `65533:65532`, `2750` (setgid) | `signer.sock` (`0660`, the caller's group) | both |
-
-The signer mounts `signer-config` read-write: its root file system is read-only, and its
-configuration names `"health_file": "/run/bezent/signer-config/signer.health"`, a file in the
-directory it owns (the configuration file itself stays `0400`). The caller reads `token` only: the
-signer's configuration holds the token's SHA-256, never the token.
-
-## What `prepare` does
-
-`prepare` takes a spec, a JSON file in the image next to the template (the signer configuration
-with no callers):
-
-```json
-{ "template": "/etc/bezent-signer/sidecar.json",
-  "config": "/run/bezent/signer-config/signer.json",
-  "signer": { "uid": 65533, "gid": 65533 },
-  "caller": { "name": "evm-endpoint", "uid": 65532, "gid": 65532 },
-  "token_file": "/run/bezent/caller-token/token",
-  "socket_dir": "/run/bezent/signer" }
-```
-
-- Writes 32 random bytes as 64 hex digits to `token_file`, for the caller alone.
-- Renders `template` to `config` with exactly one caller (name, user id, the token's SHA-256). A
-  template that names callers, binds no key, or puts its `socket` anywhere but in `socket_dir` is
-  refused, and nothing is written.
-- Creates `socket_dir` for the signer's user and the caller's group.
-- Refuses a caller with the signer's own user id.
-
-Running it again is safe: it replaces the token and the hash together and changes no owner or mode.
-It prints paths and never the token.
-
-## The signer's configuration
-
-The template is a signer configuration (`services/signer/src/config.rs`) with `"callers": []`,
-`"socket": "/run/bezent/signer/signer.sock"`, the `store` and `vault` tables, and `networks`,
-`keys` and `bindings` for the keys of this one caller and no others: a key the template does not
-bind is nobody's. Every path in the template is absolute (`keys.path`, `database_url_file` and the
-rest): a relative one would be read against the directory of the rendered configuration, not of the
-template. The task role is the signer container's identity for Vault and the store; the
-caller needs none of them for the signer.
-
-The caller's `[signer]` table:
-
-```toml
-[signer]
-socket = "/run/bezent/signer/signer.sock"
-uid = 65533
-token_file = "/run/bezent/caller-token/token"
-```
+The signer's own role is the one bound to the signer's task role below; the caller (the evm-endpoint) has no Vault
+role for the plugin and no path to it. The values below are public defaults; use your own names if your deployment
+does.
 
 ## Delivery keys
 
@@ -97,8 +21,7 @@ The signer reaches every key through one interface, a signing engine (`services/
 configuration says which engine holds which key (`keys.backend`): `file` (test keys only), or a signing service for
 the delivery keys with the other keys optionally read from Vault KV (`keys.vault`). The signing services are AWS KMS
 (`kms`: secp256k1; kept working, not used by this deployment), Vault Transit (`transit`: the Kreivo ed25519
-account, which the central signer holds) and a Vault signing plugin (`vault-plugin`: the Polygon key, which this
-sidecar holds). Whatever the engine, the signer computes the digest itself, checks every signature against the
+account) and a Vault signing plugin (`vault-plugin`: the Polygon key). Whatever the engine, the signer computes the digest itself, checks every signature against the
 key's public key before it releases it (`INV-9`), and puts no key, token, payload or signature in a log line or an
 error (`REQ-KY-1`). A key never leaves the component that signs with it (`REQ-CU-1`): in a signing service it never
 leaves the service at all.

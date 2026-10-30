@@ -4,7 +4,7 @@
 //! ruling `d-delivery-keys`; `REQ-CU-1`, `REQ-KY-1`, `REQ-KY-3`, `REQ-KY-4`, `REQ-KY-6`, `INV-9`).
 //!
 //! The key is created inside a Vault secrets engine, `blockchain-signer-vault-plugin` (pinned to a
-//! reviewed commit and built by the operator; `deploy/signer-sidecar.md`), which signs on request
+//! reviewed commit and built by the operator; `deploy/signer-polygon-plugin.md`), which signs on request
 //! and has no path that returns it. The plugin signs any bytes it is given as a hash and returns a
 //! DER signature without a recovery id, so the signer does the rest itself:
 //!

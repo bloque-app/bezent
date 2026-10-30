@@ -59,7 +59,7 @@
 //! `keys.backend` names the engines ([`crate::engine`]): `file` (test keys), or a signing service
 //! for the delivery keys, `kms`, `transit` or `vault-plugin`, each with the other keys optionally
 //! from Vault KV (`vault`). A key is the engine's whose list names it. The Polygon key of the
-//! sidecar, in a Vault signing plugin:
+//! central signer, in a Vault signing plugin:
 //!
 //! ```json
 //! "keys": { "backend": "vault-plugin", "environment": "production", "mount": "signer-bezent",

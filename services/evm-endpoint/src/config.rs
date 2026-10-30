@@ -499,7 +499,8 @@ mod tests {
         assert!(Config::parse(&key).unwrap_err().contains("lane.public_key"));
     }
 
-    /// The sidecar signer's layout (`deploy/signer-sidecar.md`): the socket on the task's shared
+    /// A local-socket signer's layout (the Polygon key's signer is the central one, reached over the
+    /// signer link, `deploy/signer-polygon-plugin.md`): the socket on the task's shared
     /// volume, the signer's user id, and the token file `bezent-signer prepare` wrote (64 hex digits,
     /// no newline, for this container's user alone).
     #[tokio::test]

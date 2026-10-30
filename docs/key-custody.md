@@ -17,7 +17,7 @@ identifiers) are not part of this repository.
   test keys from a file (`file`); or a signing service that signs on request and never releases the key, AWS KMS
   (`kms`, secp256k1), Vault Transit (`transit`, ed25519) or a Vault signing plugin (`vault-plugin`, secp256k1 for
   EVM networks), with the keys that are not delivery keys optionally read from Vault KV. The plan keeps the Kreivo
-  delivery key in Vault Transit and the Polygon delivery key in the Vault signing plugin (`deploy/signer-sidecar.md`).
+  delivery key in Vault Transit and the Polygon delivery key in the Vault signing plugin (`deploy/signer-polygon-plugin.md`), both signed by the central signer.
   Credentials come from the platform's default credential chain (a task or instance role), never from the
   configuration or from an environment variable (`REQ-KY-1`).
 - **The signer computes what is signed and checks what comes back.** It computes every digest itself, sends a signing
@@ -41,5 +41,5 @@ identifiers) are not part of this repository.
   in a production environment (`REQ-KY-6`).
 - **Every key is bounded on chain** (`REQ-KY-3`): the contract's per-asset bounds and the vault's roles limit what a
   compromised key can do.
-- **A signer beside its caller** (`deploy/signer-sidecar.md`) is the same signer with a configuration naming one caller
+- **A signer with one caller** (a local-socket link, for a test or a single-caller deployment; the Polygon key is not held this way, `deploy/signer-polygon-plugin.md`) is the same signer with a configuration naming one caller
   and the keys that caller may use.

@@ -1,8 +1,8 @@
 ---
 name: bezent
-plan_version: 0.6.2
-status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`)
-date: 2026-10-29
+plan_version: 0.6.3
+status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`)
+date: 2026-10-30
 binds: SPEC.md v0.5.4
 ---
 
@@ -36,6 +36,7 @@ that serves nothing in the spec is not in this plan.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.6.3 | 2026-10-30 | @pandres95's ruling `d-polygon-central-signer` (2026-10-30): there is no Polygon signer sidecar. The central signer, which has its own task role, signs Polygon through the Vault signing plugin, and the EVM endpoint reaches it over the mTLS signer link (`PUB-1b`) like every other caller. Containers in one task share one cloud IAM role, so a sidecar would let the EVM endpoint authenticate as the plugin role and sign arbitrary hashes, bypassing the signer's intent check (`REQ-AR-3`). `DEC-11` and `F-005` follow; `PUB-1b` becomes a prerequisite of Polygon delivery (`F-009`, `M-1`). `SPEC.md` is unchanged |
 | 0.6.2 | 2026-10-29 | The plan binds `SPEC.md` v0.5.4 (amendment 0015: `REQ-CU-1` names a boundary, not a store). @pandres95's ruling `d-delivery-keys` (2026-10-29) moves both delivery keys off AWS KMS: `DEC-11` names the store per key, and `RISK-7` is closed. The signer gets one `SigningEngine` interface (`F-005`) |
 | 0.6.1 | 2026-10-22 | The plan binds `SPEC.md` v0.5.3 (amendments 0013 and 0014; no requirement the plan relies on changes). @pandres95's rulings of 2026-10-22: the 48-hour mainnet soak exercises tiny synthetic transfers within the bounds between Polygon and Kreivo (his option A; `DEC-19`, `M-4`); the vault guard's bounds are confirmed: a delay cooldown from 1 hour to 30 days and an expiration from 1 day to 90 days, with a deployment default of a 24-hour cooldown and a 7-day expiration (`DEC-10`); and the guardian key is replaced by a key held by an independent party before the vault is funded, the holder still to be decided, a hot key until then (`DEC-10`, `RISK-10`) |
 | 0.6.0 | 2026-10-20 | @pandres95's rulings of 2026-10-15 to 2026-10-20; `SPEC.md` is unchanged. The repository is public now, and one mainnet instance serves Bloque Test and Bloque: the separate test environment is gone, the test bed stays, and a 48-hour soak runs on mainnet before bUSDC goes live (`DEC-15`, `DEC-18`, `DEC-19`, `DEC-20`, `F-014`, `F-017`, `M-1`, `M-4`, `M-5`). Kreivo is set up with no Root referendum: community 4243, the contract's roles and the hand-over of the asset roles (`DEC-6`, `DEC-7`, `F-015`; `RISK-6` closed). The vault gains a guardian (`DEC-10`). Polygon conversions move before the bUSDC launch gate (`DEC-13`, `F-010`, `M-2`, `M-4`). The delivery account carries a KSM float (`DEC-18`, `F-014`). Block-denominated constants use 41,739 blocks a day (`DEC-6`). New `RISK-9` and `RISK-10` |
@@ -348,7 +349,7 @@ change and no store is named in the specification.
 | Key | Store |
 |---|---|
 | Kreivo delivery key | Vault Transit, ed25519. A new key and so a new account, because the current one is ECDSA in KMS; the contract's delivery role moves to it |
-| Polygon delivery key | The Vault signing plugin (secp256k1, which Transit cannot hold), behind the sidecar signer in the EVM endpoint's task. Vault KV read by the sidecar stays only as a fallback |
+| Polygon delivery key | The Vault signing plugin (secp256k1, which Transit cannot hold), signed by the central signer, which has its own task role and reaches the plugin under its own Vault role (`d-polygon-central-signer`). The EVM endpoint asks the signer over the mTLS signer link (`PUB-1b`) and has no Vault role for the plugin. Vault KV read by the signer stays only as a fallback |
 | Pause and statement keys | Unchanged: read from Vault by the signer process |
 | Existing KMS keys | Left unused, not deleted |
 
@@ -357,6 +358,11 @@ change and no store is named in the specification.
   and address, and signs; it has no way to be asked for a secret. Engines: the test-key file, Vault KV, Vault Transit,
   the Vault plugin and, for the keys already made, AWS KMS. Changing where a key rests is a change of engine, and
   a later move of the Polygon key to a full signing service needs no new interface.
+- **No Polygon signer sidecar** (`d-polygon-central-signer`, 2026-10-30). Containers in one task share one cloud IAM
+  role, so a sidecar in the EVM endpoint's task would let the endpoint authenticate as the plugin role and sign
+  arbitrary hashes, bypassing the signer's intent check (`REQ-AR-3`). The central signer signs both delivery keys, with
+  the plugin role bound to its own task role alone. The signer link (`PUB-1b`, mutual TLS) is therefore a prerequisite
+  of Polygon delivery.
 - A key that never leaves a signing service meets `REQ-CU-1` more strictly than one read into a signer. Whichever the
   store, `REQ-AR-3`, `REQ-KY-1` and `REQ-KY-3` bound the key as before.
 
@@ -652,7 +658,8 @@ and page on divergence, the surplus floor alert, and the daily signed statement 
 **`F-005` Signer and guards.** The stateless signer and its guards (`DEC-3`) on the custody of `DEC-11`: a stub with
 test keys in `M-0`, and the Transit and plugin engines behind the `SigningEngine` interface by `M-1`. Done when no unrecorded intent is signed (`INV-9`), a
 restart re-sends recorded bytes (`AC-D2.1`), an unrecorded signature starts the compromise path (`AC-I1.2`), and a
-test key holds no production authority (`AC-I4.2`).
+test key holds no production authority (`AC-I4.2`). The central signer signs Polygon through the plugin engine, so
+the signer link (`PUB-1b`) is built before Polygon delivery.
 
 **`F-006` Kreivo contract.** The ink! contract of `DEC-6`, deployed on zombienet through ContractsStore as on mainnet.
 Done when a redemption destroys in the same call and records its reference and instructions (`AC-B5.1`), a reused
@@ -671,7 +678,8 @@ of `DEC-19`. Done when the allowance bounds every outflow (`AC-I1.1`), every out
 **`F-009` EVM endpoint.** The alloy service of `DEC-8`, first on Polygon Amoy, then on Base Sepolia and BNB Chain
 testnet, with the provider cross-check of `DEC-12`. Done when arrivals at the vault wait until a request names their
 coordinate (`REQ-IN-3`), arrivals are minted only after finality (`AC-A2.1`–`AC-A2.3`), reports carry coordinates
-(`AC-C1.3`), a forced non-execution is checkable (`AC-C2.1`), and gaps are filled (`AC-D2.3`).
+(`AC-C1.3`), a forced non-execution is checkable (`AC-C2.1`), and gaps are filled (`AC-D2.3`). Polygon delivery waits on the signer link (`PUB-1b`): the endpoint signs through the
+central signer, never through a sidecar.
 
 **`F-010` Venues.** Swaps' conversions on the vault: the role configuration, observing them, and minting against
 the output
