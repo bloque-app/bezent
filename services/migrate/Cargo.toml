@@ -18,7 +18,10 @@ path = "src/main.rs"
 
 [dependencies]
 bezent-store = { path = "../../crates/store" }
+bezent-vault = { path = "../../crates/vault" }
+serde = { version = "1", features = ["derive"] }
 sqlx.workspace = true
+toml = "0.8"
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]

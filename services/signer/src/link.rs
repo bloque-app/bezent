@@ -3,7 +3,8 @@
 //! The authenticated link between the core and the signer (`T-005-02`; `REQ-AR-3`, `REQ-CU-1`).
 //!
 //! A Unix socket, as aledgent's `F-035` built it: the core and the signer run on one host (or in
-//! one task), so mutual TLS buys nothing a socket's peer credentials do not.
+//! one task, the signer a sidecar of its caller: `prepare`), so mutual TLS buys nothing a socket's
+//! peer credentials do not. A signer reached across the network is another link.
 //!
 //! - **The signer authenticates the caller** twice: by the peer's user id, which the kernel
 //!   reports and the caller cannot forge, and by a token whose SHA-256 the configuration lists for
@@ -39,7 +40,7 @@ use zeroize::Zeroizing;
 
 use crate::compromise::{self, Answer, Returned};
 use crate::config::Caller;
-use crate::keys::KeyBackend;
+use crate::keys::SigningEngine;
 use crate::signer::{Outcome, Signer};
 
 /// The largest frame either side accepts.
@@ -311,7 +312,7 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 }
 
 /// Serves `listener` until it fails.
-pub async fn serve<B: KeyBackend>(
+pub async fn serve<B: SigningEngine>(
     listener: UnixListener,
     callers: Arc<Callers>,
     signer: Arc<Signer<B>>,
@@ -323,7 +324,7 @@ pub async fn serve<B: KeyBackend>(
     }
 }
 
-async fn handle<B: KeyBackend>(mut stream: UnixStream, callers: &Callers, signer: &Signer<B>) {
+async fn handle<B: SigningEngine>(mut stream: UnixStream, callers: &Callers, signer: &Signer<B>) {
     let uid = stream.peer_cred().ok().map(|c| c.uid());
     let hello = tokio::time::timeout(HELLO_TIMEOUT, read_frame::<Request>(&mut stream)).await;
     let caller = match hello {

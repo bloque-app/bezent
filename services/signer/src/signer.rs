@@ -58,7 +58,7 @@ use sqlx::{PgConnection, PgPool};
 use crate::cancel;
 use crate::config::{CANCEL, DESTROY, Policy, STATEMENT, parse_minor_units};
 use crate::intent::Intent;
-use crate::keys::{Environment, KeyBackend, KeyError};
+use crate::keys::{Environment, KeyError, SigningEngine};
 use crate::log::Log;
 
 /// The advisory lock every signing transaction takes (`hashtext('bezent-signer')` is not stable
@@ -421,7 +421,7 @@ pub struct Signer<B> {
     serial: tokio::sync::Mutex<()>,
 }
 
-impl<B: KeyBackend> Signer<B> {
+impl<B: SigningEngine> Signer<B> {
     /// A signer over `pool` (connected with [`pool_options`]), deciding by `policy`, signing with
     /// `backend`, logging to `log`.
     pub fn new(pool: PgPool, policy: Policy, backend: B, log: Log) -> Self {

@@ -3,7 +3,9 @@
 //! The signer's configuration: a JSON file whose path is the process's only argument.
 //!
 //! It names where keys come from, never a key (`REQ-KY-1`): the file backend's key file is a path.
-//! The database URL is read from a file too, so a dump of the configuration carries no secret.
+//! The database URL is read from a file too, so a dump of the configuration carries no secret. Or
+//! the store is named by `store`: its host, and a login and password that are `SecretRef`s (a file
+//! or a field in Vault), from which the URL is built in the process (issue #64).
 //!
 //! ```json
 //! {
@@ -47,14 +49,34 @@
 //! The statement key (`REQ-PR-1`; PLAN `DEC-16`, 2026-10-14; issue #42) is named apart, by
 //! `"statement_key": "<key id>"`: an ed25519 key that signs intents of purpose `statement` and
 //! nothing else. It is bound to no network, and no binding may name it or the purpose `statement`.
+//!
+//! Any other ed25519 key is a native Kreivo delivery account (the public key is the account): it
+//! may be bound to a network that is not an EVM network, and only when a signing service holds it
+//! and never releases it ([`SigningEngine::non_exportable`]: Vault Transit, the plan's ruling
+//! `d-delivery-keys`; the test file's keys are test keys). Its public key must not be the statement
+//! key's.
+//!
+//! `keys.backend` names the engines ([`crate::engine`]): `file` (test keys), or a signing service
+//! for the delivery keys, `kms`, `transit` or `vault-plugin`, each with the other keys optionally
+//! from Vault KV (`vault`). A key is the engine's whose list names it. The Polygon key of the
+//! central signer, in a Vault signing plugin:
+//!
+//! ```json
+//! "keys": { "backend": "vault-plugin", "environment": "production", "mount": "signer-bezent",
+//!           "role": "bezent-evm-signer-plugin",
+//!           "keys": [ { "id": "polygon-delivery", "key": "bezent-polygon-delivery",
+//!                       "address": "0x…", "public_key": "0x02…" } ] }
+//! ```
 
+use bezent_vault::{StoreSource, VaultConfig};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::keys::{Environment, KeyBackend, Scheme};
+use crate::engine::SigningEngine;
+use crate::keys::{Environment, Scheme};
 
 /// The purpose of an intent that destroys a bridged asset on the issuing network. Such an intent
 /// must destroy from the on-chain component's own account (`DEC-3`, `INV-4`).
@@ -101,6 +123,15 @@ pub struct Config {
     /// A file holding the database URL of a login role that is a member of `bezent_signer` only.
     #[serde(default)]
     pub database_url_file: Option<PathBuf>,
+    /// The store as a host and a login and password from files or Vault, in place of
+    /// `database_url_file` (exactly one of them serves). The login is a member of `bezent_signer`
+    /// only.
+    #[serde(default)]
+    pub store: Option<StoreSource>,
+    /// Where Vault is and how to log in to it, when any secret is read from it: the store's login
+    /// or password, or `keys.vault`.
+    #[serde(default)]
+    pub vault: Option<VaultConfig>,
     /// Who may ask for signatures.
     pub callers: Vec<Caller>,
     /// The networks the signer signs for.
@@ -176,7 +207,7 @@ pub struct DeliveryContracts {
     pub role: String,
 }
 
-/// Where the keys come from (`DEC-11`). Only the file backend exists in `M-0`.
+/// Where the keys come from (`DEC-11`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "backend", rename_all = "lowercase", deny_unknown_fields)]
 pub enum KeySource {
@@ -199,6 +230,41 @@ pub enum KeySource {
         /// The KMS keys.
         keys: Vec<crate::kms::KmsKey>,
         /// The non-delivery keys, from Vault.
+        #[serde(default)]
+        vault: Option<crate::vault::VaultSource>,
+    },
+    /// Delivery keys in Vault Transit: ed25519 keys that never leave Vault (the Kreivo delivery
+    /// account), the other keys (statement, pause) optionally from Vault KV. The signer logs in
+    /// to Vault under its task role (`vault` table).
+    Transit {
+        /// The environment of every key here; the Vault KV secret must match it, and so must
+        /// the networks the keys are bound to.
+        environment: Environment,
+        /// The Transit engine's mount, for example `transit-bezent-signer`.
+        mount: String,
+        /// The Transit keys.
+        keys: Vec<crate::transit::TransitKey>,
+        /// The non-delivery keys, from Vault KV.
+        #[serde(default)]
+        vault: Option<crate::vault::VaultSource>,
+    },
+    /// Delivery keys in a Vault signing plugin: secp256k1 EVM keys that never leave Vault (the
+    /// Polygon delivery key, [`crate::vault_plugin`]), the other keys optionally from Vault KV.
+    /// The signer logs in to Vault under its task role, as `role`: a role of its own whose policy
+    /// grants `sign/hash` on these keys and nothing else.
+    #[serde(rename = "vault-plugin")]
+    VaultPlugin {
+        /// The environment of every key here; the Vault KV secret must match it, and so must the
+        /// networks the keys are bound to.
+        environment: Environment,
+        /// The plugin's mount, for example `signer`.
+        mount: String,
+        /// The Vault role this engine logs in as (the `vault` table names the server and the
+        /// auth mount; its own `role` is for the store and Vault KV).
+        role: String,
+        /// The plugin keys.
+        keys: Vec<crate::vault_plugin::PluginKey>,
+        /// The non-delivery keys, from Vault KV.
         #[serde(default)]
         vault: Option<crate::vault::VaultSource>,
     },
@@ -279,6 +345,9 @@ impl Config {
             }
         };
         resolve(&mut config.socket);
+        if let Some(store) = config.store.as_mut() {
+            store.rebase(base);
+        }
         if let Some(p) = config.health_file.as_mut() {
             resolve(p);
         }
@@ -287,32 +356,71 @@ impl Config {
         }
         match &mut config.keys {
             KeySource::File { path } => resolve(path),
-            KeySource::Kms { vault, .. } => {
-                if let Some(v) = vault {
-                    resolve(&mut v.token_file);
-                }
-            }
+            KeySource::Kms { .. } | KeySource::Transit { .. } | KeySource::VaultPlugin { .. } => {}
         }
         Ok(config)
     }
 
-    /// Parses a configuration.
+    /// Parses a configuration, and checks what needs no key: the Vault table and the store, and
+    /// that every secret read from Vault has a table to log in with. Contacts nothing.
     pub fn parse(bytes: &[u8]) -> Result<Self, ConfigError> {
-        serde_json::from_slice(bytes).map_err(|e| {
+        let config: Self = serde_json::from_slice(bytes).map_err(|e| {
             ConfigError(format!(
                 "not a valid configuration ({:?} error at line {}, column {})",
                 e.classify(),
                 e.line(),
                 e.column()
             ))
-        })
+        })?;
+        config.check_secrets()?;
+        Ok(config)
+    }
+
+    fn check_secrets(&self) -> Result<(), ConfigError> {
+        let refuse_with = |e: bezent_vault::Error| ConfigError(e.to_string());
+        if let Some(vault) = &self.vault {
+            vault.check().map_err(refuse_with)?;
+        }
+        if let Some(store) = &self.store {
+            store.check().map_err(refuse_with)?;
+            if self.database_url_file.is_some() {
+                return refuse("set one of database_url_file and store, not both");
+            }
+        }
+        let from_vault = self
+            .store
+            .as_ref()
+            .is_some_and(|s| s.login.is_vault() || s.password.is_vault())
+            || matches!(
+                &self.keys,
+                KeySource::Kms { vault: Some(_), .. }
+                    | KeySource::Transit { .. }
+                    | KeySource::VaultPlugin { .. }
+            );
+        if from_vault && self.vault.is_none() {
+            return refuse("a secret is read from Vault but there is no vault table");
+        }
+        if let KeySource::VaultPlugin { role, .. } = &self.keys {
+            if role.is_empty() || role.chars().any(|c| c.is_control()) {
+                return refuse("keys.role is not usable");
+            }
+            // The plugin's role signs and does nothing else; the vault table's reads the store's
+            // login and Vault KV. One role for both would carry more than sign/hash.
+            if self.vault.as_ref().is_some_and(|v| &v.role == role) {
+                return refuse(
+                    "keys.role is the vault table's role; the signing plugin logs in as a role \
+                     of its own that may only sign (REQ-KY-1)",
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Checks the configuration against the key backend and resolves it. Refuses, at start, a
     /// binding of a key to a network of another environment (`REQ-KY-6`, `AC-I4.2`), a binding to
     /// an undeclared network or key, two keys for one network and purpose, a destroy on the
     /// issuing network without the on-chain component's account, and a caller without a token.
-    pub fn policy(&self, backend: &impl KeyBackend) -> Result<Policy, ConfigError> {
+    pub fn policy(&self, backend: &impl SigningEngine) -> Result<Policy, ConfigError> {
         if self.callers.is_empty() {
             return refuse("no caller is declared");
         }
@@ -442,11 +550,25 @@ impl Config {
             let scheme = backend
                 .scheme(&b.key)
                 .map_err(|e| ConfigError(format!("binding of key {}: {e}", b.key)))?;
-            if scheme == crate::keys::Scheme::Ed25519 {
-                return refuse(format!(
-                    "key {} is an ed25519 statement key, used for nothing else (REQ-PR-1)",
-                    b.key
-                ));
+            if scheme == Scheme::Ed25519 {
+                // The statement key signs nothing else (REQ-PR-1). Any other ed25519 key is a
+                // native Kreivo delivery account, which the plan keeps in a signing service that
+                // never releases it (d-delivery-keys); the test file's keys are test keys
+                // (REQ-KY-6).
+                if self.statement_key.as_deref() == Some(b.key.as_str()) {
+                    return refuse(format!(
+                        "key {} is an ed25519 statement key, used for nothing else (REQ-PR-1)",
+                        b.key
+                    ));
+                }
+                if !backend.non_exportable(&b.key) && backend.environment() != Environment::Test {
+                    return refuse(format!(
+                        "key {} is an ed25519 delivery key held where the signer can read it; \
+                         the plan keeps it in a signing service that never releases it \
+                         (d-delivery-keys)",
+                        b.key
+                    ));
+                }
             }
             if !network.takes(scheme) {
                 return refuse(format!(
@@ -571,6 +693,20 @@ impl Config {
                     scheme.as_str()
                 ));
             }
+            // Used for nothing else, by its public key as well as its id: no delivery key is
+            // the same key under another id (REQ-PR-1).
+            let public = backend
+                .public_key(key)
+                .map_err(|e| ConfigError(format!("statement key {key}: {e}")))?;
+            for b in &self.bindings {
+                if backend.public_key(&b.key).is_ok_and(|p| p == public) {
+                    return refuse(format!(
+                        "statement key {key} is also key {}, bound to network {}; it signs \
+                         statements only (REQ-PR-1)",
+                        b.key, b.network
+                    ));
+                }
+            }
             if self.bindings.iter().any(|b| &b.key == key) {
                 return refuse(format!(
                     "statement key {key} is also bound to a network; it signs statements only (REQ-PR-1)"
@@ -643,4 +779,145 @@ pub fn parse_minor_units(text: &str) -> Option<u128> {
         return None;
     }
     text.parse().ok()
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    /// The published fixture, with `edit` applied to it.
+    fn parse(edit: impl FnOnce(&mut serde_json::Value)) -> Result<Config, ConfigError> {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/signer.json")).unwrap();
+        edit(&mut json);
+        Config::parse(json.to_string().as_bytes())
+    }
+
+    const VAULT: &str = r#"{"address":"https://vault.example:8200","mount":"bezent","role":"bezent-signer-iam","sts_region":"us-east-2","server_id":"vault.example"}"#;
+
+    fn store(login: &str) -> serde_json::Value {
+        serde_json::from_str(&format!(
+            r#"{{"host":"db.example","database":"bezent","login":{login},"password":{{"vault":{{"path":"secret/bezent/signer","field":"db_password"}}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn req_ky_1_the_store_is_a_host_with_a_login_and_password_from_files_or_vault() {
+        let config = parse(|j| {
+            j["store"] = store(r#"{"file":"login"}"#);
+            j["vault"] = serde_json::from_str(VAULT).unwrap();
+        })
+        .unwrap();
+        assert!(config.store.is_some() && config.vault.is_some());
+        // Debug prints references, never values.
+        assert!(!format!("{config:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn req_ky_1_a_vault_secret_needs_the_vault_table_and_the_store_one_source() {
+        assert!(parse(|j| j["store"] = store(r#"{"file":"login"}"#)).is_err());
+        assert!(
+            parse(|j| {
+                j["store"] = store(r#"{"file":"login"}"#);
+                j["vault"] = serde_json::from_str(VAULT).unwrap();
+                j["database_url_file"] = "url".into();
+            })
+            .is_err()
+        );
+        assert!(
+            parse(|j| {
+                j["vault"] = serde_json::from_str(&VAULT.replace("https", "http")).unwrap();
+            })
+            .is_err(),
+            "plain http off loopback"
+        );
+    }
+
+    #[test]
+    fn req_ky_1_keys_vault_plugin_needs_the_vault_table_and_a_role_of_its_own() {
+        let plugin = |role: &str| {
+            let role = role.to_owned();
+            move |j: &mut serde_json::Value| {
+                j["keys"] = serde_json::json!({
+                    "backend": "vault-plugin", "environment": "test", "mount": "signer",
+                    "role": role,
+                    "keys": [{"id": "polygon-delivery", "key": "polygon-delivery",
+                              "address": "0x01", "public_key": "0x02"}],
+                });
+            }
+        };
+        let config = parse(|j| {
+            plugin("bezent-evm-signer-plugin")(j);
+            j["vault"] = serde_json::from_str(VAULT).unwrap();
+        })
+        .unwrap();
+        assert!(matches!(config.keys, KeySource::VaultPlugin { .. }));
+        assert!(
+            parse(plugin("bezent-evm-signer-plugin")).is_err(),
+            "no vault table"
+        );
+        // The vault table's role reads the store's login; the plugin's only signs.
+        let shared = parse(|j| {
+            plugin("bezent-signer-iam")(j);
+            j["vault"] = serde_json::from_str(VAULT).unwrap();
+        })
+        .unwrap_err();
+        assert!(shared.0.contains("role of its own"), "{shared}");
+        for role in ["", "a\nb"] {
+            assert!(
+                parse(|j| {
+                    plugin(role)(j);
+                    j["vault"] = serde_json::from_str(VAULT).unwrap();
+                })
+                .is_err()
+            );
+        }
+        // The old spelling of a backend is not this one, and an unknown field is refused.
+        assert!(
+            parse(|j| {
+                plugin("r")(j);
+                j["keys"]["backend"] = "vaultplugin".into();
+                j["vault"] = serde_json::from_str(VAULT).unwrap();
+            })
+            .is_err()
+        );
+        assert!(
+            parse(|j| {
+                plugin("r")(j);
+                j["keys"]["token_file"] = "t".into();
+                j["vault"] = serde_json::from_str(VAULT).unwrap();
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn req_ky_1_keys_vault_logs_in_and_no_longer_takes_a_token_file() {
+        let kms = |vault: serde_json::Value| {
+            move |j: &mut serde_json::Value| {
+                j["keys"] = serde_json::json!({
+                    "backend": "kms", "environment": "test", "region": "us-east-2",
+                    "keys": [], "vault": vault,
+                });
+            }
+        };
+        assert!(
+            parse(kms(serde_json::json!({"path": "secret/bezent/signer"}))).is_err(),
+            "keys.vault with no vault table"
+        );
+        assert!(
+            parse(|j| {
+                kms(serde_json::json!({"path": "secret/bezent/signer"}))(j);
+                j["vault"] = serde_json::from_str(VAULT).unwrap();
+            })
+            .is_ok()
+        );
+        assert!(
+            parse(kms(
+                serde_json::json!({"path": "p", "address": "https://v.example", "token_file": "t"})
+            ))
+            .is_err()
+        );
+    }
 }

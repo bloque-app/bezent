@@ -36,7 +36,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::PathBuf;
 
-use bezent_signer::keys::{KeyBackend, KeyError, Scheme};
+use bezent_signer::keys::{KeyError, Scheme, SigningEngine};
 use bezent_signer::link::{Client, Response};
 use bezent_signer::verify::verifies_exactly;
 use chrono::{DateTime, Duration, Utc};
@@ -98,7 +98,7 @@ pub struct KeyBackendSigner<B> {
     key: String,
 }
 
-impl<B: KeyBackend> KeyBackendSigner<B> {
+impl<B: SigningEngine> KeyBackendSigner<B> {
     /// The statement key `key` of `backend`. Only an ed25519 key is accepted.
     pub fn new(backend: B, key: &str) -> Result<Self, KeyError> {
         if backend.scheme(key)? != Scheme::Ed25519 {
@@ -113,7 +113,7 @@ impl<B: KeyBackend> KeyBackendSigner<B> {
     }
 }
 
-impl<B: KeyBackend> StatementSigner for KeyBackendSigner<B> {
+impl<B: SigningEngine> StatementSigner for KeyBackendSigner<B> {
     fn public_key(&self) -> Result<Vec<u8>, KeyError> {
         self.backend.public_key(&self.key)
     }

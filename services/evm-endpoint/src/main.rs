@@ -91,12 +91,6 @@ fn main() -> ExitCode {
     }
 }
 
-fn read_secret(path: &std::path::Path, what: &str) -> Result<String, String> {
-    std::fs::read_to_string(path)
-        .map(|s| s.trim().to_owned())
-        .map_err(|e| format!("cannot read the {what} file {}: {e}", path.display()))
-}
-
 async fn run(config: Config) -> Result<(), String> {
     // An earlier run's liveness file never passes for this run's (issue #61): removed before any start-up check or
     // connection.
@@ -107,13 +101,12 @@ async fn run(config: Config) -> Result<(), String> {
         tracing::warn!(error = %e.kind(), "the liveness file could not be removed; `health` may read an earlier run's");
     }
     let checked = config.check()?;
-    let provider = |i: usize| -> Result<Http, String> {
-        let p = &config.providers[i];
-        Http::new(&p.name, &Config::provider_url(p)?)
-    };
+    // One login to Vault for the secrets read at start (issue #64); `--check` never gets here.
+    let resolver = config.resolver()?;
+    let urls = config.provider_urls(&resolver).await?;
     let pair = Pair {
-        a: provider(0)?,
-        b: provider(1)?,
+        a: Http::new(&config.providers[0].name, &urls[0])?,
+        b: Http::new(&config.providers[1].name, &urls[1])?,
     };
     // AC-I4.1, DEC-12: the declared network on both providers, or nothing starts.
     let head = network::check(
@@ -139,7 +132,7 @@ async fn run(config: Config) -> Result<(), String> {
 
     let pool = bezent_store::tls::connect(
         bezent_store::login::pool_options().max_connections(config.max_connections),
-        &read_secret(&config.database_url_file, "database URL")?,
+        &config.store_url(&resolver).await?,
     )
     .await
     .map_err(|e| format!("the store: {e}"))?;
@@ -162,7 +155,7 @@ async fn run(config: Config) -> Result<(), String> {
     let signer = SignerLink {
         socket: config.signer.socket.clone(),
         uid: config.signer.uid,
-        token: read_secret(&config.signer.token_file, "signer token")?,
+        token: config.signer_token(&resolver).await?.to_string(),
     };
     let follower = Follower {
         pair: &pair,

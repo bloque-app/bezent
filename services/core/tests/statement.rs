@@ -19,7 +19,7 @@ use bezent_core_service::reserve::statement::{
     DirectoryStore, KeyBackendSigner, StatementError, StatementStore, Statements, StoreError,
     VerifyError, stuck_page_window, verify, verify_chain,
 };
-use bezent_signer::keys::{FileBackend, KeyBackend, KeyError};
+use bezent_signer::keys::{FileBackend, KeyError, SigningEngine};
 use chrono::Duration;
 use common::reserve::*;
 use common::*;

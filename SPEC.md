@@ -1,7 +1,7 @@
 ---
 name: bezent
 summary: A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger's contract.
-spec_version: 0.5.3
+spec_version: 0.5.4
 status: draft
 date: 2026-10-13
 ---
@@ -15,12 +15,13 @@ It is normative and self-contained. It does not say how bezent is built, which t
 implement it, which networks it serves today, or why the project exists. `notes/` says why, and
 `notes/CONSTRAINTS-FOR-PLAN.md` says what the plan is expected to bind.
 
-Amendments 0001 to 0014 are applied (see `amendments/`).
+Amendments 0001 to 0015 are applied (see `amendments/`).
 
 ### Change history
 
 | Version | Date | Change |
 |---|---|---|
+| 0.5.4 | 2026-10-29 | Amendment 0015 (decision item `sp-custody-boundary`, ruled by @pandres95 in chat): `REQ-CU-1` names a boundary and its properties, not a store. Key material is never readable outside the component that signs with it, which is separate from the state and auditable on its own; the sentences naming a key-management service, a hardware security module and a secrets vault are removed. |
 | 0.5.3 | 2026-10-22 | Amendment 0013 (decision item `sp-needs-review-when`, ruled by @pandres95): two more occasions for `Needs-Review` in §5.4 — a delivery attempt whose preparation is refused without a named condition past the route's deadline, and a delivery anomaly recorded for the transfer's attempt. Amendment 0014 (`sp-inv8-unsigned`): an attempt for which no signature has been recorded, and which the store has closed to signing under the approved resolution that refunds, counts as proven not executed for `INV-8`; and the signer releases a signature only once it is recorded (`INV-9`). |
 | 0.5.2 | 2026-10-15 | Amendment 0012 (decision item `sp-payout-window`): new named condition `CND-PayoutWindow` — a withdrawal waits while the reserve's outflow allowance is spent and resumes when it refills. |
 | 0.5.1 | 2026-10-13 | Amendment 0011 (decision item `sp-refund-dest`, ruled in chat): a withdrawal's refund always goes to its redeemer; the refund destination leaves a redemption's extras (`REQ-RQ-4`), and `REQ-RF-2` binds deposits. |
@@ -464,10 +465,8 @@ below its floor (`REQ-BK-10`), new mints of that asset MUST pause until the rese
 
 #### (c) Custody
 
-**`REQ-CU-1`** Key material MUST never be readable outside the component that signs with it. **Delivery keys**
-(those that mint, pay out from a reserve, or refund) MUST live in a key-management service or hardware security
-module that signs on request and never releases them. Other keys (pause, statements) MAY be held in a
-secrets vault and loaded only by the signer process (`REQ-AR-3`).
+**`REQ-CU-1`** Key material MUST never be readable outside the component that signs with it. That component MUST
+be separate from the component that holds bezent's state (`REQ-AR-3`), and MUST be auditable on its own.
 
 **`REQ-CU-2`** The custody capability MUST support separate keys per network and per role, and rotation
 without stranding transfers in flight (`REQ-KY-4`).

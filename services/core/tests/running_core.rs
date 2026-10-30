@@ -23,7 +23,7 @@ use bezent_core_service::reserve::statement::{
     StatementStore, Statements, StoreError, verify, verify_chain,
 };
 use bezent_signer::config::{Caller, Config as SignerConfig};
-use bezent_signer::keys::{FileBackend, KeyBackend, KeyError};
+use bezent_signer::keys::{FileBackend, KeyError, SigningEngine};
 use bezent_signer::link::{self, Callers};
 use bezent_signer::log::Log;
 use bezent_signer::signer::Signer;

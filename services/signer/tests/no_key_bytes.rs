@@ -11,7 +11,7 @@ mod common;
 
 use bezent_signer::compromise::{self, ObservedSignature};
 use bezent_signer::config::Config;
-use bezent_signer::keys::{FileBackend, KeyBackend};
+use bezent_signer::keys::{FileBackend, SigningEngine};
 use bezent_signer::link::{self, Callers, Client};
 use common::*;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};

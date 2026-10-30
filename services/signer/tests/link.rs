@@ -9,7 +9,7 @@ mod common;
 use std::sync::Arc;
 
 use bezent_signer::config::Caller;
-use bezent_signer::keys::KeyBackend;
+use bezent_signer::keys::SigningEngine;
 use bezent_signer::link::{self, Callers, Client, LinkError, Request, Response};
 use common::*;
 use sha2::{Digest, Sha256};

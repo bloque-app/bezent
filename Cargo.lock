@@ -1768,6 +1768,7 @@ dependencies = [
  "bezent-health",
  "bezent-signer",
  "bezent-store",
+ "bezent-vault",
  "blake2",
  "bs58",
  "chrono",
@@ -1794,6 +1795,7 @@ dependencies = [
  "bezent-health",
  "bezent-signer",
  "bezent-store",
+ "bezent-vault",
  "hex",
  "k256",
  "serde",
@@ -1819,6 +1821,7 @@ dependencies = [
  "bezent-core",
  "bezent-health",
  "bezent-store",
+ "bezent-vault",
  "blake2",
  "bs58",
  "chacha20poly1305",
@@ -1850,6 +1853,7 @@ dependencies = [
  "bezent-health",
  "bezent-signer",
  "bezent-store",
+ "bezent-vault",
  "blake2",
  "chrono",
  "ed25519-zebra",
@@ -1876,8 +1880,11 @@ name = "bezent-migrate"
 version = "0.1.0"
 dependencies = [
  "bezent-store",
+ "bezent-vault",
+ "serde",
  "sqlx",
  "tokio",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -1909,9 +1916,12 @@ name = "bezent-signer"
 version = "0.1.0"
 dependencies = [
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-kms",
+ "base64 0.22.1",
  "bezent-health",
  "bezent-store",
+ "bezent-vault",
  "blake2",
  "ed25519-dalek",
  "hex",
@@ -1919,14 +1929,15 @@ dependencies = [
  "reqwest",
  "rustix",
  "schnorrkel",
+ "secp256k1 0.30.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sha3 0.10.9",
  "sqlx",
  "subtle",
+ "tiny-keccak",
  "tokio",
- "url",
  "zeroize",
 ]
 
@@ -1938,6 +1949,26 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "tokio",
+]
+
+[[package]]
+name = "bezent-vault"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-credential-types",
+ "aws-sigv4",
+ "aws-smithy-runtime-api",
+ "base64 0.22.1",
+ "percent-encoding",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 0.8.23",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
