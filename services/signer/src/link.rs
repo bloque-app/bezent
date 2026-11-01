@@ -429,6 +429,9 @@ pub async fn serve_tls<B: SigningEngine>(
             let handshake = tokio::time::timeout(HELLO_TIMEOUT, acceptor.accept(tcp)).await;
             let stream = match handshake {
                 Ok(Ok(stream)) => stream,
+                // A connection closed before it said anything (the container health check opens
+                // one and drops it) is not a refusal worth a line.
+                Ok(Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => return,
                 _ => {
                     signer.log().line(format_args!(
                         "refused connection REQ-AR-3: no valid client certificate"

@@ -22,7 +22,7 @@
       "name": "core",
       "dns_name": "core.link.bezent.prod.bloque.network",
       "token_sha256": ["711fef65d2af3b4b1cdae5d79e9aee02bb191de586e96834d73dad9aa74536df"],
-      "allow": [{ "network": "kreivo", "purposes": ["mint", "refund-mint", "statement"] }]
+      "allow": [{ "network": "kreivo", "purposes": ["statement"] }]
     },
     {
       "name": "kreivo-endpoint",
