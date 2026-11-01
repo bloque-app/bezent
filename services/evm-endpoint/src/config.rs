@@ -604,21 +604,19 @@ mod tests {
         c.check().unwrap();
         assert_eq!(c.signer.transport, Transport::Tls);
         assert!(c.signer.socket.is_none() && c.signer.uid.is_none() && c.signer.tls.is_some());
-        assert!(
-            Config::parse(&tls).unwrap().check().is_err(),
-            "no vault table"
-        );
+        // `parse` runs the checks, so a refusal is a parse error.
+        assert!(Config::parse(&tls).is_err(), "no vault table");
         // A socket beside TLS is refused, and so is TLS with no tls table.
         let both = (tls.clone() + VAULT).replace(
             "transport = \"tls\"\n",
             "transport = \"tls\"\nsocket = \"/s\"\n",
         );
-        assert!(Config::parse(&both).unwrap().check().is_err());
+        assert!(Config::parse(&both).is_err());
         let none = FIXTURE.replace(
             "socket = \"/run/bezent-signer/signer.sock\"\nuid = 1001\n",
             "transport = \"tls\"\n",
         );
-        assert!(Config::parse(&(none + VAULT)).unwrap().check().is_err());
+        assert!(Config::parse(&(none + VAULT)).is_err());
         // The default transport is the socket, which takes no tls table.
         assert_eq!(
             Config::parse(FIXTURE).unwrap().signer.transport,
