@@ -236,7 +236,10 @@ impl Routed {
         }
         let index = self.services.len();
         for id in SigningEngine::key_ids(&engine) {
-            let kv = self.vault.as_ref().is_some_and(|v| v.ids().any(|k| k == id));
+            let kv = self
+                .vault
+                .as_ref()
+                .is_some_and(|v| v.ids().any(|k| k == id));
             if kv || self.owner.insert(id.clone(), index).is_some() {
                 return Err(KeyError::Source(format!(
                     "key {id} is held by more than one engine"

@@ -153,8 +153,7 @@ async fn run(config: Config) -> Result<(), String> {
         config.network
     );
     let signer = SignerLink {
-        socket: config.signer.socket.clone(),
-        uid: config.signer.uid,
+        dialer: config.signer_dialer().await?,
         token: config.signer_token(&resolver).await?.to_string(),
     };
     let follower = Follower {

@@ -44,10 +44,31 @@
 //! uid = 1001
 //! token_file = "/run/secrets/…"
 //! ```
+//!
+//! The signer, in the central deployment, is another task, reached over mutual TLS (`PUB-1b`,
+//! `transport = "tls"`; the certificate is issued from Vault under the task role and renewed in the
+//! process, and the `[vault_login]` table says where Vault is):
+//!
+//! ```toml
+//! [signer]
+//! transport = "tls"
+//! token = { vault = { path = "secret/bezent/evm-endpoint", field = "signer_token" } }
+//! [signer.tls]
+//! address = "signer.bezent.internal:7443"           # where to dial
+//! server_name = "signer.bezent.prod.bloque.network" # the name its certificate must carry
+//! ca_file = "/etc/bezent/pki-bezent-root.pem"       # the pinned root
+//! [signer.tls.pki]
+//! mount = "pki-bezent-link"
+//! role = "evm-endpoint"
+//! common_name = "evm-endpoint.link.bezent.prod.bloque.network"
+//! ```
 
 use std::path::{Path, PathBuf};
 
 use alloy::primitives::{Address, B256};
+use bezent_signer::config::Transport;
+use bezent_signer::link::Dialer;
+use bezent_signer::tls::DialTls;
 use bezent_vault::{Resolver, SecretRef, StoreSource, VaultConfig, Zeroizing};
 use serde::Deserialize;
 
@@ -112,10 +133,20 @@ fn default_margin() -> u64 {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SignerConfig {
-    /// The signer's socket.
-    pub socket: PathBuf,
-    /// The signer's user id.
-    pub uid: u32,
+    /// How the signer is reached: `unix` (the default; a socket, for local and e2e use) or `tls`
+    /// (mutual TLS to the central signer, `PUB-1b`).
+    #[serde(default)]
+    pub transport: Transport,
+    /// The signer's socket (`transport = "unix"`).
+    #[serde(default)]
+    pub socket: Option<PathBuf>,
+    /// The signer's user id (`transport = "unix"`).
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// The signer's address and name, the pinned root and this endpoint's certificate
+    /// (`transport = "tls"`).
+    #[serde(default)]
+    pub tls: Option<DialTls>,
     /// A file holding this endpoint's token. Exactly one of `token_file` and `token`.
     #[serde(default)]
     pub token_file: Option<PathBuf>,
@@ -242,6 +273,9 @@ impl Config {
             }
             if let Some(p) = c.signer.token_file.as_mut() {
                 resolve(p);
+            }
+            if let Some(tls) = c.signer.tls.as_mut() {
+                tls.rebase(dir);
             }
             if let Some(store) = c.store.as_mut() {
                 store.rebase(dir);
@@ -407,6 +441,13 @@ impl Config {
         if self.signer.token_file.is_some() == self.signer.token.is_some() {
             return Err("set exactly one of signer.token_file and signer.token".into());
         }
+        Dialer::check(
+            self.signer.transport,
+            self.signer.socket.as_deref(),
+            self.signer.uid,
+            self.signer.tls.as_ref(),
+            self.vault_login.is_some(),
+        )?;
         if let Some(vault) = &self.vault_login {
             vault.check().map_err(|e| e.to_string())?;
         }
@@ -441,6 +482,20 @@ impl Config {
             (None, Some(store)) => resolver.store_url(store).await.map_err(|e| e.to_string()),
             (None, None) => Err("no store is configured".to_owned()),
         }
+    }
+
+    /// The way to the signer: the socket, or mutual TLS with this endpoint's certificate, issued
+    /// now from Vault and renewed in the background.
+    pub async fn signer_dialer(&self) -> Result<Dialer, String> {
+        Dialer::build(
+            self.signer.transport,
+            self.signer.socket.as_deref(),
+            self.signer.uid,
+            self.signer.tls.as_ref(),
+            self.vault_login.as_ref(),
+            bezent_signer::log::Log::stderr(),
+        )
+        .await
     }
 
     /// The endpoint's token for the signer link.
@@ -522,7 +577,7 @@ mod tests {
         c.check().unwrap();
         assert_eq!(
             c.signer.socket,
-            PathBuf::from("/run/bezent/signer/signer.sock")
+            Some(PathBuf::from("/run/bezent/signer/signer.sock"))
         );
         assert!(c.signer.token_file.is_some() && c.signer.token.is_none());
         let resolver = Resolver::new(None).unwrap();
@@ -531,6 +586,44 @@ mod tests {
             token.as_str()
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The central signer is another task, reached over mutual TLS (`PUB-1b`): the endpoint dials an
+    /// address, expects one name, pins a root and issues its own certificate from Vault.
+    #[test]
+    fn req_ar_3_the_signer_can_be_reached_over_mutual_tls_and_only_with_its_own_settings() {
+        let tls = FIXTURE.replace(
+            "socket = \"/run/bezent-signer/signer.sock\"\nuid = 1001\n",
+            "transport = \"tls\"\n",
+        ) + "\n[signer.tls]\naddress = \"signer.bezent.internal:7443\"\n\
+               server_name = \"signer.bezent.prod.bloque.network\"\nca_file = \"root.pem\"\n\
+               [signer.tls.pki]\nmount = \"pki-bezent-link\"\nrole = \"evm-endpoint\"\n\
+               common_name = \"evm-endpoint.link.bezent.prod.bloque.network\"\n";
+        // TLS issues the certificate from Vault, so it needs the [vault_login] table.
+        let c = Config::parse(&(tls.clone() + VAULT)).unwrap();
+        c.check().unwrap();
+        assert_eq!(c.signer.transport, Transport::Tls);
+        assert!(c.signer.socket.is_none() && c.signer.uid.is_none() && c.signer.tls.is_some());
+        assert!(
+            Config::parse(&tls).unwrap().check().is_err(),
+            "no vault table"
+        );
+        // A socket beside TLS is refused, and so is TLS with no tls table.
+        let both = (tls.clone() + VAULT).replace(
+            "transport = \"tls\"\n",
+            "transport = \"tls\"\nsocket = \"/s\"\n",
+        );
+        assert!(Config::parse(&both).unwrap().check().is_err());
+        let none = FIXTURE.replace(
+            "socket = \"/run/bezent-signer/signer.sock\"\nuid = 1001\n",
+            "transport = \"tls\"\n",
+        );
+        assert!(Config::parse(&(none + VAULT)).unwrap().check().is_err());
+        // The default transport is the socket, which takes no tls table.
+        assert_eq!(
+            Config::parse(FIXTURE).unwrap().signer.transport,
+            Transport::Unix
+        );
     }
 
     const VAULT: &str = "\n[vault_login]\naddress = \"https://vault.example:8200\"\nmount = \"bezent\"\nrole = \"bezent-evm-endpoint-iam\"\nsts_region = \"us-east-2\"\nserver_id = \"vault.example\"\n";

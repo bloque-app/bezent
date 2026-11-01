@@ -185,7 +185,10 @@ fn render(spec: &Spec, token_sha256: &str) -> Result<Vec<u8>, PrepareError> {
     if config.bindings.is_empty() {
         return refuse("the template binds no key, so the caller would be granted nothing");
     }
-    if config.socket.parent() != Some(spec.socket_dir.as_path()) || !config.socket.is_absolute() {
+    let Some(socket) = config.socket.as_ref() else {
+        return refuse("the template has no socket; a sidecar signer listens on one");
+    };
+    if socket.parent() != Some(spec.socket_dir.as_path()) || !socket.is_absolute() {
         return refuse("the template's socket is not a file in socket_dir");
     }
     Ok(rendered)

@@ -244,8 +244,7 @@ mod run {
         };
         tracing::info!("{}", lane.declaration(&config.network));
         let signer = SignerLink {
-            socket: config.signer.socket.clone(),
-            uid: config.signer.uid,
+            dialer: config.signer_dialer().await?,
             token: config.signer_token(&resolver).await?.to_string(),
         };
         let supplies = Supplies {

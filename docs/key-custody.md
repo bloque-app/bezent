@@ -48,5 +48,15 @@ identifiers) are not part of this repository.
   in a production environment (`REQ-KY-6`).
 - **Every key is bounded on chain** (`REQ-KY-3`): the contract's per-asset bounds and the vault's roles limit what a
   compromised key can do.
+- **The signer link** (`PUB-1b`). Callers in other tasks reach the central signer over mutual TLS on TCP
+  (`transport = "tls"`; a Unix socket with a peer user id check, `transport = "unix"`, remains for local and e2e use).
+  The signer presents a server certificate and requires a client certificate that chains to the link's root, pinned
+  from a file; a caller presents a client-only certificate and verifies that the server's certificate carries exactly the
+  signer's name. Certificates come from Vault PKI in the process (each service logs in with its own task role and
+  issues its own), are renewed with a third of the lifetime left and swapped in under the live listener; a Vault
+  outage does not stop a process that holds a valid certificate. The signer maps the one DNS name in a caller's
+  certificate to a configured caller, checks that caller's token (SHA-256 in the configuration) and lets it ask only for
+  the intents its `allow` list names (network and purposes, required over TLS): a caller authenticated as the EVM
+  endpoint cannot ask for a Kreivo mint (`REQ-AR-3`).
 - **A signer with one caller** (a local-socket link, for a test or a single-caller deployment; the Polygon key is not held this way, `deploy/signer-polygon-plugin.md`) is the same signer with a configuration naming one caller
   and the keys that caller may use.

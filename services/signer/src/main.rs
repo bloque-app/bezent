@@ -204,6 +204,35 @@ async fn load(path: &Path, log: &Log, serve: bool) -> Result<(Config, Custody, P
     Ok((config, backend, policy))
 }
 
+/// The bound link: the socket, or the TLS listener with its acceptor.
+enum Listener {
+    Unix(tokio::net::UnixListener),
+    Tls(tokio::net::TcpListener, tokio_rustls::TlsAcceptor),
+}
+
+impl Listener {
+    fn describe(&self, config: &Config) -> String {
+        match (&config.socket, &config.tls) {
+            (Some(socket), _) => socket.display().to_string(),
+            (None, Some(tls)) => format!("mutual TLS on {}", tls.listen),
+            (None, None) => String::new(),
+        }
+    }
+
+    async fn serve(
+        self,
+        callers: Arc<Callers>,
+        signer: Arc<Signer<Custody>>,
+    ) -> std::io::Result<()> {
+        match self {
+            Self::Unix(listener) => link::serve(listener, callers, signer).await,
+            Self::Tls(listener, acceptor) => {
+                link::serve_tls(listener, acceptor, callers, signer).await
+            }
+        }
+    }
+}
+
 async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Result<(), String> {
     let heartbeat = bezent_signer::health::heartbeat(&config);
     if config.database_url_file.is_none() && config.store.is_none() {
@@ -242,8 +271,34 @@ async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Resu
     .map_err(|e| e.to_string())?;
     // The login acts as bezent_signer, and can act as nothing else (REQ-AR-3).
     check_login(&pool).await?;
-    let listener = link::bind(&config.socket).map_err(|e| e.to_string())?;
-    // Healthy from here: the login is checked and the socket bound (issue #61).
+    let listener = match (&config.socket, &config.tls) {
+        (Some(socket), _) => Listener::Unix(link::bind(socket).map_err(|e| e.to_string())?),
+        (None, Some(tls)) => {
+            let vault = config
+                .vault
+                .as_ref()
+                .ok_or("configuration refused: tls needs the vault table")?;
+            let issuer = std::sync::Arc::new(
+                bezent_signer::tls::VaultIssuer::new(vault, &tls.pki, bezent_vault::Usage::Server)
+                    .map_err(|e| e.to_string())?,
+            );
+            // The certificate is issued now, or the signer does not start; it is renewed in the
+            // background and swapped under the listener.
+            let identity =
+                bezent_signer::tls::Identity::start(issuer, bezent_signer::tls::RETRY, log.clone())
+                    .await
+                    .map_err(|e| e.to_string())?;
+            let roots = bezent_signer::tls::load_roots(&tls.ca_file).map_err(|e| e.to_string())?;
+            let server =
+                bezent_signer::tls::server_config(identity, roots).map_err(|e| e.to_string())?;
+            let tcp = tokio::net::TcpListener::bind(&tls.listen)
+                .await
+                .map_err(|e| format!("cannot listen on {}: {}", tls.listen, e.kind()))?;
+            Listener::Tls(tcp, tokio_rustls::TlsAcceptor::from(server))
+        }
+        (None, None) => return Err("configuration refused: no transport".into()),
+    };
+    // Healthy from here: the login is checked and the link bound (issue #61).
     let pulse = tokio::spawn(bezent_signer::health::pulse(
         pool.clone(),
         heartbeat,
@@ -252,12 +307,12 @@ async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Resu
     log.line(format_args!(
         "{} serving {} with keys {:?}",
         env!("CARGO_PKG_VERSION"),
-        config.socket.display(),
+        listener.describe(&config),
         backend
     ));
     let signer = Arc::new(Signer::new(pool, policy, backend, log));
     let result = tokio::select! {
-        served = link::serve(listener, callers, signer) => served.map_err(|e| e.to_string()),
+        served = listener.serve(callers, signer) => served.map_err(|e| e.to_string()),
         _ = tokio::signal::ctrl_c() => Ok(()),
     };
     pulse.abort();

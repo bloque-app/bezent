@@ -26,6 +26,27 @@ key's public key before it releases it (`INV-9`), and puts no key, token, payloa
 error (`REQ-KY-1`). A key never leaves the component that signs with it (`REQ-CU-1`): in a signing service it never
 leaves the service at all.
 
+### The signer link
+
+The central signer listens on TCP (`transport = "tls"`, `tls.listen`, for example `0.0.0.0:7443`) with a certificate
+issued from `tls.pki` under the `vault` table's login (`bezent-signer-iam`), and requires a client certificate that
+chains to the root in `tls.ca_file`. Each caller is declared by the one DNS name in its certificate and by the SHA-256
+of its token, with the intents it may ask for:
+
+```json
+"transport": "tls",
+"tls": { "listen": "0.0.0.0:7443", "ca_file": "/etc/bezent-signer/pki-bezent-root.pem",
+         "pki": { "mount": "pki-bezent-link", "role": "signer",
+                  "common_name": "signer.bezent.prod.bloque.network" } },
+"callers": [
+  { "name": "evm-endpoint", "dns_name": "evm-endpoint.link.bezent.prod.bloque.network",
+    "token_sha256": ["…"], "allow": [ { "network": "polygon", "purposes": ["payout", "cancel"] } ] } ]
+```
+
+Each caller's own configuration says the same from its side (`transport = "tls"`, a `tls` table with `address`,
+`server_name`, `ca_file` and its own `pki` role and name). The health check opens a TCP connection to the local
+listener. A complete signer configuration is `services/signer/fixtures/signer-central.json`.
+
 ### The Polygon key in the Vault signing plugin
 
 The key is created inside Vault by the secrets engine

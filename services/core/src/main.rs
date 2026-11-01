@@ -132,13 +132,14 @@ async fn main() -> ExitCode {
                 }
             };
             let public_key = s.public_key_bytes().unwrap_or_default();
-            match SignerProcess::new(
-                pool.clone(),
-                s.signer_socket.clone(),
-                s.signer_uid,
-                token,
-                public_key,
-            ) {
+            let dialer = match config.signer_dialer(s).await {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("{NAME}: signer link: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            match SignerProcess::new(pool.clone(), dialer, token, public_key) {
                 Ok(signer) => Some(Statements::new(pool.clone(), signer, sink)),
                 Err(e) => {
                     eprintln!("{NAME}: statement key: {e}");

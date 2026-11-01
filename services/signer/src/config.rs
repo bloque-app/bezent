@@ -133,8 +133,16 @@ fn refuse<T>(why: impl Into<String>) -> Result<T, ConfigError> {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// The Unix socket the signer listens on.
-    pub socket: PathBuf,
+    /// How callers reach the signer: `unix` (a socket, with a peer user id check; the default, for
+    /// local and e2e use) or `tls` (mutual TLS over TCP, for callers in other tasks).
+    #[serde(default)]
+    pub transport: Transport,
+    /// The Unix socket the signer listens on (`transport = "unix"`).
+    #[serde(default)]
+    pub socket: Option<PathBuf>,
+    /// The TLS listener (`transport = "tls"`).
+    #[serde(default)]
+    pub tls: Option<ServerTls>,
     /// A file holding the database URL of a login role that is a member of `bezent_signer` only.
     #[serde(default)]
     pub database_url_file: Option<PathBuf>,
@@ -165,16 +173,62 @@ pub struct Config {
     pub health_file: Option<PathBuf>,
 }
 
-/// A caller of the signer: its peer user id and the SHA-256 of its tokens (two while one rotates).
+/// How callers reach the signer (`PUB-1b`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// A Unix socket; callers are recognised by their peer user id.
+    #[default]
+    Unix,
+    /// Mutual TLS over TCP; callers are recognised by the DNS name in their certificate.
+    Tls,
+}
+
+/// The signer's TLS listener: where it listens, the pinned root, and its own certificate.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerTls {
+    /// `host:port` to listen on, for example `0.0.0.0:7443`.
+    pub listen: String,
+    /// The PEM file of the root (`pki-bezent-root`) the callers' certificates must chain to.
+    pub ca_file: PathBuf,
+    /// The signer's certificate: the PKI mount and role, and its one name
+    /// (`signer.bezent.prod.bloque.network`). Issued under the `vault` table's login.
+    pub pki: crate::tls::PkiConfig,
+}
+
+/// What a caller may ask the signer to sign: intents of these purposes on this network.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Allow {
+    /// The network id, or `*` for any.
+    pub network: String,
+    /// The purposes.
+    pub purposes: Vec<String>,
+}
+
+/// A caller of the signer: how it is recognised (its peer user id on the socket, the DNS name of
+/// its certificate over TLS), the SHA-256 of its tokens (two while one rotates), and what it may
+/// ask for.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Caller {
     /// A name for the log.
     pub name: String,
-    /// The user id the caller's process runs as.
-    pub uid: u32,
+    /// The user id the caller's process runs as (`transport = "unix"`).
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// The one DNS name in the caller's certificate (`transport = "tls"`), for example
+    /// `core.link.bezent.prod.bloque.network`.
+    #[serde(default)]
+    pub dns_name: Option<String>,
     /// Hex SHA-256 of each token the caller may present.
     pub token_sha256: Vec<String>,
+    /// The intents this caller may ask for (`REQ-AR-3`). Required over TLS, where one signer
+    /// serves several callers; left out on the socket, the caller may ask for anything its keys
+    /// are bound for.
+    #[serde(default)]
+    pub allow: Option<Vec<Allow>>,
 }
 
 /// A network the signer signs for.
@@ -406,7 +460,12 @@ impl Config {
                 *p = base.join(&*p);
             }
         };
-        resolve(&mut config.socket);
+        if let Some(p) = config.socket.as_mut() {
+            resolve(p);
+        }
+        if let Some(tls) = config.tls.as_mut() {
+            resolve(&mut tls.ca_file);
+        }
         if let Some(store) = config.store.as_mut() {
             store.rebase(base);
         }
@@ -452,6 +511,7 @@ impl Config {
                 return refuse("set one of database_url_file and store, not both");
             }
         }
+        self.check_transport()?;
         let from_vault = self
             .store
             .as_ref()
@@ -462,6 +522,7 @@ impl Config {
                     | KeySource::Transit { .. }
                     | KeySource::VaultPlugin { .. }
             )
+            || self.tls.is_some()
             || matches!(
                 &self.keys,
                 KeySource::Multi { engines, vault, .. }
@@ -473,9 +534,7 @@ impl Config {
         }
         match &self.keys {
             KeySource::VaultPlugin { role, .. } => self.check_plugin_role("keys.role", role)?,
-            KeySource::Multi {
-                engines, vault: _, ..
-            } => {
+            KeySource::Multi { engines, .. } => {
                 if engines.is_empty() {
                     return refuse("keys.engines names no engine");
                 }
@@ -497,6 +556,86 @@ impl Config {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// The transport's settings are the ones its transport takes, and each caller is recognisable
+    /// by them.
+    fn check_transport(&self) -> Result<(), ConfigError> {
+        let mut names = BTreeSet::new();
+        let mut dns = BTreeSet::new();
+        for caller in &self.callers {
+            if !names.insert(caller.name.as_str()) {
+                return refuse(format!("caller {} is declared twice", caller.name));
+            }
+            if let Some(name) = &caller.dns_name
+                && !dns.insert(name.to_ascii_lowercase())
+            {
+                return refuse(format!("dns_name {name} names two callers"));
+            }
+        }
+        match self.transport {
+            Transport::Unix => {
+                if self.socket.is_none() {
+                    return refuse("transport unix needs socket");
+                }
+                if self.tls.is_some() {
+                    return refuse("tls is set but the transport is unix");
+                }
+                if let Some(c) = self.callers.iter().find(|c| c.uid.is_none()) {
+                    return refuse(format!("caller {} has no uid (transport unix)", c.name));
+                }
+                if let Some(c) = self.callers.iter().find(|c| c.dns_name.is_some()) {
+                    return refuse(format!(
+                        "caller {} has a dns_name but the transport is unix",
+                        c.name
+                    ));
+                }
+            }
+            Transport::Tls => {
+                let Some(tls) = &self.tls else {
+                    return refuse("transport tls needs a tls table");
+                };
+                if self.socket.is_some() {
+                    return refuse("socket is set but the transport is tls");
+                }
+                if self.vault.is_none() {
+                    return refuse(
+                        "transport tls issues its certificate from Vault, so needs a vault table",
+                    );
+                }
+                if tls.listen.parse::<std::net::SocketAddr>().is_err() {
+                    return refuse("tls.listen is not an address and port");
+                }
+                for caller in &self.callers {
+                    if caller.uid.is_some() {
+                        return refuse(format!(
+                            "caller {} has a uid but the transport is tls",
+                            caller.name
+                        ));
+                    }
+                    let name_ok = caller.dns_name.as_deref().is_some_and(|n| {
+                        !n.is_empty()
+                            && n.chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                    });
+                    if !name_ok {
+                        return refuse(format!(
+                            "caller {} needs a dns_name (transport tls)",
+                            caller.name
+                        ));
+                    }
+                    // One signer, several callers: none may ask for everything.
+                    if caller.allow.as_ref().is_none_or(Vec::is_empty) {
+                        return refuse(format!(
+                            "caller {} needs an allow list: over TLS one signer serves several \
+                             callers and each may ask only for its own intents (REQ-AR-3)",
+                            caller.name
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1078,6 +1217,70 @@ mod secret_tests {
             })
             .is_err(),
             "the environment is the keys table's, not an engine's"
+        );
+    }
+
+    #[test]
+    fn req_ar_3_the_central_signers_fixture_is_tls_with_two_engines_and_one_allow_list_per_caller()
+    {
+        let config = Config::parse(include_bytes!("../fixtures/signer-central.json")).unwrap();
+        assert_eq!(config.transport, Transport::Tls);
+        assert!(config.socket.is_none() && config.tls.is_some());
+        assert_eq!(config.callers.len(), 3);
+        assert!(
+            config
+                .callers
+                .iter()
+                .all(|c| c.uid.is_none() && c.dns_name.is_some())
+        );
+        assert!(matches!(&config.keys, KeySource::Multi { engines, .. } if engines.len() == 2));
+    }
+
+    #[test]
+    fn req_ar_3_a_transport_takes_its_own_settings_and_a_tls_caller_an_allow_list() {
+        let central: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/signer-central.json")).unwrap();
+        let with = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut j = central.clone();
+            edit(&mut j);
+            Config::parse(j.to_string().as_bytes())
+        };
+        assert!(with(&|_| {}).is_ok());
+        // A socket beside TLS, a caller by uid over TLS, one without a name or without an allow
+        // list, a name for two callers, and TLS without the vault table.
+        assert!(with(&|j| j["socket"] = "/s".into()).is_err());
+        assert!(with(&|j| j["callers"][0]["uid"] = 1.into()).is_err());
+        assert!(
+            with(&|j| {
+                j["callers"][0].as_object_mut().unwrap().remove("dns_name");
+            })
+            .is_err()
+        );
+        assert!(
+            with(&|j| {
+                j["callers"][0].as_object_mut().unwrap().remove("allow");
+            })
+            .is_err()
+        );
+        assert!(with(&|j| j["callers"][0]["allow"] = serde_json::json!([])).is_err());
+        let dup = with(&|j| j["callers"][1]["dns_name"] = j["callers"][0]["dns_name"].clone());
+        assert!(dup.is_err());
+        assert!(
+            with(&|j| {
+                j.as_object_mut().unwrap().remove("vault");
+            })
+            .is_err()
+        );
+        assert!(with(&|j| j["tls"]["listen"] = "not-an-address".into()).is_err());
+        // The socket transport is the default and takes no TLS table.
+        let unix = parse(|_| {}).unwrap();
+        assert_eq!(unix.transport, Transport::Unix);
+        assert!(parse(|j| j["tls"] = central["tls"].clone()).is_err());
+        assert!(
+            parse(|j| {
+                j.as_object_mut().unwrap().remove("socket");
+            })
+            .is_err()
         );
     }
 }

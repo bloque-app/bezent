@@ -6,7 +6,29 @@
 //! password can also stay out of the file: `[store]` names the host, and the login and password as
 //! `SecretRef`s (a file or a field in Vault, issue #64), and the URL is built in the process.
 //! No key lives here, and the core holds none (`REQ-AR-3`, `REQ-KY-1`).
+//!
+//! The statement key's signer is reached over a Unix socket (`signer_transport = "unix"`, the
+//! default: `signer_socket`, `signer_uid`) or, in the central deployment, over mutual TLS
+//! (`PUB-1b`): the core's certificate is issued from Vault under its task role and renewed in the
+//! process, so the `[vault]` table is required.
+//!
+//! ```toml
+//! [statement]
+//! signer_transport = "tls"
+//! signer_token = { vault = { path = "secret/bezent/core", field = "signer_token" } }
+//! [statement.signer_tls]
+//! address = "signer.bezent.internal:7443"           # where to dial
+//! server_name = "signer.bezent.prod.bloque.network" # the name its certificate must carry
+//! ca_file = "/etc/bezent/pki-bezent-root.pem"       # the pinned root
+//! [statement.signer_tls.pki]
+//! mount = "pki-bezent-link"
+//! role = "core"
+//! common_name = "core.link.bezent.prod.bloque.network"
+//! ```
 
+use bezent_signer::config::Transport;
+use bezent_signer::link::Dialer;
+use bezent_signer::tls::DialTls;
 use bezent_vault::{Resolver, SecretRef, StoreSource, VaultConfig, Zeroizing};
 use serde::Deserialize;
 use std::fmt;
@@ -109,10 +131,22 @@ impl Statement {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatementConfig {
-    /// The signer's socket: the statement key lives only behind the signer (`REQ-AR-3`).
-    pub signer_socket: PathBuf,
-    /// The user id the signer runs as; the core refuses a socket served by anyone else.
-    pub signer_uid: u32,
+    /// How the signer is reached: `unix` (the default; a socket, for local and e2e use) or `tls`
+    /// (mutual TLS to the central signer, `PUB-1b`). The statement key lives only behind the
+    /// signer (`REQ-AR-3`).
+    #[serde(default)]
+    pub signer_transport: Transport,
+    /// The signer's socket (`signer_transport = "unix"`).
+    #[serde(default)]
+    pub signer_socket: Option<PathBuf>,
+    /// The user id the signer runs as; the core refuses a socket served by anyone else
+    /// (`signer_transport = "unix"`).
+    #[serde(default)]
+    pub signer_uid: Option<u32>,
+    /// The signer's address and name, the pinned root and the core's certificate
+    /// (`signer_transport = "tls"`).
+    #[serde(default)]
+    pub signer_tls: Option<DialTls>,
     /// A file holding the core's token for the signer link (never the environment, `REQ-KY-1`).
     pub signer_token_file: Option<PathBuf>,
     /// The same token as a `SecretRef` (a file, or a field in Vault), in place of
@@ -251,8 +285,10 @@ impl StatementConfig {
 impl fmt::Debug for StatementConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StatementConfig")
+            .field("signer_transport", &self.signer_transport)
             .field("signer_socket", &self.signer_socket)
             .field("signer_uid", &self.signer_uid)
+            .field("signer_tls", &self.signer_tls)
             .field("signer_token_file", &self.signer_token_file)
             .field("signer_token", &self.signer_token)
             .field("public_key", &self.public_key)
@@ -327,6 +363,18 @@ impl Config {
                     path.display()
                 ));
             }
+            if let Err(why) = Dialer::check(
+                statement.signer_transport,
+                statement.signer_socket.as_deref(),
+                statement.signer_uid,
+                statement.signer_tls.as_ref(),
+                config.vault.is_some(),
+            ) {
+                return Err(format!(
+                    "invalid configuration {}: statement: {why}",
+                    path.display()
+                ));
+            }
             match (&statement.directory, &statement.s3) {
                 (Some(_), Some(_)) | (None, None) => {
                     return Err(format!(
@@ -346,7 +394,12 @@ impl Config {
                 (Some(_), None) => {}
             }
             let base = path.parent().unwrap_or(Path::new("."));
-            for p in [&mut statement.signer_socket]
+            if let Some(tls) = statement.signer_tls.as_mut() {
+                tls.rebase(base);
+            }
+            for p in statement
+                .signer_socket
+                .as_mut()
                 .into_iter()
                 .chain(statement.signer_token_file.as_mut())
                 .chain(statement.directory.as_mut())
@@ -415,6 +468,20 @@ impl Config {
             return Err("a secret is read from Vault but there is no [vault] table".to_owned());
         }
         Ok(())
+    }
+
+    /// The way to the signer for the statement key: the socket, or mutual TLS with the core's
+    /// certificate, issued now from Vault and renewed in the background.
+    pub async fn signer_dialer(&self, statement: &StatementConfig) -> Result<Dialer, String> {
+        Dialer::build(
+            statement.signer_transport,
+            statement.signer_socket.as_deref(),
+            statement.signer_uid,
+            statement.signer_tls.as_ref(),
+            self.vault.as_ref(),
+            bezent_signer::log::Log::stderr(),
+        )
+        .await
     }
 
     /// The resolver for this configuration's `[vault]` table. Contacts nothing until a secret is

@@ -439,6 +439,17 @@ impl<B: SigningEngine> Signer<B> {
         &self.log
     }
 
+    /// The network and purpose of recorded intent `intent_id`, or `None` if none is recorded. The
+    /// link reads it to decide whether the caller may ask for this intent at all (`REQ-AR-3`),
+    /// before the signer looks at anything else; the error is the store's, in words.
+    pub async fn scope_of(&self, intent_id: i64) -> Result<Option<(String, String)>, String> {
+        sqlx::query_as("SELECT network, purpose FROM intents WHERE id = $1")
+            .bind(intent_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|_| "the store did not answer".to_owned())
+    }
+
     /// Signs recorded intent `intent_id`, or returns its recorded signature, or refuses it. Every
     /// outcome is logged with the intent id (`REQ-AR-3`).
     pub async fn sign(&self, intent_id: i64) -> Outcome {

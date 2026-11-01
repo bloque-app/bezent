@@ -43,13 +43,11 @@
 //! never signs holds the lane (an EVM transaction does not expire). Stated plainly: one unknown
 //! payout holds every later one until it executes or a cancel consumes its nonce.
 
-use std::path::PathBuf;
-
 use alloy::consensus::TxEip1559;
 use alloy::consensus::{Transaction as _, TxEnvelope};
 use alloy::eips::eip2718::Decodable2718;
 use alloy::primitives::{Address, B256, U256};
-use bezent_signer::link::{Client, LinkError, Response};
+use bezent_signer::link::{Dialer, LinkError, Response};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
@@ -95,10 +93,8 @@ impl Lane {
 /// The signer link's coordinates. The token is never printed.
 #[derive(Clone)]
 pub struct SignerLink {
-    /// The socket.
-    pub socket: PathBuf,
-    /// The signer's user id.
-    pub uid: u32,
+    /// How to reach the signer: its socket, or mutual TLS.
+    pub dialer: Dialer,
     /// The endpoint's token.
     pub token: String,
 }
@@ -106,8 +102,7 @@ pub struct SignerLink {
 impl std::fmt::Debug for SignerLink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SignerLink")
-            .field("socket", &self.socket)
-            .field("uid", &self.uid)
+            .field("dialer", &self.dialer)
             .finish_non_exhaustive()
     }
 }
@@ -968,11 +963,10 @@ impl<R: Rpc> Submitter<'_, R> {
             )));
         }
 
-        let mut client =
-            match Client::connect(&self.signer.socket, &self.signer.token, self.signer.uid).await {
-                Ok(c) => c,
-                Err(e) => return Ok(Submitted::NotSigned(format!("the signer link: {e:?}"))),
-            };
+        let mut client = match self.signer.dialer.connect(&self.signer.token).await {
+            Ok(c) => c,
+            Err(e) => return Ok(Submitted::NotSigned(format!("the signer link: {e:?}"))),
+        };
         let (key, scheme, public_key, signature) = match client.sign(self.pool, intent_id).await {
             Ok(Response::Signed {
                 key,

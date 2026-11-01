@@ -70,8 +70,11 @@ async fn req_ar_3_the_caller_signs_through_the_sidecar_with_its_uid_and_token(
     assert!(policy.binding("polygon-test", "payout").is_some());
     assert!(policy.binding("kreivo-test", "mint").is_none());
 
-    let listener = link::bind(&config.socket).unwrap();
-    let socket_mode = std::fs::metadata(&config.socket).unwrap().mode() & 0o7777;
+    let listener = link::bind(config.socket.as_ref().unwrap()).unwrap();
+    let socket_mode = std::fs::metadata(config.socket.as_ref().unwrap())
+        .unwrap()
+        .mode()
+        & 0o7777;
     assert_eq!(socket_mode, 0o660);
     assert_eq!(
         std::fs::metadata(&spec.socket_dir).unwrap().mode() & 0o7777,
@@ -85,7 +88,9 @@ async fn req_ar_3_the_caller_signs_through_the_sidecar_with_its_uid_and_token(
     let token = std::fs::read_to_string(&spec.token_file).unwrap();
     let uid = my_uid();
     let core = f.core_pool().await;
-    let mut client = Client::connect(&config.socket, &token, uid).await.unwrap();
+    let mut client = Client::connect(config.socket.as_ref().unwrap(), &token, uid)
+        .await
+        .unwrap();
 
     // A payout, the key the configuration lists, is signed and the signature verifies.
     let payout = f.intent("polygon-test", "payout", None, "100", None).await;
@@ -108,7 +113,7 @@ async fn req_ar_3_the_caller_signs_through_the_sidecar_with_its_uid_and_token(
 
     // A wrong token, an empty one and the hash itself are not the token.
     for wrong in ["not-the-token", "", &hex::encode(sha2_of(&token))] {
-        let err = Client::connect(&config.socket, wrong, uid)
+        let err = Client::connect(config.socket.as_ref().unwrap(), wrong, uid)
             .await
             .unwrap_err();
         assert!(matches!(err, LinkError::Unauthenticated), "{err}");
@@ -117,7 +122,7 @@ async fn req_ar_3_the_caller_signs_through_the_sidecar_with_its_uid_and_token(
     let other = f.dir.join("sock/other.sock");
     let listener = link::bind(&other).unwrap();
     let mut elsewhere = config.callers.clone();
-    elsewhere[0].uid = uid.wrapping_add(1);
+    elsewhere[0].uid = Some(uid.wrapping_add(1));
     let (signer, _, _) = Fixture::start(&config, &f.connect).await;
     tokio::spawn(link::serve(
         listener,

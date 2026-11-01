@@ -6,8 +6,10 @@
 //! bezent's state, that holds no state of its own and signs only intents the core recorded
 //! (`REQ-AR-3`, `INV-9`).
 //!
-//! - [`link`]: the core sends an intent id over a Unix socket; the caller is authenticated by its
-//!   peer user id and a token, the signer by its own user id (`T-005-02`).
+//! - [`link`]: a caller sends an intent id over a Unix socket (local and e2e use) or over mutual
+//!   TLS (the Fargate deployment, [`tls`]); the caller is authenticated by its peer user id or its
+//!   certificate's name, and by a token, and may ask only for the intents its configuration lists;
+//!   the signer by its own user id or its certificate (`T-005-02`, `PUB-1b`).
 //! - [`engine`]: the one interface every signing engine implements ([`engine::SigningEngine`]):
 //!   a key's scheme, public key and address, a signature over a prepared message or digest, and a
 //!   health check. The engines: [`keys`] (the file of test keys, `T-005-03`), [`vault`] (the other
@@ -48,6 +50,7 @@ pub mod log;
 pub mod prepare;
 pub mod process;
 pub mod signer;
+pub mod tls;
 pub mod transit;
 pub mod vault;
 pub mod vault_plugin;

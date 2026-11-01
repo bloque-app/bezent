@@ -512,7 +512,11 @@ async fn req_ar_3_a_signature_goes_to_the_engine_that_holds_the_key_and_to_no_ot
     engine.sign("polygon-delivery", PAYLOAD).await.unwrap();
     engine.sign("kreivo-delivery", PAYLOAD).await.unwrap();
     let err = engine
-        .sign_prepared("kreivo-delivery", Scheme::Secp256k1Evm, Signable::Digest([1; 32]))
+        .sign_prepared(
+            "kreivo-delivery",
+            Scheme::Secp256k1Evm,
+            Signable::Digest([1; 32]),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, KeyError::Refused(_)), "{err}");
@@ -584,5 +588,8 @@ async fn req_cu_1_the_custody_is_ready_only_when_every_engine_is_and_fails_close
     assert!(err.is_transient(), "{err}");
     down.sign("polygon-delivery", PAYLOAD).await.unwrap();
     let health = down.health().await;
-    assert!(!health.ready && health.detail.contains("Vault Transit"), "{health:?}");
+    assert!(
+        !health.ready && health.detail.contains("Vault Transit"),
+        "{health:?}"
+    );
 }

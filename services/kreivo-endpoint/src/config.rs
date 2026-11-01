@@ -37,6 +37,24 @@
 //! token_file = "/run/secrets/bezent-kreivo-endpoint-signer-token"
 //! ```
 //!
+//! The signer, in the central deployment, is another task, reached over mutual TLS (`PUB-1b`,
+//! `transport = "tls"`; the certificate is issued from Vault under the task role and renewed in the
+//! process, and the `[vault]` table says where Vault is):
+//!
+//! ```toml
+//! [signer]
+//! transport = "tls"
+//! token = { vault = { path = "secret/bezent/kreivo-endpoint", field = "signer_token" } }
+//! [signer.tls]
+//! address = "signer.bezent.internal:7443"           # where to dial
+//! server_name = "signer.bezent.prod.bloque.network" # the name its certificate must carry
+//! ca_file = "/etc/bezent/pki-bezent-root.pem"       # the pinned root
+//! [signer.tls.pki]
+//! mount = "pki-bezent-link"
+//! role = "kreivo-endpoint"
+//! common_name = "kreivo-endpoint.link.bezent.prod.bloque.network"
+//! ```
+//!
 //! The live Kreivo contract's code hash is
 //! `0xe89943fbbed677f2e33fde16e4877c84bf339354d05c796accf97614e2fb24ad`: that is the value to configure.
 //! It equals the hash of the public CI build (PR #40, run 39369032023, artifact `bezent-contract`).
@@ -55,6 +73,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use bezent_signer::config::Transport;
+use bezent_signer::link::Dialer;
+use bezent_signer::tls::DialTls;
 use bezent_vault::{Resolver, SecretRef, StoreSource, VaultConfig, Zeroizing};
 use serde::Deserialize;
 
@@ -176,10 +197,20 @@ pub struct LaneConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignerConfig {
-    /// The signer's socket.
-    pub socket: PathBuf,
-    /// The user id the signer runs as.
-    pub uid: u32,
+    /// How the signer is reached: `unix` (the default; a socket, for local and e2e use) or `tls`
+    /// (mutual TLS to the central signer, `PUB-1b`).
+    #[serde(default)]
+    pub transport: Transport,
+    /// The signer's socket (`transport = "unix"`).
+    #[serde(default)]
+    pub socket: Option<PathBuf>,
+    /// The user id the signer runs as (`transport = "unix"`).
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// The signer's address and name, the pinned root and this endpoint's certificate
+    /// (`transport = "tls"`).
+    #[serde(default)]
+    pub tls: Option<DialTls>,
     /// A file holding the endpoint's token for the link. Exactly one of `token_file` and `token`.
     #[serde(default)]
     pub token_file: Option<PathBuf>,
@@ -247,7 +278,7 @@ impl Config {
             config.relay_chain_spec.as_mut(),
             config.database_url_file.as_mut(),
             config.signer.token_file.as_mut(),
-            Some(&mut config.signer.socket),
+            config.signer.socket.as_mut(),
         ]
         .into_iter()
         .flatten()
@@ -266,6 +297,9 @@ impl Config {
         }
         if let Some(token) = config.signer.token.as_mut() {
             token.rebase(base);
+        }
+        if let Some(tls) = config.signer.tls.as_mut() {
+            tls.rebase(base);
         }
         for secret in &mut config.archive_rpc_secrets {
             secret.rebase(base);
@@ -315,6 +349,13 @@ impl Config {
         if self.signer.token_file.is_some() == self.signer.token.is_some() {
             return Err("set exactly one of signer.token_file and signer.token".into());
         }
+        Dialer::check(
+            self.signer.transport,
+            self.signer.socket.as_deref(),
+            self.signer.uid,
+            self.signer.tls.as_ref(),
+            self.vault.is_some(),
+        )?;
         if let Some(vault) = &self.vault {
             vault.check().map_err(|e| e.to_string())?;
         }
@@ -346,6 +387,20 @@ impl Config {
             (None, Some(store)) => resolver.store_url(store).await.map_err(|e| e.to_string()),
             (None, None) => Err("no store is configured".to_owned()),
         }
+    }
+
+    /// The way to the signer: the socket, or mutual TLS with this endpoint's certificate, issued
+    /// now from Vault and renewed in the background.
+    pub async fn signer_dialer(&self) -> Result<Dialer, String> {
+        Dialer::build(
+            self.signer.transport,
+            self.signer.socket.as_deref(),
+            self.signer.uid,
+            self.signer.tls.as_ref(),
+            self.vault.as_ref(),
+            bezent_signer::log::Log::stderr(),
+        )
+        .await
     }
 
     /// The endpoint's token for the signer link.

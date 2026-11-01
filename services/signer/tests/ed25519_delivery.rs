@@ -259,12 +259,14 @@ async fn req_ky_4_an_ed25519_delivery_key_signs_a_mint_through_the_store_and_the
     let config = Config::load(&path).unwrap();
     let (signer, _log, _) = Fixture::start(&config, &f.connect).await;
 
-    let listener = link::bind(&config.socket).unwrap();
+    let listener = link::bind(config.socket.as_ref().unwrap()).unwrap();
     let callers = Arc::new(Callers::sharing_the_signer_uid_in_tests(&config.callers));
     tokio::spawn(link::serve(listener, callers, signer));
     let uid = my_uid();
     let core = f.core_pool().await;
-    let mut client = Client::connect(&config.socket, TOKEN, uid).await.unwrap();
+    let mut client = Client::connect(config.socket.as_ref().unwrap(), TOKEN, uid)
+        .await
+        .unwrap();
 
     // The core verifies what comes back over the recorded bytes (INV-9) and the store records it.
     let mint = f.intent("kreivo-test", "mint", None, "100", None).await;

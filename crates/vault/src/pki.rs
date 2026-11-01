@@ -13,7 +13,7 @@
 //! certificate is not a CA. Last, the leaf's signature is verified against the issuing CA Vault
 //! returned, so the pair is consistent; but that CA arrives over the same TLS connection as the
 //! leaf, so trust in the chain still rests on TLS to Vault (the link's root is pinned separately,
-//! by the caller of PUB-1b). The TLS link that uses these is not here.
+//! by the caller of PUB-1b). The TLS link that uses these is the signer's (`bezent_signer::tls`).
 
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -443,6 +443,17 @@ impl<'a> Certificate<'a> {
         sig::UnparsedPublicKey::new(algorithm, issuer.public_key)
             .verify(self.tbs, self.signature)
             .map_err(|_| Error::Pki("the certificate is not signed by the issuing CA"))
+    }
+}
+
+/// The one DNS name in the certificate's subject alternative names, in lower case: `None` when the
+/// certificate is not parseable, has no such extension, has more than one name, or has a name that
+/// is not a DNS name. The signer maps a caller's certificate to the caller by this name, after the
+/// TLS handshake has verified the chain (PUB-1b); a certificate with any other shape maps to nobody.
+pub fn sole_dns_name(der: &[u8]) -> Option<String> {
+    match Certificate::parse(der)?.sans?.as_slice() {
+        [San::Dns(name)] => Some(name.to_ascii_lowercase()),
+        _ => None,
     }
 }
 

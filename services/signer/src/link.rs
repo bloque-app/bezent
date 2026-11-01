@@ -2,9 +2,23 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The authenticated link between the core and the signer (`T-005-02`; `REQ-AR-3`, `REQ-CU-1`).
 //!
-//! A Unix socket, as aledgent's `F-035` built it: the core and the signer run on one host (or in
-//! one task, the signer a sidecar of its caller: `prepare`), so mutual TLS buys nothing a socket's
-//! peer credentials do not. A signer reached across the network is another link.
+//! Two transports carry the same frames (`transport = "unix" | "tls"`):
+//!
+//! - **A Unix socket**, as aledgent's `F-035` built it: the caller and the signer run on one host
+//!   (or in one task, the signer a sidecar of its caller: `prepare`), so a socket's peer
+//!   credentials are enough. For local and e2e use.
+//! - **Mutual TLS over TCP** ([`crate::tls`], `PUB-1b`): the signer is a task of its own that the
+//!   callers (core, kreivo-endpoint, evm-endpoint) reach across the network. The signer presents
+//!   its certificate and requires one that chains to the link's root; the caller's identity is
+//!   the one DNS name in that certificate ([`Caller::dns_name`](crate::config::Caller)); the
+//!   caller verifies that the server's certificate carries exactly the signer's name.
+//!
+//! Whichever the transport, the signer also:
+//!
+//! - **authorises the caller per intent** (`REQ-AR-3`): a caller whose configuration lists what it
+//!   may ask for (`allow`: a network and purposes) is refused any other intent before the signer
+//!   looks at it, so one caller can neither mint through another's lane nor sign on a network it
+//!   does not serve. A caller with no list asks for anything (the sidecar, which has one caller).
 //!
 //! - **The signer authenticates the caller** twice: by the peer's user id, which the kernel
 //!   reports and the caller cannot forge, and by a token whose SHA-256 the configuration lists for
@@ -34,14 +48,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use subtle::ConstantTimeEq;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio_rustls::TlsAcceptor;
 use zeroize::Zeroizing;
 
 use crate::compromise::{self, Answer, Returned};
-use crate::config::Caller;
+use crate::config::{Caller, Transport};
 use crate::keys::SigningEngine;
 use crate::signer::{Outcome, Signer};
+use crate::tls::{self, ClientLink, DialTls};
 
 /// The largest frame either side accepts.
 pub const MAX_FRAME: usize = 64 * 1024;
@@ -189,7 +205,10 @@ impl From<io::Error> for LinkError {
     }
 }
 
-async fn write_frame<T: Serialize>(stream: &mut UnixStream, body: &T) -> Result<(), LinkError> {
+async fn write_frame<S: AsyncWrite + Unpin, T: Serialize>(
+    stream: &mut S,
+    body: &T,
+) -> Result<(), LinkError> {
     let bytes = Zeroizing::new(
         serde_json::to_vec(body).map_err(|_| LinkError::Protocol("unencodable frame".into()))?,
     );
@@ -203,7 +222,9 @@ async fn write_frame<T: Serialize>(stream: &mut UnixStream, body: &T) -> Result<
     Ok(())
 }
 
-async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut UnixStream) -> Result<T, LinkError> {
+async fn read_frame<S: AsyncRead + Unpin, T: for<'de> Deserialize<'de>>(
+    stream: &mut S,
+) -> Result<T, LinkError> {
     let mut len = [0u8; 4];
     stream.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len) as usize;
@@ -216,9 +237,21 @@ async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut UnixStream) -> Re
     serde_json::from_slice(&bytes).map_err(|_| LinkError::Protocol("frame not understood".into()))
 }
 
-/// The callers the signer accepts: user ids and token hashes.
+/// One configured caller, resolved.
 #[derive(Debug, Clone)]
-pub struct Callers(Vec<(String, u32, Vec<[u8; 32]>)>);
+struct Entry {
+    name: String,
+    uid: Option<u32>,
+    dns_name: Option<String>,
+    hashes: Vec<[u8; 32]>,
+    /// What it may ask for: `None` is anything.
+    allow: Option<Vec<(String, Vec<String>)>>,
+}
+
+/// The callers the signer accepts: how each is recognised (a peer user id on the socket, a
+/// certificate's DNS name over TLS), the SHA-256 of its tokens, and what it may ask for.
+#[derive(Debug, Clone)]
+pub struct Callers(Vec<Entry>);
 
 /// A caller runs as the signer's own user (`REQ-CU-1`, `REQ-AR-3`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,12 +277,13 @@ impl std::error::Error for SharedUid {}
 
 impl Callers {
     /// From the configuration (already checked: every hash is 64 hex digits), for a signer running
-    /// as user `signer_uid`. A caller with the signer's own user id is refused.
+    /// as user `signer_uid`. A socket caller with the signer's own user id is refused; a TLS caller
+    /// has no user id.
     pub fn new(callers: &[Caller], signer_uid: u32) -> Result<Self, SharedUid> {
-        if let Some(c) = callers.iter().find(|c| c.uid == signer_uid) {
+        if let Some(c) = callers.iter().find(|c| c.uid == Some(signer_uid)) {
             return Err(SharedUid {
                 caller: c.name.clone(),
-                uid: c.uid,
+                uid: signer_uid,
             });
         }
         Ok(Self::sharing_the_signer_uid_in_tests(callers))
@@ -262,34 +296,69 @@ impl Callers {
         Self(
             callers
                 .iter()
-                .map(|c| {
-                    let hashes = c
+                .map(|c| Entry {
+                    name: c.name.clone(),
+                    uid: c.uid,
+                    dns_name: c.dns_name.as_ref().map(|n| n.to_ascii_lowercase()),
+                    hashes: c
                         .token_sha256
                         .iter()
                         .filter_map(|h| hex::decode(h).ok()?.try_into().ok())
-                        .collect();
-                    (c.name.clone(), c.uid, hashes)
+                        .collect(),
+                    allow: c.allow.as_ref().map(|list| {
+                        list.iter()
+                            .map(|a| (a.network.clone(), a.purposes.clone()))
+                            .collect()
+                    }),
                 })
                 .collect(),
         )
     }
 
-    /// The name of the caller with user id `uid` and token `token`, if there is one.
-    pub fn authenticate(&self, uid: Option<u32>, token: &[u8]) -> Option<&str> {
-        let uid = uid?;
+    /// The first entry `is` accepts whose token is `token`. Every hash of every entry is compared
+    /// in constant time, matched or not.
+    fn find(&self, is: impl Fn(&Entry) -> bool, token: &[u8]) -> Option<&str> {
         let digest: [u8; 32] = Sha256::digest(token).into();
         let mut found = None;
-        for (name, caller_uid, hashes) in &self.0 {
-            // Every hash is compared, matched or not.
+        for entry in &self.0 {
             let mut matched = subtle::Choice::from(0);
-            for hash in hashes {
+            for hash in &entry.hashes {
                 matched |= hash.ct_eq(&digest);
             }
-            if bool::from(matched) && *caller_uid == uid && found.is_none() {
-                found = Some(name.as_str());
+            if bool::from(matched) && is(entry) && found.is_none() {
+                found = Some(entry.name.as_str());
             }
         }
         found
+    }
+
+    /// The name of the caller with user id `uid` and token `token`, if there is one (the socket).
+    pub fn authenticate(&self, uid: Option<u32>, token: &[u8]) -> Option<&str> {
+        let uid = uid?;
+        self.find(|e| e.uid == Some(uid), token)
+    }
+
+    /// The name of the caller whose certificate carries the DNS name `dns` and whose token is
+    /// `token`, if there is one (TLS). The certificate was verified by the handshake; the name
+    /// must be exactly a configured caller's.
+    pub fn authenticate_dns(&self, dns: Option<&str>, token: &[u8]) -> Option<&str> {
+        let dns = dns?.to_ascii_lowercase();
+        self.find(|e| e.dns_name.as_deref() == Some(dns.as_str()), token)
+    }
+
+    /// Whether caller `name` may ask for an intent of `purpose` on `network` (`REQ-AR-3`): a caller
+    /// with no `allow` list may ask for anything, one with a list only for what it names (`*` as a
+    /// network is any network).
+    pub fn permits(&self, name: &str, network: &str, purpose: &str) -> bool {
+        self.0
+            .iter()
+            .find(|e| e.name == name)
+            .is_some_and(|e| match &e.allow {
+                None => true,
+                Some(list) => list.iter().any(|(n, purposes)| {
+                    (n == "*" || n == network) && purposes.iter().any(|p| p == purpose)
+                }),
+            })
     }
 }
 
@@ -311,7 +380,24 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// Serves `listener` until it fails.
+/// Who a connection says it is, as the transport established it.
+enum Who {
+    /// The socket's peer user id.
+    Uid(Option<u32>),
+    /// The DNS name of the certificate the handshake verified.
+    Dns(Option<String>),
+}
+
+impl fmt::Display for Who {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Uid(uid) => write!(f, "uid={uid:?}"),
+            Self::Dns(name) => write!(f, "name={name:?}"),
+        }
+    }
+}
+
+/// Serves `listener` (the Unix socket) until it fails.
 pub async fn serve<B: SigningEngine>(
     listener: UnixListener,
     callers: Arc<Callers>,
@@ -320,20 +406,60 @@ pub async fn serve<B: SigningEngine>(
     loop {
         let (stream, _) = listener.accept().await?;
         let (callers, signer) = (callers.clone(), signer.clone());
-        tokio::spawn(async move { handle(stream, &callers, &signer).await });
+        tokio::spawn(async move {
+            let who = Who::Uid(stream.peer_cred().ok().map(|c| c.uid()));
+            handle(stream, who, &callers, &signer).await;
+        });
     }
 }
 
-async fn handle<B: SigningEngine>(mut stream: UnixStream, callers: &Callers, signer: &Signer<B>) {
-    let uid = stream.peer_cred().ok().map(|c| c.uid());
-    let hello = tokio::time::timeout(HELLO_TIMEOUT, read_frame::<Request>(&mut stream)).await;
-    let caller = match hello {
-        Ok(Ok(Request::Hello { token })) => callers.authenticate(uid, token.as_bytes()),
+/// Serves mutual TLS on `listener` until it fails: `acceptor` holds the signer's identity and
+/// requires a client certificate that chains to the link's root (`PUB-1b`). A connection whose
+/// handshake fails, or does not finish within [`HELLO_TIMEOUT`], is dropped.
+pub async fn serve_tls<B: SigningEngine>(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    callers: Arc<Callers>,
+    signer: Arc<Signer<B>>,
+) -> io::Result<()> {
+    loop {
+        let (tcp, _) = listener.accept().await?;
+        let (acceptor, callers, signer) = (acceptor.clone(), callers.clone(), signer.clone());
+        tokio::spawn(async move {
+            let handshake = tokio::time::timeout(HELLO_TIMEOUT, acceptor.accept(tcp)).await;
+            let stream = match handshake {
+                Ok(Ok(stream)) => stream,
+                _ => {
+                    signer.log().line(format_args!(
+                        "refused connection REQ-AR-3: no valid client certificate"
+                    ));
+                    return;
+                }
+            };
+            let who = Who::Dns(tls::peer_name(stream.get_ref().1.peer_certificates()));
+            handle(stream, who, &callers, &signer).await;
+        });
+    }
+}
+
+async fn handle<S, B>(mut stream: S, who: Who, callers: &Callers, signer: &Signer<B>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    B: SigningEngine,
+{
+    let hello = tokio::time::timeout(HELLO_TIMEOUT, read_frame::<_, Request>(&mut stream)).await;
+    let caller = match (hello, &who) {
+        (Ok(Ok(Request::Hello { token })), Who::Uid(uid)) => {
+            callers.authenticate(*uid, token.as_bytes())
+        }
+        (Ok(Ok(Request::Hello { token })), Who::Dns(name)) => {
+            callers.authenticate_dns(name.as_deref(), token.as_bytes())
+        }
         _ => None,
     };
     let Some(caller) = caller else {
         signer.log().line(format_args!(
-            "refused connection uid={uid:?} REQ-AR-3: unauthenticated"
+            "refused connection {who} REQ-AR-3: unauthenticated"
         ));
         let _ = write_frame(&mut stream, &Response::Unauthenticated).await;
         return;
@@ -342,13 +468,29 @@ async fn handle<B: SigningEngine>(mut stream: UnixStream, callers: &Callers, sig
         return;
     }
     loop {
-        match read_frame::<Request>(&mut stream).await {
+        match read_frame::<_, Request>(&mut stream).await {
             Ok(Request::Sign { intent }) => {
-                let outcome = signer.sign(intent).await;
-                if write_frame(&mut stream, &Response::of(intent, outcome))
-                    .await
-                    .is_err()
-                {
+                let response = match signer.scope_of(intent).await {
+                    Err(reason) => Response::Unavailable { intent, reason },
+                    Ok(Some((network, purpose)))
+                        if !callers.permits(caller, &network, &purpose) =>
+                    {
+                        signer.log().line(format_args!(
+                            "refused intent={intent} caller={caller} REQ-AR-3: not allowed to ask \
+                             for {purpose} on {network}"
+                        ));
+                        Response::Refused {
+                            intent,
+                            spec: "REQ-AR-3".to_owned(),
+                            reason: format!(
+                                "caller {caller} may not ask for {purpose} on {network}"
+                            ),
+                        }
+                    }
+                    // An unrecorded intent is the signer's own refusal to make.
+                    Ok(_) => Response::of(intent, signer.sign(intent).await),
+                };
+                if write_frame(&mut stream, &response).await.is_err() {
                     return;
                 }
             }
@@ -363,16 +505,113 @@ async fn handle<B: SigningEngine>(mut stream: UnixStream, callers: &Callers, sig
     }
 }
 
+/// A byte stream the link runs over.
+trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
+
 /// The core's end of the link.
-#[derive(Debug)]
 pub struct Client {
-    stream: UnixStream,
+    stream: Box<dyn Duplex>,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Client")
+    }
+}
+
+/// How a caller reaches the signer: the socket (`transport = "unix"`) or mutual TLS
+/// (`transport = "tls"`), built once from a service's configuration and used for every request.
+#[derive(Clone, Debug)]
+pub enum Dialer {
+    /// The signer's Unix socket and the user id that must serve it.
+    Unix {
+        /// The socket.
+        socket: std::path::PathBuf,
+        /// The signer's user id.
+        uid: u32,
+    },
+    /// The signer over mutual TLS.
+    Tls(ClientLink),
+}
+
+impl Dialer {
+    /// Checks a caller's `transport` settings, touching nothing: a socket needs `socket` and
+    /// `uid` and no `tls`, TLS needs `tls` and the Vault login table (`has_vault`) its
+    /// certificate is issued under, and no socket or uid.
+    pub fn check(
+        transport: Transport,
+        socket: Option<&Path>,
+        uid: Option<u32>,
+        tls: Option<&DialTls>,
+        has_vault: bool,
+    ) -> Result<(), String> {
+        match transport {
+            Transport::Unix => {
+                if socket.is_none() || uid.is_none() {
+                    return Err("transport unix needs signer socket and uid".into());
+                }
+                if tls.is_some() {
+                    return Err("a tls table is set but the signer transport is unix".into());
+                }
+            }
+            Transport::Tls => {
+                if socket.is_some() || uid.is_some() {
+                    return Err("socket and uid are set but the signer transport is tls".into());
+                }
+                if tls.is_none() {
+                    return Err("transport tls needs a tls table".into());
+                }
+                if !has_vault {
+                    return Err(
+                        "transport tls issues the certificate from Vault, so needs the Vault \
+                         login table"
+                            .into(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The dialer a configuration names. Over TLS it issues this process's certificate from Vault
+    /// now (a Vault that does not answer fails the start) and renews it in the background.
+    pub async fn build(
+        transport: Transport,
+        socket: Option<&Path>,
+        uid: Option<u32>,
+        tls: Option<&DialTls>,
+        vault: Option<&bezent_vault::VaultConfig>,
+        log: crate::log::Log,
+    ) -> Result<Self, String> {
+        Self::check(transport, socket, uid, tls, vault.is_some())?;
+        match (transport, socket, uid, tls, vault) {
+            (Transport::Unix, Some(socket), Some(uid), _, _) => Ok(Self::Unix {
+                socket: socket.to_path_buf(),
+                uid,
+            }),
+            (Transport::Tls, _, _, Some(tls), Some(vault)) => tls
+                .link(vault, log)
+                .await
+                .map(Self::Tls)
+                .map_err(|e| e.to_string()),
+            _ => Err("the signer link is not configured".into()),
+        }
+    }
+
+    /// Connects and presents `token`.
+    pub async fn connect(&self, token: &str) -> Result<Client, LinkError> {
+        match self {
+            Self::Unix { socket, uid } => Client::connect(socket, token, *uid).await,
+            Self::Tls(link) => Client::connect_tls(link, token).await,
+        }
+    }
 }
 
 impl Client {
     /// Connects to the signer at `path`, served by user `signer_uid`, and presents `token`.
     pub async fn connect(path: &Path, token: &str, signer_uid: u32) -> Result<Self, LinkError> {
-        let mut stream = UnixStream::connect(path).await?;
+        let stream = UnixStream::connect(path).await?;
         let uid = stream.peer_cred().ok().map(|c| c.uid());
         if uid != Some(signer_uid) {
             return Err(LinkError::WrongPeer { uid });
@@ -380,8 +619,28 @@ impl Client {
         let hello = Request::Hello {
             token: Zeroizing::new(token.to_owned()),
         };
+        Self::hello(Box::new(stream), hello).await
+    }
+
+    /// Connects over mutual TLS to the signer `link` names, which must present a certificate for
+    /// exactly that name, and presents `token`. A refused client certificate shows as an error
+    /// here: TLS 1.3 reports it on the first read.
+    pub async fn connect_tls(link: &ClientLink, token: &str) -> Result<Self, LinkError> {
+        let tcp = TcpStream::connect(&link.address).await?;
+        let connector = tokio_rustls::TlsConnector::from(link.config.clone());
+        let stream = connector
+            .connect(link.server_name.clone(), tcp)
+            .await
+            .map_err(LinkError::Io)?;
+        let hello = Request::Hello {
+            token: Zeroizing::new(token.to_owned()),
+        };
+        Self::hello(Box::new(stream), hello).await
+    }
+
+    async fn hello(mut stream: Box<dyn Duplex>, hello: Request) -> Result<Self, LinkError> {
         write_frame(&mut stream, &hello).await?;
-        match read_frame::<Response>(&mut stream).await? {
+        match read_frame::<_, Response>(&mut stream).await? {
             Response::Welcome => Ok(Self { stream }),
             Response::Unauthenticated => Err(LinkError::Unauthenticated),
             _ => Err(LinkError::Protocol("unexpected answer to hello".into())),
@@ -437,7 +696,10 @@ impl Client {
     }
 
     /// Sends a raw request: for tests of what the signer refuses.
-    pub async fn raw(stream: &mut UnixStream, request: &Request) -> Result<Response, LinkError> {
+    pub async fn raw<S: AsyncRead + AsyncWrite + Unpin>(
+        stream: &mut S,
+        request: &Request,
+    ) -> Result<Response, LinkError> {
         write_frame(stream, request).await?;
         read_frame(stream).await
     }

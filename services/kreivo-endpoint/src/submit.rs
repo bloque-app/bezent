@@ -44,7 +44,7 @@
 //! at most its era ([`MAX_ERA`] blocks), after which its outcome is proven from chain data and the
 //! nonce is taken again from the chain.
 
-use std::path::PathBuf;
+use bezent_signer::link::Dialer;
 
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -92,10 +92,8 @@ impl Lane {
 /// The signer link's coordinates. The token is never printed.
 #[derive(Clone)]
 pub struct SignerLink {
-    /// The signer's socket.
-    pub socket: PathBuf,
-    /// The signer's user id.
-    pub uid: u32,
+    /// How to reach the signer: its socket, or mutual TLS.
+    pub dialer: Dialer,
     /// The endpoint's token.
     pub token: String,
 }
@@ -103,8 +101,7 @@ pub struct SignerLink {
 impl std::fmt::Debug for SignerLink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SignerLink")
-            .field("socket", &self.socket)
-            .field("uid", &self.uid)
+            .field("dialer", &self.dialer)
             .field("token", &"<redacted>")
             .finish()
     }
@@ -653,13 +650,7 @@ impl<C: Chain> Submitter<'_, C> {
 
         // The signature, over the link: Client::sign verifies it over the recorded bytes and starts
         // the compromise path if it is not (AC-I1.2).
-        let response = match bezent_signer::link::Client::connect(
-            &self.signer.socket,
-            &self.signer.token,
-            self.signer.uid,
-        )
-        .await
-        {
+        let response = match self.signer.dialer.connect(&self.signer.token).await {
             Ok(mut client) => client.sign(self.pool, intent_id).await,
             Err(e) => Err(e),
         };
