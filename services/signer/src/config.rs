@@ -67,6 +67,21 @@
 //!           "keys": [ { "id": "polygon-delivery", "key": "bezent-polygon-delivery",
 //!                       "address": "0x…", "public_key": "0x02…" } ] }
 //! ```
+//!
+//! More than one engine at once is `"backend": "multi"`: each engine in `engines` has its own
+//! mount (and a plugin its own login role), a key is the engine's whose `keys` names it, and
+//! `vault` reads the statement key from Vault KV, as with one engine:
+//!
+//! ```json
+//! "keys": { "backend": "multi", "environment": "production",
+//!           "engines": [
+//!             { "engine": "transit", "mount": "transit-bezent-signer",
+//!               "keys": [ { "id": "kreivo-delivery", "key": "kreivo-delivery", "account": "0x…" } ] },
+//!             { "engine": "vault-plugin", "mount": "signer-bezent", "role": "bezent-evm-signer-plugin",
+//!               "keys": [ { "id": "polygon-delivery", "key": "bezent-polygon-delivery",
+//!                           "address": "0x…", "public_key": "0x02…" } ] } ],
+//!           "vault": { "path": "secret/bezent/signer" } }
+//! ```
 
 use bezent_vault::{StoreSource, VaultConfig};
 use std::collections::{BTreeMap, BTreeSet};
@@ -268,6 +283,53 @@ pub enum KeySource {
         #[serde(default)]
         vault: Option<crate::vault::VaultSource>,
     },
+    /// Several signing services at once, each holding its own keys: the central signer signs the
+    /// Kreivo delivery key through Vault Transit and the Polygon one through a Vault signing
+    /// plugin, in one process (`DEC-11`). The other keys (statement, pause) are optionally read
+    /// from Vault KV. A key is the engine's whose `keys` list names it, and no id may be in two.
+    Multi {
+        /// The environment of every key here; every engine and the Vault KV secret must match
+        /// it, and so must the networks the keys are bound to.
+        environment: Environment,
+        /// The engines, each with its own mount and, for a plugin, its own login role.
+        engines: Vec<EngineSpec>,
+        /// The non-delivery keys, from Vault KV.
+        #[serde(default)]
+        vault: Option<crate::vault::VaultSource>,
+    },
+}
+
+/// One engine of `keys.backend = "multi"`: the same settings as the engine's own `backend`,
+/// without `environment` and `vault`, which the `keys` table sets for all of them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "engine", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum EngineSpec {
+    /// AWS KMS.
+    Kms {
+        /// The AWS region.
+        region: String,
+        /// A service URL override (a VPC endpoint).
+        #[serde(default)]
+        endpoint: Option<String>,
+        /// The KMS keys.
+        keys: Vec<crate::kms::KmsKey>,
+    },
+    /// Vault Transit.
+    Transit {
+        /// The Transit engine's mount, for example `transit-bezent-signer`.
+        mount: String,
+        /// The Transit keys.
+        keys: Vec<crate::transit::TransitKey>,
+    },
+    /// A Vault signing plugin.
+    VaultPlugin {
+        /// The plugin's mount, for example `signer-bezent`.
+        mount: String,
+        /// The Vault role this engine logs in as; never the `vault` table's own role.
+        role: String,
+        /// The plugin keys.
+        keys: Vec<crate::vault_plugin::PluginKey>,
+    },
 }
 
 /// One key's intents and cap.
@@ -356,7 +418,10 @@ impl Config {
         }
         match &mut config.keys {
             KeySource::File { path } => resolve(path),
-            KeySource::Kms { .. } | KeySource::Transit { .. } | KeySource::VaultPlugin { .. } => {}
+            KeySource::Kms { .. }
+            | KeySource::Transit { .. }
+            | KeySource::VaultPlugin { .. }
+            | KeySource::Multi { .. } => {}
         }
         Ok(config)
     }
@@ -396,22 +461,58 @@ impl Config {
                 KeySource::Kms { vault: Some(_), .. }
                     | KeySource::Transit { .. }
                     | KeySource::VaultPlugin { .. }
+            )
+            || matches!(
+                &self.keys,
+                KeySource::Multi { engines, vault, .. }
+                    if vault.is_some()
+                        || engines.iter().any(|e| !matches!(e, EngineSpec::Kms { .. }))
             );
         if from_vault && self.vault.is_none() {
             return refuse("a secret is read from Vault but there is no vault table");
         }
-        if let KeySource::VaultPlugin { role, .. } = &self.keys {
-            if role.is_empty() || role.chars().any(|c| c.is_control()) {
-                return refuse("keys.role is not usable");
+        match &self.keys {
+            KeySource::VaultPlugin { role, .. } => self.check_plugin_role("keys.role", role)?,
+            KeySource::Multi {
+                engines, vault: _, ..
+            } => {
+                if engines.is_empty() {
+                    return refuse("keys.engines names no engine");
+                }
+                // Each plugin signs under a role of its own, and no two engines share a mount:
+                // two engines on one mount would be two answers to who holds a key.
+                let mut mounts = BTreeSet::new();
+                for engine in engines {
+                    let mount = match engine {
+                        EngineSpec::Kms { .. } => continue,
+                        EngineSpec::Transit { mount, .. } => mount,
+                        EngineSpec::VaultPlugin { mount, role, .. } => {
+                            self.check_plugin_role("keys.engines role", role)?;
+                            mount
+                        }
+                    };
+                    if !mounts.insert(mount.as_str()) {
+                        return refuse(format!("keys.engines: two engines use the mount {mount}"));
+                    }
+                }
             }
-            // The plugin's role signs and does nothing else; the vault table's reads the store's
-            // login and Vault KV. One role for both would carry more than sign/hash.
-            if self.vault.as_ref().is_some_and(|v| &v.role == role) {
-                return refuse(
-                    "keys.role is the vault table's role; the signing plugin logs in as a role \
-                     of its own that may only sign (REQ-KY-1)",
-                );
-            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// A signing plugin's login role: usable, and not the `vault` table's.
+    fn check_plugin_role(&self, what: &str, role: &str) -> Result<(), ConfigError> {
+        if role.is_empty() || role.chars().any(|c| c.is_control()) {
+            return refuse(format!("{what} is not usable"));
+        }
+        // The plugin's role signs and does nothing else; the vault table's reads the store's
+        // login and Vault KV. One role for both would carry more than sign/hash.
+        if self.vault.as_ref().is_some_and(|v| v.role == role) {
+            return refuse(format!(
+                "{what} is the vault table's role; the signing plugin logs in as a role of its \
+                 own that may only sign (REQ-KY-1)"
+            ));
         }
         Ok(())
     }
@@ -918,6 +1019,65 @@ mod secret_tests {
                 serde_json::json!({"path": "p", "address": "https://v.example", "token_file": "t"})
             ))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn req_cu_1_keys_multi_names_several_engines_each_with_its_mount_and_a_plugin_its_own_role() {
+        let multi = |plugin_role: &str, second_mount: &str| {
+            let (plugin_role, second_mount) = (plugin_role.to_owned(), second_mount.to_owned());
+            move |j: &mut serde_json::Value| {
+                j["keys"] = serde_json::json!({
+                    "backend": "multi", "environment": "test",
+                    "engines": [
+                        {"engine": "transit", "mount": "transit-bezent-signer",
+                         "keys": [{"id": "kreivo-delivery", "key": "kreivo-delivery",
+                                   "account": "0x01"}]},
+                        {"engine": "vault-plugin", "mount": second_mount, "role": plugin_role,
+                         "keys": [{"id": "polygon-delivery", "key": "bezent-polygon-delivery",
+                                   "address": "0x01", "public_key": "0x02"}]},
+                    ],
+                    "vault": {"path": "secret/bezent/signer"},
+                });
+                j["vault"] = serde_json::from_str(VAULT).unwrap();
+            }
+        };
+        let config = parse(multi("bezent-evm-signer-plugin", "signer-bezent")).unwrap();
+        assert!(matches!(&config.keys, KeySource::Multi { engines, .. } if engines.len() == 2));
+        // The plugin's role is not the vault table's; two engines never share a mount.
+        let shared = parse(multi("bezent-signer-iam", "signer-bezent")).unwrap_err();
+        assert!(shared.0.contains("role of its own"), "{shared}");
+        let mount = parse(multi("r", "transit-bezent-signer")).unwrap_err();
+        assert!(mount.0.contains("mount"), "{mount}");
+        // No engine, no vault table, an unknown engine and an unknown field are refused.
+        assert!(
+            parse(|j| {
+                multi("r", "m")(j);
+                j["keys"]["engines"] = serde_json::json!([]);
+            })
+            .is_err()
+        );
+        assert!(
+            parse(|j| {
+                multi("r", "m")(j);
+                j.as_object_mut().unwrap().remove("vault");
+            })
+            .is_err()
+        );
+        assert!(
+            parse(|j| {
+                multi("r", "m")(j);
+                j["keys"]["engines"][0]["engine"] = "file".into();
+            })
+            .is_err()
+        );
+        assert!(
+            parse(|j| {
+                multi("r", "m")(j);
+                j["keys"]["engines"][1]["environment"] = "test".into();
+            })
+            .is_err(),
+            "the environment is the keys table's, not an engine's"
         );
     }
 }

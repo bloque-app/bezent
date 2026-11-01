@@ -25,8 +25,8 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use bezent_signer::config::{Config, KeySource, Policy};
-use bezent_signer::custody::{Custody, Mixed};
+use bezent_signer::config::{Config, EngineSpec, KeySource, Policy};
+use bezent_signer::custody::{Custody, Mixed, Routed};
 use bezent_signer::engine::SigningEngine;
 use bezent_signer::keys::FileBackend;
 use bezent_signer::kms::{AwsKms, KmsBackend};
@@ -132,6 +132,63 @@ async fn load(path: &Path, log: &Log, serve: bool) -> Result<(Config, Custody, P
                 None => None,
             };
             Custody::VaultPlugin(Mixed::new(plugin, vault).map_err(|e| e.to_string())?)
+        }
+        KeySource::Multi {
+            environment,
+            engines,
+            vault,
+        } => {
+            let vault = match vault {
+                Some(source) => {
+                    let resolver =
+                        Resolver::new(config.vault.as_ref()).map_err(|e| e.to_string())?;
+                    Some(
+                        bezent_signer::vault::load(source, *environment, &resolver)
+                            .await
+                            .map_err(|e| e.to_string())?,
+                    )
+                }
+                None => None,
+            };
+            let mut routed = Routed::new(vault);
+            for engine in engines {
+                routed = match engine {
+                    EngineSpec::Kms {
+                        region,
+                        endpoint,
+                        keys,
+                    } => {
+                        let api = AwsKms::new(region, endpoint.as_deref()).await;
+                        let kms = KmsBackend::connect(api, *environment, keys)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        routed.with(kms)
+                    }
+                    EngineSpec::Transit { mount, keys } => {
+                        let resolver = Arc::new(
+                            Resolver::new(config.vault.as_ref()).map_err(|e| e.to_string())?,
+                        );
+                        let api = VaultTransit::new(resolver, mount);
+                        let transit = TransitBackend::connect(api, *environment, keys)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        routed.with(transit)
+                    }
+                    EngineSpec::VaultPlugin { mount, role, keys } => {
+                        let table = config.vault.as_ref().ok_or(
+                            "configuration refused: a secret is read from Vault but there is no \
+                             vault table",
+                        )?;
+                        let api = VaultPlugin::with_role(table, role, mount)
+                            .map_err(|e| e.to_string())?;
+                        let plugin = PluginBackend::new(api, *environment, keys)
+                            .map_err(|e| e.to_string())?;
+                        routed.with(plugin)
+                    }
+                }
+                .map_err(|e| e.to_string())?;
+            }
+            Custody::Multi(routed)
         }
     };
     let policy = config.policy(&backend).map_err(|e| e.to_string())?;

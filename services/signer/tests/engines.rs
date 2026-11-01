@@ -7,7 +7,7 @@
 
 mod conformance;
 
-use bezent_signer::custody::Mixed;
+use bezent_signer::custody::{Mixed, Routed};
 use bezent_signer::engine::{Signable, SigningEngine, prepare};
 use bezent_signer::keys::{Environment, FileBackend, KeyError, Scheme, evm_digest};
 use bezent_signer::kms::{KmsBackend, KmsKey, evm_address, kreivo_account};
@@ -443,4 +443,146 @@ fn req_ky_6_a_published_test_fixtures_key_is_refused_in_production() {
         "{err}"
     );
     assert!(PluginBackend::new(LocalPlugin::new(fixture), Environment::Test, &[entry]).is_ok());
+}
+
+// ------------------------------------------------------------ several engines at once
+
+fn statement_kv(environment: Environment) -> FileBackend {
+    FileBackend::from_seeds(
+        environment,
+        vec![(
+            "statement".into(),
+            Scheme::Ed25519,
+            Zeroizing::new(seed_hex(5)),
+        )],
+    )
+    .unwrap()
+}
+
+/// The central signer's custody: Transit for Kreivo, the plugin for Polygon, Vault KV for the
+/// statement key.
+async fn central(transit: LocalTransit, plugin: LocalPlugin) -> Routed {
+    Routed::new(Some(statement_kv(Environment::Test)))
+        .with(transit_engine(transit).await)
+        .unwrap()
+        .with(plugin_engine(plugin))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn req_cu_1_one_signer_holds_transit_the_plugin_and_vault_kv_and_each_key_signs_in_its_own() {
+    let engine = central(LocalTransit::new(ed_key(8)), LocalPlugin::new(secp_key(11))).await;
+    assert!(engine.non_exportable("kreivo-delivery") && engine.non_exportable("polygon-delivery"));
+    assert!(!engine.non_exportable("statement") && !engine.non_exportable("nobody"));
+    run(Setup {
+        engine: &engine,
+        cases: vec![
+            Case {
+                id: "kreivo-delivery",
+                scheme: Scheme::Ed25519,
+                public_key: ed_key(8).verifying_key().to_bytes().to_vec(),
+                non_exportable: true,
+            },
+            Case {
+                id: "polygon-delivery",
+                scheme: Scheme::Secp256k1Evm,
+                public_key: secp_public(&secp_key(11)),
+                non_exportable: true,
+            },
+            Case {
+                id: "statement",
+                scheme: Scheme::Ed25519,
+                public_key: ed_key(5).verifying_key().to_bytes().to_vec(),
+                non_exportable: false,
+            },
+        ],
+        secrets: vec![seed(8), seed(11), seed(5)],
+    })
+    .await;
+    assert!(matches!(
+        engine.scheme("nobody"),
+        Err(KeyError::UnknownKey(_))
+    ));
+}
+
+#[tokio::test]
+async fn req_ar_3_a_signature_goes_to_the_engine_that_holds_the_key_and_to_no_other() {
+    let engine = central(LocalTransit::new(ed_key(8)), LocalPlugin::new(secp_key(11))).await;
+    // The Polygon key never reached Transit, and the Kreivo key never reached the plugin.
+    engine.sign("polygon-delivery", PAYLOAD).await.unwrap();
+    engine.sign("kreivo-delivery", PAYLOAD).await.unwrap();
+    let err = engine
+        .sign_prepared("kreivo-delivery", Scheme::Secp256k1Evm, Signable::Digest([1; 32]))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KeyError::Refused(_)), "{err}");
+}
+
+#[tokio::test]
+async fn req_ky_6_engines_of_two_environments_or_sharing_a_key_id_are_refused() {
+    let test_plugin = plugin_engine(LocalPlugin::new(secp_key(11)));
+    let production = PluginBackend::new(
+        LocalPlugin::new(secp_key(12)),
+        Environment::Production,
+        &[PluginKey {
+            id: "other".into(),
+            ..plugin_key(&secp_key(12))
+        }],
+    );
+    // A published test key is refused in production on its own account, so only the mix is
+    // checked where the engine could be built.
+    if let Ok(production) = production {
+        let refused = Routed::new(None)
+            .with(transit_engine(LocalTransit::new(ed_key(8))).await)
+            .unwrap()
+            .with(production);
+        assert!(refused.is_err());
+    }
+    // The KV keys are of the custody's environment too.
+    let kv = statement_kv(Environment::Production);
+    assert!(Routed::new(Some(kv)).with(test_plugin).is_err());
+    // Two engines, one key id.
+    let twice = Routed::new(None)
+        .with(plugin_engine(LocalPlugin::new(secp_key(11))))
+        .unwrap()
+        .with(plugin_engine(LocalPlugin::new(secp_key(11))));
+    assert!(twice.is_err());
+    // A Vault KV key by the id of an engine's key.
+    let clash = FileBackend::from_seeds(
+        Environment::Test,
+        vec![(
+            "polygon-delivery".into(),
+            Scheme::Secp256k1Evm,
+            Zeroizing::new(seed_hex(5)),
+        )],
+    )
+    .unwrap();
+    assert!(
+        Routed::new(Some(clash))
+            .with(plugin_engine(LocalPlugin::new(secp_key(11))))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn req_cu_1_the_custody_is_ready_only_when_every_engine_is_and_fails_closed_per_engine() {
+    let engine = central(LocalTransit::new(ed_key(8)), LocalPlugin::new(secp_key(11))).await;
+    assert!(engine.health().await.ready);
+
+    // Transit down: the Kreivo key fails closed, transiently; the Polygon key still signs; the
+    // custody as a whole is not ready, and says which engine.
+    let down = Routed::new(None)
+        .with({
+            let t = transit_engine(LocalTransit::new(ed_key(8))).await;
+            *t.api().down.lock().unwrap() = true;
+            t
+        })
+        .unwrap()
+        .with(plugin_engine(LocalPlugin::new(secp_key(11))))
+        .unwrap();
+    let err = down.sign("kreivo-delivery", PAYLOAD).await.unwrap_err();
+    assert!(err.is_transient(), "{err}");
+    down.sign("polygon-delivery", PAYLOAD).await.unwrap();
+    let health = down.health().await;
+    assert!(!health.ready && health.detail.contains("Vault Transit"), "{health:?}");
 }

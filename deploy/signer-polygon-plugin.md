@@ -39,7 +39,21 @@ that returns or imports a key. The signer asks it for `sign/hash` and nothing el
    address the configuration declares. If neither recovers it, the signature is refused.
 4. It verifies the signature against the declared public key before it returns `r ‖ s ‖ v`.
 
-The template's `keys`:
+Together with the Kreivo Transit key in one signer process, the template's `keys` is a `multi` table (each engine has
+its own mount, the plugin its own role; the environment and the statement key's `vault` are shared):
+
+```json
+"keys": { "backend": "multi", "environment": "production",
+          "engines": [
+            { "engine": "transit", "mount": "transit-bezent-signer",
+              "keys": [ { "id": "kreivo-delivery", "key": "kreivo-delivery", "account": "0x…" } ] },
+            { "engine": "vault-plugin", "mount": "signer-bezent", "role": "bezent-evm-signer-plugin",
+              "keys": [ { "id": "polygon-delivery", "key": "bezent-polygon-delivery",
+                          "address": "0x…", "public_key": "0x02…" } ] } ],
+          "vault": { "path": "secret/bezent/signer" } }
+```
+
+For the plugin alone, the template's `keys`:
 
 ```json
 "keys": { "backend": "vault-plugin", "environment": "production", "mount": "signer-bezent",

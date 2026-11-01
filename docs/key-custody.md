@@ -20,6 +20,13 @@ identifiers) are not part of this repository.
   delivery key in Vault Transit and the Polygon delivery key in the Vault signing plugin (`deploy/signer-polygon-plugin.md`), both signed by the central signer.
   Credentials come from the platform's default credential chain (a task or instance role), never from the
   configuration or from an environment variable (`REQ-KY-1`).
+- **Several engines in one signer.** The central signer signs Kreivo through Vault Transit and Polygon through the
+  Vault signing plugin at once: `keys.backend = "multi"` lists the engines (`engine` = `transit`, `vault-plugin` or
+  `kms`), each with its own mount and, for a plugin, its own login role, and a key is the engine's whose `keys` names
+  it. All engines share the `keys.environment`; no key id may be in two engines or in Vault KV; no two engines share a
+  mount; each plugin role differs from the `vault` table's role. The custody is ready only when every engine is, and
+  whether a key is exportable is decided by the engine that holds it. The statement key stays in Vault KV
+  (`keys.vault`). The single-engine spellings (`transit`, `vault-plugin`, `kms`, `file`) are unchanged.
 - **The signer computes what is signed and checks what comes back.** It computes every digest itself, sends a signing
   service nothing but that digest or the message, and verifies each signature against the key's public key before it
   releases it (`INV-9`). An ECDSA signature leaves as `r ‖ s ‖ v` with a low `s`, `v` found by recovering the key.
