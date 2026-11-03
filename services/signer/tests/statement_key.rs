@@ -1,15 +1,16 @@
 // Copyright (c) 2026 Pagos Cube LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! F-004 T-004-05: the statement key is ed25519 and used for nothing else (`REQ-PR-1`). The signer
-//! signs only intents bound to a network by its configuration; an ed25519 key bound to any
-//! network refuses the configuration, so the statement key can never sign a transaction.
+//! signs only intents bound to a network by its configuration; the statement key bound to any
+//! network refuses the configuration, so it can never sign a transaction. (Another ed25519 key
+//! may be a Kreivo delivery account: `tests/ed25519_delivery.rs`.)
 //! Issue #42 (PLAN DEC-16, 2026-10-14): the statement key is named apart and signs statement
 //! intents only, through the same recorded-intent path as every other key.
 
 mod common;
 
 use bezent_signer::config::Config;
-use bezent_signer::keys::{FileBackend, KeyBackend, Scheme};
+use bezent_signer::keys::{FileBackend, Scheme, SigningEngine};
 use bezent_signer::signer::{Outcome, Refusal};
 use common::*;
 use sha2::Digest;
@@ -42,6 +43,7 @@ async fn req_pr_1_the_statement_key_is_refused_for_any_network_binding() {
 
     // Bound to a network, for any purpose: refused.
     let mut json = config_json(&dir, my_uid(), TOKEN);
+    json["statement_key"] = "statement".into();
     json["bindings"][2]["key"] = "statement".into();
     let config = Config::parse(json.to_string().as_bytes()).unwrap();
     let err = config.policy(&backend).unwrap_err();

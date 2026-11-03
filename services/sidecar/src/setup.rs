@@ -155,7 +155,7 @@ pub fn signer_config(token: &str) -> Result<(SignerConfig, FileBackend), String>
     let mut config = SignerConfig::parse(SIGNER_CONFIG).map_err(|e| e.to_string())?;
     let backend = FileBackend::parse(TEST_KEYS).map_err(|e| e.to_string())?;
     for caller in &mut config.callers {
-        caller.uid = bezent_signer::process::euid();
+        caller.uid = Some(bezent_signer::process::euid());
         caller.token_sha256 = vec![hex::encode(Sha256::digest(token.as_bytes()))];
     }
     Ok((config, backend))

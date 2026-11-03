@@ -1,0 +1,108 @@
+{
+  "transport": "tls",
+  "tls": {
+    "listen": "0.0.0.0:7443",
+    "ca_file": "pki-bezent-root.pem",
+    "pki": {
+      "mount": "pki-bezent-link",
+      "role": "signer",
+      "common_name": "signer.bezent.prod.bloque.network"
+    }
+  },
+  "vault": {
+    "address": "https://vault.example:8200",
+    "mount": "bezent",
+    "role": "bezent-signer-iam",
+    "sts_region": "us-east-2",
+    "server_id": "vault.example"
+  },
+  "database_url_file": "/run/secrets/bezent-signer-db",
+  "callers": [
+    {
+      "name": "core",
+      "dns_name": "core.link.bezent.prod.bloque.network",
+      "token_sha256": ["711fef65d2af3b4b1cdae5d79e9aee02bb191de586e96834d73dad9aa74536df"],
+      "allow": [{ "network": "kreivo", "purposes": ["statement"] }]
+    },
+    {
+      "name": "kreivo-endpoint",
+      "dns_name": "kreivo-endpoint.link.bezent.prod.bloque.network",
+      "token_sha256": ["711fef65d2af3b4b1cdae5d79e9aee02bb191de586e96834d73dad9aa74536df"],
+      "allow": [{ "network": "kreivo", "purposes": ["mint", "refund-mint"] }]
+    },
+    {
+      "name": "evm-endpoint",
+      "dns_name": "evm-endpoint.link.bezent.prod.bloque.network",
+      "token_sha256": ["711fef65d2af3b4b1cdae5d79e9aee02bb191de586e96834d73dad9aa74536df"],
+      "allow": [{ "network": "polygon", "purposes": ["payout", "cancel"] }]
+    }
+  ],
+  "networks": [
+    {
+      "id": "kreivo",
+      "environment": "production",
+      "issuing": true,
+      "contract_account": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "genesis": "0x4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b"
+    },
+    {
+      "id": "polygon",
+      "environment": "production",
+      "chain_id": 137,
+      "delivery": {
+        "roles": "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+        "multisend": "0x9641d764fc13c8b624c04430c7356c1c7c8102e2",
+        "emitter": "0xa3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+        "role": "bezent.delivery"
+      }
+    }
+  ],
+  "keys": {
+    "backend": "multi",
+    "environment": "production",
+    "engines": [
+      {
+        "engine": "transit",
+        "mount": "transit-bezent-signer",
+        "keys": [
+          {
+            "id": "kreivo-delivery",
+            "key": "kreivo-delivery",
+            "account": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      },
+      {
+        "engine": "vault-plugin",
+        "mount": "signer-bezent",
+        "role": "bezent-evm-signer-plugin",
+        "keys": [
+          {
+            "id": "polygon-delivery",
+            "key": "bezent-polygon-delivery",
+            "address": "0x2222222222222222222222222222222222222222",
+            "public_key": "0x022222222222222222222222222222222222222222222222222222222222222222"
+          }
+        ]
+      }
+    ],
+    "vault": { "path": "secret/bezent/signer" }
+  },
+  "bindings": [
+    {
+      "key": "kreivo-delivery",
+      "network": "kreivo",
+      "purposes": ["mint", "refund-mint"],
+      "window_cap": "1000000000",
+      "window_seconds": 86400
+    },
+    {
+      "key": "polygon-delivery",
+      "network": "polygon",
+      "purposes": ["payout", "cancel"],
+      "window_cap": "1000000000",
+      "window_seconds": 86400
+    }
+  ],
+  "statement_key": "statement"
+}

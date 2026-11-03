@@ -25,8 +25,8 @@ use bezent_evm_endpoint::submit::{
     GasBounds, Lane, Prepared, SignerLink, Submitter, decode_signed, signing_intent_payload,
 };
 use bezent_signer::config::{Caller, Config};
-use bezent_signer::keys::{FileBackend, KeyBackend};
-use bezent_signer::link::{self, Callers};
+use bezent_signer::keys::{FileBackend, SigningEngine};
+use bezent_signer::link::{self, Callers, Dialer};
 use bezent_signer::log::Log;
 use bezent_signer::signer::Signer;
 use k256::ecdsa::SigningKey;
@@ -217,8 +217,10 @@ pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (
     let uid = my_uid();
     let caller = Caller {
         name: "evm-endpoint".into(),
-        uid,
+        uid: Some(uid),
+        dns_name: None,
         token_sha256: vec![hex::encode(Sha256::digest(TOKEN.as_bytes()))],
+        allow: None,
     };
     let config_path = dir.join("signer.json");
     std::fs::write(
@@ -262,8 +264,7 @@ pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (
     let address = evm::address_of(&public_key).unwrap();
     (
         SignerLink {
-            socket,
-            uid,
+            dialer: Dialer::Unix { socket, uid },
             token: TOKEN.into(),
         },
         Lane {

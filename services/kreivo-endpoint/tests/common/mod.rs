@@ -19,8 +19,8 @@ use bezent_kreivo_endpoint::submit::{
     Lane, Prepared, SignerLink, Submitter, signing_intent_payload,
 };
 use bezent_signer::config::{Caller, Config};
-use bezent_signer::keys::{FileBackend, KeyBackend};
-use bezent_signer::link::{self, Callers};
+use bezent_signer::keys::{FileBackend, SigningEngine};
+use bezent_signer::link::{self, Callers, Dialer};
 use bezent_signer::log::Log;
 use bezent_signer::signer::Signer;
 use sha2::{Digest, Sha256};
@@ -139,8 +139,10 @@ impl Fixture {
         let uid = my_uid();
         let caller = Caller {
             name: "kreivo-endpoint".into(),
-            uid,
+            uid: Some(uid),
+            dns_name: None,
             token_sha256: vec![hex::encode(Sha256::digest(TOKEN.as_bytes()))],
+            allow: None,
         };
         let config_path = dir.join("signer.json");
         std::fs::write(
@@ -196,8 +198,7 @@ impl Fixture {
                 account,
             },
             link: SignerLink {
-                socket,
-                uid,
+                dialer: Dialer::Unix { socket, uid },
                 token: TOKEN.into(),
             },
             keys: backend,

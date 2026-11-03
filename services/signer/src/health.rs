@@ -74,10 +74,24 @@ pub fn check(config: &Path) -> Result<(), String> {
     heartbeat(&config)
         .check(MAX_AGE)
         .map_err(|e| e.to_string())?;
-    if !is_socket(&config.socket) {
-        return Err("the link socket is missing".to_owned());
+    match (&config.socket, &config.tls) {
+        (Some(socket), _) if !is_socket(socket) => Err("the link socket is missing".to_owned()),
+        (Some(_), _) => Ok(()),
+        // The listener answers on this host: a TCP connection, closed at once (the handshake
+        // that follows is refused, which is all the check needs of it).
+        (None, Some(tls)) => {
+            let port = tls
+                .listen
+                .parse::<std::net::SocketAddr>()
+                .map_err(|_| "the link address is not usable".to_owned())?
+                .port();
+            let local = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            std::net::TcpStream::connect_timeout(&local, std::time::Duration::from_secs(2))
+                .map(drop)
+                .map_err(|_| "the link is not listening".to_owned())
+        }
+        (None, None) => Err("the link has no transport".to_owned()),
     }
-    Ok(())
 }
 
 /// `config` as `health` is given it, or the image's default.

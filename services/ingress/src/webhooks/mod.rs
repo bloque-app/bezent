@@ -120,15 +120,20 @@ impl SealingKey {
         }
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read the webhook key {}: {e}", path.display()))?;
+        Self::from_hex(&text).map_err(|_| {
+            format!(
+                "the webhook key {} is not 64 hexadecimal characters",
+                path.display()
+            )
+        })
+    }
+
+    /// A key from 64 hexadecimal characters (surrounding whitespace aside): what Vault holds.
+    pub fn from_hex(text: &str) -> Result<Self, String> {
         let bytes = hex::decode(text.trim())
             .ok()
             .and_then(|b| <[u8; 32]>::try_from(b).ok())
-            .ok_or_else(|| {
-                format!(
-                    "the webhook key {} is not 64 hexadecimal characters",
-                    path.display()
-                )
-            })?;
+            .ok_or_else(|| "the webhook key is not 64 hexadecimal characters".to_owned())?;
         Ok(Self::from_bytes(bytes))
     }
 

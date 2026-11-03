@@ -46,7 +46,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use bezent_signer::config::Config as SignerConfig;
-use bezent_signer::keys::{FileBackend, KeyBackend};
+use bezent_signer::keys::{FileBackend, SigningEngine};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

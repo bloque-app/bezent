@@ -58,7 +58,7 @@ use sqlx::{PgConnection, PgPool};
 use crate::cancel;
 use crate::config::{CANCEL, DESTROY, Policy, STATEMENT, parse_minor_units};
 use crate::intent::Intent;
-use crate::keys::{Environment, KeyBackend, KeyError};
+use crate::keys::{Environment, KeyError, SigningEngine};
 use crate::log::Log;
 
 /// The advisory lock every signing transaction takes (`hashtext('bezent-signer')` is not stable
@@ -421,7 +421,7 @@ pub struct Signer<B> {
     serial: tokio::sync::Mutex<()>,
 }
 
-impl<B: KeyBackend> Signer<B> {
+impl<B: SigningEngine> Signer<B> {
     /// A signer over `pool` (connected with [`pool_options`]), deciding by `policy`, signing with
     /// `backend`, logging to `log`.
     pub fn new(pool: PgPool, policy: Policy, backend: B, log: Log) -> Self {
@@ -437,6 +437,17 @@ impl<B: KeyBackend> Signer<B> {
     /// The signer's log.
     pub fn log(&self) -> &Log {
         &self.log
+    }
+
+    /// The network and purpose of recorded intent `intent_id`, or `None` if none is recorded. The
+    /// link reads it to decide whether the caller may ask for this intent at all (`REQ-AR-3`),
+    /// before the signer looks at anything else; the error is the store's, in words.
+    pub async fn scope_of(&self, intent_id: i64) -> Result<Option<(String, String)>, String> {
+        sqlx::query_as("SELECT network, purpose FROM intents WHERE id = $1")
+            .bind(intent_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|_| "the store did not answer".to_owned())
     }
 
     /// Signs recorded intent `intent_id`, or returns its recorded signature, or refuses it. Every

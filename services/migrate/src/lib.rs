@@ -14,11 +14,15 @@
 //!   versions before it applied, and a new run resumes at N (see [`apply`]).
 //! - [`with_lock_timeout`] bounds every wait for a lock, so a run behind a held lock fails instead of
 //!   waiting for ever.
+//! - [`owner::OwnerConfig`] reads the owner's login from a configuration file (a `SecretRef`: a file or
+//!   Vault, issue #64) instead of a URL in a file or the environment.
 //! - [`refuse_service_login`] refuses to run as a login that is a service's.
 //! - [`catalogue_findings`] is the catalogue-wide grants check of `bezent_store::grants`, the one
 //!   the store tests run.
 //!
 //! Output is versions and role or object names, never a URL, a password or a checksum.
+
+pub mod owner;
 
 use bezent_store::grants::{self, PUBLIC_FUNCTIONS, ROLES};
 use std::borrow::Cow;

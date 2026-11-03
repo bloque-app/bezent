@@ -2,19 +2,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Keys (`T-005-03`; `REQ-CU-1`, `REQ-KY-1`, `REQ-KY-6`; PLAN `DEC-11`).
 //!
-//! [`KeyBackend`] is what the signer asks of a key custody: a key's scheme and public key, and a
-//! signature over a message. `DEC-11` puts delivery keys in AWS KMS and the others in Vault; both
-//! are `M-1` backends behind this trait. The only `M-0` backend is [`FileBackend`]: test keys from
-//! a file whose path the configuration names (never the environment, `REQ-KY-1`), tagged
-//! `"environment": "test"`. It refuses a file with any other tag, so a key it holds is always a
-//! test key, and the signer refuses to use one for a production network (`REQ-KY-6`, `AC-I4.2`).
+//! The schemes, the key errors, and the one in-process engine, [`FileBackend`]: keys read into the
+//! signer's memory, behind the [`SigningEngine`] interface every engine implements
+//! ([`crate::engine`]). It holds test keys from a file whose path the configuration names (never
+//! the environment, `REQ-KY-1`), tagged `"environment": "test"`: it refuses a file with any other
+//! tag, so a key it holds is always a test key, and the signer refuses to use one for a production
+//! network (`REQ-KY-6`, `AC-I4.2`). The Vault KV loader ([`crate::vault`]) builds one too, for the
+//! keys that are not delivery keys, in the environment its secret declares.
 //!
 //! The schemes: `sr25519` (a Kreivo account; the `substrate` signing context), `ecdsa` (a Kreivo
 //! ECDSA account: secp256k1 over the BLAKE2b-256 of the message, 65 bytes `r ‖ s ‖ v`) and
 //! `secp256k1-evm` (secp256k1 over the Keccak-256 of the message, 65 bytes `r ‖ s ‖ v`, `v` the
-//! recovery id 0 or 1), and `ed25519` (RFC 8032 over the message itself, 64 bytes): the statement key
-//! of `REQ-PR-1` (`F-004`), which signs nothing else, so the policy refuses to bind it to a network. ECDSA signatures are deterministic (RFC 6979) and low-`s`; sr25519 ones are
-//! randomised, which is why a replay returns the recorded signature rather than signing again
+//! recovery id 0 or 1), and `ed25519` (RFC 8032 over the message itself, 64 bytes): the statement
+//! key of `REQ-PR-1` (`F-004`), which signs nothing else, so the policy refuses to bind it to a
+//! network; or a native Kreivo ed25519 account, a delivery key held by a signing service that never
+//! releases it ([`SigningEngine::non_exportable`]). ECDSA signatures are deterministic (RFC 6979) and
+//! low-`s`; sr25519 ones are randomised, which is why a replay returns the recorded signature rather than signing again
 //! (`AC-D2.1`). The message is the network's signing payload as the core recorded it.
 
 use std::collections::BTreeMap;
@@ -29,6 +32,9 @@ use serde::Deserialize;
 use sha3::{Digest, Keccak256};
 use zeroize::Zeroizing;
 
+pub use crate::engine::SigningEngine;
+use crate::engine::{EngineKind, Signable, check_input};
+
 /// A signature scheme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub enum Scheme {
@@ -41,7 +47,8 @@ pub enum Scheme {
     /// An EVM account (secp256k1 over Keccak-256).
     #[serde(rename = "secp256k1-evm")]
     Secp256k1Evm,
-    /// The statement key (`REQ-PR-1`): ed25519 over the message (RFC 8032).
+    /// The statement key (`REQ-PR-1`), or a Kreivo ed25519 delivery key: ed25519 over the message
+    /// (RFC 8032).
     #[serde(rename = "ed25519")]
     Ed25519,
 }
@@ -77,17 +84,29 @@ impl fmt::Display for Environment {
     }
 }
 
-/// Why a key could not be loaded or used. It never carries key material (`REQ-KY-1`).
+/// Why a key could not be loaded or used. It never carries key material, a token, the message, a
+/// digest or a signature (`REQ-KY-1`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyError {
-    /// The backend holds no key by this id.
+    /// The engine holds no key by this id.
     UnknownKey(String),
-    /// The key source is refused, with the spec id that refuses it.
+    /// The key, its source or the request is refused, with the spec id that refuses it.
     Refused(String),
     /// The key source could not be read or parsed; the text names where, never what.
     Source(String),
-    /// The backend failed to sign.
+    /// The signing service did not answer, or answered that it cannot now (a timeout, a 5xx, a
+    /// 429): worth trying again later.
+    Unavailable(String),
+    /// The engine answered, and the answer is wrong or a refusal: a signature that does not
+    /// verify, a key that is not the configured one, a denied request. Not worth waiting for.
     Backend(String),
+}
+
+impl KeyError {
+    /// Whether the same request may succeed later without any change ([`KeyError::Unavailable`]).
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Unavailable(_))
+    }
 }
 
 impl fmt::Display for KeyError {
@@ -96,31 +115,13 @@ impl fmt::Display for KeyError {
             Self::UnknownKey(id) => write!(f, "no key {id}"),
             Self::Refused(why) => write!(f, "key source refused: {why}"),
             Self::Source(why) => write!(f, "key source unreadable: {why}"),
-            Self::Backend(why) => write!(f, "key backend failed: {why}"),
+            Self::Unavailable(why) => write!(f, "key engine unavailable: {why}"),
+            Self::Backend(why) => write!(f, "key engine failed: {why}"),
         }
     }
 }
 
 impl std::error::Error for KeyError {}
-
-/// A key custody (`DEC-11`): the file backend in `M-0`; AWS KMS and Vault in `M-1`.
-pub trait KeyBackend: Send + Sync + 'static {
-    /// The environment every key of this backend belongs to.
-    fn environment(&self) -> Environment;
-
-    /// The scheme of key `id`.
-    fn scheme(&self, id: &str) -> Result<Scheme, KeyError>;
-
-    /// The public key of key `id`: 32 bytes for sr25519, 33 (compressed) for secp256k1.
-    fn public_key(&self, id: &str) -> Result<Vec<u8>, KeyError>;
-
-    /// Signs `message` with key `id`.
-    fn sign(
-        &self,
-        id: &str,
-        message: &[u8],
-    ) -> impl Future<Output = Result<Vec<u8>, KeyError>> + Send;
-}
 
 enum Secret {
     Sr25519(schnorrkel::Keypair),
@@ -134,10 +135,12 @@ struct FileKey {
     secret: Secret,
 }
 
-/// Test keys from a file (`M-0` only). See the module documentation.
+/// Keys in the signer's memory: test keys from a file, or the keys read from Vault KV. See the
+/// module documentation.
 pub struct FileBackend {
     keys: BTreeMap<String, FileKey>,
     environment: Environment,
+    origin: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -200,6 +203,7 @@ impl FileBackend {
         Ok(Self {
             keys,
             environment: Environment::Test,
+            origin: "file",
         })
     }
 
@@ -219,7 +223,11 @@ impl FileBackend {
                 return Err(KeyError::Source(format!("key {id} appears twice")));
             }
         }
-        Ok(Self { keys, environment })
+        Ok(Self {
+            keys,
+            environment,
+            origin: "Vault KV",
+        })
     }
 
     /// The ids of the keys held.
@@ -275,21 +283,18 @@ impl FileKey {
         })
     }
 
-    fn sign(&self, id: &str, message: &[u8]) -> Result<Vec<u8>, KeyError> {
-        match (&self.secret, self.scheme) {
-            (Secret::Sr25519(pair), Scheme::Sr25519) => Ok(pair
+    fn sign(&self, id: &str, input: Signable<'_>) -> Result<Vec<u8>, KeyError> {
+        match (&self.secret, input) {
+            (Secret::Sr25519(pair), Signable::Message(message)) => Ok(pair
                 .sign(schnorrkel::signing_context(b"substrate").bytes(message))
                 .to_bytes()
                 .to_vec()),
-            (Secret::Secp256k1(key), Scheme::Ecdsa) => recoverable(id, key, &ecdsa_digest(message)),
-            (Secret::Secp256k1(key), Scheme::Secp256k1Evm) => {
-                recoverable(id, key, &evm_digest(message))
-            }
-            (Secret::Ed25519(key), Scheme::Ed25519) => {
+            (Secret::Secp256k1(key), Signable::Digest(digest)) => recoverable(id, key, &digest),
+            (Secret::Ed25519(key), Signable::Message(message)) => {
                 use ed25519_dalek::Signer as _;
                 Ok(key.sign(message).to_bytes().to_vec())
             }
-            _ => Err(KeyError::Backend(format!("key {id}: scheme mismatch"))),
+            _ => Err(KeyError::Refused(format!("key {id}: scheme mismatch"))),
         }
     }
 }
@@ -319,9 +324,21 @@ fn recoverable(id: &str, key: &SigningKey, digest: &[u8]) -> Result<Vec<u8>, Key
     Ok(out)
 }
 
-impl KeyBackend for FileBackend {
+impl SigningEngine for FileBackend {
+    fn kind(&self) -> EngineKind {
+        EngineKind::InProcess
+    }
+
+    fn name(&self) -> &'static str {
+        self.origin
+    }
+
     fn environment(&self) -> Environment {
         self.environment
+    }
+
+    fn key_ids(&self) -> Vec<String> {
+        self.keys.keys().cloned().collect()
     }
 
     fn scheme(&self, id: &str) -> Result<Scheme, KeyError> {
@@ -332,12 +349,16 @@ impl KeyBackend for FileBackend {
         self.key(id).map(|k| k.public_key.clone())
     }
 
-    fn sign(
+    fn sign_prepared(
         &self,
         id: &str,
-        message: &[u8],
+        scheme: Scheme,
+        input: Signable<'_>,
     ) -> impl Future<Output = Result<Vec<u8>, KeyError>> + Send {
-        std::future::ready(self.key(id).and_then(|k| k.sign(id, message)))
+        std::future::ready(self.key(id).and_then(|k| {
+            check_input(id, k.scheme, scheme, &input)?;
+            k.sign(id, input)
+        }))
     }
 }
 

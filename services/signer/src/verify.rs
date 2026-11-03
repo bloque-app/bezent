@@ -116,7 +116,7 @@ pub fn verifies_exactly(scheme: &str, public_key: &[u8], message: &[u8], signatu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::{FileBackend, KeyBackend};
+    use crate::keys::{FileBackend, SigningEngine};
 
     const SEED: &str = "0x0202020202020202020202020202020202020202020202020202020202020202";
 

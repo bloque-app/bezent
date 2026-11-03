@@ -20,6 +20,7 @@ path = "src/main.rs"
 bezent-core.workspace = true
 bezent-health = { path = "../../crates/health" }
 bezent-store = { path = "../../crates/store" }
+bezent-vault = { path = "../../crates/vault" }
 # The compromise path and signature checks (F-005); the core holds no key.
 bezent-signer = { path = "../signer" }
 # The S3 statement sink (issue #58). The same AWS stack, features and licences as the signer's KMS

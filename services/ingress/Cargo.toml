@@ -21,6 +21,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 bezent-core.workspace = true
 bezent-health = { path = "../../crates/health" }
 bezent-store = { path = "../../crates/store" }
+bezent-vault = { path = "../../crates/vault" }
 blake2 = "0.10"
 bs58 = "0.5"
 # Webhooks (REQ-ST-5, issue #2): secrets and URLs sealed at rest under the ingress's webhook key,

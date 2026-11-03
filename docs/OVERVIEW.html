@@ -102,7 +102,7 @@ steps</a></li>
       <div class="kicker">OVERVIEW.md</div>
       <h1>bezent</h1>
       
-      <dl class="meta"><div><dt>Edition</dt><dd>5 (supersedes the editions of 2026-10-01, 2026-10-02, 2026-10-03 and 2026-10-11)</dd></div><div><dt>Status</dt><dd>informative — where this and SPEC.md disagree, SPEC.md wins</dd></div><div><dt>Date</dt><dd>2026-10-13</dd></div><div><dt>Digest of</dt><dd>SPEC.md v0.5.0 (amendments 0001–0010 applied)</dd></div><div><dt>Source</dt><dd><code>bezent/OVERVIEW.md</code> · uncommitted + local changes</dd></div></dl>
+      <dl class="meta"><div><dt>Edition</dt><dd>5 (supersedes the editions of 2026-10-01, 2026-10-02, 2026-10-03 and 2026-10-11)</dd></div><div><dt>Status</dt><dd>informative — where this and SPEC.md disagree, SPEC.md wins</dd></div><div><dt>Date</dt><dd>2026-10-13</dd></div><div><dt>Digest of</dt><dd>SPEC.md v0.5.0 (amendments 0001–0010 applied)</dd></div><div><dt>Source</dt><dd><code>bezent/OVERVIEW.md</code> · b57024e 2026-10-17 + local changes</dd></div></dl>
     </header>
     
 <h1 id="bezent--design-overview">bezent — Design overview</h1>
@@ -1575,97 +1575,103 @@ without redesign</td>
 <td>2026-10-13</td>
 <td>Keys that mint, pay out or refund sign inside a key-management
 service; others may come from a secrets vault</td>
-<td>Current (amendment 0006; AWS KMS and Vault,
-<code>DEC-11</code>)</td>
+<td>Superseded on 2026-10-29 (amendment 0015)</td>
 </tr>
 <tr class="even">
+<td>2026-10-29</td>
+<td>Key custody is a boundary: no key readable outside the component
+that signs with it, which is apart from the state and auditable on its
+own; where each key rests is the plan's</td>
+<td>Current (amendment 0015)</td>
+</tr>
+<tr class="odd">
 <td>2026-10-13</td>
 <td>bezent moves value only between reserves and Kreivo; Swaps converts
 inside the vault under a role</td>
 <td>Current (amendment 0007)</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>2026-10-13</td>
 <td>A fiat payment reversed after Swaps reported it final is Swaps' to
 cover; mints pause under the floor</td>
 <td>Current (amendment 0007)</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>2026-10-13</td>
 <td>Payouts only on the reserve's network; Swaps bridges onward from its
 own funds</td>
 <td>Current (amendment 0007, ruled in chat)</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>2026-10-13</td>
 <td>A redemption is identified by its redeemer and its reference; mint
 and redemption references kept apart</td>
 <td>Current (amendment 0008)</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>2026-10-13</td>
 <td>The transfer state graph is normative, with exits from review and
 numbered attempts</td>
 <td>Current (amendment 0009)</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>2026-10-13</td>
 <td>Extras written once; cut-offs hold and never refuse; two new named
 refusals</td>
 <td>Current (amendment 0010)</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>2026-10-13</td>
 <td>Plain Rust services around one PostgreSQL store for V0, not a VOS
 deployment</td>
 <td>Current (<code>DEC-2</code>)</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>2026-10-13</td>
 <td>One contract for every bridged asset, with bounds per asset</td>
 <td>Current (<code>DEC-6</code>)</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>2026-10-13</td>
 <td>bUSDC at Here(101), bEURC at Here(102), bBTC at Here(103); MXNB and
 BRLB recreated at Here(104) and Here(105) later</td>
 <td>Current (<code>DEC-7</code>)</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>2026-10-13</td>
 <td>Each EVM reserve is a Safe vault with a Zodiac Roles module</td>
 <td>Current (<code>DEC-10</code>)</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>2026-10-13</td>
 <td>Vault owners limited by a guard that stops token moves and a delay
 on widening changes</td>
 <td>Current (<code>DEC-10</code>)</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>2026-10-13</td>
 <td>Only USDT0 on Polygon may be converted into a reserve</td>
 <td>Current (<code>DEC-13</code>)</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>2026-10-13</td>
 <td>Each EVM network read through two independent providers,
 cross-checked</td>
 <td>Current (<code>DEC-12</code>)</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>2026-10-13</td>
 <td>The statement is kept in a public, append-only bucket with object
 lock</td>
 <td>Current (<code>DEC-16</code>)</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>2026-10-13</td>
 <td>Starting bounds for bUSDC and COPM as measured; the other assets
 converted from them</td>
 <td>Current (<code>DEC-17</code>, §4.1)</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>2026-10-13</td>
 <td>The code goes open source (2026-10-17: before mainnet, the remaining
 work done in public), from a public repository whose history starts at

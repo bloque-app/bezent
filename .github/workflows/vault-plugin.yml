@@ -1,0 +1,126 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# One reproducible build of the Vault signing plugin (blockchain-signer-vault-plugin at a pinned
+# commit, with two dependency bumps), for the Vault nodes (linux/amd64), published with its SHA-256
+# so DevOps can put exactly that binary on the Vault image. The recipe is tools/ci/build-vault-plugin.sh;
+# the SHA-256 it must give is pinned in deploy/vault-plugin.sha256.
+#
+#   build     twice, on two runners, each with fresh Go caches
+#   compare   the two must be byte-identical; uploads the binary and SHA256SUMS as the workflow
+#             artifact `vault-signing-plugin-linux-amd64`, on every run
+#   release   only on dispatch, and only if the SHA-256 equals the pin: attaches the same two files
+#             to the GitHub release `vault-signing-plugin-<short sha>`
+name: Vault signing plugin
+
+on:
+  pull_request:
+    paths:
+      - tools/ci/build-vault-plugin.sh
+      - deploy/vault-plugin.sha256
+      - .github/workflows/vault-plugin.yml
+  push:
+    branches: [main]
+    paths:
+      - tools/ci/build-vault-plugin.sh
+      - deploy/vault-plugin.sha256
+      - .github/workflows/vault-plugin.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.run }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [a, b]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.1"
+          cache: false
+      - run: tools/ci/build-vault-plugin.sh "$RUNNER_TEMP/out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-build-${{ matrix.run }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+          retention-days: 7
+
+  compare:
+    name: two builds are identical and equal the pin
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha256: ${{ steps.sum.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: plugin-build-*
+          path: ${{ runner.temp }}/builds
+      - id: sum
+        run: |
+          set -euo pipefail
+          b="$RUNNER_TEMP/builds"
+          a=$(sha256sum "$b/plugin-build-a/blockchain-signer-vault-plugin" | cut -d' ' -f1)
+          c=$(sha256sum "$b/plugin-build-b/blockchain-signer-vault-plugin" | cut -d' ' -f1)
+          echo "build a: $a"
+          echo "build b: $c"
+          pin=$(cut -d' ' -f1 deploy/vault-plugin.sha256)
+          echo "pinned:  $pin"
+          {
+            echo "### Vault signing plugin (linux/amd64)"
+            echo "- build a: \`$a\`"
+            echo "- build b: \`$c\`"
+            echo "- pinned (deploy/vault-plugin.sha256): \`$pin\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "sha256=$a" >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/final"
+          cp "$b/plugin-build-a/blockchain-signer-vault-plugin" "$b/plugin-build-a/SHA256SUMS" "$RUNNER_TEMP/final/"
+          test "$a" = "$c" || { echo "the two builds differ" >&2; exit 1; }
+          test "$a" = "$pin" || { echo "the build is not the pinned one" >&2; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.sum.outputs.sha256 != ''
+        with:
+          name: vault-signing-plugin-linux-amd64
+          path: ${{ runner.temp }}/final/
+          if-no-files-found: error
+
+  release:
+    name: release
+    if: github.event_name == 'workflow_dispatch'
+    needs: compare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: vault-signing-plugin-linux-amd64
+          path: ${{ runner.temp }}/final
+      - name: Release, only if the SHA-256 is the pinned one
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/final"
+          sha256sum -c "$GITHUB_WORKSPACE/deploy/vault-plugin.sha256"
+          sha256sum -c SHA256SUMS
+          tag="vault-signing-plugin-${GITHUB_SHA::7}"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" blockchain-signer-vault-plugin SHA256SUMS --clobber
+          else
+            gh release create "$tag" blockchain-signer-vault-plugin SHA256SUMS \
+              --target "$GITHUB_SHA" --title "$tag" --notes \
+              "blockchain-signer-vault-plugin, linux/amd64, reproducible build of tools/ci/build-vault-plugin.sh at $GITHUB_SHA. SHA-256: $(cut -d' ' -f1 SHA256SUMS)"
+          fi

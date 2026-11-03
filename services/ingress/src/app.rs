@@ -4,7 +4,7 @@
 
 use crate::config::Config;
 use crate::error::ApiError;
-use crate::webhooks::{self, Dispatcher, SealingKey, Webhooks};
+use crate::webhooks::{self, Dispatcher, Webhooks};
 use crate::{intake, query};
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Request, State};
@@ -200,6 +200,15 @@ async fn note_answers(State(app): State<App>, request: Request, next: Next) -> R
 /// and of nothing else, holding exactly the ingress's grants (#46, `REQ-AR-3`). Fails closed: the
 /// ingress does not start without its store, or on any other login.
 pub async fn connect(config: &Config) -> Result<PgPool, String> {
+    connect_with(config, &config.resolver()?).await
+}
+
+/// [`connect`], reading the secrets through `resolver` (one login to Vault for the start).
+pub async fn connect_with(
+    config: &Config,
+    resolver: &bezent_vault::Resolver,
+) -> Result<PgPool, String> {
+    let url = config.store_url(resolver).await?;
     let pool = bezent_store::tls::connect(
         bezent_store::login::pool_options()
             .max_connections(config.max_connections)
@@ -213,7 +222,7 @@ pub async fn connect(config: &Config) -> Result<PgPool, String> {
                     Ok(())
                 })
             }),
-        &config.database_url,
+        &url,
     )
     .await
     .map_err(|e| format!("cannot connect to the store: {e}"))?;
@@ -244,14 +253,15 @@ pub async fn serve(
     config: Config,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    let pool = connect(&config).await?;
+    let resolver = config.resolver()?;
+    let pool = connect_with(&config, &resolver).await?;
     let hooks = match &config.webhooks {
         Some(w) => {
             let production = bezent_store::environment::production_networks(&pool)
                 .await
                 .map_err(|e| format!("store: {e}"))?;
             w.confirm_environment(&production)?;
-            Some(w.settings(SealingKey::from_file(&w.key_file)?)?)
+            Some(w.settings(w.sealing_key(&resolver).await?)?)
         }
         None => None,
     };
@@ -274,7 +284,7 @@ pub async fn serve(
             bezent_store::login::pool_options()
                 .max_connections(2)
                 .acquire_timeout(Duration::from_secs(5)),
-            &w.database_url,
+            &w.store_url(&resolver).await?,
         )
         .await
         .map_err(|e| format!("cannot connect the webhook dispatcher to the store: {e}"))?;

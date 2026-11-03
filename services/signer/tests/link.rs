@@ -9,7 +9,7 @@ mod common;
 use std::sync::Arc;
 
 use bezent_signer::config::Caller;
-use bezent_signer::keys::KeyBackend;
+use bezent_signer::keys::SigningEngine;
 use bezent_signer::link::{self, Callers, Client, LinkError, Request, Response};
 use common::*;
 use sha2::{Digest, Sha256};
@@ -19,8 +19,10 @@ use tokio::net::UnixStream;
 fn callers(uid: u32) -> Arc<Callers> {
     Arc::new(Callers::sharing_the_signer_uid_in_tests(&[Caller {
         name: "core".into(),
-        uid,
+        uid: Some(uid),
+        dns_name: None,
         token_sha256: vec![hex::encode(Sha256::digest(TOKEN.as_bytes()))],
+        allow: None,
     }]))
 }
 
@@ -89,8 +91,10 @@ async fn req_ar_3_unauthenticated_caller_is_refused(
 fn req_cu_1_signer_refuses_a_caller_with_its_own_uid() {
     let caller = |uid| Caller {
         name: "core".into(),
-        uid,
+        uid: Some(uid),
+        dns_name: None,
         token_sha256: vec![hex::encode(Sha256::digest(TOKEN.as_bytes()))],
+        allow: None,
     };
     let err = Callers::new(&[caller(1000)], 1000).unwrap_err();
     assert_eq!((err.caller.as_str(), err.uid), ("core", 1000));

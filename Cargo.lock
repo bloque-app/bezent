@@ -1768,6 +1768,7 @@ dependencies = [
  "bezent-health",
  "bezent-signer",
  "bezent-store",
+ "bezent-vault",
  "blake2",
  "bs58",
  "chrono",
@@ -1794,6 +1795,7 @@ dependencies = [
  "bezent-health",
  "bezent-signer",
  "bezent-store",
+ "bezent-vault",
  "hex",
  "k256",
  "serde",
@@ -1819,6 +1821,7 @@ dependencies = [
  "bezent-core",
  "bezent-health",
  "bezent-store",
+ "bezent-vault",
  "blake2",
  "bs58",
  "chacha20poly1305",
@@ -1850,6 +1853,7 @@ dependencies = [
  "bezent-health",
  "bezent-signer",
  "bezent-store",
+ "bezent-vault",
  "blake2",
  "chrono",
  "ed25519-zebra",
@@ -1876,8 +1880,11 @@ name = "bezent-migrate"
 version = "0.1.0"
 dependencies = [
  "bezent-store",
+ "bezent-vault",
+ "serde",
  "sqlx",
  "tokio",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -1909,24 +1916,31 @@ name = "bezent-signer"
 version = "0.1.0"
 dependencies = [
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-kms",
+ "base64 0.22.1",
  "bezent-health",
  "bezent-store",
+ "bezent-vault",
  "blake2",
  "ed25519-dalek",
  "hex",
  "k256",
+ "rcgen",
  "reqwest",
  "rustix",
+ "rustls",
  "schnorrkel",
+ "secp256k1 0.30.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sha3 0.10.9",
  "sqlx",
  "subtle",
+ "tiny-keccak",
  "tokio",
- "url",
+ "tokio-rustls",
  "zeroize",
 ]
 
@@ -1938,6 +1952,26 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "tokio",
+]
+
+[[package]]
+name = "bezent-vault"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-credential-types",
+ "aws-sigv4",
+ "aws-smithy-runtime-api",
+ "base64 0.22.1",
+ "percent-encoding",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 0.8.23",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -5012,6 +5046,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5540,6 +5584,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5da7e78a036ce858e8d55b7e7dc8ba3a88b78350fd2155d3591bbd966b58589e"
 dependencies = [
  "rustversion",
+]
+
+[[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
 ]
 
 [[package]]
@@ -8856,6 +8913,15 @@ name = "yap"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfe269e7b803a5e8e20cbd97860e136529cd83bf2c9c6d37b142467e7e1f051f"
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
+]
 
 [[package]]
 name = "yoke"

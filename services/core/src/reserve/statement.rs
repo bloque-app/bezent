@@ -36,8 +36,8 @@ use std::fmt;
 use std::future::Future;
 use std::path::PathBuf;
 
-use bezent_signer::keys::{KeyBackend, KeyError, Scheme};
-use bezent_signer::link::{Client, Response};
+use bezent_signer::keys::{KeyError, Scheme, SigningEngine};
+use bezent_signer::link::{Dialer, Response};
 use bezent_signer::verify::verifies_exactly;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Value, json};
@@ -98,7 +98,7 @@ pub struct KeyBackendSigner<B> {
     key: String,
 }
 
-impl<B: KeyBackend> KeyBackendSigner<B> {
+impl<B: SigningEngine> KeyBackendSigner<B> {
     /// The statement key `key` of `backend`. Only an ed25519 key is accepted.
     pub fn new(backend: B, key: &str) -> Result<Self, KeyError> {
         if backend.scheme(key)? != Scheme::Ed25519 {
@@ -113,7 +113,7 @@ impl<B: KeyBackend> KeyBackendSigner<B> {
     }
 }
 
-impl<B: KeyBackend> StatementSigner for KeyBackendSigner<B> {
+impl<B: SigningEngine> StatementSigner for KeyBackendSigner<B> {
     fn public_key(&self) -> Result<Vec<u8>, KeyError> {
         self.backend.public_key(&self.key)
     }
@@ -128,8 +128,7 @@ impl<B: KeyBackend> StatementSigner for KeyBackendSigner<B> {
 /// key's public half, from its configuration.
 pub struct SignerProcess {
     pool: PgPool,
-    socket: PathBuf,
-    uid: u32,
+    dialer: Dialer,
     token: String,
     public_key: Vec<u8>,
 }
@@ -137,21 +136,19 @@ pub struct SignerProcess {
 impl fmt::Debug for SignerProcess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SignerProcess")
-            .field("socket", &self.socket)
-            .field("uid", &self.uid)
+            .field("dialer", &self.dialer)
             .field("public_key", &hex0x(&self.public_key))
             .finish_non_exhaustive()
     }
 }
 
 impl SignerProcess {
-    /// The signer at `socket`, served by user `uid`, reached with `token`, holding the ed25519
+    /// The signer reached through `dialer` (its socket, or mutual TLS) with `token`, holding the ed25519
     /// statement key whose public key is `public_key`; intents are recorded through `pool` (the
     /// core's login).
     pub fn new(
         pool: PgPool,
-        socket: PathBuf,
-        uid: u32,
+        dialer: Dialer,
         token: String,
         public_key: Vec<u8>,
     ) -> Result<Self, KeyError> {
@@ -165,8 +162,7 @@ impl SignerProcess {
         }
         Ok(Self {
             pool,
-            socket,
-            uid,
+            dialer,
             token,
             public_key,
         })
@@ -222,7 +218,9 @@ impl StatementSigner for SignerProcess {
 
     async fn sign(&self, message: &[u8]) -> Result<Vec<u8>, KeyError> {
         let intent = self.intent(message).await?;
-        let mut client = Client::connect(&self.socket, &self.token, self.uid)
+        let mut client = self
+            .dialer
+            .connect(&self.token)
             .await
             .map_err(|e| KeyError::Backend(e.to_string()))?;
         // `Client::sign` checks the signature against the intent's recorded bytes, and starts the

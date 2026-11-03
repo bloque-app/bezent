@@ -3,13 +3,15 @@
 //! `bezent-migrate`: brings a bezent store to this release's migrations, as the migration owner.
 //!
 //! ```text
-//! bezent-migrate (--url-file <path> | --url-env <NAME>) [--check] [--login <name>]...
+//! bezent-migrate (--config <path> | --url-file <path> | --url-env <NAME>) [--check] [--login <name>]...
 //!                [--grants enforce|report|skip] [--lock-timeout <seconds>]
 //! ```
 //!
-//! - The owner's database URL is read from the file (`--url-file`, preferred: a mounted secret) or
-//!   from the environment variable the command line names (`--url-env`, discouraged: the credential
-//!   stays in the process environment, visible to `docker inspect` and `/proc/<pid>/environ`). It is
+//! - The owner's database URL is built from a configuration file (`--config`: the store's host, and
+//!   the owner's login and password as files or fields in Vault, which the process logs in to
+//!   itself; see `owner.rs`), or read from the file (`--url-file`: a mounted secret) or from the
+//!   environment variable the command line names (`--url-env`, discouraged: the credential stays
+//!   in the process environment, visible to `docker inspect` and `/proc/<pid>/environ`). It is
 //!   never printed. `sslmode` and `sslrootcert` in it drive TLS (`bezent_store::tls`).
 //! - Without `--check` it applies the pending migrations and prints `applied <version>` for each.
 //!   It refuses, changing nothing, a store whose history diverges: a version this release lacks, a
@@ -37,8 +39,11 @@ use sqlx::postgres::PgPoolOptions;
 
 const NAME: &str = "bezent-migrate";
 const DEFAULT_LOCK_TIMEOUT_SECS: u64 = 300;
-const USAGE: &str = "usage: bezent-migrate (--url-file <path> | --url-env <NAME>) [--check] \
-                     [--login <name>]... [--grants enforce|report|skip] [--lock-timeout <seconds>]
+const USAGE: &str = "usage: bezent-migrate (--config <path> | --url-file <path> | --url-env <NAME>) \
+                     [--check] [--login <name>]... [--grants enforce|report|skip] \
+                     [--lock-timeout <seconds>]
+  --config <path>          a TOML file naming the store and the owner's login and password as files or
+                           Vault fields ([vault] and [store]); the URL is built in the process
   --url-file <path>        read the owner's database URL from a file (preferred: mount it as a secret)
   --url-env <NAME>         read it from an environment variable (discouraged: the credential stays in
                            the process environment)
@@ -58,6 +63,7 @@ enum Grants {
 }
 
 struct Args {
+    config: Option<String>,
     url_file: Option<String>,
     url_env: Option<String>,
     check: bool,
@@ -68,6 +74,7 @@ struct Args {
 
 fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut parsed = Args {
+        config: None,
         url_file: None,
         url_env: None,
         check: false,
@@ -80,6 +87,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
         let mut value = |what: &str| args.next().ok_or(format!("{arg} needs {what}"));
         match arg.as_str() {
             "--check" => parsed.check = true,
+            "--config" => parsed.config = Some(value("a path")?),
             "--url-file" => parsed.url_file = Some(value("a path")?),
             "--url-env" => parsed.url_env = Some(value("a variable name")?),
             "--login" => parsed.logins.push(value("a login name")?),
@@ -105,28 +113,42 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
             other => return Err(format!("unexpected argument {other}")),
         }
     }
-    if parsed.url_file.is_some() == parsed.url_env.is_some() {
+    let named = [&parsed.config, &parsed.url_file, &parsed.url_env]
+        .iter()
+        .filter(|a| a.is_some())
+        .count();
+    if named != 1 {
         return Err(
-            "name the database URL with exactly one of --url-file and --url-env".to_owned(),
+            "name the database URL with exactly one of --config, --url-file and --url-env"
+                .to_owned(),
         );
     }
     Ok(parsed)
 }
 
 /// The URL, from where the command line says. The error never holds the URL.
-fn read_url(args: &Args) -> Result<String, String> {
-    let raw = match (&args.url_file, &args.url_env) {
-        (Some(path), _) => std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read the URL file {path}: {}", e.kind()))?,
-        (_, Some(name)) => std::env::var(name)
-            .map_err(|_| format!("the environment variable {name} is not set"))?,
+async fn read_url(args: &Args) -> Result<bezent_vault::Zeroizing<String>, String> {
+    let raw = match (&args.config, &args.url_file, &args.url_env) {
+        (Some(path), _, _) => {
+            // Reads the file and builds the URL, logging in to Vault if a secret is there.
+            let config = bezent_migrate::owner::OwnerConfig::from_file(std::path::Path::new(path))?;
+            config.url().await?
+        }
+        (_, Some(path), _) => bezent_vault::Zeroizing::new(
+            std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read the URL file {path}: {}", e.kind()))?,
+        ),
+        (_, _, Some(name)) => bezent_vault::Zeroizing::new(
+            std::env::var(name)
+                .map_err(|_| format!("the environment variable {name} is not set"))?,
+        ),
         _ => unreachable!("parse() requires one"),
     };
-    let url = raw.trim().to_owned();
+    let url = raw.trim();
     if url.is_empty() {
         return Err("the database URL is empty".to_owned());
     }
-    Ok(url)
+    Ok(bezent_vault::Zeroizing::new(url.to_owned()))
 }
 
 fn list(versions: &[i64]) -> String {
@@ -156,7 +178,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> Result<ExitCode, String> {
-    let url = read_url(&args)?;
+    let url = read_url(&args).await?;
     let pool = bezent_store::tls::connect(
         bezent_migrate::with_lock_timeout(
             PgPoolOptions::new()

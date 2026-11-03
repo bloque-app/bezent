@@ -9,7 +9,7 @@ mod common;
 
 use bezent_signer::compromise::{self, ObservedSignature, Verdict};
 use bezent_signer::config::Config;
-use bezent_signer::keys::KeyBackend;
+use bezent_signer::keys::SigningEngine;
 use bezent_signer::{Outcome, Refusal, Signed};
 use common::*;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};

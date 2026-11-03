@@ -23,7 +23,7 @@ use bezent_core_service::reserve::statement::{
     StatementStore, Statements, StoreError, verify, verify_chain,
 };
 use bezent_signer::config::{Caller, Config as SignerConfig};
-use bezent_signer::keys::{FileBackend, KeyBackend, KeyError};
+use bezent_signer::keys::{FileBackend, KeyError, SigningEngine};
 use bezent_signer::link::{self, Callers};
 use bezent_signer::log::Log;
 use bezent_signer::signer::Signer;
@@ -365,8 +365,10 @@ async fn signer_with_statement_seed(
     .unwrap();
     let caller = Caller {
         name: "core".into(),
-        uid: my_uid(),
+        uid: Some(my_uid()),
+        dns_name: None,
         token_sha256: vec![hex::encode(Sha256::digest(LINK_TOKEN.as_bytes()))],
+        allow: None,
     };
     let config = SignerConfig::parse(
         &serde_json::to_vec(&json!({
@@ -407,8 +409,10 @@ async fn signer_with_statement_seed(
 fn signer_process(w: &World, dir: &Path, public: &[u8]) -> SignerProcess {
     SignerProcess::new(
         w.core.pool().clone(),
-        dir.join("s.sock"),
-        my_uid(),
+        bezent_signer::link::Dialer::Unix {
+            socket: dir.join("s.sock"),
+            uid: my_uid(),
+        },
         LINK_TOKEN.into(),
         public.to_vec(),
     )

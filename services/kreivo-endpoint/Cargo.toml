@@ -33,6 +33,7 @@ light-client = [
 [dependencies]
 bezent-health = { path = "../../crates/health" }
 bezent-store = { path = "../../crates/store" }
+bezent-vault = { path = "../../crates/vault" }
 # The signer link's client, and the core's check of a returned signature (F-005, AC-I1.2). The
 # endpoint holds no key: it never builds a key backend (REQ-AR-3).
 bezent-signer = { path = "../signer" }
