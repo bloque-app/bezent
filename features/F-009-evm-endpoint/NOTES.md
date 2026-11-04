@@ -198,6 +198,16 @@ configuration), so a network is an instance, not code. What `M-2` added:
   largest the route takes) and seeded values. An arrival under one ratio (it would mint nothing) is not tested: the
   route's minimum is what keeps it out, and the plan does not say what the core does with one.
 
+- **Fork tests on each network** (`tests/fork.rs`, now generic over a `Net`): the four scenarios (start-up identity,
+  the vault's Roles check, an arrival then a payout with its reference, a forced non-execution and a wrapped copy)
+  run on Polygon, Base (EURC, 6 decimals) and BNB Chain (BTCB, 18 decimals) at the blocks of `e2e/evm/forks.env`, whose
+  hashes were read from two public providers. The vault is deployed on each fork by `DeployVault` with that network's
+  configuration (no conversion member where there is no venue). The balance slot of the token is found by probing, not
+  assumed. On BNB Chain the payout is 12 345 678 units of bBTC times 10^10 (`REQ-AS-10`), received exactly, and the
+  arrival keeps its remainder (`REQ-AS-9`: the endpoint records the arrival whole, the core scales). Run with
+  `BEZENT_EVM_FORK_URL` (Polygon), `BEZENT_EVM_FORK_URL_BASE`, `BEZENT_EVM_FORK_URL_BSC`; public archive endpoints
+  rate-limit parallel forks, so pass `-- --test-threads=1` on BNB Chain's.
+
 ### Open for the owner (needs a deployment, a funded key or a ruling)
 
 - **The testnet vaults**: Safe, Roles and emitter on Base Sepolia and BNB Chain testnet (`contracts/evm`, `DeployVault`),
@@ -207,5 +217,3 @@ configuration), so a network is an instance, not code. What `M-2` added:
   `EURC`, checked on chain). **bBTC's token**: Binance's BTCB (`0x7130…ad9c`, 18 decimals) has no code on BNB Chain
   testnet. A token symbolled `BTCB` with 18 decimals exists there (`0xA808…B8e4`), but nothing shows Binance issued it,
   and `REQ-AS-3` (one issuer per bridged asset) means a stand-in token is the owner's ruling, not an implementation choice.
-- **Fork tests of the endpoint on Base and BNB Chain** (anvil, pinned blocks of `e2e/evm/forks.env`): `tests/fork.rs`
-  is written for Polygon's USDC; not generalised here.

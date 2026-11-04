@@ -161,18 +161,58 @@ pub async fn declare(admin: &PgPool) {
 
 /// [`declare`], with the vault at `vault`.
 pub async fn declare_vault(admin: &PgPool, vault: &str) {
+    declare_on(
+        admin,
+        vault,
+        &Declared {
+            network: NETWORK,
+            chain_id: CHAIN_ID,
+            asset: ASSET,
+            asset_precision: 6,
+            token: &usdc().to_string(),
+            token_precision: 6,
+        },
+    )
+    .await;
+}
+
+/// What the operator declares for one EVM network (M-2: bEURC on Base, bBTC on BNB Chain).
+pub struct Declared<'a> {
+    /// The network's id in the store.
+    pub network: &'a str,
+    /// Its chain id.
+    pub chain_id: u64,
+    /// The bridged asset.
+    pub asset: &'a str,
+    /// The asset's precision on the issuing network.
+    pub asset_precision: i16,
+    /// The origin token.
+    pub token: &'a str,
+    /// The origin token's precision (the asset's, or more: `REQ-AS-4`).
+    pub token_precision: i16,
+}
+
+/// [`declare_vault`] for any network: the networks, the asset, its token, the vault as its
+/// reserve, and the endpoint's login as the instance of the network.
+pub async fn declare_on(admin: &PgPool, vault: &str, d: &Declared<'_>) {
+    let Declared {
+        network,
+        chain_id,
+        asset,
+        asset_precision,
+        token,
+        token_precision,
+    } = d;
     sqlx::raw_sql(&format!(
         "INSERT INTO networks (network, role, address_format, backend) VALUES \
-           ('{ISSUING}', 'issuing', 'ss58', NULL), ('{NETWORK}', 'origin', 'evm', 'evm:{CHAIN_ID}'); \
+           ('{ISSUING}', 'issuing', 'ss58', NULL), ('{network}', 'origin', 'evm', 'evm:{chain_id}'); \
          INSERT INTO assets (asset, precision, assurance_class, issuing_asset) VALUES \
-           ('{ASSET}', 6, 'public', 'Here(101)'); \
+           ('{asset}', {asset_precision}, 'public', 'Here(101)'); \
          INSERT INTO admitted_tokens (network, token, asset, precision) VALUES \
-           ('{NETWORK}', '{}', '{ASSET}', 6); \
-         INSERT INTO reserves (asset, network, address) VALUES ('{ASSET}', '{NETWORK}', '{}'); \
+           ('{network}', '{token}', '{asset}', {token_precision}); \
+         INSERT INTO reserves (asset, network, address) VALUES ('{asset}', '{network}', '{vault}'); \
          INSERT INTO evm_endpoint_networks (login, network) VALUES \
-           ('evm_endpoint_tests_{}', '{NETWORK}');",
-        usdc(),
-        vault,
+           ('evm_endpoint_tests_{}', '{network}');",
         bezent_store::EVM_ENDPOINT_ROLE
     ))
     .execute(admin)
@@ -205,6 +245,18 @@ pub async fn start_signer(connect: &PgConnectOptions) -> (SignerLink, Lane) {
 /// As [`start_signer`], with the vault's contracts `vault` declared to the signer: what a payout's
 /// bytes must name (audit must-fix 2).
 pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (SignerLink, Lane) {
+    start_signer_on(connect, vault, NETWORK, CHAIN_ID, KEY).await
+}
+
+/// As [`start_signer_for`], for the EVM network `network` of chain `chain_id`, the delivery key being
+/// `key` (M-2: one instance per network, each with its own key and binding).
+pub async fn start_signer_on(
+    connect: &PgConnectOptions,
+    vault: Contracts,
+    network: &str,
+    chain_id: u64,
+    key: &str,
+) -> (SignerLink, Lane) {
     let dir = temp_dir();
     let keys_path = dir.join("keys.json");
     std::fs::write(
@@ -212,7 +264,7 @@ pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (
         serde_json::to_vec(&json!({
             "comment": "TEST KEYS: Foundry's test account 4",
             "environment": "test",
-            "keys": [{"id": KEY, "scheme": "secp256k1-evm", "seed": LANE_SECRET}],
+            "keys": [{"id": key, "scheme": "secp256k1-evm", "seed": LANE_SECRET}],
         }))
         .unwrap(),
     )
@@ -231,7 +283,7 @@ pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (
         serde_json::to_vec(&json!({
             "socket": dir.join("s.sock"),
             "callers": [{"name": caller.name, "uid": uid, "token_sha256": caller.token_sha256}],
-            "networks": [{"id": NETWORK, "environment": "test", "chain_id": CHAIN_ID,
+            "networks": [{"id": network, "environment": "test", "chain_id": chain_id,
                           "cancel_max_fee_per_gas": MAX_FEE.to_string(),
                           // What a payout's bytes must name (audit must-fix 2).
                           "delivery": {"roles": vault.roles.to_string(),
@@ -239,8 +291,9 @@ pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (
                                        "emitter": vault.emitter.to_string(),
                                        "role": "bezent.delivery"}}],
             "keys": {"backend": "file", "path": keys_path},
-            "bindings": [{"key": KEY, "network": NETWORK, "purposes": ["payout", "cancel"],
-                          "window_cap": "1000000000000", "window_seconds": 3600}],
+            // The cap is in the origin token's minor units: high enough for an 18-decimal token.
+            "bindings": [{"key": key, "network": network, "purposes": ["payout", "cancel"],
+                          "window_cap": "1000000000000000000000000", "window_seconds": 3600}],
         }))
         .unwrap(),
     )
@@ -263,7 +316,7 @@ pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (
         Arc::new(Callers::sharing_the_signer_uid_in_tests(&[caller])),
         signer,
     ));
-    let public_key = backend.public_key(KEY).unwrap();
+    let public_key = backend.public_key(key).unwrap();
     let address = evm::address_of(&public_key).unwrap();
     (
         SignerLink {
@@ -271,7 +324,7 @@ pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (
             token: TOKEN.into(),
         },
         Lane {
-            key: KEY.into(),
+            key: key.into(),
             public_key,
             address,
         },
