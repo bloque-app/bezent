@@ -68,8 +68,14 @@
 //!   own that minted is an attempt of the reference with a record of its own.
 //! - `recorded-undecodable` (marked `recorded_undecodable: true`): the nonce was consumed by a
 //!   recorded extrinsic this build cannot decode. It may be an attempt of this very reference, and
-//!   it may have minted; nothing is proven (`REQ-NX-3`). Does **not** decide: the mint stays held
-//!   and pages, and the transfer is sent to review by the anomaly (`REQ-RF-1`: no refund).
+//!   it may have minted; nothing is proven (`REQ-NX-3`). It can only have minted **in the block
+//!   that holds it**, which the anomaly records as its `coordinate`. For a mint in that block it
+//!   does **not** decide: the mint stays held and pages, and the transfer is sent to review by the
+//!   anomaly (`REQ-RF-1`: no refund). For a mint in any other block it cannot be that extrinsic's
+//!   (a block hash names one block), so it decides the attempt like the kinds above. An anomaly
+//!   with no readable `coordinate.block_hash` (a row of an older build, or a malformed one)
+//!   cannot be compared and holds, as before: a false global pause on bezent's own mint is the
+//!   failure to avoid, and a hold only pages (review of PR #80).
 //! - the `:bytes` kinds (marked `bytes_unreadable: true`): written before the chain is read, because
 //!   the recorded bytes do not decode or do not answer their rows. The same bytes may have
 //!   executed. Does **not** decide. Rows written before the marker existed lack it and still decide:
@@ -195,11 +201,31 @@ struct Signed {
     proof: Option<i64>,
     /// Whether it was included, executed, in the candidate's block.
     executed_here: bool,
-    /// Whether it was included at all (executed or refused), or an anomaly names it.
+    /// Whether it was included at all (executed or refused), or an anomaly decides it (see
+    /// [`late`], "What decides an attempt").
     decided: bool,
+    /// An anomaly says a recorded extrinsic this build cannot decode took its nonce, and it
+    /// could be the mint's (it does not decide the attempt: see `decided`).
+    recorded_undecodable: bool,
+    /// An anomaly says the attempt's recorded bytes cannot be read.
+    bytes_unreadable: bool,
     /// Its era, if the prepared transaction is on record.
     valid_from: Option<i64>,
     valid_until: Option<i64>,
+}
+
+impl Signed {
+    /// What the prover wrote of this attempt, for the page: `none`, or the anomaly that says it
+    /// cannot read the attempt.
+    fn record(&self) -> &'static str {
+        if self.bytes_unreadable {
+            "bytes-unreadable"
+        } else if self.recorded_undecodable {
+            "recorded-undecodable"
+        } else {
+            "none"
+        }
+    }
 }
 
 fn hex0x(b: &[u8]) -> String {
@@ -414,12 +440,50 @@ async fn hold(
         "at": now.to_rfc3339(),
         "final_head": wait.head,
         "attempts": wait.attempts,
-        "meaning": "the prover has recorded nothing for these attempts of the reference (no proof, inclusion or anomaly) though their eras are over, and a mint of the reference waits on it: the prover is down or stuck, an inclusion older than its max_walk is never recorded, or a key is compromised; nothing is raised or paused",
+        "meaning": meaning(&wait.attempts),
     });
     store::event(conn, "late-mint-prover-silent", None, &detail).await?;
     tracing::error!(kind = %"late-mint-prover-silent", %detail,
         "page: a mint of a reference waits on an attempt the prover does not decide; it is the prover (stuck, down, max_walk) or a compromised key");
     Ok(())
+}
+
+/// What a `late-mint-prover-silent` page means, true of each attempt it names. An attempt with no
+/// record from the prover is one the prover has not decided; one marked `recorded-undecodable` or
+/// `bytes-unreadable` has an anomaly the prover wrote, which does not decide it (the prover cannot
+/// read it), so "recorded nothing" would be false of it.
+fn meaning(attempts: &[serde_json::Value]) -> String {
+    let of = |record: &str| {
+        attempts
+            .iter()
+            .filter(|a| a["record"] == record)
+            .map(|a| a["signed_transaction"].to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut parts = Vec::new();
+    let none = of("none");
+    if !none.is_empty() {
+        parts.push(format!(
+            "signed transaction(s) {none}: the prover has recorded nothing (no proof, inclusion or anomaly), so it is down or stuck, an inclusion older than its max_walk is never recorded, or a key is compromised"
+        ));
+    }
+    let undecodable = of("recorded-undecodable");
+    if !undecodable.is_empty() {
+        parts.push(format!(
+            "signed transaction(s) {undecodable}: the prover recorded an anomaly (recorded_undecodable): the lane's nonce was consumed by an extrinsic bezent recorded and this build cannot decode, which may be an attempt of this reference and may have minted this very mint; nothing is proven, and a restart does not change it (only a build that decodes the extrinsic, or a person reading the chain at the mint's block, does)"
+        ));
+    }
+    let unreadable = of("bytes-unreadable");
+    if !unreadable.is_empty() {
+        parts.push(format!(
+            "signed transaction(s) {unreadable}: the prover recorded an anomaly (bytes_unreadable): the recorded bytes do not decode or do not answer their rows, so the prover never read the chain for them and the same bytes may have executed; nothing is proven, and only a person reading the chain at the mint's block ends it"
+        ));
+    }
+    format!(
+        "a mint of the reference waits on attempts the prover does not decide; {}; nothing is raised or paused",
+        parts.join("; ")
+    )
 }
 
 /// The look at the candidate failed: it stays open and is tried again, and a failure that persists
@@ -562,8 +626,18 @@ async fn late(conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<Look> {
                  OR EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'delivery-anomaly' \
                             AND e.payload ->> 'signed_transaction' = st.id::text \
                             AND e.payload ->> 'network' = $2 \
-                            AND NOT (e.payload @> '{\"recorded_undecodable\": true}') \
-                            AND NOT (e.payload @> '{\"bytes_unreadable\": true}'))) AS decided, \
+                            AND NOT (e.payload @> '{\"bytes_unreadable\": true}') \
+                            AND (NOT (e.payload @> '{\"recorded_undecodable\": true}') \
+                                 OR COALESCE(lower(e.payload #>> '{coordinate,block_hash}') <> $4, false)))) \
+                  AS decided, \
+                EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'delivery-anomaly' \
+                        AND e.payload ->> 'signed_transaction' = st.id::text \
+                        AND e.payload ->> 'network' = $2 \
+                        AND e.payload @> '{\"recorded_undecodable\": true}') AS recorded_undecodable, \
+                EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'delivery-anomaly' \
+                        AND e.payload ->> 'signed_transaction' = st.id::text \
+                        AND e.payload ->> 'network' = $2 \
+                        AND e.payload @> '{\"bytes_unreadable\": true}') AS bytes_unreadable, \
                 (SELECT p.valid_from_block FROM prepared_transactions p \
                  WHERE p.id::text = i.payload ->> 'prepared') AS valid_from, \
                 (SELECT p.valid_until_block FROM prepared_transactions p \
@@ -574,6 +648,7 @@ async fn late(conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<Look> {
     .bind(&ids)
     .bind(&c.network)
     .bind(&c.block_hash)
+    .bind(hex0x(&c.block_hash))
     .fetch_all(&mut *conn)
     .await?;
 
@@ -611,6 +686,7 @@ async fn late(conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<Look> {
             attempts.push(json!({
                 "signed_transaction": s.id,
                 "attempt": s.attempt,
+                "record": s.record(),
                 "valid_from": s.valid_from,
                 "valid_until": s.valid_until,
             }));
