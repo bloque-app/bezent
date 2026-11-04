@@ -61,7 +61,7 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    tracing_subscriber::fmt().with_target(false).init();
+    bezent_logging::init();
     // An earlier run's liveness file never passes for this run's (issue #61): removed before any
     // start-up check or connection, so a file left by a run that is being replaced is gone first.
     let heartbeat = bezent_core_service::health::heartbeat(&config);

@@ -25,7 +25,7 @@ and what is left. The runbooks are in `deploy/runbooks/`; read `alerts.md` there
 ## What this change adds
 
 - **Observables** (`AC-H3.1`). Migration 0090 `ops_observables()`: oldest non-final transfer per route, unknown legs
-  (count, age), observer lag and open gaps per network, the reserve equation per asset (outcome, age), reserve per
+  (count, age), an estimate of each network's observer lag (`observer_lag_estimate_seconds`) and open gaps per network, the reserve equation per asset (outcome, age), reserve per
   network, undelivered and dead notifications, arrivals in `CND-Unassociated` with age, reviews, pauses, transfers held in
   `CND-FeeShort`. The core reads it with its own login each minute and writes CloudWatch embedded-metric lines to its
   log (`services/core/src/observe.rs`), because the log is the only exporter a service with no port has. An unknown value
@@ -52,10 +52,14 @@ and what is left. The runbooks are in `deploy/runbooks/`; read `alerts.md` there
 
 ## `AC-*` status
 
+The criteria map's exceptions for `AC-H3.1` and `AC-I3.1` (F-013, PR #75) are removed in this change, as the map requires once a criterion has its test. Both stay **partial**, below: the map has no state for that.
+
 | Criterion | Layer (SPEC §9) | State here |
 |---|---|---|
 | `AC-H3.1` | Service, over the store | **partial**: every `REQ-ST-6` item but fee positions is one read, tested; fee positions are not observable (Open 2) |
-| `AC-I2.1` | Service + chain | service half passes (global, asset, network, direction and route; in flight continues; a second login lifts); `REQ-IC-2`'s pause on a compromise is not applied by bezent (Open 1); the chain half is `F-006`'s, `contracts/bezent` |
+| `AC-I1.2` | Custody + service | **FAILING.** The signer and the core detect a signature bezent did not record, refuse it and raise `key-compromise` with a `pause-requested`, and the core now pages it; but **nothing applies `pause-requested`**, so bezent does not pause, which the criterion (pause, rotate, report) and `REQ-IC-4` require. A person must pause, from a page nobody receives yet (`alerts.md`); until then the bridge keeps minting and signing. The criteria map (`e2e/criteria`) lists it `covered`, because tests verify the detection and the alert; it has no way to say "tested but failing", so this table is the record. Open 1 |
+| `REQ-IC-2` | (requirement) | **FAILING** for "a signature it did not record" (and a late mint, which raises the same request): the pause is a request nobody applies (Open 1). The reserve-equation divergence, a stall that outlasts the route's budget and an unevaluable reserve are paused by the reserve check (`reserve_check.rs::req_ic_2_nfr_5_m2_*`, `ac_e2_1_*`), and a supply mismatch pauses the asset under `INV-4`. A deeper-than-expected reorganisation and an observation gap are not assessed by this change |
+| `AC-I2.1` | Service + chain | service half passes (global, asset, network, direction and route; in flight continues; a second login lifts); the chain half is `F-006`'s, `contracts/bezent` |
 | `AC-I3.1` | Store | **partial**: passes for the pause, its lifting and the acts recorded with `operator_record`; recording an act done elsewhere is voluntary, and the schema owner edits declarations with no record (Open 3) |
 | `AC-I3.2` | Store | passes |
 | `AC-I4.1` | Service | passes (existing tests of both endpoints, named; the EVM one shown to fail with its check removed) |
@@ -67,8 +71,14 @@ and what is left. The runbooks are in `deploy/runbooks/`; read `alerts.md` there
   fixture exceeds ten) plus the cycle's own time. A test pauses as an operator, runs one cycle and
   measures the elapsed time (6 to 14 ms against a local store). The ingress reads `pauses` on each request.
   Not measured: a pause on chain (the contract's), and a cycle under production load.
-- **`NFR-6`** (observer lag within 60 s): the quantity is observable and is `observer_lag_seconds`; a test shows it moves.
-  Whether an endpoint stays within 60 s needs a running endpoint against a live network, and the alarm on it.
+- **`NFR-6`** (each observer within 60 s of its network's final head): **estimated, not measured.** The store never holds
+  the network's final head, only the heads an endpoint recorded, so the distance behind the network cannot be read. What
+  is observable is `observer_lag_estimate_seconds` (before this change `observer_lag_seconds`, seconds since a head's
+  `seen_at`, which overclaimed): the clock less the latest recorded head's block time less the network's configured
+  `finality_seconds`, floored at zero, which is the reserve check's own basis for a stale head. It is wrong by the
+  difference between the real and the configured finality time and by clock difference. A test shows it per network
+  (`ac_h3_1_observer_lag_estimate_and_open_gaps_are_per_network`). Measuring `NFR-6` exactly needs the endpoint to record
+  the network's head beside its own (a live network); whether an endpoint stays within 60 s needs one running.
 - **`NFR-9`** (every runbook exercised): none has been. `deploy/runbooks/EXERCISES.md` is empty on purpose.
   What exists is a test of the behaviour under each runbook, listed in it.
 
@@ -79,12 +89,12 @@ channel. `deploy/runbooks/alerts.md` has the table, the three kinds no filter co
 
 ## Open
 
-1. **Nothing applies `pause-requested`.** A key-compromise alert from the signer or an endpoint appends the alert and a
+1. **Nothing applies `pause-requested`; `AC-I1.2` and `REQ-IC-2` are FAILING for it.** A key-compromise alert from the signer or an endpoint appends the alert and a
    global pause request to the log. The core now pages the alert, but no process turns the request into a pause, so
    `REQ-IC-2` and `REQ-IC-4` ("MUST pause") are met by a person, within minutes of the page, not by bezent. Building it
    needs the store to let the core insert a global pause for that cause (the pause guard of migration 0031 admits only an
    asset's routes on a reserve cause) and a test. Not done here: it widens what the core may do to a pause and deserves its
-   own review. The same applies to a late mint (PR #72), which raises the same request.
+   own review. The same applies to a late mint (PR #72, merged), which raises the same request.
 2. **Fee positions** (`REQ-ST-6`). No service reads a delivery account's balance. `fee_short_transfers` is the only signal,
    and it fires after a delivery could not pay. Needs a balance read in each endpoint (live network) and a floor from
    configuration (`DEC-18`).
@@ -93,7 +103,8 @@ channel. `deploy/runbooks/alerts.md` has the table, the three kinds no filter co
    still change declarations directly; that login is for migrations and restores, held outside the operators.
 4. **Alarms**: see `alerts.md`. Not changed here (read only).
 5. Credentials have no revocation or expiry (`F-002` notes); not in this change.
-6. After PR #66 and PR #72 merge, `pages.rs` and `runbooks.rs` fail until their pages record the kind with `%` and the
-   runbooks' `not_on_base` markers are removed. That is the point of both tests.
+6. PR #72 (the late-mint pages) is on `develop`: its three kinds are recorded with `%`, tested against real emissions
+   (`late_mint.rs`) and no longer `not_on_base`. After PR #66 merges, `pages.rs` and `runbooks.rs` fail until its pages record
+   the kind with `%` and the runbooks' `not_on_base` markers are removed. That is the point of both tests.
 
 No amendment is proposed: nothing here depends on a decision SPEC does not make.

@@ -266,15 +266,21 @@ mod tests {
     fn an_unknown_value_is_named_and_never_written_as_a_number() {
         let lines = emf_lines(
             &[
-                row("observer_lag_seconds", None, Some("polygon"), None, None),
+                row(
+                    "observer_lag_estimate_seconds",
+                    None,
+                    Some("polygon"),
+                    None,
+                    None,
+                ),
                 row("open_gaps", None, Some("polygon"), None, Some(0.0)),
             ],
             1,
         );
         assert_eq!(lines.len(), 1);
         let v: Value = serde_json::from_str(&lines[0]).unwrap();
-        assert!(v.get("observer_lag_seconds").is_none(), "{v}");
-        assert_eq!(v["unknown"], json!(["observer_lag_seconds"]));
+        assert!(v.get("observer_lag_estimate_seconds").is_none(), "{v}");
+        assert_eq!(v["unknown"], json!(["observer_lag_estimate_seconds"]));
         assert_eq!(v["open_gaps"], 0.0);
         let declared: Vec<_> = v["_aws"]["CloudWatchMetrics"][0]["Metrics"]
             .as_array()

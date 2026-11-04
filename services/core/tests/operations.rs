@@ -203,7 +203,7 @@ async fn ac_h3_1_the_core_reads_every_req_st_6_observable_and_writes_the_minute_
         "oldest_nonfinal_transfer_age_seconds",
         "unknown_legs",
         "unknown_legs_oldest_age_seconds",
-        "observer_lag_seconds",
+        "observer_lag_estimate_seconds",
         "open_gaps",
         "undelivered_notifications",
         "undelivered_notifications_oldest_age_seconds",

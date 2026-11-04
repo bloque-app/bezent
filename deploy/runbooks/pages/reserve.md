@@ -7,7 +7,7 @@ id: reserve
 kind: pages
 covers: [REQ-IC-2, REQ-BK-1, REQ-BK-3, REQ-BK-8, REQ-BK-10, NFR-5, NFR-6, INV-1, INV-4]
 pages: [reserve-divergence, reserve-alert, reserve-check-incomplete, reserve-check-failed, reserve-check-stalled, supply-mismatch-pause, book-quarantine]
-observables: [reserve_equation_outcome, reserve_equation_age_seconds, reserve_amount, observer_lag_seconds, open_gaps, pauses_in_force]
+observables: [reserve_equation_outcome, reserve_equation_age_seconds, reserve_amount, observer_lag_estimate_seconds, open_gaps, pauses_in_force]
 tests: [services/core/tests/reserve_check.rs::req_ic_2_nfr_5_m2_an_evaluation_that_cannot_be_made_beyond_the_bound_pauses, services/core/tests/reserve_check.rs::inv_1_req_ic_2_m1_an_observation_the_book_cannot_post_is_quarantined_paged_and_paused, crates/store/tests/reserve_check.rs::req_bk_1_req_ic_2_the_core_pauses_only_an_assets_routes_on_that_assets_divergence, services/core/tests/reserve_check.rs::ac_e2_1_a_divergence_pauses_the_assets_routes_keeps_observing_and_pages_a_human, services/core/tests/operations.rs::ac_i2_1_an_operators_pause_holds_new_work_in_each_scope_and_a_second_operator_lifts_it]
 exercised: no
 ---
@@ -41,7 +41,7 @@ kind, with the differences itemised. `alerts.md` has the filter for each.
 ```sql
 SELECT metric, asset, network, value FROM ops_observables()
 WHERE metric IN ('reserve_equation_outcome', 'reserve_equation_age_seconds', 'reserve_amount',
-                 'observer_lag_seconds', 'open_gaps', 'pauses_in_force') ORDER BY metric, asset, network;
+                 'observer_lag_estimate_seconds', 'open_gaps', 'pauses_in_force') ORDER BY metric, asset, network;
 SELECT id, asset, evaluated_at, outcome, reason, differences FROM reserve_evaluations
 ORDER BY id DESC LIMIT 10;
 SELECT id, asset, cause FROM pauses ORDER BY id;
@@ -51,7 +51,7 @@ SELECT * FROM book_quarantine ORDER BY id DESC LIMIT 5;
 
 The outcome is 0 holds, 1 diverges, 2 could not be made. The itemised `differences` say which term and which item
 (a network, a reference) the networks and the book disagree on, in minor units. An incomplete or stalled evaluation
-names its reason: look first at `observer_lag_seconds` and `open_gaps` for the networks the asset uses (a network that
+names its reason: look first at `observer_lag_estimate_seconds` and `open_gaps` for the networks the asset uses (a network that
 stopped recording final heads, or a gap) and at the endpoint's own health (`deploy/health.md`).
 
 ## Do

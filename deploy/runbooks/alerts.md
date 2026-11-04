@@ -15,7 +15,13 @@ An ERROR event whose fields include `kind=<kind>`, **unquoted**. Two emitters wr
 records its kind with Display, and `services/core/tests/pages.rs` fails on a quoted one. Most pages are also an
 `event_log` entry of the same kind, so the operator can read the detail with `SELECT`.
 
-The container's logs are plain text (`NO_COLOR=1`, no target). The filter for a kind is the string `"kind=<kind>"`.
+The services' logs are plain text, no colour, no target. The deployment sets `NO_COLOR=1` in every task definition (the
+infrastructure repository's `app_bezent_services.tf`, `bezent_env`, on its main branch on 2026-11-04), which is why a
+deployed line was plain. Nothing in **this** repository set it, and `tracing-subscriber` writes ANSI escapes around the field
+names unless `NO_COLOR` is set, terminal or not (`\x1b[3mkind\x1b[0m\x1b[2m=\x1b[0mreserve-divergence`, which no `kind=`
+filter matches). So that the format does not depend on a setting in another repository, every service now starts its log
+with `bezent-logging` (`crates/logging`), which turns colour off itself; `services/core/tests/pages.rs` shows the default
+setup's coloured line, the services' plain one, The filter for a kind is the string `"kind=<kind>"`.
 
 ## Does a page reach a human today?
 
@@ -66,7 +72,7 @@ kind exists on `develop` at this commit.
 
 The kinds of PR #66 are written in the code of that open pull request, quoted (`kind = "..."`), so it will fail
 `pages.rs` and `runbooks.rs` when it rebases until it records the kind with `%` and the runbook drops its
-`not_on_base` marker. That is intended. The late-mint kinds of PR #72 were quoted too and are fixed in this change.
+`not_on_base` marker. That is intended. The late-mint kinds of PR #72 (on `develop`) were quoted too and are fixed in this change.
 
 Platform alarms with no kind (`pages/platform.md`): a service not running, the store unreachable, the signer refusing an
 unauthenticated caller, the database's storage and CPU.
@@ -83,7 +89,7 @@ deployment):
 
 | Metric | Alarm | Spec |
 |---|---|---|
-| `observer_lag_seconds` | above 60 s for a network (alert); missing data is a breach | `NFR-6` |
+| `observer_lag_estimate_seconds` | above 60 s for a network (alert); missing data is a breach. An **estimate** (see below) | `NFR-6` |
 | `reserve_equation_age_seconds` | older than three evaluations (the check runs each minute) | `NFR-5` |
 | `reserve_equation_outcome` | not 0 | `INV-1` |
 | `open_gaps` | above 0 | `REQ-ST-6`, `REQ-OB-3` |
@@ -94,6 +100,14 @@ deployment):
 | `fee_short_transfers` | above 0 | `CND-FeeShort` |
 | `pauses_in_force` | above 0 (information) | `REQ-GV-1` |
 
+`observer_lag_estimate_seconds` is an **estimate** of `NFR-6`'s quantity, the distance between an observer and its network's
+own final head. The store never holds the network's head, only the heads the endpoint recorded, so the value is the clock
+minus the block time of the latest head recorded, minus the network's configured `finality_seconds` (floored at zero): the
+basis on which the reserve check decides a head is stale. It is wrong by whatever the network's real finality time differs
+from that figure by and by any difference between the chain's clock and the store's; it is not a measurement of the network's
+head. Before `F-014` it was named `observer_lag_seconds` and measured the time since `final_heads.seen_at`, which an endpoint
+that records old heads promptly keeps small, so it was renamed and replaced.
+
 Nothing reads a delivery account's balance, so there is **no alert floor on a float** (`pages/float-top-up.md`).
 
 ## What infrastructure must add
@@ -103,8 +117,8 @@ Stated as needs; this repository changes none of it.
 1. Test every pattern with `aws logs test-metric-filter` against a line of the running services, then turn the alarm
    actions on.
 2. Add filters for `"kind=statement-publish-failed"`, `"kind=payout-refusal-alert"`,
-   `"kind=resolution-blocked-by-inclusion"`, and, when their pull requests merge, `"kind=attested-"` and
-   `"kind=late-mint-"` (prefix patterns).
+   `"kind=resolution-blocked-by-inclusion"`, `"kind=late-mint-"` (a prefix pattern; the late-mint pages of PR #72 are on
+   `develop`) and, when its pull request merges, `"kind=attested-"` (also a prefix).
 3. Alarm on the metrics above, with missing data treated as breaching.
 4. Give the alarm topic a destination that reaches a person: an on-call service with acknowledgement and escalation, or at
    least a phone-reaching subscription, chosen by the owner. A chat post is not a page.

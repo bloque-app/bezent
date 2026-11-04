@@ -2,7 +2,7 @@
 -- F-014: the observables of REQ-ST-6 (AC-H3.1), as one read-only function.
 --
 -- REQ-ST-6 asks that these be observable continuously: the age of the oldest non-final transfer
--- per route; the count and age of unknown legs; observation lag and open gaps per network; the
+-- per route; the count and age of unknown legs; an estimate of each network's observer lag and its open gaps; the
 -- reserve equation per asset; reserve per network; fee positions; undelivered notifications; and
 -- arrivals in CND-Unassociated with their age. Each already lives in the store, in a table or a
 -- view of its own; none was one place a person or an alarm could read. `ops_observables()` is that
@@ -20,8 +20,15 @@
 --     transaction of the attempt. Once the leg is seen included the transfer leaves `Delivering`
 --     and the leg is no longer unknown. A transfer in review for another reason may count its
 --     executed attempt here: the count errs toward showing a leg, never toward hiding one.
---   * Observer lag. Seconds since the network's endpoint recorded its latest final head
---     (`final_heads.seen_at`), which is what NFR-6 bounds at 60 s.
+--   * Observer lag, as an ESTIMATE (`observer_lag_estimate_seconds`). NFR-6 bounds the distance
+--     between the observer and its network's own final head at 60 s. The store never holds the
+--     network's head, only the heads an endpoint recorded, so the distance is estimated the way
+--     the reserve check does (reserve/check.rs, migration 0033): the clock minus the block time
+--     of the latest final head the endpoint recorded, less `networks.finality_seconds`, the time
+--     the network takes to its own finality, floored at zero. It is only as good as that
+--     configured figure and the agreement of the chain's clock with the store's; a network whose
+--     finality varies reads high or low by the variation. NULL when no final head was ever
+--     recorded.
 --   * Fee positions are NOT in this view: no service reads a delivery account's balance yet. The
 --     transfers held in CND-FeeShort are (`fee_short_transfers`), and are the only signal of a
 --     short fee position the store has. F-014 NOTES lists the gap.
@@ -94,11 +101,14 @@ SELECT 'unknown_legs_oldest_age_seconds', r.asset, r.network, r.direction,
                    AND u.direction = r.direction), 0)::numeric
 FROM routes r
 UNION ALL
--- Observation lag: NULL when the network has never recorded a final head.
-SELECT 'observer_lag_seconds', NULL, n.network, NULL,
-       extract(epoch FROM now() - (SELECT max(h.seen_at) FROM final_heads h
-                                   WHERE h.network = n.network))::numeric
+-- Observer lag, estimated (see above): NULL when the network has never recorded a final head.
+SELECT 'observer_lag_estimate_seconds', NULL, n.network, NULL,
+       CASE WHEN h.block_time IS NULL THEN NULL
+            ELSE greatest(0, extract(epoch FROM now() - h.block_time) - n.finality_seconds)::numeric
+       END
 FROM networks n
+LEFT JOIN LATERAL (SELECT f.block_time FROM final_heads f WHERE f.network = n.network
+                    ORDER BY f.block_number DESC LIMIT 1) h ON true
 UNION ALL
 SELECT 'open_gaps', NULL, n.network, NULL,
        (SELECT count(*) FROM observation_gaps g WHERE g.network = n.network AND NOT g.filled)::numeric

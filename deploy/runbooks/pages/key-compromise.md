@@ -22,10 +22,26 @@ on chain per asset and window (`REQ-KY-3`, `AC-I1.1`); that is why this is an in
 
 ## Pages
 
-`key-compromise`, an ERROR line `page kind=key-compromise ...` and an `event_log` entry of the same kind. **Nothing has
-paused when you read it**, unless the cause was a supply mismatch (`supply-mismatch-pause`, which pauses the asset by
-itself). The signer and the endpoints raise the alert and a `pause-requested` entry in the log; no process applies that
-request yet (`features/F-014-operations/NOTES.md`, "Open"). The pause is yours, and it is the first thing to do.
+`key-compromise`, an ERROR line and an `event_log` entry of the same kind. Two emitters write the line:
+
+- the core's signals step, for every alert except a supply mismatch (an unrecorded signature seen by the signer or an
+  endpoint, a mint after its proof of non-execution): `page: a signature bezent did not record ... kind=key-compromise alert_seq=<seq> detector=<detector>`;
+- the reserve check, for a supply mismatch (`INV-4`): `page kind=key-compromise asset=<asset> detail=<json>`, which is
+  followed by `supply-mismatch-pause`.
+
+**Nothing applies the pause the specification requires, and until it does a person must pause.** `REQ-IC-2`, `REQ-IC-4`,
+`AC-I1.2` require bezent to pause the affected routes itself when it sees a signature it did not record (`REQ-BK-1` requires
+the pause only when the compromise shows as a reserve divergence, and that one holds).
+It does not: the signer and the endpoints raise the alert and a `pause-requested` entry in the log, and no process turns
+that entry into a pause (`features/F-014-operations/NOTES.md`, "Open", where `AC-I1.2` and `REQ-IC-2` are marked FAILING).
+So, from the moment the alert is raised until a person runs `operator_pause`:
+
+- **the bridge keeps minting, signing and delivering**, within the bounds the network gives each key (`REQ-KY-3`), and
+- **no page reaches anyone yet**: the alarms are code with their actions disabled and no destination that wakes a
+  person (`deploy/runbooks/alerts.md`, "Does a page reach a human today?"). The line is in a log nobody is watching.
+
+Until both are fixed, someone has to be looking for this line. The one exception is a supply mismatch
+(`supply-mismatch-pause`), where the core pauses the asset by itself.
 
 ## Confirm
 
@@ -35,8 +51,10 @@ WHERE kind IN ('key-compromise', 'pause-requested', 'signal-surfaced') ORDER BY 
 SELECT id, asset, network, direction, cause FROM pauses ORDER BY id;
 ```
 
-The alert's payload names the detector (signer, an endpoint or the core), the key's public identifier and the
-coordinate where it was seen, or the intent the signature answered. Check that coordinate on the network from public
+The alert's payload carries a `detector`, which the store stamps with the role of the login that wrote the alert (`signer`,
+`kreivo-endpoint`, `evm-endpoint` or `core`), the key's public identifier and the coordinate where it was seen, or the
+intent the signature answered. A late mint (a mint of a reference after its proof of non-execution) is written by the core,
+so its `detector` is `core`; what tells it apart is its `source`, which is `late-mint`, and its `reason`. Check that coordinate on the network from public
 chain data: the transaction, its sender, its recipient and its amount. Establish whether value moved and whether any
 reserve address was involved.
 
@@ -66,6 +84,6 @@ reserve address was involved.
 ## Exercise
 
 On the test bed: have the core record an intent, make a signature over other bytes, see the alert and the log entry,
-then follow steps 1 to 6 with two operators. The pause-request consumer is missing; until it exists the pause is by hand.
+then follow steps 1 to 6 with two operators. The pause-request consumer is missing, so the pause in step 1 is by hand, and the page is not yet delivered to anyone.
 
 Status: not exercised (NFR-9). Behaviour proven by the tests listed above, not by a run of this runbook.

@@ -164,20 +164,38 @@ async fn ac_h3_1_an_unknown_leg_is_counted_and_aged_until_it_is_seen_included(po
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn ac_h3_1_observer_lag_and_open_gaps_are_per_network(pool: PgPool) {
+async fn ac_h3_1_observer_lag_estimate_and_open_gaps_are_per_network(pool: PgPool) {
     world(&pool).await;
     exec(
         &pool,
-        "INSERT INTO networks (network, role, address_format) VALUES ('silent', 'origin', 'opaque'); \
-         UPDATE final_heads SET seen_at = now() - interval '45 seconds' WHERE false",
+        "INSERT INTO networks (network, role, address_format, finality_seconds) \
+           VALUES ('silent', 'origin', 'opaque', 0), ('behind', 'origin', 'opaque', 30), \
+                  ('keeping-up', 'origin', 'opaque', 30); \
+         INSERT INTO final_heads (network, block_number, block_hash, block_time) VALUES \
+           ('behind', 10, '\\x0a', now() - interval '200 seconds'), \
+           ('behind', 9, '\\x09', now() - interval '900 seconds'), \
+           ('keeping-up', 10, '\\x0b', now() - interval '20 seconds'), \
+           ('origin-a', 99999, '\\x99', now())",
     )
     .await;
-    // `final_heads` is append-only: the lag is read as of now.
     let all = observables(&pool).await;
-    let lag = value(&all, "observer_lag_seconds", "", "origin-a", "").expect("recorded a head");
+    // The estimate: the clock less the block time of the latest recorded head, less the network's
+    // own finality time (30 s here), never below zero. Not the network's head: the store has none.
+    let behind = value(&all, "observer_lag_estimate_seconds", "", "behind", "").expect("a head");
+    assert!((169.0..175.0).contains(&behind), "{behind}");
+    assert_eq!(
+        value(&all, "observer_lag_estimate_seconds", "", "keeping-up", ""),
+        Some(0.0),
+        "a head younger than the network's finality time is not lag"
+    );
+    // A network whose latest recorded head is current: no lag to speak of.
+    let lag = value(&all, "observer_lag_estimate_seconds", "", "origin-a", "").expect("a head");
     assert!((0.0..60.0).contains(&lag), "{lag}");
     // A network that never recorded a final head is not known, which is not a zero.
-    assert_eq!(value(&all, "observer_lag_seconds", "", "silent", ""), None);
+    assert_eq!(
+        value(&all, "observer_lag_estimate_seconds", "", "silent", ""),
+        None
+    );
     assert_eq!(value(&all, "open_gaps", "", "origin-a", ""), Some(0.0));
 
     exec(

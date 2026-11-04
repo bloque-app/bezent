@@ -19,7 +19,7 @@ The core checks every final `Minted` and `RefundMinted` of the issuing network a
 reference **after** bezent proved that reference not executed, or of a reference whose order was never signed, is a late
 mint: a leaked delivery key, governance, or an attempt bezent did not record. It raises `key-compromise` (see
 `pages/key-compromise.md`). The three pages below are the check telling you it cannot do its job. They are written from
-the code of `services/core/src/late_mint.rs` (PR #72).
+the code of `services/core/src/late_mint.rs` (PR #72, merged).
 
 | Page | Meaning |
 |---|---|

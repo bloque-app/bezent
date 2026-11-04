@@ -44,9 +44,12 @@ CREATE TABLE admin_actions (
 );
 
 COMMENT ON TABLE admin_actions IS
-    'REQ-GV-5, AC-I3.1: every administrative act, with its actor (the session login) and its '
-    'justification, append-only. A pause, a request to lift it and the approval that lifts it; '
-    'acts performed elsewhere are recorded here by operator_record.';
+    'REQ-GV-5, AC-I3.1: the administrative acts the store performs or is told of, each with its actor '
+    '(the session login) and justification, append-only. A pause, a request to lift it and the approval '
+    'that lifts it are recorded by the functions that perform them. An act performed elsewhere (a key '
+    'rotation, a bound, a route, a credential) is here only if an operator recorded it with '
+    'operator_record: that is voluntary, and the schema owner changes declarations unrecorded. This is '
+    'not every administrative act, and AC-I3.1 is partial.';
 
 CREATE FUNCTION admin_actions_by_session() RETURNS trigger
     LANGUAGE plpgsql

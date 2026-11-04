@@ -21,7 +21,7 @@ owner, never a failure and never a refund on a timer (`REQ-RF-1`, `REQ-RV-1`).
 | Page | Meaning | Runbook |
 |---|---|---|
 | `payout-window-alert` | `CND-PayoutWindow` has been held past its bound. | `../conditions/CND-PayoutWindow.md` |
-| `payout-refusal-alert` | The payout's preparation is refused many times in a row with no named condition. It goes to review at its deadline. Paged once per attempt. | below |
+| `payout-refusal-alert` | The payout's preparation is refused ten times in a row with no named condition. It goes to review at its deadline. Paged once per attempt. | below |
 | `resolution-blocked-by-inclusion` | A refund or a new attempt (by resolution or automatically) waits because the payout is observed included and not withdrawn. Once, then daily. | below |
 
 ## Pages
@@ -61,7 +61,7 @@ payload and from the endpoint's own log; the refusal text is the network's, not 
 
 ## Exercise
 
-On the test bed: make the provider refuse a payout twelve times and see the single page; include a payout, order a refund
+On the test bed: make the provider refuse a payout ten times in a row (`REFUSAL_PAGE_AFTER` in `services/core/src/engine.rs`; nine pages nothing) and see the single page, still single after more refusals; include a payout, order a refund
 and see the hold and the single daily page; withdraw the inclusion and see the resolution run.
 
 Status: not exercised (NFR-9). Behaviour proven by the tests listed above, not by a run of this runbook.

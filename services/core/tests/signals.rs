@@ -6,25 +6,9 @@
 
 mod common;
 
-use std::io::Write;
-use std::sync::{Arc, Mutex};
-
 use bezent_core_service::signals;
 use common::*;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-
-#[derive(Clone, Default)]
-struct Buffer(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Buffer {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted(
@@ -32,15 +16,7 @@ async fn req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted(
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
-    let buffer = Buffer::default();
-    let writer = buffer.clone();
-    let _guard = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_target(false)
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish(),
-    );
+    let log = PageLog::start();
     // As an endpoint raises it: the alert, then the request to pause. And one the reserve check
     // raised for a supply mismatch, which it pages itself.
     exec(
@@ -54,8 +30,8 @@ async fn req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted(
     assert_eq!(signals::surface(w.core.pool()).await.unwrap(), 1);
     // Once: marked in the log, so the next cycle repeats nothing.
     assert_eq!(signals::surface(w.core.pool()).await.unwrap(), 0);
-    let out = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
-    assert_eq!(out.matches("kind=key-compromise").count(), 1, "{out}");
+    let out = log.text();
+    assert_page(&log, "key-compromise", 1);
     assert!(out.contains("ERROR"), "{out}");
     assert!(out.contains("detector=evm-endpoint"), "{out}");
     assert!(out.contains("nothing has paused yet"), "{out}");

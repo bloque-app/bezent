@@ -1,0 +1,17 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "bezent-logging"
+description = "bezent's one log format: plain text, no colour, no target, so a metric filter on `kind=<kind>` matches (F-014)"
+edition.workspace = true
+version.workspace = true
+license = "Apache-2.0 OR MIT"
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bezent_logging"
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }

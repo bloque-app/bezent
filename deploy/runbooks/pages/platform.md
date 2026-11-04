@@ -7,7 +7,7 @@ id: platform
 kind: pages
 covers: [REQ-IC-1, REQ-IC-2, REQ-AR-3, NFR-6, NFR-7]
 pages: []
-observables: [observer_lag_seconds, open_gaps, undelivered_notifications, undelivered_notifications_oldest_age_seconds, dead_notifications]
+observables: [observer_lag_estimate_seconds, open_gaps, undelivered_notifications, undelivered_notifications_oldest_age_seconds, dead_notifications]
 tests: [services/kreivo-endpoint/tests/network.rs, services/evm-endpoint/tests/network.rs, services/core/tests/health.rs]
 exercised: no
 ---
@@ -29,7 +29,7 @@ notifications.
 
 ```sql
 SELECT metric, asset, network, direction, value FROM ops_observables()
-WHERE metric IN ('observer_lag_seconds', 'open_gaps', 'undelivered_notifications',
+WHERE metric IN ('observer_lag_estimate_seconds', 'open_gaps', 'undelivered_notifications',
                  'undelivered_notifications_oldest_age_seconds', 'dead_notifications') ORDER BY 1, 3;
 ```
 
@@ -41,7 +41,7 @@ Then the service's health (`deploy/health.md`: a container's `health` subcommand
    the service's, the environment is not the declared one, or a network's identity is not the declared one
    (`REQ-IC-1`, `AC-I4.1`). Do not work around it. Fix the declaration or the endpoint it points at, from the deployment's
    own notes; the service must never run against a network that is not the one declared.
-2. **An observer behind** (`observer_lag_seconds` above 60 for a network, `NFR-6`): look at the endpoint's health file and
+2. **An observer behind** (`observer_lag_estimate_seconds` above 60 for a network, an estimate of `NFR-6`'s lag; see `alerts.md`): look at the endpoint's health file and
    its log. Beyond the route's budget the reserve check stalls and pauses the asset (`pages/reserve.md`).
 3. **A store that cannot be reached** for five minutes: the services keep trying and every service's cycle reports it.
    Restore the store from the deployment's own notes. After a restore, re-run the grants (`crates/store/README.md`; F-001
@@ -65,6 +65,6 @@ Then the service's health (`deploy/health.md`: a container's `health` subcommand
 ## Exercise
 
 On the test bed: point an endpoint at a network that is not the declared one and see it refuse to start; stop an endpoint
-and see the lag metric rise past 60 s and the alarm fire.
+and see `observer_lag_estimate_seconds` rise past 60 s and the alarm fire.
 
 Status: not exercised (NFR-9). Behaviour proven by the tests listed above, not by a run of this runbook.
