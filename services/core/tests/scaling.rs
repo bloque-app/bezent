@@ -31,9 +31,9 @@ async fn declare_bbtc(w: &World) {
              INSERT INTO reserves (asset, network, address) VALUES ('bBTC', '{ORIGIN}', '{BBTC_RESERVE}'); \
              INSERT INTO routes (asset, network, direction, minimum, maximum, window_limit, \
                  window_seconds, capacity, cutoffs, completion_budget_seconds) VALUES \
-               ('bBTC', '{ORIGIN}', 'deposit', 1, 100000000000000000000000, \
+               ('bBTC', '{ORIGIN}', 'deposit', {RATIO}, 100000000000000000000000, \
                   100000000000000000000000, 86400, 100, '[]', {BUDGET}), \
-               ('bBTC', '{ORIGIN}', 'withdrawal', 1, 100000000000000000000000, \
+               ('bBTC', '{ORIGIN}', 'withdrawal', {RATIO}, 100000000000000000000000, \
                   100000000000000000000000, 86400, 100, '[]', {BUDGET});"
         ),
     )
@@ -245,4 +245,96 @@ async fn req_as_10_a_bbtc_payout_is_exactly_the_redeemed_amount_times_the_ratio(
             "the payout of {redeemed}"
         );
     }
+}
+
+/// `REQ-LM-1`, `REQ-AS-9`: an arrival under one ratio mints nothing, so no route may take one. Found
+/// by this file's boundary tests: with a route minimum under the ratio (which 0010 allowed) the core
+/// ordered a mint of 0 for a deposit of `ratio - 1`; the transfer then sat in `Source-Final` for good
+/// and its remainder stayed in owed mint, never in surplus. Migration 0057 refuses such a
+/// declaration, in either order of declaring the token and the route; this test pins that, and that
+/// the smallest compliant minimum (one unit of bBTC) still deposits and leaves no remainder.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_lm_1_a_route_minimum_under_one_unit_of_the_asset_is_refused(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    declare_bbtc(&w).await;
+    let refused = |sql: String| {
+        let admin = w.admin.clone();
+        async move {
+            let err = sqlx::raw_sql(&sql)
+                .execute(&admin)
+                .await
+                .expect_err(&format!("accepted: {sql}"));
+            let msg = err.to_string();
+            assert!(msg.contains("under one minor unit"), "{msg}");
+        }
+    };
+    // A route under the ratio, written after the token: refused, in either direction.
+    for direction in ["deposit", "withdrawal"] {
+        exec(
+            &w.admin,
+            &format!("DELETE FROM routes WHERE asset = 'bBTC' AND direction = '{direction}'"),
+        )
+        .await;
+        refused(format!(
+            "INSERT INTO routes (asset, network, direction, minimum, maximum, window_limit, \
+                 window_seconds, capacity, cutoffs, completion_budget_seconds) VALUES \
+               ('bBTC', '{ORIGIN}', '{direction}', {}, {RATIO}00, {RATIO}00, 86400, 1, '[]', {BUDGET})",
+            RATIO - 1
+        ))
+        .await;
+        // The minimum of exactly one unit is the smallest allowed.
+        exec(
+            &w.admin,
+            &format!(
+                "INSERT INTO routes (asset, network, direction, minimum, maximum, window_limit, \
+                     window_seconds, capacity, cutoffs, completion_budget_seconds) VALUES \
+                   ('bBTC', '{ORIGIN}', '{direction}', {RATIO}, {RATIO}00, {RATIO}00, 86400, 1, '[]', {BUDGET})"
+            ),
+        )
+        .await;
+        // And it cannot be lowered afterwards.
+        refused(format!(
+            "UPDATE routes SET minimum = {} WHERE asset = 'bBTC' AND direction = '{direction}'",
+            RATIO - 1
+        ))
+        .await;
+    }
+    // A token whose precision would put an existing route under its ratio: refused.
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO assets (asset, precision, assurance_class, issuing_asset) \
+               VALUES ('bX', 6, 'public', 'Here(104)'); \
+             INSERT INTO routes (asset, network, direction, minimum, maximum, window_limit, \
+                 window_seconds, capacity, cutoffs, completion_budget_seconds) VALUES \
+               ('bX', '{ORIGIN}', 'deposit', 1, 10, 10, 86400, 1, '[]', 60)"
+        ),
+    )
+    .await;
+    refused(format!(
+        "INSERT INTO admitted_tokens (network, token, asset, precision) VALUES ('{ORIGIN}', 'tokx', 'bX', 18)"
+    ))
+    .await;
+}
+
+/// `REQ-AS-9` at the smallest deposit the route takes: exactly one unit of bBTC. It mints 1 and
+/// leaves no remainder.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_as_9_the_smallest_deposit_a_route_takes_mints_one_unit_and_leaves_no_remainder(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    declare_bbtc(&w).await;
+    let (id, ordered, bridge) = deposit_bbtc(&w, 100, RATIO).await;
+    assert_eq!(ordered, 1);
+    assert_eq!(w.state(id).await.0, "Completed");
+    assert_eq!(balance(&w.admin, "bBTC", "surplus", Some(&bridge)).await, 0);
+    assert_eq!(
+        balance(&w.admin, "bBTC", "supply", None).await,
+        -i128::try_from(RATIO).unwrap()
+    );
 }

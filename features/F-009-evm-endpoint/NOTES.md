@@ -195,8 +195,14 @@ configuration), so a network is an instance, not code. What `M-2` added:
 - **Scaling** (`REQ-AS-9`, `REQ-AS-10`): already in the core (mint floors, the book posts the remainder, a payout is
   the redeemed amount times the ratio, checked). `services/core/tests/scaling.rs` drives bBTC as the plan declares it
   (8 against 18, ratio 10^10) through the store at the boundaries (r, r+1, 2r-1, 2r, 2r+1, just under 1 BTC, the
-  largest the route takes) and seeded values. An arrival under one ratio (it would mint nothing) is not tested: the
-  route's minimum is what keeps it out, and the plan does not say what the core does with one.
+  largest the route takes) and seeded values. An arrival under one ratio mints nothing, and a probe showed what the
+  core did with a deposit of one: it ordered a mint of 0, the transfer sat in `Source-Final` for good, and the
+  remainder stayed in owed mint, never in surplus. `REQ-LM-1` settles it (a route's minimum is at least one minor
+  unit of the bridged asset, in the origin token, and the request is refused below it), but 0010 only checked
+  `minimum >= 1`. Migration 0057 refuses a route under its ratio, whichever of the route and the token's precision
+  is declared last. **Open question for the owner:** an arrival under one ratio that is already bound (a route
+  declared before 0057, or any future path that binds one) still orders a mint of 0; the spec does not say whether the
+  core should instead book the whole arrival as surplus and complete, or hold a named condition. Not invented here.
 
 - **Fork tests on each network** (`tests/fork.rs`, now generic over a `Net`): the four scenarios (start-up identity,
   the vault's Roles check, an arrival then a payout with its reference, a forced non-execution and a wrapped copy)
