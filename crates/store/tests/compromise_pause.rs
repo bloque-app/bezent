@@ -435,3 +435,70 @@ async fn nfr_7_an_alert_the_owner_replays_pauses_nothing_and_its_own_pause_row_s
         .unwrap();
     assert!(pause_of(&pool, live).await.is_some());
 }
+
+/// `NFR-7`, review of the fix round of #77: production's owner is `bezent_owner`, a login with
+/// CREATEROLE that is not a superuser (the pattern of a managed server; `migrate-createrole-owner`
+/// in CI runs the migrations as one, and its test checks the same there). Such an owner reaches the
+/// `pg_has_role` branch of both functions, which the test server's superuser does not reach alone
+/// (`rolsuper` answers first for it in the replay function). Here the tables are handed to a
+/// non-superuser login, and the replay of an alert as that owner pauses nothing, while the pause
+/// row it replays with it loads. A login that owns nothing still pauses.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn nfr_7_a_non_superuser_owner_replays_an_alert_and_pauses_nothing(pool: PgPool) {
+    const OWNER: &str = "compromise_pause_tests_createrole_owner";
+    declare(&pool).await;
+    exec(
+        &pool,
+        &format!(
+            "DO $$ BEGIN \
+               IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{OWNER}') THEN \
+                 BEGIN CREATE ROLE {OWNER} LOGIN CREATEROLE NOSUPERUSER PASSWORD 'test-only-owner-login'; \
+                 EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END; \
+               END IF; \
+             END $$; \
+             ALTER TABLE event_log OWNER TO {OWNER}; \
+             ALTER TABLE pauses OWNER TO {OWNER};"
+        ),
+    )
+    .await;
+    let options = (*pool.connect_options())
+        .clone()
+        .username(OWNER)
+        .password("test-only-owner-login");
+    let owner = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .unwrap_or_else(|e| panic!("log in as {OWNER}: {e}"));
+    let superuser: bool =
+        sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = session_user")
+            .fetch_one(&owner)
+            .await
+            .unwrap();
+    assert!(!superuser, "this test is about an owner that is not one");
+
+    let seq = raise(&owner, "owner", "replayed-by-a-non-superuser-owner")
+        .await
+        .unwrap();
+    assert_eq!(
+        pause_of(&pool, seq).await,
+        None,
+        "a non-superuser owner's replay paused"
+    );
+    assert_eq!(all_pauses(&pool).await, 0);
+    // The pause row the same restore brings loads: the guard of 0095 admits the owner by role.
+    exec(
+        &owner,
+        &format!("INSERT INTO pauses (cause, alert_seq) VALUES ('REQ-IC-4', {seq})"),
+    )
+    .await;
+    assert!(pause_of(&pool, seq).await.is_some());
+    owner.close().await;
+
+    // The other side: a detector's login, in the same store, still pauses.
+    let signer = login(&pool, bezent_store::SIGNER_ROLE).await;
+    let live = raise(&signer, bezent_store::SIGNER_ROLE, "live")
+        .await
+        .unwrap();
+    assert!(pause_of(&pool, live).await.is_some());
+}
