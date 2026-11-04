@@ -9,18 +9,29 @@
 //! shows the shape of the line, and the shape is applied to the captured line, so a renamed kind,
 //! a reordered field or a reworded runbook fails a test instead of drifting.
 
+use std::cell::RefCell;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-
-use tracing::subscriber::DefaultGuard;
+use std::sync::{Arc, Mutex, Once};
 
 #[derive(Clone, Default)]
 struct Buffer(Arc<Mutex<Vec<u8>>>);
 
-impl Write for Buffer {
+thread_local! {
+    /// Where this thread's log lines go: the buffer of the innermost `PageLog` alive on it.
+    static CURRENT: RefCell<Option<Buffer>> = const { RefCell::new(None) };
+}
+
+/// The writer of the one subscriber: a line goes to the current thread's buffer, or nowhere.
+struct Routed;
+
+impl Write for Routed {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
+        CURRENT.with(|current| {
+            if let Some(buffer) = current.borrow().as_ref() {
+                buffer.0.lock().unwrap().extend_from_slice(bytes);
+            }
+        });
         Ok(bytes.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -28,28 +39,46 @@ impl Write for Buffer {
     }
 }
 
+/// Installs the services' subscriber as the process's, once. A subscriber set per thread
+/// (`set_default`) is not safe beside the other tests' threads: `tracing-core` keeps a callsite's
+/// interest cached, and while exactly one subscriber is registered (`has_just_one`) it asks only
+/// the thread that reaches the callsite. A test thread that has no subscriber caches the engine's
+/// callsite as never enabled, and the test that has one then captures nothing, with its event-log
+/// assertions passing beside an empty log; it shows only when the tests run in parallel. A
+/// process-wide subscriber is the answer every thread gets, so every callsite stays enabled
+/// whichever thread reaches it first; which test a line belongs to is decided by [`CURRENT`].
+pub fn install() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        tracing::subscriber::set_global_default(bezent_logging::subscriber(|| Routed))
+            .expect("another global tracing subscriber is set in this test binary");
+    });
+}
+
 /// The services' log, captured for the current thread until this is dropped. The tests run on a
 /// current-thread runtime, so every event of the test lands here.
 pub struct PageLog {
     buffer: Buffer,
-    _guard: DefaultGuard,
+    previous: Option<Buffer>,
 }
 
 impl PageLog {
     pub fn start() -> Self {
+        install();
         let buffer = Buffer::default();
-        let writer = buffer.clone();
-        let guard =
-            tracing::subscriber::set_default(bezent_logging::subscriber(move || writer.clone()));
-        Self {
-            buffer,
-            _guard: guard,
-        }
+        let previous = CURRENT.with(|current| current.replace(Some(buffer.clone())));
+        Self { buffer, previous }
     }
 
     /// Everything logged so far.
     pub fn text(&self) -> String {
         String::from_utf8(self.buffer.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl Drop for PageLog {
+    fn drop(&mut self) {
+        CURRENT.with(|current| *current.borrow_mut() = self.previous.take());
     }
 }
 
