@@ -37,7 +37,9 @@ BEGIN
 END
 $$;
 
--- A route written after its token is declared: checked on the new values as written.
+-- A route written after its token is declared: checked on the new values as written. The one token
+-- looked at is the only one: 0050's unique index admits one token per (network, asset), so the
+-- SELECT below cannot pick among several ratios.
 CREATE FUNCTION route_minimum_on_route() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp

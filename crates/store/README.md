@@ -278,6 +278,19 @@ stop working as soon as it runs. As the migration owner, on the release's store:
    It sets no `statement_timeout`: a long migration is not an error.
 3. **Bring every login to its role alone**: run the block below once per service login, with the
    login's name and its role. It is safe on a login made for an earlier release, and on a new one.
+   **An EVM endpoint login also needs its network** (migration 0056, `DEC-8`). Each EVM endpoint instance
+   records one network, and the store refuses every record of an EVM network its login is not mapped to
+   (`BZ001`). As the migration owner, insert one row per login and network, **before starting that instance**:
+
+   ```sql
+   -- deploy: one row per EVM endpoint login and the one network it runs
+   INSERT INTO evm_endpoint_networks (login, network) VALUES ('bezent_evm_base_prod', 'base');
+   ```
+
+   The EVM endpoint refuses to start if its login has no row for its own network, naming both. A login that
+   already held `bezent_evm_endpoint` when 0056 ran was mapped to **every** EVM origin network declared at that
+   moment; delete the surplus rows (`DELETE FROM evm_endpoint_networks WHERE login = '…' AND network <> '…'`) so
+   each login keeps only its own. Other services read nothing of this table.
 4. **Make each operator's login** (one per person, below) and bring it to `bezent_operator` the same way.
 5. **Check** every login (the query at the end) and **start** the services. Each runs its own check
    before it serves and refuses to start, saying why, if anything is left.

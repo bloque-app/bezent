@@ -27,8 +27,10 @@ COMMENT ON TABLE evm_endpoint_networks IS
     'F-009 S7: the EVM networks each login holding bezent_evm_endpoint may record. A login with no row records nothing.';
 
 -- Today's deployments: each login that holds the role records the EVM networks declared now.
+-- DISTINCT: from PostgreSQL 16 `pg_auth_members` holds one row per grantor, so a login granted the
+-- role by two grantors appears twice, and the primary key would abort this migration.
 INSERT INTO evm_endpoint_networks (login, network)
-SELECT u.rolname, n.network
+SELECT DISTINCT u.rolname, n.network
 FROM pg_auth_members m
 JOIN pg_roles g ON g.oid = m.roleid AND g.rolname = 'bezent_evm_endpoint'
 JOIN pg_roles u ON u.oid = m.member

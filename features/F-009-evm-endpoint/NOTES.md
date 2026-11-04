@@ -179,7 +179,7 @@ configuration), so a network is an instance, not code. What `M-2` added:
   written by the owner only. The guard of 0035 now refuses a record of an EVM network unless every login in play
   (`session_user`, `current_user`) is mapped to it; a login holding the role with no row records nothing. Existing
   deployments keep working: the migration maps every login that holds the role to the EVM networks declared at that
-  moment. **Deployment:** each new instance's login needs its row before it can record. The role still inherits
+  moment. **Deployment:** each new instance's login needs its row before it can record: the migration owner inserts one row per login and network before starting the instance, and the endpoint refuses to start without it (`network::check_mapping`). A login backfilled by 0056 holds a row for every EVM network declared at that time; delete the surplus. (README, "Bring every login to its role alone".) The role still inherits
   `bezent_service`'s grants through `bezent_endpoint` (S7's second half) and is unchanged.
 - **Signer**: no code change. `services/signer/tests/evm_instances.rs` extends the central fixture in memory with
   one caller per instance (own certificate name, token and `allow` of its own network, `payout` and `cancel`) and
