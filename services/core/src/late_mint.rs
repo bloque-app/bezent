@@ -249,7 +249,7 @@ impl Watcher {
         if let Ok(mut conn) = pool.acquire().await {
             let _ = store::event(&mut conn, "late-mint-watch-failed", None, &detail).await;
         }
-        tracing::error!(kind = "late-mint-watch-failed", %detail,
+        tracing::error!(kind = %"late-mint-watch-failed", %detail,
             "page: the core cannot list the mints to check against their proofs, cycle after cycle; no late mint would be seen");
     }
 }
@@ -350,7 +350,7 @@ async fn hold(conn: &mut PgConnection, c: &Candidate, wait: &Wait) -> sqlx::Resu
         "meaning": "the prover has recorded nothing for these attempts of the reference (no proof, inclusion or anomaly) though their eras are over, and a mint of the reference waits on it: the prover is down or stuck, an inclusion older than its max_walk is never recorded, or a key is compromised; nothing is raised or paused",
     });
     store::event(conn, "late-mint-prover-silent", None, &detail).await?;
-    tracing::error!(kind = "late-mint-prover-silent", %detail,
+    tracing::error!(kind = %"late-mint-prover-silent", %detail,
         "page: a mint of a reference waits on an attempt the prover does not decide; it is the prover (stuck, down, max_walk) or a compromised key");
     Ok(())
 }
@@ -394,7 +394,7 @@ async fn failed(conn: &mut PgConnection, c: &Candidate, error: &sqlx::Error) {
         .await
         .is_ok()
     {
-        tracing::error!(kind = "late-mint-check-failed", %detail,
+        tracing::error!(kind = %"late-mint-check-failed", %detail,
             "page: a mint of the issuing network cannot be checked against its proofs, again and again; a late mint would go unseen");
     }
 }

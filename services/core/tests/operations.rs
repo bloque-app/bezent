@@ -64,12 +64,15 @@ async fn ac_i2_1_an_operators_pause_holds_new_work_in_each_scope_and_a_second_op
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
-    // Scopes that cover a deposit on (ASSET, ORIGIN): global, the asset, the network, the direction.
-    let covering: [(Option<&str>, Option<&str>, Option<&str>); 4] = [
+    // Scopes that cover a deposit on (ASSET, ORIGIN): global, the asset, the network, the direction,
+    // and the route.
+    let covering: [(Option<&str>, Option<&str>, Option<&str>); 5] = [
         (None, None, None),
         (Some(ASSET), None, None),
         (None, Some(ORIGIN), None),
         (None, None, Some("deposit")),
+        // A route: asset, network and direction together (REQ-GV-1: per route).
+        (Some(ASSET), Some(ORIGIN), Some("deposit")),
     ];
     for (i, (asset, network, direction)) in covering.into_iter().enumerate() {
         let block = 10 + 10 * i as i64;
@@ -110,7 +113,7 @@ async fn ac_i2_1_an_operators_pause_holds_new_work_in_each_scope_and_a_second_op
     let n: i64 = w
         .count("SELECT count(*) FROM admin_actions WHERE kind = 'unpause' AND actor = 'ops_bob_for_tests'")
         .await;
-    assert_eq!(n, 4);
+    assert_eq!(n, 5);
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -152,19 +155,29 @@ async fn ac_i2_1_a_pause_does_not_fail_or_refund_work_in_flight(
 }
 
 #[test]
-fn nfr_8_the_shipped_cycle_is_well_inside_the_pause_bound() {
+fn nfr_8_the_cycle_that_reads_the_pause_is_well_inside_the_bound() {
     // A pause takes effect for new work at the next cycle (the gate reads `pauses`), so the
-    // off-chain part of NFR-8's 30 s is the cycle plus the time a cycle takes. The shipped
-    // configuration sets the cycle; the test above measures the second term.
-    let config = bezent_core_service::Config::from_file(std::path::Path::new(concat!(
+    // off-chain part of NFR-8's 30 s is the cycle plus the time a cycle takes. The cycle is a
+    // configuration value: its default, and the repository's fixture (a test value, not the
+    // deployment's), are both within ten seconds; the deployment's own template is not in this
+    // repository, and `features/F-014-operations/NOTES.md` says what to check there. The test
+    // above measures the second term.
+    let default: bezent_core_service::Config =
+        toml::from_str("database_url = \"postgres://core@db/bezent\"\n").unwrap();
+    assert!(
+        default.cycle_seconds <= 10,
+        "default cycle_seconds = {}",
+        default.cycle_seconds
+    );
+    let fixture = bezent_core_service::Config::from_file(std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/core.toml"
     )))
-    .expect("the shipped configuration loads");
+    .expect("the fixture configuration loads");
     assert!(
-        config.cycle_seconds <= 10,
+        fixture.cycle_seconds <= 10,
         "cycle_seconds = {}",
-        config.cycle_seconds
+        fixture.cycle_seconds
     );
 }
 

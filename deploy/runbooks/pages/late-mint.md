@@ -7,12 +7,11 @@ id: late-mint
 kind: pages
 covers: [REQ-IC-4, REQ-IC-2, AC-I1.2, INV-8, INV-9, INV-16]
 pages: [late-mint-prover-silent, late-mint-watch-failed, late-mint-check-failed]
-not_on_base: [late-mint-prover-silent, late-mint-watch-failed, late-mint-check-failed]
 observables: [pauses_in_force]
-tests: []
+tests: [services/core/tests/late_mint.rs]
 exercised: no
 ---
-# Late-mint pages (open PR #72; not on this base)
+# Late-mint pages
 
 ## What it is
 
@@ -20,7 +19,7 @@ The core checks every final `Minted` and `RefundMinted` of the issuing network a
 reference **after** bezent proved that reference not executed, or of a reference whose order was never signed, is a late
 mint: a leaked delivery key, governance, or an attempt bezent did not record. It raises `key-compromise` (see
 `pages/key-compromise.md`). The three pages below are the check telling you it cannot do its job. They are written from
-the code of PR #72 and are **not on `develop` yet**; verify the kinds against the merged code.
+the code of `services/core/src/late_mint.rs` (PR #72).
 
 | Page | Meaning |
 |---|---|
@@ -60,7 +59,7 @@ public chain data, and the endpoint's health for the prover (`deploy/health.md`)
 
 ## Exercise
 
-Not possible on this base. On the test bed after PR #72 merges: mint a reference after its proof, and again with the
-prover stopped.
+On the test bed: mint a reference after its proof, and again with the prover stopped; stop the store's grant for the
+check and see the watch fail.
 
 Status: not exercised (NFR-9). Behaviour proven by the tests listed above, not by a run of this runbook.

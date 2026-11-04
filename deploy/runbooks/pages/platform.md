@@ -59,6 +59,8 @@ Then the service's health (`deploy/health.md`: a container's `health` subcommand
 - Never restart a service in a loop to clear an alarm that a poisoned row or a stuck network causes; the remedy is the
   cause (`deploy/health.md`, "What the checks do not cover").
 - Never run a restore over a live store, or skip the grants after one (`NFR-7`).
+- Never "repair" a transfer's status or the book by hand to clear an alarm: no administrative path moves value or edits a
+  status (`REQ-GV-5`).
 
 ## Exercise
 

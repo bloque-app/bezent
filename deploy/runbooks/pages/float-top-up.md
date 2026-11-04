@@ -49,6 +49,8 @@ and the delivery account's native balance on its network from public chain data.
 - Never send the bridged asset or its origin token to a delivery account as a top-up: an arrival at a reserve is
   a deposit or owed mint (`INV-1`, `INV-2`).
 - Never raise the key's bound on chain to cover a shortfall (`REQ-KY-3`, `REQ-GV-2`).
+- Never release a held transfer, or change its status, once the float is topped up: it resumes by itself, and no
+  administrative path edits a status or moves value (`REQ-GV-5`).
 
 ## Exercise
 

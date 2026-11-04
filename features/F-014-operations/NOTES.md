@@ -54,16 +54,17 @@ and what is left. The runbooks are in `deploy/runbooks/`; read `alerts.md` there
 
 | Criterion | Layer (SPEC §9) | State here |
 |---|---|---|
-| `AC-H3.1` | Service, over the store | passes: every `REQ-ST-6` item but fee positions is one read; fee positions are open |
-| `AC-I2.1` | Service + chain | service half passes (four scopes, in flight continues, a second login lifts); the chain half is `F-006`'s, `contracts/bezent` |
-| `AC-I3.1` | Store | passes for the pause, its lifting and the acts recorded with `operator_record`; see "Open" for what still bypasses it |
+| `AC-H3.1` | Service, over the store | **partial**: every `REQ-ST-6` item but fee positions is one read, tested; fee positions are not observable (Open 2) |
+| `AC-I2.1` | Service + chain | service half passes (global, asset, network, direction and route; in flight continues; a second login lifts); `REQ-IC-2`'s pause on a compromise is not applied by bezent (Open 1); the chain half is `F-006`'s, `contracts/bezent` |
+| `AC-I3.1` | Store | **partial**: passes for the pause, its lifting and the acts recorded with `operator_record`; recording an act done elsewhere is voluntary, and the schema owner edits declarations with no record (Open 3) |
 | `AC-I3.2` | Store | passes |
 | `AC-I4.1` | Service | passes (existing tests of both endpoints, named; the EVM one shown to fail with its check removed) |
 
 ## Measured, and what needs a live environment
 
-- **`NFR-8`** (pause within one block or 30 s): the off-chain part is the core's next cycle (the shipped configuration sets
-  five seconds; a test fails above ten) plus the cycle's own time. A test pauses as an operator, runs one cycle and
+- **`NFR-8`** (pause within one block or 30 s): the off-chain part is the core's next cycle (`cycle_seconds`: the default is five
+  seconds, and the deployment's own template sets the same value; a test fails if the default or the repository's
+  fixture exceeds ten) plus the cycle's own time. A test pauses as an operator, runs one cycle and
   measures the elapsed time (6 to 14 ms against a local store). The ingress reads `pauses` on each request.
   Not measured: a pause on chain (the contract's), and a cycle under production load.
 - **`NFR-6`** (observer lag within 60 s): the quantity is observable and is `observer_lag_seconds`; a test shows it moves.

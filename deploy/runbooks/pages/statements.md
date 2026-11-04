@@ -59,6 +59,8 @@ store refused an overwrite.
   (`REQ-PR-2`).
 - Never write a statement by hand, or backdate one, or sign with a key other than the statement key.
 - Never treat a late statement as a reserve problem, or the reverse: the reserve is `pages/reserve.md`.
+- Never edit the book, a status or a reserve reading to make a statement come out; no administrative path moves value or
+  edits a status (`REQ-GV-5`).
 
 ## Exercise
 

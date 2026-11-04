@@ -206,8 +206,9 @@ $$;
 REVOKE ALL ON admin_actions FROM PUBLIC;
 GRANT SELECT ON admin_actions TO bezent_operator;
 -- What a runbook's "confirm" reads, read-only: the pauses in force (to name one to lift), a
--- transfer's status and the sequenced log (the page's own event and its detail). An operator
--- reads the log a requester can read through the ingress, and the status a requester can query.
+-- transfer's status and the sequenced log. The log holds every page's own entry with its detail
+-- (a requester reads only the entries about its own transfers, through the ingress), so an
+-- operator needs the whole of it to confirm a page.
 GRANT SELECT ON pauses, transfer_status, event_log TO bezent_operator;
 
 REVOKE EXECUTE ON FUNCTION

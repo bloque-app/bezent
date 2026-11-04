@@ -60,11 +60,17 @@ fn parse(path: &Path) -> Runbook {
     // The licence header comes first (the licensing check reads the top of the file); the front
     // matter follows it.
     let text = match text.strip_prefix("<!--") {
-        Some(after) => after.split_once("-->\n").map_or(text.as_str(), |(_, rest)| rest).to_owned(),
+        Some(after) => after
+            .split_once("-->\n")
+            .map_or(text.as_str(), |(_, rest)| rest)
+            .to_owned(),
         None => text,
     };
     let rest = text.strip_prefix("---\n").unwrap_or_else(|| {
-        panic!("{}: front matter must follow the licence header", path.display())
+        panic!(
+            "{}: front matter must follow the licence header",
+            path.display()
+        )
     });
     let (head, body) = rest
         .split_once("\n---\n")
@@ -193,8 +199,9 @@ fn req_ic_6_each_incident_requirement_is_answered_by_a_runbook() {
     }
 }
 
-/// Every kind the services log as a page, from their sources: a `Page { kind: "…" }` and a
-/// `tracing::error!(kind = %"…")`.
+/// Every kind the services log as a page, from the places that emit one: a `Page { kind: "…" }`,
+/// and the first lines of a `tracing::error!(` call (`kind = %"…"`, or a quoted one, which
+/// `pages.rs` refuses).
 fn page_kinds_in_source() -> BTreeSet<String> {
     let mut files = Vec::new();
     for service in [
@@ -214,23 +221,23 @@ fn page_kinds_in_source() -> BTreeSet<String> {
     let mut kinds = BTreeSet::new();
     for f in files {
         let src = read(&f);
-        for (open, close) in [
-            ("kind: \"", "\""),
-            ("kind = %\"", "\""),
-            ("kind = \"", "\""),
+        for (site, window, opens) in [
+            ("Page {", 3, ["kind: \"", "kind: \""]),
+            ("tracing::error!(", 2, ["kind = %\"", "kind = \""]),
         ] {
             let mut rest = src.as_str();
-            while let Some(at) = rest.find(open) {
-                let tail = &rest[at + open.len()..];
-                let kind = tail.split(close).next().unwrap();
-                // A page kind is lower-case words joined by hyphens, at least two of them.
-                if kind.contains('-')
-                    && kind.chars().all(|c| c.is_ascii_lowercase() || c == '-')
-                    && !kind.starts_with('-')
-                {
-                    kinds.insert(kind.to_owned());
+            while let Some(at) = rest.find(site) {
+                let tail = &rest[at..];
+                let head: String = tail.lines().take(window).collect::<Vec<_>>().join(" ");
+                for open in opens {
+                    if let Some(i) = head.find(open) {
+                        let kind = head[i + open.len()..].split('"').next().unwrap();
+                        if !kind.is_empty() {
+                            kinds.insert(kind.to_owned());
+                        }
+                    }
                 }
-                rest = tail;
+                rest = &tail[site.len()..];
             }
         }
     }
@@ -239,34 +246,10 @@ fn page_kinds_in_source() -> BTreeSet<String> {
 
 #[test]
 fn f_014_every_page_the_services_log_has_a_runbook_and_a_row_in_alerts() {
-    let in_source: BTreeSet<String> = page_kinds_in_source()
-        .into_iter()
-        // Not pages: a manual action's kind, an error text, a log field's value.
-        .filter(|k| {
-            ![
-                "review-resolution",
-                "release-unassociated",
-                "kreivo-mint",
-                "kreivo-delivery",
-                "polygon-delivery",
-                "kreivo-local",
-                "polygon-payout",
-                "owed-mint",
-                "owed-payout",
-                "refund-mint",
-                "taken-in",
-                "in-transit",
-                "network-cost",
-                "venue-fee",
-                "surplus-contribution",
-                "surplus-withdrawal",
-                "unassociated-refund",
-            ]
-            .contains(&k.as_str())
-        })
-        .collect();
+    let in_source = page_kinds_in_source();
     let documented: BTreeSet<String> = runbooks().into_iter().flat_map(|r| r.pages).collect();
-    let known_pages = [
+    // The scan reads the right places: it finds the pages the brief names, among others.
+    for k in [
         "reserve-divergence",
         "reserve-alert",
         "reserve-check-incomplete",
@@ -282,34 +265,24 @@ fn f_014_every_page_the_services_log_has_a_runbook_and_a_row_in_alerts() {
         "payout-window-alert",
         "payout-refusal-alert",
         "resolution-blocked-by-inclusion",
-    ];
-    // The scan finds every known page (so it is reading the right places) ...
-    for k in known_pages {
+        "late-mint-prover-silent",
+        "late-mint-watch-failed",
+        "late-mint-check-failed",
+    ] {
         assert!(
             in_source.contains(k),
             "the scan no longer finds the page {k}"
         );
     }
-    // ... and every page it finds is documented, and every one documented exists.
-    let undocumented: Vec<_> = known_pages
-        .iter()
-        .filter(|k| !documented.contains(**k))
-        .collect();
+    // Whatever it finds has a runbook: a new page of any name fails here.
+    let undocumented: Vec<_> = in_source.difference(&documented).collect();
     assert!(
         undocumented.is_empty(),
-        "pages with no runbook: {undocumented:?}"
+        "pages the services log that no runbook names: {undocumented:?}"
     );
-    let new: Vec<_> = in_source
-        .iter()
-        .filter(|k| k.ends_with("-alert") || k.contains("late-mint") || k.starts_with("attested-"))
-        .filter(|k| !documented.contains(*k))
-        .collect();
-    assert!(new.is_empty(), "a page kind with no runbook: {new:?}");
 
     let alerts = read(&root().join("deploy/runbooks/alerts.md"));
-    let mut declared_absent = BTreeSet::new();
     for r in runbooks() {
-        declared_absent.extend(r.not_on_base.iter().cloned());
         for p in &r.pages {
             assert!(
                 alerts.contains(&format!("| `{p}` |")),
@@ -327,15 +300,12 @@ fn f_014_every_page_the_services_log_has_a_runbook_and_a_row_in_alerts() {
             );
         }
     }
-    // The pages of the two open pull requests the brief names are written down.
+    // The pages of the open pull request the brief names are written down.
     for k in [
         "attested-withdrawal-unrelayed",
         "attested-withdrawal-awaiting-head",
-        "late-mint-prover-silent",
-        "late-mint-watch-failed",
-        "late-mint-check-failed",
-        "payout-refusal-alert",
-        "resolution-blocked-by-inclusion",
+        "attested-report-refused",
+        "attested-instructions-refused",
     ] {
         assert!(documented.contains(k), "{k}");
     }
@@ -391,14 +361,18 @@ fn f_014_every_runbook_has_its_sections_and_an_honest_exercise_status() {
         if r.exercised == "no" {
             assert!(r.body.contains("Status: not exercised (NFR-9)"), "{name}");
         }
-        // Never says what never to do, and a runbook that acts says what recorded it.
+        // `Never` says that no path moves value or edits a status (`REQ-GV-5`).
+        let never = r
+            .body
+            .split("## Never")
+            .nth(1)
+            .unwrap()
+            .split("\n## ")
+            .next()
+            .unwrap();
         assert!(
-            r.body.contains("REQ-GV-5")
-                || r.kind == "procedure"
-                || r.kind == "pages"
-                || r.kind == "incident"
-                || r.kind == "condition",
-            "{name}"
+            never.contains("REQ-GV-5"),
+            "{name}: `Never` does not name REQ-GV-5"
         );
     }
     let known: BTreeSet<_> = all.iter().map(|r| r.id.clone()).collect();

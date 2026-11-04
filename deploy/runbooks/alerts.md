@@ -22,16 +22,17 @@ The container's logs are plain text (`NO_COLOR=1`, no target). The filter for a 
 **No.** Established on 2026-11-04 from the infrastructure repository's alarm definitions on its main branch (the live
 account was not readable that day: the single-sign-on session had expired, so *live state is unverified*):
 
-1. The alarms exist as code: one metric filter per pattern on the service's log group, one alarm per metric, and a
-   not-running alarm per service.
-2. Their actions are **disabled** (`actions_enabled` follows a variable whose default is false, and nothing sets it),
-   because the services have no task yet (every service's desired count is zero) and the patterns "are written from the
-   code, not from a live log".
-3. Even enabled, an alarm notifies a topic whose subscriber posts to a chat channel. That is a message in a shared
-   channel: no on-call rota, no acknowledgement, no escalation, no phone. Nobody is woken.
+1. The alarms exist as code: one metric filter per log pattern on the service's log group, one alarm per metric, a
+   not-running alarm per service and a rule for every stopped task.
+2. The **log-based, database and ingress alarms have their actions disabled**: `actions_enabled` follows a variable whose
+   default is false, and nothing in that repository sets it. The header says why: the log patterns "are written from the
+   code, not from a live log" and must be tested first. The not-running alarms and the stopped-task rule are always on,
+   but silent: every service's desired count is zero, so there is no task to run or stop.
+3. Whatever notifies goes to a topic whose subscriber posts to a chat channel. That is a message in a shared channel: no
+   on-call rota, no acknowledgement, no escalation, no phone. Nobody is woken.
 4. The patterns cover some pages only (table below).
 
-So a page today is a line in a log nobody is watching. What it needs is in "What infrastructure must add".
+So today a page is a line in a log nobody is watching. What it needs is in "What infrastructure must add".
 
 ## Page kinds
 
@@ -59,12 +60,13 @@ kind exists on `develop` at this commit.
 | `attested-withdrawal-awaiting-head` | engine | `pages/attested.md` | **no, PR #66** | no |
 | `attested-report-refused` | attested reports | `pages/attested.md` | **no, PR #66** | no |
 | `attested-instructions-refused` | engine | `pages/attested.md` | **no, PR #66** | no |
-| `late-mint-prover-silent` | late-mint check | `pages/late-mint.md` | **no, PR #72** | no |
-| `late-mint-watch-failed` | late-mint check | `pages/late-mint.md` | **no, PR #72** | no |
-| `late-mint-check-failed` | late-mint check | `pages/late-mint.md` | **no, PR #72** | no |
+| `late-mint-prover-silent` | late-mint check | `pages/late-mint.md` | yes | **no** |
+| `late-mint-watch-failed` | late-mint check | `pages/late-mint.md` | yes | **no** |
+| `late-mint-check-failed` | late-mint check | `pages/late-mint.md` | yes | **no** |
 
-The kinds of PR #66 and PR #72 are written in the code of those open pull requests, quoted
-(`kind = "..."`), so they will fail `pages.rs` when they merge until they record the kind with `%`. That is intended.
+The kinds of PR #66 are written in the code of that open pull request, quoted (`kind = "..."`), so it will fail
+`pages.rs` and `runbooks.rs` when it rebases until it records the kind with `%` and the runbook drops its
+`not_on_base` marker. That is intended. The late-mint kinds of PR #72 were quoted too and are fixed in this change.
 
 Platform alarms with no kind (`pages/platform.md`): a service not running, the store unreachable, the signer refusing an
 unauthenticated caller, the database's storage and CPU.
@@ -74,7 +76,9 @@ unauthenticated caller, the database's storage and CPU.
 The core writes the observables of `REQ-ST-6` once a minute as CloudWatch embedded-metric-format lines, namespace
 `bezent`, dimensions `Asset`, `Network`, `Direction` where they apply (`services/core/src/observe.rs`). A value that is
 unknown is left out and named in the line's `unknown` list: an alarm on **missing data** catches it, and a read that fails
-writes nothing, which is the same alarm. Alarm suggestions, each from a spec bound (no number here is a threshold of the
+writes nothing, which is the same alarm. Values pass through a 64-bit float: `reserve_amount` is exact up to 2^53 minor
+units and approximate beyond (an 18-decimal token above about 0.009 units); `ops_observables()` holds the exact value
+(`INV-11`) and the runbooks read that. Alarm suggestions, each from a spec bound (no number here is a threshold of the
 deployment):
 
 | Metric | Alarm | Spec |
