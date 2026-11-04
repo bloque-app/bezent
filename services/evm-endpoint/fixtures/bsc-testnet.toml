@@ -1,0 +1,47 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The configuration shape of the BNB Chain testnet instance (F-009, M-2; PLAN DEC-8: one instance
+# per network, with its own configuration, key lane and signer binding). For `--check` in CI and the
+# tests. No secret is here: the files it names hold them, and they need not exist for --check.
+# The vault, its Roles modifier and the emitter are placeholders until the vault is deployed on
+# BNB Chain testnet (an owner item, F-014); the lane's key is Foundry's test account 9, a test key
+# with no power anywhere (REQ-KY-6). The origin token (BTCB, 18 decimals, for bBTC; a ratio of
+# 10^10 to the asset's 8) is not here: it is admitted in the store (REQ-AS-2). Issuer's BTCB is not
+# deployed on the testnet: which token stands in is the owner's to rule (REQ-AS-3).
+# The network's `finalized` tag is served by the public testnet providers (checked 2026-11-03), so
+# the endpoint's finality rule (REQ-OB-1) needs no change for BNB Chain.
+network = "bsc-testnet"
+chain_id = 97
+# Block 140659727, finalized when it was chosen; its hash was read from two public providers.
+pinned_block = 140659727
+pinned_hash = "0x93a4468d694024df7d000a056092ee7b6dee81eeb62aa1b6cf4fc26d46e9eb08"
+vault = "0x00000000000000000000000000000000000000c1"
+roles = "0x00000000000000000000000000000000000000c2"
+emitter = "0x00000000000000000000000000000000000000c3"
+# MultiSendCallOnly 1.4.1 (the same address on BNB Chain testnet, checked by its code).
+multisend = "0x9641d764fc13c8B624c04430C7356C1C7C8102e2"
+delivery_role = "bezent.delivery"
+start_block = 140659727
+max_range = 500
+database_url_file = "/run/secrets/bezent-evm-bsc-testnet-db"
+
+[[providers]]
+name = "a"
+url_file = "/run/secrets/bezent-evm-bsc-testnet-rpc-a"
+
+[[providers]]
+name = "b"
+url_file = "/run/secrets/bezent-evm-bsc-testnet-rpc-b"
+
+[lane]
+key = "bsc-testnet-payout"
+public_key = "0x023255458e24278e31d5940f304b16300fdff3f6efd3e2a030b5818310ac67af45"
+
+[gas]
+max_gas = 500000
+max_fee_per_gas = "100000000000"
+
+[signer]
+socket = "/run/bezent-signer/signer.sock"
+uid = 1001
+token_file = "/run/secrets/bezent-evm-bsc-testnet-signer-token"

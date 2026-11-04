@@ -168,9 +168,12 @@ pub async fn declare_vault(admin: &PgPool, vault: &str) {
            ('{ASSET}', 6, 'public', 'Here(101)'); \
          INSERT INTO admitted_tokens (network, token, asset, precision) VALUES \
            ('{NETWORK}', '{}', '{ASSET}', 6); \
-         INSERT INTO reserves (asset, network, address) VALUES ('{ASSET}', '{NETWORK}', '{}');",
+         INSERT INTO reserves (asset, network, address) VALUES ('{ASSET}', '{NETWORK}', '{}'); \
+         INSERT INTO evm_endpoint_networks (login, network) VALUES \
+           ('evm_endpoint_tests_{}', '{NETWORK}');",
         usdc(),
-        vault
+        vault,
+        bezent_store::EVM_ENDPOINT_ROLE
     ))
     .execute(admin)
     .await

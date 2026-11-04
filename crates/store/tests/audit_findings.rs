@@ -237,6 +237,12 @@ async fn must_fix_1_each_endpoint_login_writes_only_its_own_networks_chain_recor
         bezent_store::EVM_ENDPOINT_ROLE,
     )
     .await;
+    // The EVM endpoint's login is the instance of polygon (migration 0056).
+    sqlx::query("INSERT INTO evm_endpoint_networks (login, network) VALUES ($1, 'polygon')")
+        .bind("audit_evm_endpoint_for_tests")
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // The audit's scenario: the Kreivo endpoint writes the EVM network's records, the proof first.
     for (table, sql) in chain_records("polygon", &polygon, 7) {

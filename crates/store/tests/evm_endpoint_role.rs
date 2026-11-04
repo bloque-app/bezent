@@ -292,3 +292,89 @@ async fn m1_inv_8_set_role_bezent_endpoint_from_an_evm_endpoint_login_is_refused
         .expect("refused");
     assert_eq!(code, "42501");
 }
+
+/// Runs `sql` on `pool` in a transaction that is rolled back; returns the SQLSTATE of its error.
+async fn attempt(pool: &PgPool, sql: &str) -> Option<String> {
+    let mut tx = pool.begin().await.unwrap();
+    let out = sqlx::raw_sql(sql).execute(&mut *tx).await;
+    tx.rollback().await.unwrap();
+    out.err().and_then(|e| {
+        e.as_database_error()
+            .and_then(|d| d.code().map(|c| c.into_owned()))
+    })
+}
+
+/// F-009 S7, migration 0056 (`DEC-8`, `REQ-OB-6`, `INV-8`): one instance per network. Each
+/// instance's login records its own network's records and no other EVM network's; a login the
+/// owner has not mapped records nothing; and no instance can change the mapping.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn s7_dec_8_each_evm_endpoint_login_records_its_own_network_only(pool: PgPool) {
+    common::exec(
+        &pool,
+        "INSERT INTO networks (network, role, address_format) VALUES \
+           ('kreivo', 'issuing', 'ss58'), ('polygon', 'origin', 'evm'), \
+           ('base-sepolia', 'origin', 'evm'), ('bsc-testnet', 'origin', 'evm'); \
+         INSERT INTO evm_endpoint_networks (login, network) VALUES \
+           ('s7_base_instance_for_tests', 'base-sepolia'), ('s7_bsc_instance_for_tests', 'bsc-testnet')",
+    )
+    .await;
+    let role = &[bezent_store::EVM_ENDPOINT_ROLE];
+    let base = login(&pool, "s7_base_instance_for_tests", role).await;
+    let bsc = login(&pool, "s7_bsc_instance_for_tests", role).await;
+    let unmapped = login(&pool, "s7_unmapped_instance_for_tests", role).await;
+    let writes = |network: &str| [observation(network), final_head(network), range(network)];
+
+    // Its own network: recorded.
+    for sql in writes("base-sepolia") {
+        assert_eq!(attempt(&base, &sql).await, None, "{sql}");
+    }
+    for sql in writes("bsc-testnet") {
+        assert_eq!(attempt(&bsc, &sql).await, None, "{sql}");
+    }
+    // Any other EVM network, the issuing network, or one nobody declared: refused.
+    let others = [
+        (
+            "base",
+            &base,
+            ["polygon", "bsc-testnet", "kreivo", "nowhere"],
+        ),
+        (
+            "bsc",
+            &bsc,
+            ["polygon", "base-sepolia", "kreivo", "nowhere"],
+        ),
+    ];
+    for (who, instance, networks) in others {
+        for network in networks {
+            for sql in writes(network) {
+                assert_eq!(
+                    attempt(instance, &sql).await.as_deref(),
+                    REFUSED,
+                    "{who} instance: {sql}"
+                );
+            }
+        }
+    }
+    // A login holding the role and mapped to nothing records nothing.
+    for network in ["polygon", "base-sepolia", "bsc-testnet"] {
+        for sql in writes(network) {
+            assert_eq!(
+                attempt(&unmapped, &sql).await.as_deref(),
+                REFUSED,
+                "unmapped: {sql}"
+            );
+        }
+    }
+    // An instance reads the mapping and cannot write it.
+    assert_eq!(
+        attempt(&base, "SELECT count(*) FROM evm_endpoint_networks").await,
+        None
+    );
+    for sql in [
+        "INSERT INTO evm_endpoint_networks (login, network) VALUES ('s7_base_instance_for_tests', 'polygon')",
+        "UPDATE evm_endpoint_networks SET network = 'polygon'",
+        "DELETE FROM evm_endpoint_networks",
+    ] {
+        assert_eq!(attempt(&base, sql).await.as_deref(), Some("42501"), "{sql}");
+    }
+}
