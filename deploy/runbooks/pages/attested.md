@@ -7,19 +7,18 @@ id: attested
 kind: pages
 covers: [REQ-BE-4, REQ-BE-5, REQ-RQ-9, REQ-IC-2]
 pages: [attested-withdrawal-unrelayed, attested-withdrawal-awaiting-head, attested-report-refused, attested-instructions-refused]
-not_on_base: [attested-withdrawal-unrelayed, attested-withdrawal-awaiting-head, attested-report-refused, attested-instructions-refused]
 observables: [oldest_nonfinal_transfer_age_seconds, nonfinal_transfers]
-tests: []
+tests: [services/core/tests/attested.rs::req_rq_9_a_redemption_nobody_relays_for_pages_once_and_a_later_relay_proceeds, services/core/tests/attested.rs::req_rq_9_a_relayed_withdrawal_with_no_head_pages_once_and_the_first_head_proceeds, services/core/tests/attested.rs::dec_14_a_forged_report_row_never_becomes_an_observation_and_holds_the_queue, services/core/tests/attested.rs::req_rq_9_a_relayed_row_that_misses_the_commitment_hands_nothing_over]
 exercised: no
 ---
-# Attested-backend pages (open PR #66; not on this base)
+# Attested-backend pages
 
 ## What it is
 
 On an attested backend, an attesting party reports the reserve and relays a withdrawal's payout instructions; bezent
 verifies, never believes (`REQ-BE-4`, `REQ-BE-5`, `REQ-RQ-9`). The value of a redemption is destroyed when it is final;
-the pages say the party's half did not happen. They are written from the code of PR #66 and are **not on `develop`
-yet**; verify the kinds against the merged code and its amendment 0016.
+the pages say the party's half did not happen. Their delivery model is amendment 0016's, which is proposed and not
+ruled (`features/F-011-attested-backend/NOTES.md`).
 
 | Page | Meaning |
 |---|---|
@@ -30,7 +29,10 @@ yet**; verify the kinds against the merged code and its amendment 0016.
 
 ## Pages
 
-ERROR lines `kind=<kind>` with the transfer or the report named, and `event_log` entries of the same kind.
+ERROR lines `page: ... kind=<kind> transfer=<bridge reference> detail=<json>` for the two withdrawal pages,
+`page: ... kind=attested-instructions-refused transfer=<bridge reference>` for the refused instructions, and
+`page: ... kind=attested-report-refused detail=<json>` for a report that was not recorded (it names the report in `detail`),
+and `event_log` entries of the same kind.
 
 ## Confirm
 
@@ -58,7 +60,7 @@ SELECT bridge_reference, state, condition FROM transfer_status WHERE state IN ('
 
 ## Exercise
 
-Not possible on this base. On the test bed after PR #66 merges: redeem on an attested backend and relay nothing; relay
+Not run. On the test bed: redeem on an attested backend and relay nothing; relay
 instructions that do not hash to the commitment; send a report with a bad signature.
 
 Status: not exercised (NFR-9). Behaviour proven by the tests listed above, not by a run of this runbook.

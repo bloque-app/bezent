@@ -100,7 +100,7 @@ Each row: the page that sends you to the runbook, the observable that shows the 
 
 | Runbook | Page kinds | Observable | A test |
 |---|---|---|---|
-| [attested](pages/attested.md) | `attested-withdrawal-unrelayed`, `attested-withdrawal-awaiting-head`, `attested-report-refused`, `attested-instructions-refused` | `oldest_nonfinal_transfer_age_seconds`, `nonfinal_transfers` | none (not on this base) |
+| [attested](pages/attested.md) | `attested-withdrawal-unrelayed`, `attested-withdrawal-awaiting-head`, `attested-report-refused`, `attested-instructions-refused` | `oldest_nonfinal_transfer_age_seconds`, `nonfinal_transfers` | `req_rq_9_a_redemption_nobody_relays_for_pages_once_and_a_later_relay_proceeds` (+3) |
 | [float-top-up](pages/float-top-up.md) | none | `fee_short_transfers` | `cnd_fee_short_holds_until_the_fee_position_can_pay` |
 | [key-compromise](pages/key-compromise.md) | `key-compromise` | `pauses_in_force` | `req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted` (+3) |
 | [late-mint](pages/late-mint.md) | `late-mint-prover-silent`, `late-mint-watch-failed`, `late-mint-check-failed` | `pauses_in_force` | `services/core/tests/late_mint.rs` |

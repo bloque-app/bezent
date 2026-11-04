@@ -505,6 +505,7 @@ async fn dec_14_a_forged_report_row_never_becomes_an_observation_and_holds_the_q
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
+    let log = PageLog::start();
     let f = Fiat::new(options, connect).await;
     let body = json!({"version": 1, "report_id": "forged", "network": RAIL, "kind": "arrival",
                       "asset": COPM, "token": COP, "amount": "1000000", "position": "acct-1"});
@@ -563,6 +564,8 @@ async fn dec_14_a_forged_report_row_never_becomes_an_observation_and_holds_the_q
         pages[0]["reason"].as_str().unwrap().contains("signature"),
         "{pages:?}"
     );
+    // The page as the log holds it: one ERROR line `alerts.md`'s filter matches, in the shape its runbook quotes.
+    assert_page(&log, "attested-report-refused", 1);
 }
 
 /// A redemption as the Kreivo endpoint records it (`payout_json`, `backend_json`).
@@ -1200,6 +1203,7 @@ async fn req_rq_9_a_relayed_row_that_misses_the_commitment_hands_nothing_over(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
+    let log = PageLog::start();
     let f = Fiat::new(options, connect).await;
     f.funded(1_000).await;
     let first = f.deposited("pay-1", 700).await;
@@ -1257,6 +1261,8 @@ async fn req_rq_9_a_relayed_row_that_misses_the_commitment_hands_nothing_over(
         .await,
         1
     );
+    // The page as the log holds it: one ERROR line `alerts.md`'s filter matches, in the shape its runbook quotes.
+    assert_page(&log, "attested-instructions-refused", 1);
 }
 
 /// `REQ-RQ-6`, `REQ-IN-6`, `REQ-BE-5`: the refund of an unassociated arrival on an attested network:
@@ -1627,6 +1633,7 @@ async fn req_rq_9_a_redemption_nobody_relays_for_pages_once_and_a_later_relay_pr
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
+    let log = PageLog::start();
     let f = Fiat::new(options, connect).await;
     f.funded(1_000).await;
     let first = f.deposited("pay-1", 700).await;
@@ -1682,6 +1689,8 @@ async fn req_rq_9_a_redemption_nobody_relays_for_pages_once_and_a_later_relay_pr
         assert_eq!(f.w.state(id).await, ("Delivering".into(), None));
     }
     assert_eq!(pages().await, 1);
+    // The page as the log holds it: one ERROR line `alerts.md`'s filter matches, in the shape its runbook quotes.
+    assert_page(&log, "attested-withdrawal-unrelayed", 1);
 }
 
 /// A relayed withdrawal on an attested network that has no final head cannot be handed over; the
@@ -1692,6 +1701,7 @@ async fn req_rq_9_a_relayed_withdrawal_with_no_head_pages_once_and_the_first_hea
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
+    let log = PageLog::start();
     let f = Fiat::new(options, connect).await;
     let _bridge = relayed(&f).await;
     exec(
@@ -1743,6 +1753,8 @@ async fn req_rq_9_a_relayed_withdrawal_with_no_head_pages_once_and_the_first_hea
         assert_eq!(f.w.state(id).await, ("Delivering".into(), None));
     }
     assert_eq!(pages().await, 1);
+    // The page as the log holds it: one ERROR line `alerts.md`'s filter matches, in the shape its runbook quotes.
+    assert_page(&log, "attested-withdrawal-awaiting-head", 1);
 }
 
 /// S1: a relay that comes after the route's budget measured from the source leg starts the attempt

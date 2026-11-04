@@ -62,17 +62,18 @@ kind exists on `develop` at this commit.
 | `payout-window-alert` | engine | `pages/payout.md`, `conditions/CND-PayoutWindow.md` | yes | yes, by message text |
 | `payout-refusal-alert` | engine | `pages/payout.md` | yes | **no** (and quoted before `F-014`) |
 | `resolution-blocked-by-inclusion` | engine | `pages/payout.md` | yes | **no** (and quoted before `F-014`) |
-| `attested-withdrawal-unrelayed` | engine | `pages/attested.md` | **no, PR #66** | no |
-| `attested-withdrawal-awaiting-head` | engine | `pages/attested.md` | **no, PR #66** | no |
-| `attested-report-refused` | attested reports | `pages/attested.md` | **no, PR #66** | no |
-| `attested-instructions-refused` | engine | `pages/attested.md` | **no, PR #66** | no |
+| `attested-withdrawal-unrelayed` | engine | `pages/attested.md` | yes | no |
+| `attested-withdrawal-awaiting-head` | engine | `pages/attested.md` | yes | no |
+| `attested-report-refused` | attested reports | `pages/attested.md` | yes | no |
+| `attested-instructions-refused` | engine | `pages/attested.md` | yes | no |
 | `late-mint-prover-silent` | late-mint check | `pages/late-mint.md` | yes | **no** |
 | `late-mint-watch-failed` | late-mint check | `pages/late-mint.md` | yes | **no** |
 | `late-mint-check-failed` | late-mint check | `pages/late-mint.md` | yes | **no** |
 
-The kinds of PR #66 are written in the code of that open pull request, quoted (`kind = "..."`), so it will fail
-`pages.rs` and `runbooks.rs` when it rebases until it records the kind with `%` and the runbook drops its
-`not_on_base` marker. That is intended. The late-mint kinds of PR #72 (on `develop`) were quoted too and are fixed in this change.
+The attested kinds are the code of PR #66, a draft on amendment 0016 (proposed, not ruled): "Base" is yes on that branch and
+on `develop` when it merges. They were quoted (`kind = "..."`) there and are recorded with `%` now, so `pages.rs` and
+`runbooks.rs` hold them as they hold the others. The late-mint kinds of PR #72 (on `develop`) were quoted too and are fixed
+in this change.
 
 Platform alarms with no kind (`pages/platform.md`): a service not running, the store unreachable, the signer refusing an
 unauthenticated caller, the database's storage and CPU.
@@ -118,7 +119,7 @@ Stated as needs; this repository changes none of it.
    actions on.
 2. Add filters for `"kind=statement-publish-failed"`, `"kind=payout-refusal-alert"`,
    `"kind=resolution-blocked-by-inclusion"`, `"kind=late-mint-"` (a prefix pattern; the late-mint pages of PR #72 are on
-   `develop`) and, when its pull request merges, `"kind=attested-"` (also a prefix).
+   `develop`) and `"kind=attested-"` (also a prefix; the attested pages of PR #66, once it merges).
 3. Alarm on the metrics above, with missing data treated as breaching.
 4. Give the alarm topic a destination that reaches a person: an on-call service with acknowledgement and escalation, or at
    least a phone-reaching subscription, chosen by the owner. A chat post is not a page.

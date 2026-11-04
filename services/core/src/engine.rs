@@ -1818,7 +1818,7 @@ impl Core {
                         &json!({"spec": "REQ-RQ-9", "bridge_reference": t.bridge_reference}),
                     )
                     .await?;
-                    tracing::error!(kind = "attested-instructions-refused", transfer = %t.bridge_reference,
+                    tracing::error!(kind = %"attested-instructions-refused", transfer = %t.bridge_reference,
                         "page: relayed instructions on record do not hash to the redemption's commitment; nothing is handed over");
                 }
                 return Ok(Did::default());
@@ -1933,7 +1933,7 @@ impl Core {
                             "network": head.network, "head_block": head.block_number,
                             "head_time": head.block_time.to_rfc3339()});
         store::event(conn, kind, Some(t.id), &detail).await?;
-        tracing::error!(kind, transfer = %t.bridge_reference, %detail, "page: {message}");
+        tracing::error!(kind = %kind, transfer = %t.bridge_reference, %detail, "page: {message}");
         Ok(())
     }
 

@@ -81,7 +81,7 @@ async fn page_refused(pool: &PgPool, r: &Pending, why: &str) -> sqlx::Result<()>
                         "reason": why});
     store::event(&mut tx, "attested-report-refused", None, &detail).await?;
     tx.commit().await?;
-    tracing::error!(kind = "attested-report-refused", %detail,
+    tracing::error!(kind = %"attested-report-refused", %detail,
         "page: a report was not recorded; its network's queue is held behind it");
     Ok(())
 }
