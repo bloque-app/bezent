@@ -1,0 +1,114 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+name: E2E (full chain)
+
+# F-013 (T-013-08; plan DEC-19): the full-chain suite, services/full-chain. The ingress, the core, the
+# signer and both endpoints run together on one PostgreSQL, each on its own login, against
+#
+#   - Polygon: an anvil FORK of the real chain at the block e2e/evm/forks.env pins, with the real
+#     USDC, Safe, Zodiac Roles and MultiSend contracts and the vault F-008's script deploys;
+#   - Kreivo: FakeChain, an IN-MEMORY MODEL (blocks, finality, the contract's events, eras, nonces),
+#     not a chain. There is no Kreivo runtime in this job.
+#
+# This is what a pull request can run on a GitHub-hosted runner. The same scenarios on a real Kreivo
+# need the self-hosted zombienet pool (e2e-zombienet.yml, which skips on pull requests) and are not
+# wired: the Kreivo endpoint's light client has to be pointed at the spawned chain, and a redemption
+# has to be signed by a holder through polkadot-api. See features/F-013-test-bed/NOTES.md.
+#
+# A run that expects the fork and does not get it FAILS: the suite has no skip branch. Upstream RPC:
+# the repository secret POLYGON_RPC_URL when set (the same secret evm-endpoint fork tests read),
+# otherwise the public archive endpoint ci.yml and e2e-evm.yml fall back to.
+
+on:
+  pull_request:
+    paths:
+      - "services/**"
+      - "crates/**"
+      - "contracts/evm/**"
+      - "e2e/evm/forks.env"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/e2e-full-chain.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-full-chain-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  full-chain:
+    name: Full chain (Polygon fork, Kreivo in memory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Each scenario creates its own database on this server (#[sqlx::test]).
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      BEZENT_E2E_FORK_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.drpc.org' }}
+    steps:
+      # The vault's contracts are the submodules of contracts/evm.
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: ./.github/actions/ci-postgres
+        id: pg
+        with:
+          variant: "16"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+      - run: tools/ci/pg-up.sh "${{ steps.pg.outputs.image }}"
+      - run: (rustup toolchain install || rustup show) && cargo --version
+      - uses: Swatinem/rust-cache@v2
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+      - name: anvil's fork state cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.foundry/cache/rpc
+          key: full-chain-fork-${{ hashFiles('e2e/evm/forks.env') }}
+          # The evm-endpoint fork job caches the same chain at the same block: start warm from it.
+          restore-keys: evm-endpoint-fork-
+
+      - name: Lint the suite (it is a test target behind the `fork` feature, so the workspace jobs skip it)
+        run: cargo clippy -p bezent-e2e-full-chain --features fork --all-targets --locked -- -D warnings
+
+      # One scenario at a time: each starts its own anvil fork and they share one public upstream.
+      - name: "T-013-08: deposit, withdrawal, payout not executed, reorg, compromise"
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          cargo test -p bezent-e2e-full-chain --features fork --locked -- --test-threads=1 2>&1 | tee full-chain.log
+          took=$(( $(date +%s) - start ))
+          # Five scenarios and one pin check ran; none was filtered, ignored or skipped.
+          grep -q 'test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' full-chain.log
+          {
+            echo "### Full-chain suite"
+            echo
+            echo "Test step: ${took} s (build included)."
+            echo
+            echo "| Network | What the scenarios ran against |"
+            echo "|---|---|"
+            echo "| Polygon | an anvil **fork** of the real chain at the pinned block: real contracts, local execution |"
+            echo "| Kreivo | **FakeChain, an in-memory model**: not a chain, no runtime, no pallets |"
+            echo
+            echo "Not run on zombienet or on a real Kreivo."
+            echo
+            echo "- S4 shows that an arrival in a block the fork then abandons, before it is final, is never recorded: the services run over it while it exists (a follower reading \`latest\` records it and fails the scenario), then it is reorganised away. It does not show a reorganisation of a block already final."
+            echo "- S5 shows that, under a compromise pause, the core orders, records and signs no new work (the signer's count of signatures does not move). It does not show that the signer itself refuses: work recorded before the pause is still signed (AC-I1.2, known unmet, issue #77)."
+            echo "- The reserve check runs on the model's clock, so staleness handling is not covered."
+            echo
+            grep -E '^test ' full-chain.log | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -49,6 +49,8 @@ RUNS_IN = [
     ("contracts/evm/", "evm-contracts.yml"),
     ("e2e/kreivo/", "e2e-zombienet.yml (self-hosted pool, not on PRs)"),
     ("services/evm-endpoint/tests/fork.rs", "ci.yml evm-endpoint-fork"),
+    # A test target behind the `fork` feature: the workspace test job does not build it.
+    ("services/full-chain/", "e2e-full-chain.yml"),
     ("", "ci.yml test"),
 ]
 SKIP_DIRS = {"node_modules", "target", ".git", "lib", "out", "cache", "broadcast"}
