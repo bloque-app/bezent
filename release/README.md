@@ -10,7 +10,7 @@ value (`SPEC.md` section 15, `PLAN.md` `DEC-19`, `M-4`). It fails closed.
 
 | Item | Kind | Where it comes from |
 |---|---|---|
-| Every V0 acceptance criterion has a test at its layer; none is excepted | mechanical | `tools/ci/criteria_map.py`, `e2e/criteria/` |
+| Every V0 acceptance criterion has a test at its layer; none is excepted or known unmet | mechanical | `tools/ci/criteria_map.py`, `e2e/criteria/` |
 | Every check in `gate.toml` succeeded on the release commit | mechanical, `--online` | check runs of the commit |
 | Each sign-off: the pull request that merged this release's `evidence.toml`, approved on its final commit by the person named, who is in the role's list; the two roles are two people | mechanical, `--online` | the pull request, its files and reviews; `roles.toml` |
 | Every runbook exercised on a test network (`NFR-9`): one per named condition and per incident class | human, needs a live test bed | `evidence.toml` `[runbook."CND-..."]`, `[runbook."I-n"]` |
@@ -25,6 +25,15 @@ full sha of the code released) and an entry per item with an `https` link to wha
 commit to be its ancestor with only `evidence.toml` between them. Before the gate, dispatch `ci`, `contracts`,
 `evm-contracts`, `e2e-evm` and `e2e-zombienet` on the release commit: the gate reads their checks there and a missing
 or skipped one fails. The `DCO` check runs on pull requests only, so the gate does not read it.
+
+## Known unmet criteria
+
+`e2e/criteria/known_unmet.toml` lists criteria that have a test at their layer yet are known not met (partial or
+failing), each with what is missing and the issue or pull request that closes it. The criteria map cannot tell a test
+that names a criterion from a criterion that is met, so this list is where that is said. The map reports such a
+criterion as `known unmet` and stays green on a pull request, as for an exception; the release gate fails while any
+entry remains. Removing an entry claims that the criterion is now met, and needs the spec owner's review (the file is
+theirs in `CODEOWNERS`). An entry naming a criterion that is not in `SPEC.md` is an error.
 
 ## Sign-off: who counts
 

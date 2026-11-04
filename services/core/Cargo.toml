@@ -17,6 +17,7 @@ name = "bezent-core"
 path = "src/main.rs"
 
 [dependencies]
+bezent-logging = { path = "../../crates/logging" }
 bezent-core.workspace = true
 bezent-health = { path = "../../crates/health" }
 bezent-store = { path = "../../crates/store" }

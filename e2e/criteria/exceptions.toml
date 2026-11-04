@@ -7,13 +7,9 @@
 # that only names a criterion is never the way out: a test named for a criterion MUST verify it.
 # Reviewed by the spec owner (CODEOWNERS).
 
-[exception."AC-H3.1"]
-reason = "REQ-ST-6's observables (oldest non-final transfer per route, unknown legs, observation lag, open gaps, fee positions, undelivered notifications) are built by F-014 Operations; none exists yet"
-blocked_by = "#14"
-
-[exception."AC-I3.1"]
-reason = "Verified for manual actions (a review resolution, a release of an unassociated arrival: actor and justification, append-only, tests req_gv_5_* in crates/store/tests/lifecycle_graph.rs); not for a pause, an unpause or a changed bound, which the store records with neither actor nor justification until the operator surface (CTR-OPS) exists"
-blocked_by = "#14"
+# No criterion is an exception at the moment: each has a test at its layer. A criterion with a test can still be
+# partial or failing: that is listed in known_unmet.toml.
+[exception]
 
 # A V0 story that SPEC section 6 gives no acceptance criterion. Listed so that a new one cannot appear silently.
 [story_without_criteria."US-H2"]

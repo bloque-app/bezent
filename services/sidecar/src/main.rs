@@ -447,7 +447,7 @@ async fn main() -> ExitCode {
         .as_slice()
     {
         [] | ["serve"] => {
-            tracing_subscriber::fmt().with_target(false).init();
+            bezent_logging::init();
             if let Err(e) = bezent_signer::process::forbid_core_dumps() {
                 tracing::warn!("{e}");
             }

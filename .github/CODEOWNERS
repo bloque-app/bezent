@@ -17,6 +17,7 @@
 
 # The criteria map and the release gate: what V0 must show before it carries value.
 /e2e/criteria/          @bloque-app/bezent-spec-owner
+/e2e/criteria/known_unmet.toml  @bloque-app/bezent-spec-owner
 /release/               @bloque-app/bezent-spec-owner
 
 # The gate itself: code that decides whether V0 may carry value must not be changeable by the release it judges

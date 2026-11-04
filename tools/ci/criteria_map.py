@@ -5,11 +5,15 @@
 
 Reads SPEC.md section 6 for the `AC-*` criteria in V0 scope (a criterion, or its whole story, marked
 "Withdrawn" is out), `e2e/criteria/layers.toml` for the layer SPEC section 9 gives each one, and
-`e2e/criteria/exceptions.toml` for the criteria that have no test yet, each with a reason. It scans the
+`e2e/criteria/exceptions.toml` for the criteria that have no test yet, each with a reason, and
+`e2e/criteria/known_unmet.toml` for the criteria that have a test yet are known not met, each with what is
+missing and the issue or PR that closes it. It scans the
 tests (Rust `#[test]` functions, Solidity `test*` functions, `check(...)` calls in e2e/*.mjs) and fails if:
 
   - a V0 criterion has no test at its layer and is not an exception;
   - an exception names a criterion that has a test (the entry is stale: remove it), or one not in V0 scope;
+  - a known-unmet entry names a criterion not in V0 scope, one that is also an exception or has no test at its
+    layers (that is an exception, not this), or lacks `missing` or `closed_by`;
   - a layer entry is missing, names a layer weaker than section 9 allows, or names no criterion of the spec.
 
 It proves that a test NAMES a criterion at the right layer. That the test VERIFIES it is the reviewer's
@@ -48,6 +52,13 @@ RUNS_IN = [
     ("", "ci.yml test"),
 ]
 SKIP_DIRS = {"node_modules", "target", ".git", "lib", "out", "cache", "broadcast"}
+
+
+def load_config():
+    """exceptions.toml and known_unmet.toml as one config: [exception], [story_without_criteria], [known_unmet]."""
+    cfg = tomllib.loads((ROOT / "e2e/criteria/exceptions.toml").read_text())
+    cfg.update(tomllib.loads((ROOT / "e2e/criteria/known_unmet.toml").read_text()))
+    return cfg
 
 
 def die(msgs):
@@ -216,6 +227,7 @@ def scan():
 def check(crit, stories, v0, inv_layers, layers, cfg, found):
     """Returns (errors, table). Pure: the tests feed it altered inputs to show each way it fails."""
     exc, no_ac = cfg.get("exception", {}), cfg.get("story_without_criteria", {})
+    unmet = cfg.get("known_unmet", {})
     errors = []
 
     # Fail closed on an empty parse: a reworded SPEC must not turn the check green by hiding every criterion.
@@ -266,6 +278,14 @@ def check(crit, stories, v0, inv_layers, layers, cfg, found):
         if not entry.get("reason") or not entry.get("blocked_by"):
             errors.append(f"exceptions.toml: {ac} needs a `reason` and a `blocked_by`")
 
+    for ac, entry in sorted(unmet.items()):
+        if ac not in crit:
+            errors.append(f"known_unmet.toml: {ac} is not a V0 criterion of SPEC.md: remove the entry")
+        if not entry.get("missing") or not entry.get("closed_by"):
+            errors.append(f"known_unmet.toml: {ac} needs `missing` (what is not met) and `closed_by` (the issue or PR that closes it)")
+        if ac in exc:
+            errors.append(f"{ac} is both an exception and known unmet: an exception means no test, known unmet means a test; keep one")
+
     table = []
     for ac in sorted(crit):
         want = layers.get(ac, {}).get("layers", [])
@@ -279,10 +299,12 @@ def check(crit, stories, v0, inv_layers, layers, cfg, found):
                 errors.append(f"exceptions.toml: {ac} has a test at every required layer ({have}): remove the entry")
         elif not hits or missing:
             status = "NO TEST"
+            if ac in unmet:
+                errors.append(f"known_unmet.toml: {ac} has no test at layer {missing or want}: it belongs in exceptions.toml, not here")
             where = f" (named only at {sorted({h['layer'] for h in wrong})})" if wrong else ""
             errors.append(f"{ac} ({crit[ac]['story']}) has no test at layer {missing or want}{where} and is not an exception")
         else:
-            status = "covered"
+            status = "known unmet" if ac in unmet else "covered"
             # A layer can hold tests of different components with different stakes (the EVM vault, the Kreivo
             # contract): `also_under` lists the path prefixes that must each have a test naming the criterion.
             for prefix in layers.get(ac, {}).get("also_under", []):
@@ -293,7 +315,7 @@ def check(crit, stories, v0, inv_layers, layers, cfg, found):
                       "tests": [f"{h['file']}::{h['test']}" for h in hits],
                       "runs_in": sorted({h["runs"] for h in hits}),
                       "narrowed": layers.get(ac, {}).get("narrowed"),
-                      "exception": exc.get(ac)})
+                      "exception": exc.get(ac), "known_unmet": unmet.get(ac)})
 
     return errors, table
 
@@ -301,7 +323,7 @@ def check(crit, stories, v0, inv_layers, layers, cfg, found):
 def main():
     crit, withdrawn, stories = spec_criteria()
     layers = tomllib.loads((ROOT / "e2e/criteria/layers.toml").read_text()).get("layer", {})
-    cfg = tomllib.loads((ROOT / "e2e/criteria/exceptions.toml").read_text())
+    cfg = load_config()
     errors, table = check(crit, stories, v0_stories(), invariant_layers(), layers, cfg, scan())
     if "--json" in sys.argv:
         print(json.dumps(table, indent=1))
@@ -309,12 +331,15 @@ def main():
         n = len(table)
         c = sum(t["status"] == "covered" for t in table)
         x = sum(t["status"] == "exception" for t in table)
-        lines = [f"### Criteria map: {n} V0 criteria, {c} with a test at their layer, {x} excepted, "
-                 f"{n - c - x} with neither\n", f"Withdrawn, not counted: {', '.join(sorted(set(withdrawn)))}\n",
+        u = sum(t["status"] == "known unmet" for t in table)
+        lines = [f"### Criteria map: {n} V0 criteria, {c} with a test at their layer, {u} with a test but known "
+                 f"not met, {x} excepted, {n - c - x - u} with neither\n", f"Withdrawn, not counted: {', '.join(sorted(set(withdrawn)))}\n",
                  "| Criterion | Layers required | Status | Runs in | Tests (first 3) |", "|---|---|---|---|---|"]
         for t in table:
             tests = "<br>".join(f"`{x}`" for x in t["tests"][:3]) or (
                 f"exception: {t['exception']['reason']} (`{t['exception']['blocked_by']}`)" if t["exception"] else "")
+            if t["known_unmet"]:
+                tests += f"<br>not met: {t['known_unmet']['missing']} (`{t['known_unmet']['closed_by']}`)"
             narrowed = " (narrowed)" if t["narrowed"] else ""
             lines.append(f"| `{t['ac']}` | {'+'.join(t['layers'])}{narrowed} | {t['status']} | "
                          f"{', '.join(t['runs_in'])} | {tests} |")

@@ -1,0 +1,24 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# F-013: V0 criteria that HAVE a test at their layer yet are known not met. exceptions.toml is for the criteria
+# with no test; this is for the ones the map would otherwise call `covered`, though the feature notes say they
+# are partial or failing. Each entry names the criterion, `missing` (what is not met) and `closed_by` (the issue
+# or pull request that closes it).
+#
+# `tools/ci/criteria_map.py` reports the criterion as `known unmet` and stays green on a pull request, as for an
+# exception; `tools/ci/release_gate.py` FAILS while any entry remains. An entry naming a criterion that is not a
+# V0 criterion of SPEC.md is an error. Removing an entry needs the spec owner's review (CODEOWNERS): it is the
+# claim that the criterion is now met.
+
+[known_unmet."AC-H3.1"]
+missing = "fee positions (REQ-ST-6) are not observable: no service reads a delivery account's balance"
+closed_by = "#14 (F-014 notes, Open 2)"
+
+[known_unmet."AC-I3.1"]
+missing = "operator_record is voluntary, and the schema owner can edit declarations with no record"
+closed_by = "#14 (F-014 notes, Open 3)"
+
+[known_unmet."AC-I1.2"]
+missing = "no automatic pause: nothing applies pause-requested, so bezent does not pause on a key compromise"
+closed_by = "#77, PR #78"

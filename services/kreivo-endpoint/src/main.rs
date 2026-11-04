@@ -29,7 +29,7 @@ use bezent_kreivo_endpoint::network;
 const NAME: &str = "bezent-kreivo-endpoint";
 
 fn main() -> ExitCode {
-    tracing_subscriber::fmt().with_target(false).init();
+    bezent_logging::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let [cmd, rest @ ..] = args.as_slice()
         && cmd == "health"

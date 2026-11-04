@@ -6,7 +6,8 @@
 What it checks, in two kinds.
 
 Mechanical, here and now:
-  1. the criteria map (tools/ci/criteria_map.py): every V0 acceptance criterion has a test at its layer;
+  1. the criteria map (tools/ci/criteria_map.py): every V0 acceptance criterion has a test at its layer, and none
+     is an exception (no test yet) or known unmet (a test, yet the criterion is not met: e2e/criteria/known_unmet.toml);
   2. with --online: every check named in release/gate.toml succeeded on the release commit (a skipped or missing
      check is a failure; every check is read at the release commit itself), and each sign-off is backed by the pull
      request that merged this release's release/evidence.toml, approved on its final commit by the person named, who
@@ -273,17 +274,28 @@ def online_signoffs(gate, ev, repo, api, roles, release, git_fn):
     return errors
 
 
-def mechanical_map():
-    crit, _, stories = criteria_map.spec_criteria()
-    layers = tomllib.loads((ROOT / "e2e/criteria/layers.toml").read_text()).get("layer", {})
-    cfg = tomllib.loads((ROOT / "e2e/criteria/exceptions.toml").read_text())
-    errors, table = criteria_map.check(crit, stories, criteria_map.v0_stories(), criteria_map.invariant_layers(),
-                                       layers, cfg, criteria_map.scan())
+def blockers(table):
+    """What the map allows on a pull request and a release does not: an exception (no test yet) and a known-unmet
+    entry (a test, yet the criterion is known not met)."""
+    errors = []
     excepted = [t["ac"] for t in table if t["status"] == "exception"]
     if excepted:
         # A criterion without a test at its layer is a release blocker; the map allows it while the work is in flight.
         errors.append(f"criteria: {len(excepted)} V0 criteria have no test yet and are excepted: {', '.join(excepted)}")
+    unmet = [t for t in table if t["status"] == "known unmet"]
+    if unmet:
+        errors.append(f"criteria: {len(unmet)} V0 criteria have a test and are known not met "
+                      "(e2e/criteria/known_unmet.toml): "
+                      + "; ".join(f"{t['ac']} lacks {t['known_unmet']['missing']} ({t['known_unmet']['closed_by']})" for t in unmet))
     return errors
+
+
+def mechanical_map():
+    crit, _, stories = criteria_map.spec_criteria()
+    layers = tomllib.loads((ROOT / "e2e/criteria/layers.toml").read_text()).get("layer", {})
+    errors, table = criteria_map.check(crit, stories, criteria_map.v0_stories(), criteria_map.invariant_layers(),
+                                       layers, criteria_map.load_config(), criteria_map.scan())
+    return errors + blockers(table)
 
 
 def gh_api(path):

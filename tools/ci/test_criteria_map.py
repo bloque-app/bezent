@@ -15,7 +15,7 @@ import criteria_map as cm  # noqa: E402
 def real():
     crit, _, stories = cm.spec_criteria()
     layers = tomllib.loads((cm.ROOT / "e2e/criteria/layers.toml").read_text())["layer"]
-    cfg = tomllib.loads((cm.ROOT / "e2e/criteria/exceptions.toml").read_text())
+    cfg = cm.load_config()
     return dict(crit=crit, stories=stories, v0=cm.v0_stories(), inv_layers=cm.invariant_layers(),
                 layers=layers, cfg=cfg, found=cm.scan())
 
@@ -74,6 +74,40 @@ class CriteriaMap(unittest.TestCase):
         cfg = real()["cfg"]
         cfg["exception"]["AC-A2.4"] = {"reason": "x", "blocked_by": "#1"}  # withdrawn by amendment 0007
         self.assertTrue(any("AC-A2.4" in e for e in run(cfg=cfg)))
+
+    def test_a_known_unmet_criterion_is_reported_apart_and_the_map_stays_green(self):
+        args = real()
+        self.assertEqual(run(), [])
+        for ac in ("AC-H3.1", "AC-I3.1", "AC-I1.2"):
+            self.assertIn(ac, args["cfg"]["known_unmet"])
+        table = cm.check(args["crit"], args["stories"], args["v0"], args["inv_layers"], args["layers"], args["cfg"],
+                         args["found"])[1]
+        got = {t["ac"]: t["status"] for t in table}
+        self.assertEqual({got[a] for a in ("AC-H3.1", "AC-I3.1", "AC-I1.2")}, {"known unmet"})
+        self.assertNotIn("known unmet", {s for a, s in got.items() if a not in args["cfg"]["known_unmet"]})
+
+    def test_a_known_unmet_entry_names_a_live_criterion(self):
+        cfg = real()["cfg"]
+        cfg["known_unmet"]["AC-A2.4"] = {"missing": "x", "closed_by": "#1"}  # withdrawn by amendment 0007
+        self.assertTrue(any("AC-A2.4" in e and "known_unmet" in e for e in run(cfg=cfg)))
+        cfg["known_unmet"]["AC-ZZ9.9"] = {"missing": "x", "closed_by": "#1"}  # not in the spec at all
+        self.assertTrue(any("AC-ZZ9.9" in e for e in run(cfg=cfg)))
+
+    def test_a_known_unmet_entry_needs_what_is_missing_and_what_closes_it(self):
+        cfg = real()["cfg"]
+        cfg["known_unmet"]["AC-I1.2"] = {"missing": "x"}
+        self.assertTrue(any("AC-I1.2" in e and "closed_by" in e for e in run(cfg=cfg)))
+        cfg["known_unmet"]["AC-I1.2"] = {"closed_by": "#1"}
+        self.assertTrue(any("AC-I1.2" in e and "missing" in e for e in run(cfg=cfg)))
+
+    def test_a_known_unmet_entry_without_a_test_or_with_an_exception_fails(self):
+        cfg = real()["cfg"]
+        found = real()["found"]
+        del found["AC-I1.2"]
+        self.assertTrue(any("AC-I1.2" in e and "exceptions.toml" in e for e in run(cfg=cfg, found=found)))
+        cfg = real()["cfg"]
+        cfg["exception"]["AC-I1.2"] = {"reason": "x", "blocked_by": "#1"}
+        self.assertTrue(any("AC-I1.2" in e and "both" in e for e in run(cfg=cfg)))
 
     def test_a_new_criterion_needs_a_layer(self):
         layers = real()["layers"]

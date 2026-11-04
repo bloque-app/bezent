@@ -17,6 +17,7 @@ name = "bezent-evm-endpoint"
 path = "src/main.rs"
 
 [dependencies]
+bezent-logging = { path = "../../crates/logging" }
 bezent-health = { path = "../../crates/health" }
 bezent-store = { path = "../../crates/store" }
 bezent-vault = { path = "../../crates/vault" }
@@ -45,7 +46,6 @@ sqlx = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["net", "signal", "sync", "time", "fs"] }
 toml = "0.8"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
 
 [dev-dependencies]
 sha2 = "0.10"
