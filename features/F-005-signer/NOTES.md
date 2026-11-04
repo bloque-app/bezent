@@ -50,6 +50,42 @@ is left.
 11. **No core dumps** (review S4, `REQ-CU-1`). The process sets `RLIMIT_CORE` to 0 (soft and hard) and, on Linux,
     `PR_SET_DUMPABLE 0`, before it reads a key. On Linux a failure stops the start; on macOS there is no
     `PR_SET_DUMPABLE` and a failure is only logged.
+12. **A mint of a reference bezent did not deliver is a signature it did not record** (issue #26, PR #72; `AC-I1.2`,
+    `REQ-IC-4`, `INV-8`, `INV-9`). The check is the core's (`services/core/src/late_mint.rs`), over the observer's
+    final `Minted` and `RefundMinted`; it raises through the compromise path above, once per observation. It raises
+    when a reference bezent ordered was minted (a) after a signed transaction of it was proven not executed at a final
+    block below the mint, or (b) with no signed transaction of it at all: the endpoint stores the exact bytes before it
+    submits (`INV-9`), so a bezent mint always has its `signed_transactions` row first. A mint of a reference with no
+    order is not matched: it is `REQ-IC-2`'s reserve check. A later attempt explains a mint (`REQ-RF-5`) only if it was
+    executed in the mint's block and the block has no more mint events of the reference than executed attempts, or it
+    is undecided by the prover (no proof, no inclusion and no anomaly for it) and its era covers the mint. The wait
+    ends **only on the prover's own record**, never on the final head: the observer and the supply reader write the
+    head, the prover is a separate worker, and a head past the era's end says only that the prover could have decided
+    (ending the wait on it raised a global pause on a legitimate retry whenever the prover was behind, down, or the
+    retry was included in the last blocks of its era, or the observer was catching up over old history). The prover
+    writes no progress marker of its own and none was added: `Prover::step` records a proof, an inclusion or an
+    anomaly, and nothing when it cannot decide. An attempt with no era on record (the signing path always records it,
+    migration 0037) waits like any other, with an error logged each cycle. *Not tied to the extrinsic*: the observation's position is the event's index in the block, not
+    its extrinsic's, so the count is what the record supports; tying them needs the endpoint to record the event's
+    phase (`ApplyExtrinsic(i)`, read in `chain/light.rs` as `ev.phase()` and dropped) in the observation's `detail`.
+    The alarm is a global pause: every widening has a test that a normal delivery raises nothing, and an undecided
+    attempt is held, never raised on, while the prover has not decided it. Migration 0075 keeps a queue
+    (`late_mint_checks`), filled by the store in the outcome's own transaction, so a cycle reads only the mints not
+    yet settled and no id or time order can make it skip one; a look that fails is counted and pages after three
+    in a row (`late-mint-check-failed`), without stopping the others, and so does a cycle whose candidate query
+    fails (`late-mint-watch-failed`, once per streak; it used to be a warning).
+    *A prover that does not decide* (migration 0076, `held_cycles`): a held row stays open and raises nothing; each
+    cycle that finds an attempt undecided with its era over at the final head counts, and at 60 cycles (five minutes at
+    the core's default) the core pages once, durably (`late-mint-prover-silent`, deduplicated by the observation),
+    naming the reference, the attempt, the signed transaction, its era and the head. No pause, no key-compromise
+    alert; the row stays open, so if the prover later decides against the mint the alarm still raises, once. An
+    operator learns that the prover is stuck or that a key may be compromised; during a long observer catch-up the
+    page can also mean only that the prover (stepped after the observer in the endpoint's loop) has not had its turn. **`max_walk`**: when a nonce is
+    consumed the prover walks back from the finalized head to the era's birth and gives up (`unknown`, nothing
+    recorded) when that is more than `max_walk` blocks, at every later pass; an attempt included that long ago is
+    therefore never recorded, and it is this page's case, not a raise (the mint may be that attempt's, and the core
+    cannot tell). The page carries the era and the head, so the gap shows; the operator resolves it by reading the
+    chain. `max_walk` is unchanged. A nonce that was never consumed does not walk and is proven once the era ends.
 
 ## Open — these block `M-1` (real keys)
 

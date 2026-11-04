@@ -67,6 +67,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "intake",
             "intake_answers",
             "intents",
+            "late_mint_checks",
             "ledger_accounts",
             "ledger_accounts_listed",
             "manual_actions",
@@ -121,7 +122,10 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
     (
         crate::CORE_ROLE,
         "UPDATE",
-        &["transfers(on_chain_reference)"],
+        &[
+            "late_mint_checks(checked_at,failures,settled_at,verdict,held_cycles)",
+            "transfers(on_chain_reference)",
+        ],
     ),
     (
         crate::CORE_ROLE,
