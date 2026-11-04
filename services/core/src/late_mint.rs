@@ -73,8 +73,9 @@
 //!   does **not** decide: the mint stays held and pages, and the transfer is sent to review by the
 //!   anomaly (`REQ-RF-1`: no refund). For a mint in any other block it cannot be that extrinsic's
 //!   (a block hash names one block), so it decides the attempt like the kinds above. An anomaly
-//!   with no readable `coordinate.block_hash` (a row of an older build, or a malformed one)
-//!   cannot be compared and holds, as before: a false global pause on bezent's own mint is the
+//!   with no readable `coordinate.block_hash` (a row of an older build, or a malformed one: not
+//!   `0x` and hex of the mint's block hash's length, such as a number, no prefix, `""` or a wrong
+//!   length) cannot be compared and holds, as before: a false global pause on bezent's own mint is the
 //!   failure to avoid, and a hold only pages (review of PR #80).
 //! - the `:bytes` kinds (marked `bytes_unreadable: true`): written before the chain is read, because
 //!   the recorded bytes do not decode or do not answer their rows. The same bytes may have
@@ -628,7 +629,10 @@ async fn late(conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<Look> {
                             AND e.payload ->> 'network' = $2 \
                             AND NOT (e.payload @> '{\"bytes_unreadable\": true}') \
                             AND (NOT (e.payload @> '{\"recorded_undecodable\": true}') \
-                                 OR COALESCE(lower(e.payload #>> '{coordinate,block_hash}') <> $4, false)))) \
+                                 OR COALESCE(CASE WHEN e.payload #>> '{coordinate,block_hash}' ~* '^0x[0-9a-f]+$' \
+                                              AND length(e.payload #>> '{coordinate,block_hash}') = length($4) \
+                                         THEN lower(e.payload #>> '{coordinate,block_hash}') <> $4 END, \
+                                         false)))) \
                   AS decided, \
                 EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'delivery-anomaly' \
                         AND e.payload ->> 'signed_transaction' = st.id::text \

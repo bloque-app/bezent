@@ -1415,10 +1415,17 @@ async fn prover_cannot_read_the_consumer(w: &World, signed: i64, coordinate: &st
 }
 
 fn coordinate_at(block: i64) -> String {
+    coordinate_with(
+        block,
+        &format!("\"0x{}\"", hex::encode(hash(ISSUING, block))),
+    )
+}
+
+/// A coordinate at `block` whose `block_hash` is the JSON value `block_hash`, verbatim.
+fn coordinate_with(block: i64, block_hash: &str) -> String {
     format!(
-        "{{\"network\": \"{ISSUING}\", \"block_number\": {block}, \"block_hash\": \"0x{}\", \
-          \"position_kind\": \"transaction\", \"position_index\": 3}}",
-        hex::encode(hash(ISSUING, block))
+        "{{\"network\": \"{ISSUING}\", \"block_number\": {block}, \"block_hash\": {block_hash}, \
+          \"position_kind\": \"transaction\", \"position_index\": 3}}"
     )
 }
 
@@ -1497,9 +1504,54 @@ async fn ac_i1_2_inv_8_the_block_hash_is_compared_whatever_its_case(
     holds_with_coordinate(
         options,
         connect,
-        coordinate_at(105).to_uppercase().replace("0X", "0x"),
+        // Only the hex is uppercased; the keys and the `0x` stay, so the path resolves and
+        // `lower()` is what makes it equal.
+        coordinate_with(
+            105,
+            &format!("\"0x{}\"", hex::encode_upper(hash(ISSUING, 105))),
+        ),
     )
     .await;
+}
+
+/// A `block_hash` that is not `0x` and hex of the mint's hash's length cannot be compared: the
+/// attempt is not decided, the mint at that very block holds, and no pause is raised.
+async fn holds_with_block_hash(options: PgPoolOptions, connect: PgConnectOptions, value: String) {
+    holds_with_coordinate(options, connect, coordinate_with(105, &value)).await;
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_a_numeric_block_hash_holds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    holds_with_block_hash(options, connect, "105".to_owned()).await;
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_a_block_hash_without_the_prefix_holds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let v = format!("\"{}\"", hex::encode(hash(ISSUING, 105)));
+    holds_with_block_hash(options, connect, v).await;
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_an_empty_block_hash_holds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    holds_with_block_hash(options, connect, "\"\"".to_owned()).await;
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_a_block_hash_of_the_wrong_length_holds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let v = format!("\"0x{}\"", &hex::encode(hash(ISSUING, 105))[..10]);
+    holds_with_block_hash(options, connect, v).await;
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
