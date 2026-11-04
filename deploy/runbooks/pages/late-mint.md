@@ -23,14 +23,14 @@ the code of `services/core/src/late_mint.rs` (PR #72, merged).
 
 | Page | Meaning |
 |---|---|
-| `late-mint-prover-silent` | A mint waits on an attempt the endpoint's prover does not decide though its era is over (the prover is stuck, down or out of range), or a key is compromised. Never a pause by itself. |
+| `late-mint-prover-silent` | A mint waits on an attempt the endpoint's prover does not decide though its era is over (the prover is stuck, down or out of range), or a key is compromised. Never a pause by itself. Once, then once a day while the mint is still held with the prover still silent. |
 | `late-mint-check-failed` | The check for one mint failed repeatedly. Once per observation. |
 | `late-mint-watch-failed` | The core cannot list the mints to check, cycle after cycle: no late mint would be seen. |
 
 ## Pages
 
 ERROR lines `kind=<kind>` with a `detail` and `event_log` entries of the same kind (once per observation, durable across
-restarts).
+restarts). `late-mint-prover-silent` repeats once a day, from the log, for as long as the hold lasts; `late-mint-watch-failed` is logged once per streak and its event is retried every cycle until it is recorded.
 
 ## Confirm
 

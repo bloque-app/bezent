@@ -232,6 +232,7 @@ pub async fn watch(pool: &PgPool, now: DateTime<Utc>) -> sqlx::Result<usize> {
 pub struct Watcher {
     failed: AtomicI32,
     paged: AtomicBool,
+    logged: AtomicBool,
 }
 
 impl Watcher {
@@ -241,6 +242,7 @@ impl Watcher {
         let Err(e) = watch(pool, now).await else {
             self.failed.store(0, Ordering::Relaxed);
             self.paged.store(false, Ordering::Relaxed);
+            self.logged.store(false, Ordering::Relaxed);
             return;
         };
         let failures = self.failed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -253,9 +255,14 @@ impl Watcher {
             "failures": failures,
             "error": e.to_string(),
         });
-        // Best effort: the store is probably what failed. The log line is the page either way, but
-        // the streak counts as paged only when the event is in the log: a failed insert leaves it
-        // to the next cycle, so the page is never a log line alone for good.
+        // The log line is the page whatever else happens, once per streak: while the store is down
+        // the insert is tried again every cycle, the line is not.
+        if !self.logged.swap(true, Ordering::Relaxed) {
+            tracing::error!(kind = %"late-mint-watch-failed", %detail,
+                "page: the core cannot list the mints to check against their proofs, cycle after cycle; no late mint would be seen");
+        }
+        // Best effort: the store is probably what failed. The streak counts as paged only when the
+        // event is in the log, so a failed insert is tried again on the next cycle.
         let recorded = match pool.acquire().await {
             Ok(mut conn) => store::event(&mut conn, "late-mint-watch-failed", None, &detail)
                 .await
@@ -265,8 +272,6 @@ impl Watcher {
         if recorded {
             self.paged.store(true, Ordering::Relaxed);
         }
-        tracing::error!(kind = %"late-mint-watch-failed", %detail,
-            "page: the core cannot list the mints to check against their proofs, cycle after cycle; no late mint would be seen");
     }
 }
 

@@ -967,6 +967,7 @@ async fn ac_i1_2_a_page_that_could_not_be_recorded_is_tried_again_not_counted_as
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
+    let log = PageLog::start();
     let (_, reference) = proven_deposit(&w, 100).await;
     mint_at(&w.admin, 105, &reference).await;
     exec(
@@ -989,6 +990,8 @@ async fn ac_i1_2_a_page_that_could_not_be_recorded_is_tried_again_not_counted_as
     assert_eq!(watch_pages(&w).await, 1, "the page that was missed is made");
     let _ = w.core.cycle(now()).await;
     assert_eq!(watch_pages(&w).await, 1, "once");
+    // And the log line is one per streak, not one per cycle while the insert kept failing.
+    assert_page(&log, "late-mint-watch-failed", 1);
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
