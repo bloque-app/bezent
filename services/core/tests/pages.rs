@@ -102,6 +102,8 @@ fn the_default_setup_would_colour_the_field_names_and_break_the_filter() {
             Ok(())
         }
     }
+    // The process-wide subscriber first, so that this scoped one does not race the callsite cache.
+    common::pagelog::install();
     let buffer = Buffer::default();
     let writer = buffer.clone();
     let default = tracing_subscriber::fmt()
