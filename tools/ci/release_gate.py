@@ -331,8 +331,12 @@ def blockers(table):
 def mechanical_map():
     crit, _, stories = criteria_map.spec_criteria()
     layers = tomllib.loads((ROOT / "e2e/criteria/layers.toml").read_text()).get("layer", {})
+    try:
+        cfg = criteria_map.load_config()
+    except criteria_map.ConfigError as e:
+        return [f"criteria: {e}"]  # a gate error, not a traceback
     errors, table = criteria_map.check(crit, stories, criteria_map.v0_stories(), criteria_map.invariant_layers(),
-                                       layers, criteria_map.load_config(), criteria_map.scan())
+                                       layers, cfg, criteria_map.scan())
     return errors + blockers(table)
 
 

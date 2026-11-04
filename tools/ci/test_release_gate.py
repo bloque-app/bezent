@@ -411,6 +411,16 @@ class Gate(unittest.TestCase):
         self.assertEqual(rg.blockers(table[:1]), [])
         self.assertIn("AC-X1.3", rg.blockers([{"ac": "AC-X1.3", "status": "exception"}])[0])
 
+    def test_a_config_error_is_a_gate_error_not_a_traceback(self):
+        from unittest import mock
+
+        def broken(root=None):
+            raise rg.criteria_map.ConfigError("e2e/criteria/exceptions.toml: table(s) [known_unmet] not allowed here")
+        with mock.patch.object(rg.criteria_map, "load_config", broken):
+            errors = rg.mechanical_map()
+        self.assertEqual(len(errors), 1)
+        self.assertIn("[known_unmet] not allowed", errors[0])
+
     def test_the_committed_known_unmet_list_fails_the_real_gate_and_empties_to_pass(self):
         from unittest import mock
         listed = tomllib.loads((rg.ROOT / "e2e/criteria/known_unmet.toml").read_text())["known_unmet"]

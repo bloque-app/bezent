@@ -54,10 +54,31 @@ RUNS_IN = [
 SKIP_DIRS = {"node_modules", "target", ".git", "lib", "out", "cache", "broadcast"}
 
 
-def load_config():
-    """exceptions.toml and known_unmet.toml as one config: [exception], [story_without_criteria], [known_unmet]."""
-    cfg = tomllib.loads((ROOT / "e2e/criteria/exceptions.toml").read_text())
-    cfg.update(tomllib.loads((ROOT / "e2e/criteria/known_unmet.toml").read_text()))
+class ConfigError(ValueError):
+    """A criteria config file that says something the map would otherwise drop or let override another."""
+
+
+# The tables each file may hold. known_unmet.toml is the spec owner's (CODEOWNERS), exceptions.toml the maintainers':
+# a `[known_unmet]` table in exceptions.toml would be overwritten by the other file's (or, if that file had none, would
+# stand in for it, without the spec owner), and the reverse is the same; neither is allowed.
+CONFIG_TABLES = {
+    "e2e/criteria/exceptions.toml": {"exception", "story_without_criteria"},
+    "e2e/criteria/known_unmet.toml": {"known_unmet"},
+}
+
+
+def load_config(root=None):
+    """exceptions.toml and known_unmet.toml as one config: [exception], [story_without_criteria], [known_unmet].
+    A table in the wrong file, or one the map does not know, is a ConfigError, never silently dropped."""
+    root = root or ROOT
+    cfg = {}
+    for name, allowed in CONFIG_TABLES.items():
+        data = tomllib.loads((root / name).read_text())
+        stray = sorted(set(data) - allowed)
+        if stray:
+            raise ConfigError(f"{name}: table(s) {', '.join(f'[{t}]' for t in stray)} not allowed here "
+                              f"(this file holds {', '.join(f'[{t}]' for t in sorted(allowed))})")
+        cfg.update(data)
     return cfg
 
 
@@ -323,7 +344,10 @@ def check(crit, stories, v0, inv_layers, layers, cfg, found):
 def main():
     crit, withdrawn, stories = spec_criteria()
     layers = tomllib.loads((ROOT / "e2e/criteria/layers.toml").read_text()).get("layer", {})
-    cfg = load_config()
+    try:
+        cfg = load_config()
+    except ConfigError as e:
+        die([str(e)])
     errors, table = check(crit, stories, v0_stories(), invariant_layers(), layers, cfg, scan())
     if "--json" in sys.argv:
         print(json.dumps(table, indent=1))
