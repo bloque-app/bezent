@@ -73,6 +73,23 @@ looks; but this is a ruling about what the completion budget means, so it is not
 None of A1a to A1d is built (the sum of point 4 is). If A1a, A1b or A1d is ruled, the change is in `services/core/src/engine.rs` (`delivering_deadline`,
 `unprepared_deadline`) and needs a feature note and tests (`AC-B1.4` and `REQ-NX-4` at the service layer, §9).
 
+## A point for the owner: a final inclusion that is not what was ordered
+
+Not about the deadline, but about the same hold (issue #35, `resolution-blocked-by-inclusion`), raised by a review of
+the fix round of that issue, and put here because it is the nearest unruled amendment. A payout observed included
+and **final** whose amount or recipient is not the one ordered (`REQ-TR-3`, `REQ-TR-5`) is a leg that stands, so a
+refund or a new attempt is withheld for as long as it stands, which is for ever: the hold ends only when the endpoint
+writes `withdrawn`, and a final inclusion is never withdrawn. It also cannot close the review as `Delivered`, because
+the leg is not what the transfer ordered. The transfer stays in `Needs-Review`, a resolution into a refund or a new
+attempt pages once a day, and nothing releases. `REQ-GV-5` forbids a path that moves value or edits a status, so none
+is built. The question is what the specification wants for value that left to the wrong place or in the wrong amount:
+(a) nothing inside bezent, the recovery being outside it and the transfer staying in review as a record (what runs
+today); (b) a terminal state or resolution for "delivered, not as ordered" that records the fact and closes the review
+without moving value; (c) something else. Today's behaviour is pinned by
+`req_rf_1_issue_35_a_final_inclusion_that_fails_the_amount_check_is_never_released` in `services/core/tests/cancel.rs`,
+which says it is not a ruling. Until it is ruled an operator escalates to the owner
+(`deploy/runbooks/pages/payout.md`).
+
 ## Identifier ledger
 
 | Action | Identifiers |

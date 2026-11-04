@@ -452,3 +452,181 @@ async fn ac_i1_2_a_key_that_mints_the_reference_is_paged_while_the_prover_is_sil
     assert_eq!(r.verdict().await.as_deref(), Some("alerted"));
     assert_eq!(r.pages().await, 1);
 }
+
+/// A signed transaction of the lane in a format `decode_extrinsic` rejects (a trailing byte after
+/// the extrinsic), still read as the lane's by its sender: what an earlier build wrote.
+fn in_a_format_this_build_rejects(bytes: &[u8]) -> Vec<u8> {
+    use bezent_kreivo_endpoint::kreivo;
+    let mut old = bytes.to_vec();
+    old.push(0);
+    assert!(kreivo::decode_extrinsic(&old).is_none());
+    assert!(kreivo::signed_sender(&old).is_some());
+    old
+}
+
+impl Retry {
+    /// What the core would do about a transfer whose delivery nobody can read: the transfer's
+    /// state, how many refunds exist for it, and the non-execution proofs of attempt 2.
+    async fn transfer(&self) -> (String, i64, i64) {
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM transfers WHERE kind = 'deposit'")
+                .fetch_one(&self.f.admin)
+                .await
+                .unwrap();
+        let refunds = self
+            .f
+            .count("SELECT count(*) FROM transfers WHERE kind = 'refund' OR refund_of IS NOT NULL")
+            .await;
+        let proofs = self
+            .f
+            .count(&format!(
+                "SELECT count(*) FROM non_execution_proofs WHERE signed_transaction_id = {}",
+                self.signed
+            ))
+            .await;
+        (state, refunds, proofs)
+    }
+}
+
+/// Review of PR #80: a recorded extrinsic this build cannot decode consumes attempt 2's nonce and
+/// mints the reference, in a block of attempt 2's era. The prover records an anomaly (nothing is
+/// proven, `REQ-NX-3`); that anomaly says the prover cannot read the attempt, never that the
+/// attempt did not mint, so the core must not decide the mint on it: it stays held and pages, and
+/// raises nothing. The transfer goes to review at once, with no refund (`REQ-RF-1`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_mint_by_a_recorded_attempt_this_build_cannot_read_is_held_and_paged_never_raised(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let r = retry(pool, connect).await;
+    let f = &r.f;
+    let bytes: Vec<u8> = sqlx::query_scalar("SELECT bytes FROM signed_transactions WHERE id = $1")
+        .bind(r.signed)
+        .fetch_one(&f.admin)
+        .await
+        .unwrap();
+    // Another recorded signed transaction of the lane, written in the older format; it is the one
+    // that lands, takes attempt 2's nonce, and mints.
+    let old = in_a_format_this_build_rejects(&bytes);
+    sqlx::query(
+        "INSERT INTO signed_transactions (intent_id, attempt, bytes, tx_hash) \
+         SELECT intent_id, 3, $1, $2 FROM signed_transactions WHERE id = $3",
+    )
+    .bind(&old)
+    .bind(bezent_kreivo_endpoint::kreivo::blake2_256(&old).as_slice())
+    .bind(r.signed)
+    .execute(&f.admin)
+    .await
+    .unwrap();
+    while f.chain.best() < r.until - 2 {
+        f.chain.produce();
+    }
+    f.chain.consume_nonce(f.lane.account);
+    f.chain.include_raw(old);
+    f.chain.use_reference_outside(r.reference);
+    f.chain.emit(ContractEvent::Minted {
+        seq: 0,
+        reference: r.reference,
+        asset: AssetId::Here(101),
+        to: DESTINATION_ACCOUNT,
+        amount: AMOUNT,
+    });
+    f.chain.produce();
+    f.chain.advance(MAX_ERA + 2);
+    r.observe().await;
+    let found = f.prover().step().await.unwrap();
+    assert!(
+        found
+            .iter()
+            .any(|(i, d)| *i == r.signed && matches!(d, Disposition::Unknown(_))),
+        "{found:?}"
+    );
+    let marked = f
+        .count(
+            "SELECT count(*) FROM event_log WHERE kind = 'delivery-anomaly' \
+               AND payload ->> 'dedupe' LIKE '%:recorded-undecodable:%' \
+               AND payload @> '{\"recorded_undecodable\": true}'",
+        )
+        .await;
+    assert_eq!(marked, 1, "the anomaly carries its marker");
+    // The old-format attempt itself has an anomaly of its own, before the chain is read; marked too.
+    let bytes_anomalies = |marked: bool| {
+        let sql = format!(
+            "SELECT count(*) FROM event_log WHERE kind = 'delivery-anomaly' \
+               AND payload ->> 'dedupe' LIKE '%:bytes' \
+               AND {}(payload @> '{{\"bytes_unreadable\": true}}')",
+            if marked { "" } else { "NOT " }
+        );
+        async move { f.count(&sql).await }
+    };
+    assert_eq!(
+        (bytes_anomalies(true).await, bytes_anomalies(false).await),
+        (1, 0)
+    );
+    // Held, paged at the bound, and nothing raised; however many cycles pass.
+    for _ in 0..HELD_PAGE_AFTER_CYCLES + 3 {
+        cycle(&r.core, now()).await;
+    }
+    assert_eq!(
+        (r.alerts().await, r.pauses().await, r.pages().await),
+        (0, 0, 1)
+    );
+    assert_eq!(r.verdict().await, None, "the row stays open");
+    // The transfer is in review at once; nothing was proven and nothing was refunded.
+    assert_eq!(
+        r.transfer().await,
+        ("Needs-Review".to_owned(), 0, 0),
+        "state, refunds, proofs of attempt 2"
+    );
+    assert!(
+        f.count("SELECT count(*) FROM event_log WHERE kind = 'delivery-anomaly-surfaced'")
+            .await
+            >= 1
+    );
+}
+
+/// The other side: a mint outside bezent, beside an attempt of bezent's that the chain refused,
+/// is still the alarm. The anomaly marker changes nothing for what the prover can decide.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_rogue_mint_beside_an_attempt_refused_on_chain_still_raises(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let r = retry(pool, connect).await;
+    let f = &r.f;
+    // The reference is minted outside bezent, then attempt 2 is sent in its era and refused.
+    f.chain.use_reference_outside(r.reference);
+    f.chain.emit(ContractEvent::Minted {
+        seq: 0,
+        reference: r.reference,
+        asset: AssetId::Here(101),
+        to: DESTINATION_ACCOUNT,
+        amount: AMOUNT,
+    });
+    f.chain.produce();
+    f.chain.refuse_on_chain(true);
+    f.chain.refuse_submissions(false);
+    assert_eq!(f.submitter().resend().await.unwrap(), 1);
+    f.chain.produce();
+    f.chain.advance(MAX_ERA + 2);
+    r.observe().await;
+    let found = f.prover().step().await.unwrap();
+    assert!(
+        matches!(found.as_slice(), [(i, Disposition::Unknown(_))] if *i == r.signed),
+        "{found:?}"
+    );
+    // The anomaly is the one that says the chain shows the attempt not executed: it decides.
+    assert_eq!(
+        f.count(
+            "SELECT count(*) FROM event_log WHERE kind = 'delivery-anomaly' \
+               AND payload ->> 'dedupe' LIKE '%:reference-used' \
+               AND NOT (payload ? 'recorded_undecodable')"
+        )
+        .await,
+        1
+    );
+    cycle(&r.core, now()).await;
+    cycle(&r.core, now()).await;
+    assert_eq!((r.alerts().await, r.pauses().await), (1, 1));
+    assert_eq!(r.verdict().await.as_deref(), Some("alerted"));
+}

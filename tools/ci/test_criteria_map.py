@@ -3,7 +3,9 @@
 """Shows that tools/ci/criteria_map.py fails closed: each way the map can go wrong turns into an error.
 Run: python3 -m unittest discover -s tools/ci -p 'test_*.py'"""
 import copy
+import shutil
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -120,6 +122,24 @@ class CriteriaMap(unittest.TestCase):
         self.assertTrue(any("AC-B1.3" in e and "narrowed" in e for e in run(layers=layers)))
         layers["AC-B1.3"]["narrowed"] = "a reviewed reason"
         self.assertEqual([e for e in run(layers=layers) if "AC-B1.3" in e], [])
+
+    def test_a_table_in_the_wrong_config_file_is_an_error_not_dropped(self):
+        # `cfg.update` once let known_unmet.toml's table replace exceptions.toml's, so a `[known_unmet]` written in
+        # exceptions.toml (the maintainers') was dropped, or stood in for the spec owner's file when that had none.
+        for name, stray in (("exceptions.toml", '[known_unmet."AC-X1.1"]\nmissing = "m"\nclosed_by = "c"\n'),
+                            ("known_unmet.toml", '[exception."AC-X1.1"]\nreason = "r"\nblocked_by = "b"\n'),
+                            ("exceptions.toml", "[surprise]\nx = 1\n")):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "e2e/criteria").mkdir(parents=True)
+                for f in ("exceptions.toml", "known_unmet.toml"):
+                    shutil.copy(cm.ROOT / "e2e/criteria" / f, root / "e2e/criteria" / f)
+                path = root / "e2e/criteria" / name
+                path.write_text(path.read_text() + "\n" + stray)
+                with self.assertRaises(cm.ConfigError) as caught:
+                    cm.load_config(root)
+                self.assertIn(name, str(caught.exception))
+        self.assertEqual(sorted(cm.load_config()), ["exception", "known_unmet", "story_without_criteria"])
 
     def test_an_empty_parse_fails(self):
         errors = run(crit={}, layers={}, found={})

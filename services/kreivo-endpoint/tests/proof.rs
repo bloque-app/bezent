@@ -467,6 +467,15 @@ async fn ac_i1_2_a_recorded_signature_in_a_format_this_build_rejects_raises_noth
         0,
         "a consumer that is not identified proves nothing"
     );
+    // It is not silent: the transfer waits on that nonce every cycle, so there is one anomaly, once
+    // for the two steps, naming it. No pause, and no proof.
+    let all: Vec<String> = sqlx::query_scalar("SELECT payload::text FROM event_log WHERE kind = 'delivery-anomaly' AND payload ->> 'dedupe' LIKE '%:recorded-undecodable:%'")
+        .fetch_all(&f.admin).await.unwrap();
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(all[0].contains("cannot decode"), "{all:?}");
+    // The marker the core reads: this anomaly does not say the attempt did not mint (the late-mint
+    // check holds on it, PR #80 review).
+    assert!(all[0].contains("\"recorded_undecodable\": true"), "{all:?}");
 }
 
 /// The other side of the test above: the same extrinsic with no record of it is a signature bezent

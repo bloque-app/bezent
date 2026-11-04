@@ -289,7 +289,7 @@ impl Core {
             tracing::warn!(error = %e, "REQ-BK-7: pending movements not posted; the cycle goes on");
         }
         // Issue #26 (AC-I1.2, INV-8): a mint of a reference after its proof raises the alert.
-        self.late_mint.cycle(&self.pool).await;
+        self.late_mint.cycle(&self.pool, now).await;
         let mut report = Report {
             withdrawals: self.withdrawals_from_redemptions().await?,
             ..Report::default()
@@ -905,6 +905,11 @@ impl Core {
         let since = since
             .or(t.source_final_block_time)
             .unwrap_or(head.block_time);
+        // This page stays on the destination's clock, unlike the hold of an inclusion (`withheld`):
+        // the hold itself is measured there (amendment 0012: the allowance refills on that chain), so
+        // a day of it is a day of that chain. A destination whose head has stopped does not page
+        // from here; it shows in the observables as transfers that stop getting younger on chain
+        // time (`oldest_nonfinal_transfer_age_seconds`, `REQ-ST-6`), which is a metric, not a page.
         let bound = self.settings.payout_window_alert_after;
         // The holds of this attempt already left count too: a provider that flaps in and out of
         // the hold does not start the page over (issue #35).
@@ -1830,6 +1835,14 @@ impl Core {
         }))
     }
 
+    /// Whether an inclusion of the payout stands: the transfer's own leg is observed, executed and
+    /// not withdrawn, decided or not (an ambiguous one counts: it is unknown, never absent). The one
+    /// reading of "standing" for both holds, the automatic path in `Delivered` (`after_proof`) and a
+    /// resolution (`resolve`), so the two cannot drift apart.
+    async fn inclusion_stands(&self, conn: &mut PgConnection, t: &Transfer) -> sqlx::Result<bool> {
+        Ok(!matches!(self.destination_leg(conn, t).await?, Leg::None))
+    }
+
     /// `Delivering`: included, proven not executed, or unknown past its deadline.
     async fn delivering(
         &self,
@@ -1870,16 +1883,7 @@ impl Core {
         match store::proof_of(conn, t.id, attempt).await? {
             Some(ProofPoint::Final(proof)) => {
                 return self
-                    .after_proof(
-                        conn,
-                        t,
-                        State::Delivering,
-                        attempt,
-                        &proof,
-                        None,
-                        false,
-                        now,
-                    )
+                    .after_proof(conn, t, State::Delivering, attempt, &proof, None, now)
                     .await;
             }
             Some(ProofPoint::Untimed) => return Ok(Did::default()),
@@ -2381,9 +2385,11 @@ impl Core {
         attempt: i32,
         proof: &Point,
         manual: Option<i64>,
-        standing: bool,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
+        // An inclusion of the payout that stands makes the leg unknown whatever a proof says
+        // (REQ-RF-1, issue #35); read here, from the same reading `resolve` holds by.
+        let standing = self.inclusion_stands(conn, t).await?;
         let retrying = store::attempt_has_intents(conn, t.id, attempt + 1).await?;
         if t.kind == "withdrawal" && !retrying {
             let start = t.source_final_block_time.unwrap_or(proof.block_time);
@@ -2589,16 +2595,7 @@ impl Core {
         // a proof says: no refund follows (REQ-RF-1, issue #35).
         if let Some(ProofPoint::Final(proof)) = store::proof_of(conn, t.id, attempt).await? {
             return self
-                .after_proof(
-                    conn,
-                    t,
-                    State::Delivered,
-                    attempt,
-                    &proof,
-                    None,
-                    leg.is_some(),
-                    now,
-                )
+                .after_proof(conn, t, State::Delivered, attempt, &proof, None, now)
                 .await;
         }
         let deadline = self.deadline(conn, t, included_at).await?;
@@ -2711,9 +2708,10 @@ impl Core {
         // no new attempt where the chain does not refuse a second delivery of one reference.
         // Such a resolution is withheld, not refused (a later one is not held up behind it): it
         // runs when the inclusion is withdrawn, and the review closes as Delivered, by a
-        // resolution, when it goes final. Nothing is derived from the observation, only withheld.
+        // resolution, when it goes final and is what was ordered (a final inclusion that fails the
+        // amount or recipient check releases nothing: F-003 NOTES item 26 (e)). Nothing is derived from the observation, only withheld.
         let blocked = matches!(before, State::Delivering | State::Delivered)
-            && !matches!(self.destination_leg(conn, t).await?, Leg::None);
+            && self.inclusion_stands(conn, t).await?;
         let mut withheld = vec!["Refunding"];
         if !self.refuses_second_delivery(conn, t).await? {
             withheld.push("Delivering");
@@ -2973,8 +2971,10 @@ impl Core {
 
     /// The hold while an inclusion of the payout stands (`REQ-RF-1`, issue #35): `to` (a refund or
     /// a new attempt), by resolution `action` or by the automatic path, changes no state and pages
-    /// a human: once, then once a day while it lasts. It lasts until the endpoint decides the
-    /// inclusion (`withdrawn` or `final`); there is no override (`REQ-GV-5`). The last page is read
+    /// a human: once, then once a day while it lasts (a day on the destination's final head or on the
+    /// core's clock, whichever comes first). It lasts until the endpoint writes
+    /// `withdrawn` for the inclusion, or `final` for one that is what was ordered; a final one that
+    /// fails the amount or recipient check never releases it. There is no override (`REQ-GV-5`). The last page is read
     /// from the event log, so a restart repeats nothing early and forgets nothing.
     async fn withheld(
         &self,
@@ -2991,8 +2991,14 @@ impl Core {
         let at = store::latest_head(conn, &t.destination_network)
             .await?
             .map_or(now, |h| h.block_time);
-        let last: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT (payload ->> 'at')::timestamptz FROM event_log \
+        // The last page of this hold: the destination's head time it was made at, and the core's
+        // own clock. A day is a day on either: the head's, so a replay of old history does not
+        // page by the calendar, and the wall clock's, so the page does not go quiet for as long as
+        // the destination's endpoint stalls and its head stops (review of the fix round of #35). A
+        // page from before the wall clock was recorded counts from when it was appended.
+        let last: Option<(DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT (payload ->> 'at')::timestamptz, \
+                    COALESCE((payload ->> 'wall')::timestamptz, appended_at) FROM event_log \
              WHERE kind = 'resolution-blocked-by-inclusion' AND transfer_id = $1 \
                AND payload ->> 'hold' = $2 ORDER BY seq DESC LIMIT 1",
         )
@@ -3000,12 +3006,14 @@ impl Core {
         .bind(&hold)
         .fetch_optional(&mut *conn)
         .await?;
-        if last.is_some_and(|l| at < l + Duration::days(1)) {
+        if last.is_some_and(|(head, wall)| {
+            at < head + Duration::days(1) && now < wall + Duration::days(1)
+        }) {
             return Ok(Did::default());
         }
         let detail = json!({"spec": "REQ-RF-1", "bridge_reference": t.bridge_reference,
                             "hold": hold, "manual_action_id": action.map(|a| a.to_string()),
-                            "resolution": to, "at": at.to_rfc3339()});
+                            "resolution": to, "at": at.to_rfc3339(), "wall": now.to_rfc3339()});
         store::event(conn, "resolution-blocked-by-inclusion", Some(t.id), &detail).await?;
         tracing::error!(kind = %"resolution-blocked-by-inclusion", transfer = %t.bridge_reference, %detail,
             "page: a refund or a new attempt waits, because the payout is observed included and not withdrawn");

@@ -77,7 +77,7 @@ is left.
     fails (`late-mint-watch-failed`, once per streak; it used to be a warning).
     *A prover that does not decide* (migration 0076, `held_cycles`): a held row stays open and raises nothing; each
     cycle that finds an attempt undecided with its era over at the final head counts, and at 60 cycles (five minutes at
-    the core's default) the core pages once, durably (`late-mint-prover-silent`, deduplicated by the observation),
+    the core's default) the core pages, durably (`late-mint-prover-silent`, once, then once a day while the mint is still held with the prover still silent, read from the log),
     naming the reference, the attempt, the signed transaction, its era and the head. No pause, no key-compromise
     alert; the row stays open, so if the prover later decides against the mint the alarm still raises, once. An
     operator learns that the prover is stuck or that a key may be compromised; during a long observer catch-up the

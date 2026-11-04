@@ -47,8 +47,16 @@ payload and from the endpoint's own log; the refusal text is the network's, not 
    fee the account cannot pay). Diagnose it on the network. If a named condition applies (`CND-FeeShort`,
    `CND-PayoutWindow`), follow its runbook. If it keeps being refused, the transfer goes to review at its deadline and
    the review runbook applies (`../conditions/CND-Withdrawn.md` and the review section of F-003 NOTES).
-2. `resolution-blocked-by-inclusion`: wait. The hold lasts until the endpoint decides the inclusion (withdrawn or final).
-   There is no override (`REQ-GV-5`). A refund before the inclusion is decided could pay twice (`INV-8`).
+2. `resolution-blocked-by-inclusion`: wait, then read the inclusion. The hold ends when the endpoint writes `withdrawn`
+   for it (the resolution then runs), or `final` for an inclusion that paid what was ordered, to whom (the review
+   then closes as `Delivered`, by a recorded resolution). There is no override (`REQ-GV-5`). A refund before the
+   inclusion is decided could pay twice (`INV-8`).
+   **If the inclusion is final and the transfer has an `amount-mismatch` or `recipient-mismatch` event, the hold never
+   ends.** Nothing in bezent releases it: it is not withdrawn, and it cannot close as `Delivered`. Do not approve or
+   record another resolution to get past it, and do not move value by hand. Leave the transfer in review, keep the daily
+   page as the record, and escalate to the spec owner with the transfer's reference, the observation (`observation_id` in
+   the mismatch event) and the amounts. Recovering what was paid wrongly is outside bezent and the owner's decision
+   (amendment 0019, "A point for the owner").
 3. In both cases tell the requester the withdrawal is delayed, never failed (`REQ-IC-3`).
 
 ## Never

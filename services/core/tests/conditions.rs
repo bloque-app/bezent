@@ -311,7 +311,22 @@ async fn pause_case(
     deposit_held: bool,
     withdrawal_held: bool,
 ) {
+    pause_case_with(options, connect, "", pause, deposit_held, withdrawal_held).await;
+}
+
+/// [`pause_case`] with `extra` run first: another asset and another network the pause can name.
+async fn pause_case_with(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+    extra: &str,
+    pause: &str,
+    deposit_held: bool,
+    withdrawal_held: bool,
+) {
     let w = World::new(options, connect).await;
+    if !extra.is_empty() {
+        exec(&w.admin, extra).await;
+    }
     exec(&w.admin, &format!("INSERT INTO pauses {pause}")).await;
     reserve(&w.admin, 1_000_000).await;
     let deposit = source_final_deposit(&w).await;
@@ -435,6 +450,128 @@ async fn ac_i2_1_a_pause_of_the_withdrawal_direction_holds_withdrawals_only(
         "(direction) VALUES ('withdrawal')",
         false,
         true,
+    )
+    .await;
+}
+
+/// Another asset and another network, declared and not used by the transfers under test.
+const ANOTHER: &str = "INSERT INTO networks (network, role, address_format, backend) VALUES \
+       ('base-test', 'origin', 'evm', 'evm:84532'); \
+     INSERT INTO assets (asset, precision, assurance_class, issuing_asset, surplus_floor, surplus_alert) \
+       VALUES ('bOTHER', 6, 'public', 'Here(102)', 0, 1);";
+
+/// `AC-I2.1`, `INV-15`, "and nothing else": a pause of another asset leaves this asset's deposit and
+/// withdrawal alone.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_pause_of_another_asset_holds_nothing_of_this_one(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    pause_case_with(
+        options,
+        connect,
+        ANOTHER,
+        "(asset) VALUES ('bOTHER')",
+        false,
+        false,
+    )
+    .await;
+}
+
+/// `AC-I2.1`, `INV-15`, "and nothing else": a pause of another network, of that network's route of
+/// this asset, and of another asset's route through this network, all in place together, leave these
+/// transfers alone.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_pause_of_another_network_or_route_holds_nothing_of_this_one(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    pause_case_with(
+        options,
+        connect,
+        ANOTHER,
+        "(asset, network, direction) VALUES \
+           (NULL, 'base-test', NULL), ('bUSDC', 'base-test', 'deposit'), \
+           ('bOTHER', 'polygon-test', 'withdrawal')",
+        false,
+        false,
+    )
+    .await;
+}
+
+/// A deposit in flight, then `pause` (which covers its route) in place: it is still observed and
+/// completed (`AC-I2.1`, `REQ-GV-1`, `INV-15`: a pause stops new work only).
+async fn deposit_in_flight_under(options: PgPoolOptions, connect: PgConnectOptions, pause: &str) {
+    let w = World::new(options, connect).await;
+    let id = source_final_deposit(&w).await;
+    deliver(&w, id, 1, t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    exec(&w.admin, &format!("INSERT INTO pauses {pause}")).await;
+    // A deposit that is new meanwhile waits.
+    let late = arrival(&w.admin, 11, 5_000).await;
+    decide(&w.admin, late, "final", 13).await;
+    deposit(&w.admin, 11, 5_000).await;
+    let reference = reference_of(&w.admin, id).await;
+    let minted = observe(
+        &w.admin,
+        ISSUING,
+        40,
+        0,
+        ISSUING_ASSET,
+        5_000,
+        None,
+        Some(DESTINATION_ACCOUNT),
+        Some(&reference),
+        true,
+        json!({"event": "Minted"}),
+    )
+    .await;
+    decide(&w.admin, minted, "final", 45).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Completed".into(), None), "{pause}");
+    let waiting: i64 = w
+        .count("SELECT count(*) FROM transfers WHERE condition = 'CND-Paused'")
+        .await;
+    assert_eq!(waiting, 1, "the new deposit waits under {pause}");
+}
+
+/// `AC-I2.1`, `REQ-GV-1`, `INV-15`: a pause of the asset, ...
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_deposit_in_flight_completes_under_a_pause_of_its_asset(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    deposit_in_flight_under(options, connect, "(asset) VALUES ('bUSDC')").await;
+}
+
+/// ... of its network, ...
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_deposit_in_flight_completes_under_a_pause_of_its_network(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    deposit_in_flight_under(options, connect, "(network) VALUES ('polygon-test')").await;
+}
+
+/// ... of the deposit direction, ...
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_deposit_in_flight_completes_under_a_pause_of_the_deposit_direction(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    deposit_in_flight_under(options, connect, "(direction) VALUES ('deposit')").await;
+}
+
+/// ... and of its route.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_deposit_in_flight_completes_under_a_pause_of_its_route(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    deposit_in_flight_under(
+        options,
+        connect,
+        "(asset, network, direction) VALUES ('bUSDC', 'polygon-test', 'deposit')",
     )
     .await;
 }

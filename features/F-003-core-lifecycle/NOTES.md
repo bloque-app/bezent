@@ -254,9 +254,17 @@ it.
     relies on it. Which network is which is read from `networks.role`. The one test that had a new attempt
     beside an inclusion on an origin network, `review_findings.rs` `m2_inv_8_…`, reached review that way only as
     setup; it now reaches it with attempt 2 signed and unknown at its deadline, and every assertion stands.
-    **A hold has no end of its own, and no override** (`REQ-GV-5`): it lasts until the endpoint writes `withdrawn` or
-    `final` for the observation. It pages once and then once a day while it lasts, durably (the last page is read
-    from the event log, on the destination's final head), as the long-hold page does.
+    **A hold has no end of its own, and no override** (`REQ-GV-5`): it lasts until the endpoint writes `withdrawn`
+    for the observation, or `final` for an inclusion that is what the transfer ordered (the review then closes as
+    `Delivered`, by a recorded resolution). **A final inclusion that fails the amount or recipient check
+    (`leg_mismatch`) never releases it**: it is not withdrawn, and it cannot close the review as `Delivered`, so the
+    transfer stays in review, a refund or new-attempt resolution is withheld for good and pages daily, and nothing
+    moves. No path is added (`REQ-GV-5`): the question of what to do for value that left wrong is the owner's, a
+    point in amendment 0019 ("A point for the owner"), and the behaviour is pinned by
+    `req_rf_1_issue_35_a_final_inclusion_that_fails_the_amount_check_is_never_released`. It pages once and then once
+    a day while it lasts, durably (the last page is read from the event log), a day counted on the destination's final
+    head or on the core's clock, whichever passes first, so it does not go quiet while the destination's endpoint
+    stalls.
 27. **A payout signed after its deadline** (point 2 of the issue): **amendment 0019, proposed, not built.** The
     specification does not say whether the clock starts when the attempt becomes signable or whether a late signature
     gets a grace period; the choice changes what the completion budget (`NFR-2`) means.
@@ -284,6 +292,11 @@ Tests: `services/core/tests/cancel.rs` (`*_issue_35_*`; the S-4 test that never 
     a `delivery-anomaly-surfaced` event names the anomaly (once: a resolved review is not reopened by the anomaly
     that caused it). Nothing is refunded, retried or failed because of it (`REQ-RF-1`). **Ruled**: the §5.4 rows into
     `Needs-Review` gain this occasion by amendment 0013 (SPEC v0.5.3, pull request #47).
+   The late-mint check (`services/core/src/late_mint.rs`, "What decides an attempt") reads the same rows
+   with a different question: an anomaly ends an attempt's wait only if it says the attempt did not
+   mint. The two kinds that say the prover cannot read the attempt (`recorded_undecodable`,
+   `bytes_unreadable` in the payload) do not: the mint stays held and pages, and the transfer goes to review
+   through this section (PR #80 review).
 
 Tests: `services/core/tests/anomalies.rs` (`INV-8`).
 

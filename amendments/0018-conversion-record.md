@@ -39,7 +39,9 @@ which arrival a given conversion's output belongs to, or what object holds the c
 ## The exposure the binding rules do not close
 
 This is true today, with no option of this amendment applied, and it is wider than the pairing question. Found while
-reviewing `F-010`; checked by running a second requester against the real ingress (a scratch test, not kept).
+reviewing `F-010`; checked by running a second requester against the real ingress; that run is now kept as
+`services/ingress/tests/requester_binding_today.rs`, which pins today's behaviour (not a desired one, and it names no
+criterion) and goes when `d-requester-arrivals` is ruled.
 
 - What binds a deposit: `source_bindable()` (migration 0034) admits a final observation of kind `arrival` or
   `conversion_output` at the asset's reserve, carrying no on-chain reference, and `decide_deposit`

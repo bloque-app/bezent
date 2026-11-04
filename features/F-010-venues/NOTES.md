@@ -50,7 +50,9 @@ destination is the request's. Grants are per kind (`REQ-PN-2`). So:
   made it, and mint it to a destination it chooses; the first to name the coordinate wins and the rightful requester is
   refused `ERR-SourceConsumed`. The mint is backed (the output's amount, once); the loss is attribution and direction;
 - an **ordinary** arrival has the same exposure: there are no deposit addresses (`DEC-9`) and an inbound transfer carries no
-  reference, so nothing binds it to its requester either. Checked against the real ingress with a second requester;
+  reference, so nothing binds it to its requester either. Checked against the real ingress with a second requester, and kept as
+  `services/ingress/tests/requester_binding_today.rs`, which pins today's behaviour (not a desired one, no criterion) and goes when
+  `d-requester-arrivals` is ruled;
 - one mainnet instance serves Bloque Test and Bloque with one reserve and one route per asset and network (`PLAN.md`
   `DEC-15`, 0.6.0), so Bloque Test's deposit credential is production deposit authority over the same vault.
 

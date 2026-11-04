@@ -226,6 +226,20 @@ async fn prover_flags(w: &World, signed: i64) {
     .await;
 }
 
+/// The prover records a `delivery-anomaly` naming attempt `signed`, with `extra` in its payload (a
+/// marker, as the endpoint writes it): the anomaly says nothing of whether the attempt minted.
+async fn prover_flags_with(w: &World, signed: i64, extra: &str) {
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO event_log (kind, payload) VALUES ('delivery-anomaly', \
+               '{{\"network\": \"{ISSUING}\", \"signed_transaction\": {signed}, \
+                 \"reason\": \"unreadable\", {extra}}}')"
+        ),
+    )
+    .await;
+}
+
 async fn verdict(w: &World, observation: i64) -> Option<String> {
     sqlx::query_scalar("SELECT verdict FROM late_mint_checks WHERE observation_id = $1")
         .bind(observation)
@@ -801,8 +815,8 @@ async fn ac_i1_2_a_prover_that_never_decides_pages_once_without_a_pause_and_the_
     assert_eq!((silent_pages(&w).await, alerts(&w).await), (0, 0));
     w.cycle(now()).await;
     assert_eq!(silent_pages(&w).await, 1, "the page, at the bound");
-    // Once, however long it goes on, and across a restart; the row stays open; nothing is raised,
-    // and nothing is paused.
+    // Once within the day, however many cycles, and across a restart (the clock here is fixed; the
+    // next test moves it); the row stays open; nothing is raised, and nothing is paused.
     for _ in 0..3 {
         w.cycle(now()).await;
     }
@@ -838,6 +852,51 @@ async fn ac_i1_2_a_prover_that_never_decides_pages_once_without_a_pause_and_the_
     assert_eq!(verdict(&w, m).await.as_deref(), Some("alerted"));
     assert_eq!(silent_pages(&w).await, 1);
     assert_page(&log, "late-mint-prover-silent", 1);
+}
+
+/// Review of the fix round of #77: an unbounded hold had a single page and nothing after it. While
+/// the mint is still held with the prover still silent the page repeats once a day, from the log
+/// (so a restart neither repeats early nor forgets), and it is never a pause and never the alert.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_prover_that_stays_silent_is_paged_again_each_day_across_restarts_and_never_pauses(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    set_era(&w, id, 2, 90, 150).await;
+    mint_final_at(&w.admin, 105, &reference, 152).await;
+    let pauses_before = all_pauses(&w).await;
+    for _ in 0..HELD_PAGE_AFTER_CYCLES {
+        w.cycle(now()).await;
+    }
+    assert_eq!(silent_pages(&w).await, 1, "the first page, at the bound");
+    let day = chrono::Duration::days(1);
+    w.cycle(now() + day - chrono::Duration::minutes(1)).await;
+    assert_eq!(silent_pages(&w).await, 1, "quiet within the day");
+    w.restarted()
+        .await
+        .cycle(now() + day - chrono::Duration::minutes(1))
+        .await
+        .unwrap();
+    assert_eq!(silent_pages(&w).await, 1, "a restart repeats nothing early");
+    w.cycle(now() + day).await;
+    assert_eq!(silent_pages(&w).await, 2, "a day on, the page repeats");
+    w.cycle(now() + day).await;
+    w.restarted().await.cycle(now() + day).await.unwrap();
+    assert_eq!(silent_pages(&w).await, 2, "once a day, restart or not");
+    w.restarted().await.cycle(now() + day * 2).await.unwrap();
+    assert_eq!(silent_pages(&w).await, 3, "and the day after");
+    assert_eq!(
+        (
+            alerts(&w).await,
+            all_pauses(&w).await,
+            open_checks(&w).await
+        ),
+        (0, pauses_before, 1),
+        "a page is not a pause, and the row stays open"
+    );
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -912,6 +971,41 @@ async fn ac_i1_2_real_signing_rows_always_name_their_era_and_one_without_waits_o
     assert_eq!((alerts(&w).await, open_checks(&w).await), (0, 1));
     assert_eq!(silent_pages(&w).await, 1);
     assert_eq!(held_cycles(&w, m).await, HELD_PAGE_AFTER_CYCLES);
+}
+
+/// Review of the fix round of #77: the streak counted as paged before the event was inserted, so a
+/// failed insert left a log line and no page in the log, for good. It is paged when the event is in the log.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_page_that_could_not_be_recorded_is_tried_again_not_counted_as_made(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let log = PageLog::start();
+    let (_, reference) = proven_deposit(&w, 100).await;
+    mint_at(&w.admin, 105, &reference).await;
+    exec(
+        &w.admin,
+        "REVOKE SELECT ON late_mint_checks FROM bezent_core",
+    )
+    .await;
+    for _ in 0..PAGE_AFTER_FAILURES - 1 {
+        w.cycle(now()).await;
+    }
+    // The streak reaches its bound while the core cannot write the log.
+    exec(&w.admin, "REVOKE INSERT ON event_log FROM bezent_core").await;
+    let _ = w.core.cycle(now()).await;
+    assert_eq!(watch_pages(&w).await, 0, "the insert could not be made");
+    let _ = w.core.cycle(now()).await;
+    assert_eq!(watch_pages(&w).await, 0);
+    // The log is writable again: the next cycle makes the page that was not made, and then no more.
+    exec(&w.admin, "GRANT INSERT ON event_log TO bezent_core").await;
+    let _ = w.core.cycle(now()).await;
+    assert_eq!(watch_pages(&w).await, 1, "the page that was missed is made");
+    let _ = w.core.cycle(now()).await;
+    assert_eq!(watch_pages(&w).await, 1, "once");
+    // And the log line is one per streak, not one per cycle while the insert kept failing.
+    assert_page(&log, "late-mint-watch-failed", 1);
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -1229,4 +1323,82 @@ async fn ac_i1_2_a_mint_that_cannot_be_checked_pages_and_blocks_none_of_the_othe
     exec(&w.admin, "DROP TRIGGER refuse_settling ON late_mint_checks").await;
     w.cycle(now()).await;
     assert_eq!(verdict(&w, stuck).await.as_deref(), Some("not-late"));
+}
+
+/// Review of PR #80: an anomaly that says the prover cannot read the attempt (a recorded extrinsic
+/// this build cannot decode took its nonce; its recorded bytes do not decode or do not answer their
+/// rows) never says the attempt did not mint, so it does not decide it. The mint stays held and
+/// pages. The kinds that do say so (`reference-used`, above) still decide.
+async fn an_unreadable_attempt_holds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+    marker: &str,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    let second = signed_of(&w.admin, id, 2).await;
+    set_era(&w, id, 2, 90, 150).await;
+    let m = mint_final_at(&w.admin, 105, &reference, 152).await;
+    let pauses_before = all_pauses(&w).await;
+    prover_flags_with(&w, second, marker).await;
+    for _ in 0..HELD_PAGE_AFTER_CYCLES + 3 {
+        w.cycle(now()).await;
+    }
+    assert_eq!(
+        (
+            alerts(&w).await,
+            all_pauses(&w).await,
+            silent_pages(&w).await
+        ),
+        (0, pauses_before, 1)
+    );
+    assert_eq!(verdict(&w, m).await, None, "the row stays open");
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_an_attempt_taken_by_a_recorded_extrinsic_nobody_can_read_stays_held_and_pages(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    an_unreadable_attempt_holds(options, connect, "\"recorded_undecodable\": true").await;
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_an_attempt_whose_recorded_bytes_cannot_be_read_stays_held_and_pages(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    an_unreadable_attempt_holds(options, connect, "\"bytes_unreadable\": true").await;
+}
+
+/// The marker is read as `payload @> {marker: true}`: a value an endpoint wrote that is not `true`
+/// neither fails the check (no `failures`, no `late-mint-check-failed`) nor holds the mint: the
+/// anomaly decides, as an unmarked one (an older row) does.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_marker_that_is_not_true_decides_like_no_marker_and_fails_nothing(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    let second = signed_of(&w.admin, id, 2).await;
+    set_era(&w, id, 2, 90, 150).await;
+    let m = mint_final_at(&w.admin, 105, &reference, 152).await;
+    prover_flags_with(
+        &w,
+        second,
+        "\"recorded_undecodable\": \"yes\", \"bytes_unreadable\": [1]",
+    )
+    .await;
+    w.cycle(now()).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, all_pauses(&w).await > 0), (1, true));
+    assert_eq!(verdict(&w, m).await.as_deref(), Some("alerted"));
+    assert_eq!(
+        w.count("SELECT count(*) FROM event_log WHERE kind = 'late-mint-check-failed'")
+            .await,
+        0
+    );
 }
