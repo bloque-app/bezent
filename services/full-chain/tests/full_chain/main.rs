@@ -209,6 +209,27 @@ async fn s2_withdrawal(pool: PgPoolOptions, connect: PgConnectOptions) {
     assert_eq!(bed.kreivo_supply().await, DEPOSIT - WITHDRAWAL);
     bed.assert_balanced(DEPOSIT - WITHDRAWAL, DEPOSIT - WITHDRAWAL)
         .await;
+    // Issue #14 / PR #83: the fee position the endpoint recorded at its latest final head is the
+    // delivery account's own native balance on the fork at that head (the account that signed the
+    // payout), not a number the store made up.
+    let (number, holder, amount): (i64, String, Option<String>) = sqlx::query_as(
+        "SELECT block_number, holder, amount::text FROM fee_position_readings \
+         WHERE network = 'polygon' ORDER BY block_number DESC LIMIT 1",
+    )
+    .fetch_one(&bed.admin)
+    .await
+    .unwrap();
+    let lane = bed.evm_lane_address();
+    assert_eq!(holder, lane.to_checksum(None));
+    let real = bed
+        .anvil
+        .rpc(
+            "eth_getBalance",
+            serde_json::json!([lane, format!("{number:#x}")]),
+        )
+        .await;
+    let real = U256::from_str_radix(real.as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
+    assert_eq!(amount, Some(real.to_string()), "block {number}");
 }
 
 /// The payout's transaction and bytes, once the EVM endpoint has signed and sent it.

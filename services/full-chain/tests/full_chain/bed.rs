@@ -849,6 +849,8 @@ impl Bed {
                 emitter: self.vault.emitter,
                 declarations: &self.declarations,
                 convertibles: &[],
+                // The account the endpoint signs from (main.rs: `delivery: checked.lane_address`).
+                delivery: self.signing.evm_lane.address,
             },
             start_block: PINNED_BLOCK + 1,
             max_range: 500,
