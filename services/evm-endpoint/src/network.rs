@@ -167,6 +167,31 @@ impl Declarations {
     }
 }
 
+/// The login must be mapped to `network` in `evm_endpoint_networks` (migration 0056, `DEC-8`,
+/// `REQ-OB-6`). The store's guard refuses every record of a network the login is not mapped to
+/// (`BZ001`), so an unmapped instance would pass every other check here and fail on its first
+/// write; this refuses it before it serves, naming the login and the network. Run after
+/// [`bezent_store::login::check_login`] (the connection acts as its login), by the EVM endpoint
+/// only: no other service reads the mapping.
+pub async fn check_mapping(pool: &PgPool, network: &str) -> Result<(), String> {
+    let (login, mapped): (String, bool) = sqlx::query_as(
+        "SELECT session_user::text, EXISTS (SELECT 1 FROM evm_endpoint_networks \
+                                           WHERE login = session_user AND network = $1)",
+    )
+    .bind(network)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("the store: {e}"))?;
+    if mapped {
+        return Ok(());
+    }
+    Err(format!(
+        "DEC-8: the login {login} is not mapped to network {network} in evm_endpoint_networks, so the \
+         store would refuse every record it writes (BZ001); the migration owner must insert \
+         ({login}, {network}) before this instance starts"
+    ))
+}
+
 /// Reads the declarations of `network` and checks them: an origin network with EVM addresses,
 /// every reserve on it the configured vault, and the admitted tokens well formed.
 pub async fn declarations(
