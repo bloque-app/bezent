@@ -74,7 +74,7 @@ Amounts are decimal strings of exact integer minor units of the origin token (`I
 | 400 `ERR-Malformed` | Nothing recorded |
 | 401, 403 `ERR-NotAuthorised` | No credential, no grant, not this backend's party, an undeclared key or a signature that does not verify. Nothing recorded |
 | 409 `ERR-ReferenceConflict` | The `report_id` was used with other bytes |
-| 503 `not-final` | A `payout` or `payout-not-executed` of a transfer not ready for it yet. Nothing recorded; send the same bytes again |
+| 503 `not-final` | A `payout` or `payout-not-executed` of a transfer not ready for it yet, or a `payout` just after an attempt was reported not executed, before the core has started the next. Nothing recorded; send the same bytes again |
 | 503 `ERR-Overloaded`, `outcome-unknown` | Send the same bytes again |
 
 ## The flows
@@ -99,7 +99,8 @@ Report the outcome (working assumption, `amendments/0016-attested-delivery.md`, 
 - `payout-not-executed`, naming the attempt: within the route's completion budget, a new attempt, `Delivering` again with the
   next number, and the log says so. Pay again or report it again. Past the budget, the refund mint to the redeemer. This is
   the only report that can start a refund mint, so send it only for a payment that can never execute. Once sent, that
-  attempt can no longer be reported paid.
+  attempt can no longer be reported paid: a `payout` right after it answers `not-final` until the next attempt begins, and
+  `ERR-SourceConsumed` if it is refunding instead.
 - Nothing, past the budget: `Needs-Review`, with an owner. Nothing is refunded on a timer (`REQ-RF-1`).
 
 **A refund of an unassociated arrival.** `POST /v0/refunds` as for any arrival. It waits for the operator's second approver.

@@ -65,6 +65,11 @@ reversed before its mint. `REQ-BE-6` gains:
 *Why.* Minting against a payment known reversed spends surplus for nothing, and refunding one pays it twice. A restoration
 releases both, since the reserve is whole again.
 
+*Trade-off.* `CND-Paused` is a route's condition in §10, and this holds one transfer. No other named condition fits and a
+new one is a larger change, so the webhook dispatcher tells every requester granted on the route that `CND-Paused` is held
+there, while the route still takes other deposits. With one attesting requester that is a misleading notice to the party
+that caused it, no worse. A named condition of its own would be cleaner if this is ruled in.
+
 ## Identifier ledger
 
 | Action | Identifiers |

@@ -51,7 +51,9 @@ Each choice below is a reading of the spec and the plan, not a ruling. What need
     review, and no condition names the wait since `CND-AwaitingInstruction` was withdrawn (see the questions). The gates
     apply until a payout is reported; after that they stop and any condition they left clears, since the reserve has
     already lost that amount and `REQ-OT-5`'s check would count it twice. A payout may be reported before the hand-over
-    runs: the leg waits for it.
+    runs: the leg waits for it. **A gap, stated plainly:** the deadline's clock on an attested backend is the latest
+    report's time. If the party stops sending reports altogether, a handed-over payout never reaches its deadline, and
+    only the snapshot bound pauses the asset and pages (note 7). The page is what ends the silence.
 11. **The commitment was read from the wrong key.** `decide_extras` read `detail ->> 'commitment'`, while the Kreivo
     endpoint records `detail.payout.commitment` (`observe.rs`, `payout_json`). The ingress tests passed because their
     fixture wrote the top-level key. Fixed, and the fixture now writes what the endpoint writes.
@@ -77,7 +79,7 @@ PR does, on the instruction to complete `M-3` on the recommendations, in a draft
 | Assumption | Where | To reverse |
 |---|---|---|
 | 0016 A1: `Delivering` also means handed to the party; a report of non-execution is the proof | Migration `0061`; `Core::hand_over`, and the two lines in `deliver` and `source_final`; `Kind::PayoutNotExecuted` and `decide_not_executed` | Drop `0061`, make `deliver` return before an attested destination, remove the kind. Fiat withdrawals hold at `Source-Final` with their payout in the book. The tests that change: completion, refund, retry, refund of an unassociated arrival |
-| 0016 A3: an arrival reversed and not restored binds nothing, and holds a deposit | Migration `0062`; `reversed` in the ingress, the first lines of `Core::gate` | Drop `0062` and those calls. Such an arrival stays mintable, charged to surplus |
+| 0016 A3: an arrival reversed and not restored binds nothing, and holds a deposit | Migration `0062`; `reversed` in the ingress, the first lines of `Core::gate`. One held deposit reads to the webhook dispatcher as `CND-Paused` held on the route (0016 A3, trade-off) | Drop `0062` and those calls. Such an arrival stays mintable, charged to surplus |
 | Question 4: one hour, ten minutes | `attested_snapshot_*`, two lines of configuration | Change the values, no release of the store |
 | A withdrawal with no instructions waits with no deadline | `hand_over` | See the questions |
 

@@ -387,11 +387,14 @@ async fn decide_payout(
         w.state.as_str(),
         "Source-Final" | "Delivering" | "Delivered" | "Needs-Review"
     );
-    if !open
-        || paid(conn, &d.network, bridge_reference).await?
-        || not_executed(conn, &d.network, bridge_reference, w.attempt).await?
-    {
+    if !open || paid(conn, &d.network, bridge_reference).await? {
         return Ok(Decision::Refuse(SOURCE_CONSUMED));
+    }
+    // The attempt it is at was reported not executed, and the core has not moved on yet: a new
+    // attempt or the refund mint. Whichever it is, not now: nothing recorded, and the same bytes are
+    // taken once a new attempt is there, or refused once it is refunding.
+    if not_executed(conn, &d.network, bridge_reference, w.attempt).await? {
+        return Err(ApiError::NotFinal);
     }
     Ok(Decision::Take)
 }

@@ -924,18 +924,18 @@ async fn req_ot_6_a_fiat_payout_reported_not_executed_ends_in_one_refund_mint(
         json!({"bridge_reference": bridge, "attempt": 1, "ids": {"rail": "rejected-7"}}),
     )
     .await;
-    // Nor can it now be reported paid: one outcome per attempt (INV-8).
-    let (_, late) = f
-        .report(
-            "out-1",
-            "payout",
-            json!({"amount": "700", "position": "acct-1", "bridge_reference": bridge}),
-        )
-        .await;
-    assert_eq!(late["error"], "ERR-SourceConsumed", "{late}");
+    // One outcome per attempt (INV-8): until the core moves on, a payout waits, with nothing recorded,
+    // and the same bytes are refused once it is refunding.
+    let payout = json!({"amount": "700", "position": "acct-1", "bridge_reference": bridge});
+    let (status, waits) = f.report("out-1", "payout", payout.clone()).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{waits}");
+    assert_eq!(waits["error"], "not-final", "{waits}");
 
     f.w.cycle(now()).await;
     assert_eq!(f.w.state(id).await.0, "Refunding");
+    let (status, late) = f.report("out-1", "payout", payout).await;
+    assert_eq!(status, StatusCode::CREATED, "{late}");
+    assert_eq!(late["error"], "ERR-SourceConsumed", "{late}");
     let refund: i64 = scalar(
         &f.w.admin,
         &format!("SELECT id FROM transfers WHERE refund_of = {id}"),
