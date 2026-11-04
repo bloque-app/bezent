@@ -304,6 +304,79 @@ async fn m2_inv_8_review_cannot_refund_while_a_later_attempt_is_signed(
     );
 }
 
+/// The entry `m2_inv_8_review_cannot_refund_while_a_later_attempt_is_signed` had before issue #35 and
+/// lost to it: review from `Delivered`, on `CND-Withdrawn`, with a later attempt signed. Now with no
+/// inclusion standing beside a new attempt: attempt 1 is proven, attempt 2 is ordered and signed, its
+/// payout is observed included (`Delivered`) and then withdrawn. The refund resolution resting on
+/// attempt 1's proof is refused all the same (INV-8), by the core and by the store.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn m2_inv_8_review_from_delivered_on_cnd_withdrawn_cannot_refund_while_a_later_attempt_is_signed(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal_by(&w, 20, REDEEMER, [15; 32], BENEFICIARY).await;
+    deliver(&w, id, 1, t0()).await;
+    prove(&w.admin, id, 1, ORIGIN, 100).await;
+    w.cycle(t0()).await;
+    let (o2, _) = order(&w.admin, id, 2).await.expect("attempt 2 ordered");
+    prepare(&w.admin, o2, None).await;
+    w.cycle(t0()).await;
+    let (s2, _) = signing_intent(&w.admin, id, 2)
+        .await
+        .expect("attempt 2's signing intent");
+    sign(&w, s2).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    // Attempt 2's payout is observed included, then withdrawn: review from Delivered.
+    let r = payout_reference_of(&w.admin, id).await;
+    let paid = payout(&w, 105, 3, BENEFICIARY, &r).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivered");
+    decide(&w.admin, paid, "withdrawn", 110).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Needs-Review".into(), Some("CND-Withdrawn".into()))
+    );
+    assert_eq!(order(&w.admin, id, 3).await, None, "no attempt 3");
+
+    let action: i64 = sqlx::query_scalar(
+        "INSERT INTO manual_actions (kind, transfer_id, to_state, network, block_number, \
+             block_hash, block_time, justification) \
+         VALUES ('review-resolution', $1, 'Refunding', $2, 100, $3, $4, 'attempt 1 did not run') \
+         RETURNING id",
+    )
+    .bind(id)
+    .bind(ORIGIN)
+    .bind(hash(ORIGIN, 100))
+    .bind(t0() + chrono::Duration::seconds(100))
+    .fetch_one(&w.ops[0])
+    .await
+    .unwrap();
+    approve_as(&w, 1, action).await.unwrap();
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(refunds(&w).await, 0);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM event_log WHERE kind = 'review-evidence-refused' \
+               AND payload ->> 'manual_action_id' = '{action}'"
+        ))
+        .await,
+        1
+    );
+    let mut tx = w.admin.begin().await.unwrap();
+    let err = refund_by_hand(&mut tx, id, "Needs-Review", 100, Some(action))
+        .await
+        .expect_err("a refund beside a signed attempt");
+    assert!(
+        err.to_string().contains("INV-8"),
+        "the refusal names INV-8: {err}"
+    );
+}
+
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn m2_req_rf_5_the_retry_or_refund_decision_is_made_once(
     options: PgPoolOptions,
