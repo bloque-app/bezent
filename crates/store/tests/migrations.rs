@@ -153,3 +153,52 @@ async fn nfr_7_the_attested_migrations_revert_stepwise_and_apply_again(pool: PgP
         );
     }
 }
+
+/// F-011 (S7): the attested migrations also revert with rows they made: a report taken in by the
+/// intake, and a report of non-execution. Both tables are append-only, so the narrower checks of the
+/// older versions are added `NOT VALID` and the rows stay.
+#[sqlx::test(migrations = false)]
+async fn nfr_7_the_attested_migrations_revert_with_the_rows_they_made(pool: PgPool) {
+    REVERSIBLE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("migrations apply on an empty database");
+    let objects = bezent_objects(&pool).await;
+    sqlx::raw_sql(
+        "INSERT INTO networks (network, role, address_format, backend) VALUES \
+           ('kreivo', 'issuing', 'ss58', NULL), ('rail', 'origin', 'opaque', 'attested:1'); \
+         INSERT INTO assets (asset, precision, assurance_class, issuing_asset) \
+           VALUES ('cop', 2, 'attested', 'Here(100)'); \
+         INSERT INTO requesters (requester) VALUES ('swaps'); \
+         INSERT INTO attesting_parties (network, requester, party) VALUES ('rail', 'swaps', 'Swaps'); \
+         INSERT INTO attesting_keys (network, public_key) VALUES ('rail', decode(repeat('11', 32), 'hex')); \
+         INSERT INTO intake (request_reference, requester, kind, body, body_digest) \
+           VALUES ('r-1', 'swaps', 'report', '{}', '\\x01'); \
+         INSERT INTO attested_reports (network, seq, intake_id, requester, party, report_id, kind, \
+                 asset, body, signed_bytes, signature, public_key, digest) \
+           SELECT 'rail', 1, i.id, 'swaps', 'Swaps', 'r-1', 'payout-not-executed', 'cop', \
+                  '{\"report_id\": \"r-1\", \"kind\": \"payout-not-executed\", \"network\": \"rail\", \"asset\": \"cop\"}', \
+                  '\\x01', decode(repeat('00', 64), 'hex'), decode(repeat('11', 32), 'hex'), \
+                  decode(repeat('22', 32), 'hex') \
+           FROM intake i WHERE i.request_reference = 'r-1';",
+    )
+    .execute(&pool)
+    .await
+    .expect("rows the attested migrations made");
+    for target in [61, 60, 59] {
+        REVERSIBLE_MIGRATOR
+            .undo(&pool, target)
+            .await
+            .unwrap_or_else(|e| panic!("revert to {target} with rows: {e}"));
+    }
+    let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM intake WHERE kind = 'report'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, 1, "the append-only intake keeps its row");
+    REVERSIBLE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("apply again with the intake row there");
+    assert_eq!(bezent_objects(&pool).await, objects);
+}
