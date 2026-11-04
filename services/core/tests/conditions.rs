@@ -25,6 +25,7 @@ async fn source_final_deposit(w: &World) -> i64 {
     id
 }
 
+/// `AC-I2.1`, `REQ-GV-1`: with a pause in place new work waits (`CND-Paused`, no intent), and resumes when it lifts.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn cnd_paused_new_work_waits_and_resumes_when_the_route_reopens(
     options: PgPoolOptions,
@@ -49,6 +50,7 @@ async fn cnd_paused_new_work_waits_and_resumes_when_the_route_reopens(
     assert!(order(&w.admin, id, 1).await.is_some());
 }
 
+/// `AC-I2.1`, `REQ-GV-1`: a global pause stops new work only; a transfer in flight is still observed and completed.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn cnd_paused_work_in_flight_continues(options: PgPoolOptions, connect: PgConnectOptions) {
     // REQ-GV-1, AC-I2.1: a pause stops new work only.

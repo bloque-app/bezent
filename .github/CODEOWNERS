@@ -14,3 +14,7 @@
 /docs/oss/              @bloque-app/bezent-spec-owner
 /REUSE.toml             @bloque-app/bezent-maintainers
 /LICENSES/              @bloque-app/bezent-spec-owner
+
+# The criteria map and the release gate: what V0 must show before it carries value.
+/e2e/criteria/          @bloque-app/bezent-spec-owner
+/release/               @bloque-app/bezent-spec-owner

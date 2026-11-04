@@ -1,0 +1,78 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# F-013: what the release gate (tools/ci/release_gate.py, .github/workflows/release-gate.yml) requires. Reviewed by
+# the spec owner (CODEOWNERS). Read the header of release_gate.py first.
+
+# Each check below must have succeeded on the release commit itself. A squash merge carries none of its pull
+# request's runs, and a workflow filtered by path does not run on a commit that touches none of them, so the
+# release procedure dispatches those workflows (contracts, evm-contracts, e2e-evm, e2e-zombienet) on the release
+# commit first. The two zombienet jobs run on the self-hosted pool and never on a pull request. A skipped or
+# missing check fails the gate.
+
+[[check]]
+name = "DCO sign-off"
+
+[[check]]
+name = "rustfmt"
+
+[[check]]
+name = "build and clippy"
+
+[[check]]
+name = "tests"
+
+[[check]]
+name = "migrations as a CREATEROLE owner (PostgreSQL 16)"
+
+[[check]]
+name = "database TLS"
+
+[[check]]
+name = "Vault client and signing plugin against vault server -dev"
+
+[[check]]
+name = "evm-endpoint fork tests"
+
+[[check]]
+name = "licence headers, REUSE and dependency licences"
+
+[[check]]
+name = "secret scan"
+
+[[check]]
+name = "criteria map and release gate self-test"
+
+[[check]]
+name = "fmt, clippy and unit tests"
+
+[[check]]
+name = "cargo contract build"
+
+[[check]]
+name = "forge build and test"
+
+[[check]]
+name = "Forks and local CCTP"
+
+[[check]]
+name = "bezent contract (cargo contract build)"
+
+[[check]]
+name = "Kreivo test bed"
+
+# Exit criteria of SPEC section 15, measured on the test bed (not on mainnet).
+[exit]
+# sustained_divergence_free_hours = ?
+#
+# UNSET ON PURPOSE. SPEC section 15 asks for "the reserve equation at exactly zero divergence, sustained" and gives
+# no duration (DEC-19's 48 hours is the mainnet soak). Amendment 0021 proposes one; applying an unruled value
+# is not allowed. Until the owner rules, the gate fails on this line.
+
+# The soak of DEC-19 (ruled 2026-10-15, option A of 2026-10-22): on mainnet, before bUSDC goes live.
+[soak]
+hours = 48
+statements_per_day = 2
+
+[signoff]
+required = ["spec-owner", "maintainer"]

@@ -1,0 +1,40 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# F-013 (DEC-19, SPEC section 15): the release gate. It runs on a release tag and by hand, never on a pull
+# request, and holds no secret: it reads the commit's check runs and the sign-off pull requests with the
+# workflow's own token. It fails closed (tools/ci/release_gate.py says what it requires and which parts are human).
+# Dispatch contracts, evm-contracts, e2e-evm and e2e-zombienet on the release commit first; the gate reads them there.
+name: Release gate
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Full sha of the commit being released (default: the commit the workflow runs on)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+
+jobs:
+  gate:
+    name: release gate
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release || github.sha }}
+      - name: Gate
+        shell: bash
+        env:
+          RELEASE: ${{ inputs.release || github.sha }}
+        run: |
+          python3 tools/ci/release_gate.py --release "$RELEASE" --online --repo "$GITHUB_REPOSITORY" | tee gate.md
+          cat gate.md >> "$GITHUB_STEP_SUMMARY"

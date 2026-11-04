@@ -1,0 +1,183 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# F-013: the layer at which each V0 acceptance criterion MUST have a test (SPEC section 9, REQ-AR-5).
+# `tools/ci/criteria_map.py` reads this next to SPEC.md. A criterion that cites an invariant needs a test at every
+# layer section 9 gives that invariant; a narrower set needs a `narrowed` reason. A new criterion fails CI until it
+# has an entry here. Reviewed by the spec owner (CODEOWNERS).
+
+[layer."AC-A2.1"]
+layers = ["service"]
+why = "INV-6 is the service's (SPEC 9); the core decides when an arrival may mint"
+
+[layer."AC-A2.2"]
+layers = ["service"]
+why = "REQ-IN-3 and REQ-IN-4 are the core's binding and mint order; INV-6 is the service's"
+
+[layer."AC-A2.3"]
+layers = ["service"]
+why = "REQ-IN-7: the observer and the core withdraw an observation that stops matching"
+
+[layer."AC-A4.1"]
+layers = ["service"]
+why = "REQ-IN-6: the core classifies an arrival as unassociated, with an owner"
+
+[layer."AC-A4.2"]
+layers = ["service"]
+why = "REQ-IN-6: the core never counts, mints or absorbs it without a two-person decision"
+
+[layer."AC-A5.1"]
+layers = ["service"]
+why = "REQ-CV-1: the core holds CND-AwaitingConversion"
+
+[layer."AC-A5.2"]
+layers = ["service"]
+why = "REQ-CV-2, REQ-CV-5: the core mints the output's amount and reports both"
+
+[layer."AC-A5.3"]
+layers = ["service"]
+why = "REQ-CV-4: the statement is the service's"
+
+[layer."AC-B1.1"]
+layers = ["service"]
+why = "INV-7 is the service's (SPEC 9)"
+
+[layer."AC-B1.2"]
+layers = ["service"]
+why = "the core completes a withdrawal on a final, full payout"
+
+[layer."AC-B1.3"]
+layers = ["chain", "service", "store"]
+why = "INV-8 is enforced by store + service + chain (SPEC 9): the store gates the refund on proven attempts, the core orders it, the contract mints it once"
+
+[layer."AC-B1.4"]
+layers = ["service"]
+why = "REQ-RV-1: the core sends an unknown outcome to review and returns nothing"
+
+[layer."AC-B3.1"]
+layers = ["service"]
+why = "REQ-OT-5: the core holds CND-ReserveShort, one per asset and network"
+
+[layer."AC-B3.2"]
+layers = ["service"]
+why = "REQ-OT-5: the core resumes without anyone acting"
+
+[layer."AC-B5.1"]
+layers = ["chain"]
+why = "REQ-HN-7: the contract destroys in the same call and records in order"
+
+[layer."AC-B5.2"]
+layers = ["chain", "store"]
+why = "INV-2 is enforced by chain + store (SPEC 9): the contract refuses the reference, the store holds it once per redeemer"
+
+[layer."AC-C1.1"]
+layers = ["service"]
+why = "REQ-NX-*: the endpoints and the core derive a disposition"
+
+[layer."AC-C1.2"]
+layers = ["service"]
+why = "REQ-NX-3: a failure to look is unknown, in the endpoints and the core"
+
+[layer."AC-C1.3"]
+layers = ["service"]
+why = "REQ-ST-3: the report is the service's"
+
+[layer."AC-C2.1"]
+layers = ["service"]
+why = "REQ-NX-2: the endpoints build the proof from public chain data"
+
+[layer."AC-D1.1"]
+layers = ["service"]
+why = "REQ-ID-1: ingress returns the original's status"
+
+[layer."AC-D1.2"]
+layers = ["service"]
+why = "REQ-ID-1: ingress refuses with ERR-ReferenceConflict"
+
+[layer."AC-D2.1"]
+layers = ["service", "store", "custody"]
+why = "REQ-EO-1 and INV-9 (store + custody): the endpoint re-sends the recorded bytes, the store records them once, the signer signs once per intent"
+
+[layer."AC-D2.2"]
+layers = ["chain", "store"]
+why = "INV-2 is enforced by chain + store (SPEC 9): the contract refuses the reference and the store consumes it once"
+
+[layer."AC-D2.3"]
+layers = ["service"]
+why = "REQ-OB-3: the observers show a gap and fill it first"
+
+[layer."AC-E1.1"]
+layers = ["service"]
+why = "REQ-BK-6, REQ-PR-1: the statement is the service's"
+
+[layer."AC-E1.2"]
+layers = ["service"]
+why = "REQ-PR-2: the statement chain is the service's"
+
+[layer."AC-E2.1"]
+layers = ["service"]
+why = "REQ-BK-1, REQ-IC-2: the core's reserve check pauses and pages (INV-1 is the service's)"
+
+[layer."AC-E2.2"]
+layers = ["service"]
+why = "REQ-BK-4, REQ-TR-5: the reserve book charges surplus; the core reduces no delivery"
+
+[layer."AC-G1.1"]
+layers = ["service"]
+why = "REQ-LM-1: ingress publishes the route table"
+
+[layer."AC-G1.2"]
+layers = ["service"]
+why = "REQ-LM-2: ingress refuses before value moves"
+
+[layer."AC-G1.3"]
+layers = ["service"]
+why = "REQ-LM-4: ingress refuses with ERR-Overloaded"
+
+[layer."AC-H1.1"]
+layers = ["service"]
+why = "REQ-ST-2: ingress answers a status query"
+
+[layer."AC-H1.2"]
+layers = ["service"]
+why = "REQ-ST-4: ingress serves the sequenced log"
+
+[layer."AC-H1.3"]
+layers = ["service"]
+why = "REQ-ST-5: the log entry carries a stable key"
+
+[layer."AC-H3.1"]
+layers = ["service"]
+why = "REQ-ST-6: the observables are the service's"
+
+[layer."AC-I1.1"]
+layers = ["chain"]
+why = "REQ-KY-3: the network bounds a key's outflow (the vault's roles and allowance, the contract's bounds)"
+
+[layer."AC-I1.2"]
+layers = ["custody", "service"]
+why = "REQ-IC-4: the signer's record check and the core's compromise path"
+
+[layer."AC-I2.1"]
+layers = ["service", "chain"]
+why = "REQ-GV-1, INV-15 (service + chain): the core holds new work, the contract refuses new mints and redemptions"
+
+[layer."AC-I2.2"]
+layers = ["chain"]
+why = "REQ-GV-2: the contract lets only governance unpause or raise a bound"
+
+[layer."AC-I3.1"]
+layers = ["store"]
+why = "REQ-GV-5: the append-only record of actor and justification is the store's"
+
+[layer."AC-I3.2"]
+layers = ["store"]
+why = "REQ-GV-5: no role may edit a status or move value outside the ordinary functions; the grant matrix and the store's guards decide it"
+
+[layer."AC-I4.1"]
+layers = ["service"]
+why = "REQ-IC-1: the endpoints verify the network at start-up"
+
+[layer."AC-I4.2"]
+layers = ["custody"]
+why = "REQ-KY-6: the signer refuses a test key on production"

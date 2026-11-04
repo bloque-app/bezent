@@ -1435,6 +1435,7 @@ fn redeemed() -> Bezent {
     contract
 }
 
+/// `AC-B1.3`, `INV-8` on the chain: the refund mint of a redemption is made once, to the redeemer.
 #[test]
 fn inv_8_refund_mint_mints_once_to_the_redeemer_tied_to_the_redemption() {
     let mut contract = redeemed();
@@ -1451,6 +1452,7 @@ fn inv_8_refund_mint_mints_once_to_the_redeemer_tied_to_the_redemption() {
     );
 }
 
+/// `AC-B1.3`, `INV-8` on the chain: a second refund mint for one redemption is refused, in a later window too.
 #[test]
 fn inv_8_a_second_refund_mint_is_refused() {
     let mut contract = redeemed();

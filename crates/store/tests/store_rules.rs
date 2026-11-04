@@ -651,6 +651,7 @@ async fn req_tr_2_milestone_is_recorded_whole(pool: PgPool) {
     .await;
 }
 
+/// `AC-I3.2`, `REQ-GV-5`: a status is edited by no UPDATE, the owner's included; it changes only by a transition.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_tr_2_state_changes_only_by_transition(pool: PgPool) {
     let id = transfer(&pool, "br-1").await;
@@ -870,6 +871,8 @@ async fn inv_2_source_coordinate_funds_one_transfer(pool: PgPool) {
     bound_deposit(&pool, "b6", 50).await;
 }
 
+/// `AC-D2.2`, `INV-2` at the store: a second transfer cannot take an on-chain reference another holds (a unique
+/// violation), and a reference, once set, is never changed.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn inv_2_on_chain_reference_is_consumed_once(pool: PgPool) {
     let a = transfer(&pool, "b1").await;
@@ -1308,6 +1311,8 @@ async fn as_role(pool: &PgPool, role: &str, sql: &str) -> Result<(), sqlx::Error
     tx.commit().await
 }
 
+/// `AC-I3.2`, `REQ-GV-5`: none of the store's roles can edit a status, rewrite the book, disable a rule or the
+/// log, so no surface moves value or edits a status outside the ordinary steps.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_ar_5_service_role_cannot_switch_the_rules_off(pool: PgPool) {
     let id = transfer(&pool, "br-1").await;

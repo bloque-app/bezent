@@ -449,6 +449,8 @@ async fn req_eo_6_one_signature_per_reference_and_attempt(pool: PgPool) {
     assert_refusal(&err, "REQ-EO-6", "attempt 2 of another lane");
 }
 
+/// `AC-B1.3`, `INV-8` at the store: a refund is not opened on a timer or on unknown, only when the attempt is
+/// proven not executed at finality.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_eo_6_refunding_needs_the_attempt_proven_at_finality(pool: PgPool) {
     // REQ-RF-1, INV-8: never on a timer, never on unknown.
@@ -583,6 +585,8 @@ async fn withdrawal(
     .await
 }
 
+/// `AC-B5.2`, `INV-2` at the store: the same redeemer and reference twice is a unique violation; another redeemer
+/// may choose the same reference, and a mint's reference is another namespace.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn inv_2_a_redemptions_reference_is_scoped_to_its_redeemer(pool: PgPool) {
     withdrawal(&pool, "w-1", 1, "0xalice", "0101")
