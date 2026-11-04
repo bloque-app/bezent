@@ -1950,6 +1950,67 @@ fn req_gv_3_block_counts_are_pinned_to_kreivos_2_07_second_blocks() {
     assert!(day.is_valid());
 }
 
+/// `INV-3` at the size operators actually configure: a 24 h window of `BLOCKS_PER_DAY` blocks
+/// (bloque-app/bezent#38). The block-count test above only shows such bounds are valid; this one
+/// mints across the window. The ceiling is reached by two mints in different buckets (blocks `S`
+/// and `S + 5 000`, a bucket being 4 174 blocks), then: one more unit is refused until the
+/// window ending at the block after the first mint's last has left it; at `S + W - 1` the first
+/// mint is still counted; at `S + W` exactly it is free again, while the second is still counted.
+#[test]
+fn inv_3_a_24_hour_window_enforces_its_ceiling_and_resets_at_the_boundary() {
+    const W: BlockNumber = BLOCKS_PER_DAY;
+    const FIRST: BlockNumber = 1_000;
+    const SECOND: BlockNumber = FIRST + 5_000;
+    assert!(SECOND - FIRST >= bucket_blocks(W), "two buckets, not one");
+    let bounds = Bounds {
+        window_blocks: W,
+        per_transfer_max: BOUNDS.window_amount,
+        ..BOUNDS
+    };
+    let mut contract = setup_with(bounds);
+    let half = bounds.window_amount / 2;
+
+    at_block(FIRST);
+    mint(&mut contract, holder(), half, r(0x10)).unwrap();
+    at_block(SECOND);
+    mint(&mut contract, holder(), half, r(0x11)).unwrap();
+    assert_eq!(contract.minted_in_window(BUSDC), bounds.window_amount);
+
+    // The ceiling holds while the whole day is inside the window, to its last block.
+    for block in [SECOND, FIRST + W - 1] {
+        at_block(block);
+        assert_eq!(contract.minted_in_window(BUSDC), bounds.window_amount);
+        assert_refused(
+            &mut contract,
+            |c| mint(c, holder(), 1, r(0x12)),
+            Error::AboveWindow,
+        );
+    }
+
+    // At the boundary the first mint, and only it, has left: its share is free again, no more.
+    at_block(FIRST + W);
+    assert_eq!(contract.minted_in_window(BUSDC), half);
+    assert_refused(
+        &mut contract,
+        |c| mint(c, holder(), half + 1, r(0x12)),
+        Error::AboveWindow,
+    );
+    mint(&mut contract, holder(), half, r(0x12)).expect("the first mint left the window");
+    assert_eq!(contract.minted_in_window(BUSDC), bounds.window_amount);
+    assert_refused(
+        &mut contract,
+        |c| mint(c, holder(), 1, r(0x13)),
+        Error::AboveWindow,
+    );
+
+    // The second mint leaves at its own boundary, and so does what was minted at the first.
+    at_block(SECOND + W - 1);
+    assert_eq!(contract.minted_in_window(BUSDC), bounds.window_amount);
+    at_block(SECOND + W);
+    assert_eq!(contract.minted_in_window(BUSDC), half);
+    mint(&mut contract, holder(), half, r(0x13)).expect("the second mint left the window");
+}
+
 /// Review 2's S6 scenario: a raise delay of `BlockNumber::MAX - 10` made every later schedule
 /// overflow, and a merely long one (ten years) would hold back raises, new assets, delay changes and
 /// a governance handover just the same. Refused above `MAX_RAISE_DELAY`, 28 days of blocks
