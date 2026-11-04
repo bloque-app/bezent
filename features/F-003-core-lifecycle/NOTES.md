@@ -195,8 +195,34 @@ Tests: `services/core/tests/cancel.rs` (named after `REQ-NX-4`, `REQ-RV-1`, `REQ
 address, as the EVM endpoint requires of an admitted token there. Items 24 and 25: `services/core/tests/unsigned_attempts.rs` (`REQ-RV-1`, `INV-8`,
 `CND-PayoutWindow`) and, in the store, `crates/store/tests/lifecycle_graph.rs` (`issue_25_*`).
 
-Not done here (review S-5): transfers already in `Needs-Review` from `Delivering` on an origin network before this
-ships get no cancel ordered; the cancel is ordered only on the deadline transition.
+Review S-5 (transfers already in `Needs-Review` from `Delivering` before the cancel shipped get no cancel ordered): **moot,
+closed in issue #35.** The cancel is ordered only on the deadline transition, and no such transfer exists: production's
+ingress has never run (the ingress and the EVM endpoint are off and the ingress secrets were never written, so no
+transfer, no payout and no review has been recorded), and nothing was signed on an origin network. Nothing is built for
+it.
+
+## Payout-window and cancel edge cases (issue #35)
+
+26. **A refusal the providers disagree on** (`REQ-RV-1`, `REQ-EO-3`; `CND-PayoutWindow`). A refusal that names no
+    condition (a Roles refusal the two providers did not return alike, or any reason nobody resumes from) was already
+    bounded by item 24 when it was steady. Two things were not. (a) A provider that flaps between the allowance's
+    refusal and such a refusal took and left the hold each time, and each exit restarted the attempt's clock, so the
+    deadline never came. A deadline now leaves out the time held, summed over every hold since the attempt's point, and
+    restarts where the first hold was taken (the restart of review M-1, once) (`store::held_under_window`,
+    `Core::deadline_held`). (b) The long-hold page measured only the current hold; it now counts the holds already
+    left. (c) Nothing paged on a refusal that keeps coming back: after ten refused preparations of one attempt, none
+    naming a condition, the core records `payout-refusal-alert` once per attempt and logs it as a page. It changes no
+    state: the deadline sends the transfer to review, never to a refund (`REQ-RF-1`).
+27. **A payout signed after its deadline** (point 2 of the issue): **amendment 0019, proposed, not built.** The
+    specification does not say whether the clock starts when the attempt becomes signable or whether a late signature
+    gets a grace period; the choice changes what the completion budget (`NFR-2`) means.
+28. **Only a final inclusion is evidence for a review** (`REQ-RV-2`, `INV-16`). Item 23 attached the payout's inclusion as
+    the review's evidence as soon as the leg was observed. Evidence is never withdrawn, so an inclusion that was later
+    reorganised away blocked the cancel's `not-executed` evidence for good. It is attached now only when the observation's
+    outcome is `final`; a leg observed and not yet final still stops the cancel being driven (item 23), and a leg that is
+    withdrawn frees the cancel and its evidence again.
+
+Tests: `services/core/tests/cancel.rs` (`*_issue_35_*`; the S-4 test that never decided finality now does).
 
 ## Delivery anomalies (issue #24)
 

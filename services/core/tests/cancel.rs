@@ -810,8 +810,182 @@ async fn req_nx_4_s4_once_the_payout_is_included_its_cancel_is_never_signed(
     w.settle(t0()).await;
     assert!(cancel_signing_intent(&w.admin, signed).await.is_none());
     assert_eq!(cancels(&w).await, 1, "the order alone");
+    // Issue #35: an inclusion that is not final is no evidence yet (INV-16); once it is, it is.
+    assert!(events(&w, id, "review-evidence").await.is_empty());
+    let paid: i64 = scalar(
+        &w.admin,
+        "SELECT id FROM observations WHERE detail ->> 'event' = 'Payout'",
+    )
+    .await;
+    decide(&w.admin, paid, "final", PAST + 20).await;
+    w.settle(t0()).await;
     assert_eq!(
         events(&w, id, "review-evidence").await[0]["kind"],
         json!("included")
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Issue #35: payout-window and cancel edge cases before mainnet payouts.
+
+/// A refusal the core names no condition for: it holds nothing and is retried.
+const UNNAMED: &str = "Unspecified";
+
+/// The words of a Roles refusal the two providers did not return alike: no structured violation,
+/// so the core names nothing from it (`CND-PayoutWindow`, review S-2).
+fn disagreed() -> String {
+    format!(
+        "Roles: ConditionViolation(status 17, {}) (execution reverted)",
+        allowance_key()
+    )
+}
+
+/// The latest order of attempt 1 of `id` is prepared with a dry run refused with `reason`, then
+/// one cycle runs.
+async fn refuse(w: &World, id: i64, reason: &str) {
+    let (o, _) = order(&w.admin, id, 1).await.expect("an order");
+    prepare(&w.admin, o, Some(reason)).await;
+    w.cycle(t0()).await;
+}
+
+/// The latest order of attempt 1 of `id` is refused over the token's allowance, then one cycle.
+async fn spend(w: &World, id: i64) {
+    let (o, _) = order(&w.admin, id, 1).await.expect("an order");
+    prepare_allowance_spent(&w.admin, o, &allowance_key()).await;
+    w.cycle(t0()).await;
+}
+
+/// REQ-RV-1, REQ-EO-3, CND-PayoutWindow, issue #35 point 1: a provider that flaps between the
+/// allowance's refusal and a refusal that names nothing does not restart the attempt's clock at
+/// each exit from the hold. Only the time actually held is left out of the deadline.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_issue_35_a_flapping_refusal_does_not_restart_the_deadline_each_time(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [60; 32], 700).await;
+    head(&w.admin, ORIGIN, 30).await;
+    w.cycle(t0()).await;
+    spend(&w, id).await; // held at 30
+    head(&w.admin, ORIGIN, 1_022).await;
+    refuse(&w, id, &disagreed()).await; // left at 1 022: held 992 s
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    head(&w.admin, ORIGIN, 1_522).await;
+    spend(&w, id).await; // held again at 1 522
+    head(&w.admin, ORIGIN, 3_000).await;
+    refuse(&w, id, &disagreed()).await; // left at 3 000: held 1 478 s
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+
+    // The clock restarted where the first hold was taken (30), and 992 + 1 478 s were held.
+    let deadline = 30 + BUDGET + 992 + 1_478;
+    head(&w.admin, ORIGIN, deadline - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    head(&w.admin, ORIGIN, deadline + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(refunds(&w).await, 0, "REQ-RF-1: no refund on unknown");
+}
+
+/// REQ-RV-1, issue #35 point 1: a refusal that keeps coming back and names nothing pages a human
+/// once, well before its deadline, and then goes to review at the deadline as any unknown leg.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_issue_35_a_repeated_refusal_pages_once_and_reaches_review_at_the_deadline(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [61; 32], 700).await;
+    w.cycle(t0()).await;
+    for _ in 0..9 {
+        refuse(&w, id, &disagreed()).await;
+    }
+    assert!(
+        events(&w, id, "payout-refusal-alert").await.is_empty(),
+        "nine refusals are not yet a pattern"
+    );
+    refuse(&w, id, &disagreed()).await;
+    refuse(&w, id, &disagreed()).await;
+    refuse(&w, id, UNNAMED).await;
+    let paged = events(&w, id, "payout-refusal-alert").await;
+    assert_eq!(paged.len(), 1, "paged once");
+    assert_eq!(paged[0]["attempt"], json!("1"));
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+
+    head(&w.admin, ORIGIN, 22 + BUDGET + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(events(&w, id, "payout-refusal-alert").await.len(), 1);
+    assert_eq!(refunds(&w).await, 0);
+}
+
+/// CND-PayoutWindow, issue #35 point 1: the long-hold page counts the time held across a flap, so
+/// leaving and retaking the hold does not start it over.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn cnd_payout_window_issue_35_a_flapping_provider_does_not_reset_the_long_hold_page(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    head(&w.admin, ORIGIN, 1_000).await;
+    let id = held(&w, 62).await; // held at 1 000
+    head(&w.admin, ORIGIN, 101_000).await;
+    refuse(&w, id, &disagreed()).await; // left: 100 000 s held
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    head(&w.admin, ORIGIN, 101_100).await;
+    spend(&w, id).await; // held again at 101 100
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-PayoutWindow".into()))
+    );
+    // The current hold alone is 99 900 s, under the two-day bound (172 800 s); with the time held
+    // before the flap it is past it.
+    head(&w.admin, ORIGIN, 201_000).await;
+    w.settle(t0()).await;
+    assert_eq!(window_pages(&w, id).await.len(), 1);
+}
+
+/// REQ-RV-2, INV-16, issue #35 point 3: an inclusion that is not final is no evidence for the
+/// review. When it is reorganised away and the cancel's proof of non-execution becomes final,
+/// that proof is attached, as `not-executed`.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_2_inv_16_issue_35_an_inclusion_reorganised_away_does_not_block_the_cancels_evidence(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, _signed) = cancel_signed_in_review(&w, 63).await;
+    let included = PAST + 5;
+    let paid = observe(
+        &w.admin,
+        ORIGIN,
+        included,
+        0,
+        TOKEN,
+        700,
+        None,
+        Some(BENEFICIARY),
+        Some(&payout_reference_of(&w.admin, id).await),
+        true,
+        json!({"event": "Payout"}),
+    )
+    .await;
+    w.settle(t0()).await;
+    assert!(
+        events(&w, id, "review-evidence").await.is_empty(),
+        "included, not final: nothing is attached (INV-16)"
+    );
+
+    // The inclusion is reorganised away; the cancel consumes the nonce, final.
+    decide(&w.admin, paid, "withdrawn", PAST + 10).await;
+    prove_replaced(&w.admin, id, 1, PAST + 6, PAST + 20).await;
+    w.settle(t0()).await;
+    w.settle(t0()).await;
+    let evidence = events(&w, id, "review-evidence").await;
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0]["kind"], json!("not-executed"));
+    assert_eq!(w.state(id).await.0, "Needs-Review");
 }

@@ -229,6 +229,43 @@ pub async fn final_point(
     }))
 }
 
+/// The holds `transfer` has had in `CND-PayoutWindow` and left, on the destination network's
+/// clock, among those taken at or after `since` (all of them when `None`): when the first was
+/// taken (the attempt's start, for a hold taken before any final head was recorded), and how
+/// long they lasted together. A hold still open counts nothing here. A deadline
+/// leaves the time held out and starts when the first hold was taken (review M-1: the clock
+/// restarts when the hold is left); summing keeps a provider that flaps in and out of the hold
+/// from restarting it each time (issue #35).
+pub async fn held_under_window(
+    conn: &mut PgConnection,
+    transfer: i64,
+    since: Option<DateTime<Utc>>,
+) -> sqlx::Result<Option<(DateTime<Utc>, chrono::Duration)>> {
+    let row: (Option<DateTime<Utc>>, Option<i64>) = sqlx::query_as(
+        "SELECT min(i.taken), sum(extract(epoch FROM i.released - i.taken))::bigint FROM ( \
+             SELECT coalesce(x.block_time, $2) AS taken, \
+                    (SELECT y.block_time FROM transitions y \
+                      WHERE y.transfer_id = x.transfer_id AND y.id > x.id \
+                        AND y.condition IS DISTINCT FROM 'CND-PayoutWindow' \
+                      ORDER BY y.id LIMIT 1) AS released \
+             FROM ( SELECT id, transfer_id, block_time, condition, \
+                           lag(condition) OVER (ORDER BY id) AS before \
+                    FROM transitions WHERE transfer_id = $1) x \
+             WHERE x.condition = 'CND-PayoutWindow' \
+               AND x.before IS DISTINCT FROM 'CND-PayoutWindow' \
+               AND ($2::timestamptz IS NULL OR x.block_time IS NULL OR x.block_time >= $2)) i \
+         WHERE i.taken IS NOT NULL AND i.released IS NOT NULL",
+    )
+    .bind(transfer)
+    .bind(since)
+    .fetch_one(conn)
+    .await?;
+    Ok(match row {
+        (Some(first), Some(secs)) => Some((first, chrono::Duration::seconds(secs))),
+        _ => None,
+    })
+}
+
 /// The latest final head recorded for `network`.
 pub async fn latest_head(conn: &mut PgConnection, network: &str) -> sqlx::Result<Option<Point>> {
     let row: Option<(i64, Vec<u8>, DateTime<Utc>)> = sqlx::query_as(
