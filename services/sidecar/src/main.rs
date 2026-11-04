@@ -28,6 +28,7 @@
 //! | `BEZENT_SIDECAR_ENVIRONMENT` | required, exactly `test` |
 //! | `BEZENT_SIDECAR_DATABASE_URL` or `…_FILE` | required: the owner login (superuser or `CREATEROLE`) of an empty or earlier sidecar database |
 //! | `BEZENT_SIDECAR_REQUESTERS` | required: `name=<credential id>.<secret>;…`; each is granted deposit, withdrawal and refund |
+//! | `BEZENT_SIDECAR_ATTESTING` | `<requester>=<public key, 64 hexadecimal digits>`: declares the attested test backend (F-011), with that requester as its attesting party; unset, it is not declared |
 //! | `BEZENT_SIDECAR_LISTEN` | `0.0.0.0:8080` |
 //! | `BEZENT_SIDECAR_SIGNER_SOCKET` | `/tmp/bezent-signer.sock` |
 //! | `BEZENT_SIDECAR_SIGNER_TOKEN` | the signer link's token; a random one, in memory, if unset |
@@ -71,6 +72,7 @@ struct Settings {
     database_url: String,
     listen: SocketAddr,
     requesters: Vec<(String, String, String)>,
+    attesting: Option<(String, String)>,
     signer_socket: PathBuf,
     signer_token: Option<String>,
     cycle: Duration,
@@ -142,6 +144,22 @@ fn settings() -> Result<Settings, String> {
     if requesters.is_empty() {
         return Err("BEZENT_SIDECAR_REQUESTERS names no requester".to_owned());
     }
+    // F-011: `<requester>=<the attesting key's public half, 64 hexadecimal digits>`.
+    let attesting = match var("BEZENT_SIDECAR_ATTESTING") {
+        None => None,
+        Some(v) => {
+            let Some((requester, key)) = v.split_once('=') else {
+                return Err("BEZENT_SIDECAR_ATTESTING is <requester>=<public key>".to_owned());
+            };
+            if !requesters.iter().any(|(name, _, _)| name == requester) {
+                return Err(
+                    "BEZENT_SIDECAR_ATTESTING names no requester of BEZENT_SIDECAR_REQUESTERS"
+                        .to_owned(),
+                );
+            }
+            Some((requester.to_owned(), key.to_owned()))
+        }
+    };
     let cycle = var("BEZENT_SIDECAR_CYCLE_SECONDS")
         .map(|s| s.parse::<u64>().ok().filter(|n| *n > 0))
         .unwrap_or(Some(2))
@@ -150,6 +168,7 @@ fn settings() -> Result<Settings, String> {
         database_url,
         listen: listen_address()?,
         requesters,
+        attesting,
         signer_socket: var("BEZENT_SIDECAR_SIGNER_SOCKET")
             .unwrap_or_else(|| "/tmp/bezent-signer.sock".to_owned())
             .into(),
@@ -195,6 +214,9 @@ async fn serve() -> Result<(), String> {
         .map_err(|e| format!("migrations: {e}"))?;
     only_test_networks(&owner).await?;
     seed(&owner, &settings.requesters).await?;
+    if let Some((requester, key)) = &settings.attesting {
+        bezent_sidecar::setup::seed_attested(&owner, requester, key).await?;
+    }
     let (ingress_pw, core_pw, signer_pw) = (random_secret()?, random_secret()?, random_secret()?);
     let webhooks_pw = random_secret()?;
     login(

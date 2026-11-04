@@ -17,8 +17,19 @@ pub const ORIGIN: &str = "polygon-amoy";
 /// The origin network's chain id, as the signer's fixture declares it.
 pub const ORIGIN_CHAIN_ID: u64 = 80002;
 
-/// The only networks this binary serves: two of the store's test networks.
-pub const SERVED: &[&str] = &[ISSUING, ORIGIN];
+/// The attested backend's network, declared only with `BEZENT_SIDECAR_ATTESTING` (F-011).
+pub const ATTESTED_NETWORK: &str = "fiat-local";
+/// The attested bridged asset.
+pub const ATTESTED_ASSET: &str = "COPM";
+/// Its identity on the issuing network.
+pub const ATTESTED_ISSUING_ASSET: &str = "Here(100)";
+/// Its token on [`ATTESTED_NETWORK`].
+pub const ATTESTED_TOKEN: &str = "COP";
+/// Its reserve there: the party's accounts.
+pub const ATTESTED_RESERVE: &str = "party-accounts";
+
+/// The only networks this binary serves: three of the store's test networks.
+pub const SERVED: &[&str] = &[ISSUING, ORIGIN, ATTESTED_NETWORK];
 
 /// The bridged asset the sidecar declares.
 pub const ASSET: &str = "bUSDC";
@@ -132,7 +143,74 @@ pub async fn seed(owner: &PgPool, requesters: &[(String, String, String)]) -> Re
     tx.commit().await.map_err(|e| format!("store: {e}"))
 }
 
-/// Refuses a store that declares any network but the two test networks (`REQ-KY-6`). The rule is
+/// The attested backend (F-011), for a harness that drives a requester's reports: its network, the
+/// asset, and `requester` as its attesting party, signing with the test key whose public half is
+/// `public_key` (32 bytes, hexadecimal). The harness holds the key: the sidecar holds only this.
+/// Idempotent, and declared only when asked: every other harness's assets stay as they were.
+pub async fn seed_attested(
+    owner: &PgPool,
+    requester: &str,
+    public_key: &str,
+) -> Result<(), String> {
+    if hex::decode(public_key).map(|k| k.len()) != Ok(32) {
+        return Err("the attesting key is not 32 bytes of hexadecimal".to_owned());
+    }
+    let mut tx = owner.begin().await.map_err(|e| format!("store: {e}"))?;
+    sqlx::raw_sql(&format!(
+        "INSERT INTO networks (network, role, address_format, backend, reserve_point_lag_seconds) \
+           VALUES ('{ATTESTED_NETWORK}', 'origin', 'opaque', 'attested:1', 3600) \
+           ON CONFLICT DO NOTHING; \
+         INSERT INTO assets (asset, precision, assurance_class, issuing_asset, surplus_floor, \
+             surplus_alert) \
+           VALUES ('{ATTESTED_ASSET}', 2, 'attested', '{ATTESTED_ISSUING_ASSET}', 0, 1) \
+           ON CONFLICT DO NOTHING; \
+         INSERT INTO admitted_tokens (network, token, asset, precision) VALUES \
+           ('{ATTESTED_NETWORK}', '{ATTESTED_TOKEN}', '{ATTESTED_ASSET}', 2) \
+           ON CONFLICT DO NOTHING; \
+         INSERT INTO reserves (asset, network, address) VALUES \
+           ('{ATTESTED_ASSET}', '{ATTESTED_NETWORK}', '{ATTESTED_RESERVE}') \
+           ON CONFLICT DO NOTHING; \
+         INSERT INTO routes (asset, network, direction, minimum, maximum, window_limit, \
+             window_seconds, capacity, cutoffs, completion_budget_seconds) VALUES \
+           ('{ATTESTED_ASSET}', '{ATTESTED_NETWORK}', 'deposit', 1, 1000000000, 10000000000, \
+            86400, 100, '[]', 3600), \
+           ('{ATTESTED_ASSET}', '{ATTESTED_NETWORK}', 'withdrawal', 1, 1000000000, 10000000000, \
+            86400, 100, '[]', 3600) \
+           ON CONFLICT DO NOTHING;"
+    ))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("cannot seed the attested backend: {e}"))?;
+    sqlx::query(
+        "INSERT INTO requester_grants (requester, grant_kind) VALUES ($1, 'attest') \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(requester)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("cannot grant {requester} the attesting grant: {e}"))?;
+    sqlx::query(
+        "INSERT INTO attesting_parties (network, requester, party) VALUES ($1, $2, 'Test Party') \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(ATTESTED_NETWORK)
+    .bind(requester)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("cannot declare the attesting party: {e}"))?;
+    sqlx::query(
+        "INSERT INTO attesting_keys (network, public_key) VALUES ($1, decode($2, 'hex')) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(ATTESTED_NETWORK)
+    .bind(public_key)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("cannot declare the attesting key: {e}"))?;
+    tx.commit().await.map_err(|e| format!("store: {e}"))
+}
+
+/// Refuses a store that declares any network but the test networks (`REQ-KY-6`). The rule is
 /// the store's own ([`bezent_store::environment`]), which the core shares (PR #50 re-check M-1).
 /// Read-only: it changes nothing.
 pub async fn only_test_networks(pool: &PgPool) -> Result<(), String> {

@@ -20,6 +20,8 @@ pub const TEST_NETWORKS: &[&str] = &[
     // The public test networks of the other origin networks.
     "base-sepolia",
     "bnb-testnet",
+    // The sidecar's attested test backend (F-011).
+    "fiat-local",
     // The ids the services' tests and the zombienet harness declare.
     "kreivo-test",
     "polygon-test",

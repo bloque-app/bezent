@@ -718,6 +718,75 @@ async fn req_rq_9_relayed_instructions_match_their_commitment_and_nothing_is_ord
     );
 }
 
+/// PLAN §5, `M-3` names three assets, and nothing here is one asset's: a second asset on the same rail
+/// keeps its own reports, snapshot, reserve and owed terms, and each holds alone at the one point the
+/// rail has.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_be_4_two_attested_assets_on_one_rail_do_not_mix(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    exec(
+        &f.w.admin,
+        &format!(
+            "INSERT INTO assets (asset, precision, assurance_class, issuing_asset, surplus_floor, \
+                 surplus_alert) VALUES ('MXNB', 2, 'attested', 'Here(104)', 0, 1); \
+             INSERT INTO admitted_tokens (network, token, asset, precision) \
+               VALUES ('{RAIL}', 'mxn', 'MXNB', 2); \
+             INSERT INTO reserves (asset, network, address) \
+               VALUES ('MXNB', '{RAIL}', 'swaps-mxn-accounts');"
+        ),
+    )
+    .await;
+    f.funded(1_000).await;
+    let mxnb = |fields: Value| {
+        let mut all = json!({"asset": "MXNB", "token": "mxn"});
+        all.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        all
+    };
+    f.reported(
+        "mx-1",
+        "arrival",
+        mxnb(json!({"amount": "300", "position": "mx-acct"})),
+    )
+    .await;
+    f.reported(
+        "mx-snap",
+        "positions",
+        mxnb(json!({"positions": [{"position": "mx-acct", "amount": "300"}], "through": "mx-1"})),
+    )
+    .await;
+    f.w.settle(now()).await;
+
+    let e = f.holds().await;
+    assert_eq!(e.chain.reserve[RAIL], 1_000);
+    assert!(e.chain.owed_mint.is_empty());
+
+    let snapshot = Recorded::new(f.w.core.pool().clone())
+        .attested("MXNB", RAIL)
+        .await
+        .unwrap();
+    assert_eq!(snapshot.positions[0].position, "mx-acct");
+    f.readings
+        .chain()
+        .attested
+        .insert(("MXNB".into(), RAIL.into()), snapshot);
+    sync_chain(&f.w.admin, &f.readings).await;
+    let e = f.check.evaluate("MXNB", t0()).await.unwrap();
+    assert_eq!(
+        e.outcome,
+        Outcome::Holds,
+        "{:?} {:?}",
+        e.differences,
+        e.reason
+    );
+    assert_eq!(e.chain.reserve[RAIL], 300);
+    assert_eq!(e.chain.owed_mint.len(), 1);
+}
+
 /// `REQ-OT-5`, F-011 NOTES 10: the check before a payout must not count the payout twice. The last
 /// holder redeems nearly all of the reserve; once the party reports it paid, the reserve is small and
 /// the withdrawal, which holds at `Source-Final`, raises no `CND-ReserveShort`.

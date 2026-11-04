@@ -49,8 +49,9 @@ Amounts are decimal strings of exact integer minor units of the origin token (`I
 | `kind` | Fields | When to send it |
 |---|---|---|
 | `arrival` | `asset`, `token`, `amount`, `position`; optional `funder` | The payment is final under its rail's rules, and not before (`REQ-OB-7`) |
-| `payout` | `asset`, `token`, `amount`, `position`, `bridge_reference` | The fiat payout of a withdrawal is final on its rail. The amount is the withdrawal's |
-| `positions` | `asset`, `token`, `positions` (array of `position`, `amount`), `through` | Regularly, within the backend's declared bound |
+| `payout` | `asset`, `token`, `amount`, `position`, `bridge_reference` | The fiat payout of a withdrawal, or of the refund of an unassociated arrival, is final on its rail. The amount is the transfer's |
+| `payout-not-executed` | `asset`, `token`, `bridge_reference`, `attempt` | The payout of that attempt failed on the rail and can never execute. **Only then** (`REQ-RF-1`): it is the proof bezent refunds on. "Could not tell" is no such report |
+| `positions` | `asset`, `token`, `positions` (array of `position`, `amount`), `through` | Every ten minutes. Past an hour without one the asset pauses (both values are configuration, a working assumption) |
 | `reversal` | `asset`, `token`, `amount`, `position`, `reverses` | A payment reported final was reversed: a chargeback or a fraud recall (`REQ-BE-6`) |
 | `restoration` | `asset`, `token`, `amount`, `position`, `restores` | The reserve a reversal took has been put back, in full |
 
@@ -69,11 +70,11 @@ Amounts are decimal strings of exact integer minor units of the origin token (`I
 |---|---|
 | 201, `state: "Recorded"` | Taken in. Carries the report's `coordinate` |
 | 200 | A repeat of the same bytes: the original answer |
-| 201, `state: "Refused"` with `error` | Recorded as refused, the reference is spent: `ERR-UnknownRoute` (the asset, token and network do not go together), `ERR-SourceNotFound` (it names something that is not there), `ERR-SourceMismatch` (the amount does not fit), `ERR-SourceConsumed` (already paid out, or already restored) |
+| 201, `state: "Refused"` with `error` | Recorded as refused, the reference is spent: `ERR-UnknownRoute` (the asset, token and network do not go together), `ERR-SourceNotFound` (it names something that is not there), `ERR-SourceMismatch` (the amount or the attempt does not fit), `ERR-SourceConsumed` (already paid out, already reported not executed, already refunding, or already restored) |
 | 400 `ERR-Malformed` | Nothing recorded |
 | 401, 403 `ERR-NotAuthorised` | No credential, no grant, not this backend's party, an undeclared key or a signature that does not verify. Nothing recorded |
 | 409 `ERR-ReferenceConflict` | The `report_id` was used with other bytes |
-| 503 `not-final` | A `payout` for a redemption that is not final yet. Nothing recorded; send the same bytes again |
+| 503 `not-final` | A `payout` or `payout-not-executed` of a transfer not ready for it yet. Nothing recorded; send the same bytes again |
 | 503 `ERR-Overloaded`, `outcome-unknown` | Send the same bytes again |
 
 ## The flows
@@ -91,9 +92,21 @@ that `bridge_reference`. `ERR-CommitmentMismatch` means the bytes are not the on
 that names a redemption bezent has not observed yet is refused with `ERR-SourceNotFound` and spends its reference, so wait
 for finality on the issuing network before relaying.
 
-**After the payout.** The withdrawal holds at `Source-Final` with its payout in the book, until the owner rules on the
-state after `Source-Final` for an attested backend (`amendments/0016-attested-delivery.md`). A report of a payout that
-failed on the rail, and the refund mint behind it, wait on the same ruling; no such kind is taken yet.
+**After the relay.** The next core cycle hands the withdrawal over: `Delivering`, attempt 1, with nothing ordered or signed.
+Report the outcome (working assumption, `amendments/0016-attested-delivery.md`, A1, proposed and not ruled):
+
+- `payout`: `Delivered`, then `Completed`.
+- `payout-not-executed`, naming the attempt: within the route's completion budget, a new attempt, `Delivering` again with the
+  next number, and the log says so. Pay again or report it again. Past the budget, the refund mint to the redeemer. This is
+  the only report that can start a refund mint, so send it only for a payment that can never execute. Once sent, that
+  attempt can no longer be reported paid.
+- Nothing, past the budget: `Needs-Review`, with an owner. Nothing is refunded on a timer (`REQ-RF-1`).
+
+**A refund of an unassociated arrival.** `POST /v0/refunds` as for any arrival. It waits for the operator's second approver.
+Once released it is handed over the same way, with no instructions: the request named the destination. Report its
+`payout` under its `bridge_reference`. It is paid from the reserve, like a withdrawal.
 
 **Reversal.** Report it as soon as it is known; restore within one business day (`REQ-BE-6`). Past that, bezent pages. While
-the surplus is under its floor, new mints of the asset hold `CND-Paused`. Holders keep what they hold.
+the surplus is under its floor, new mints of the asset hold `CND-Paused`. Holders keep what they hold. An arrival reversed
+and not restored binds no deposit and no refund (`ERR-SourceConsumed`), and a deposit bound to it holds `CND-Paused` until the
+restoration, unless its mint is already signed (working assumption, amendment 0016 A3).

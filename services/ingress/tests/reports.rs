@@ -405,6 +405,34 @@ async fn req_ot_3_a_payout_report_needs_its_instructions_and_a_final_redemption(
     assert_eq!(count(&pool, "attested_reports").await, 0);
 }
 
+/// Amendment 0016 A1, a working assumption: a report of non-execution names its transfer and its
+/// attempt. What the core makes of it is in `services/core/tests/attested.rs`.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_be_5_a_report_of_non_execution_names_its_transfer_and_attempt(pool: PgPool) {
+    let ingress = world(&pool).await;
+    for fields in [
+        json!({"bridge_reference": "bz-w-b1"}),
+        json!({"attempt": 1}),
+        json!({"bridge_reference": "bz-w-b1", "attempt": 0}),
+        json!({"bridge_reference": "bz-w-b1", "attempt": 1, "amount": "5"}),
+    ] {
+        let d = document("n-0", "payout-not-executed", fields);
+        let (status, answer) = ingress.post(REPORTS, ALPHA, &signed(&d)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{d}: {answer}");
+    }
+    let d = document(
+        "n-1",
+        "payout-not-executed",
+        json!({"bridge_reference": "bz-w-none", "attempt": 1}),
+    );
+    let (_, answer) = ingress.post(REPORTS, ALPHA, &signed(&d)).await;
+    assert_eq!(answer["error"], "ERR-SourceNotFound", "{answer}");
+    let mut other_kind = arrival_report("n-2", "500");
+    other_kind["attempt"] = json!(1);
+    let (status, _) = ingress.post(REPORTS, ALPHA, &signed(&other_kind)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 /// `REQ-RQ-3`: a deposit naming a report the core has not recorded yet is not final: nothing is
 /// recorded and the reference is not spent, never a recorded `ERR-SourceNotFound`.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]

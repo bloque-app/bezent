@@ -16,3 +16,7 @@ SPDX-License-Identifier: CC-BY-4.0
 | T-011-07 | Check: `Recorded::attested`, the attested point, roll-forward, staleness; owed terms on attested networks | `REQ-BK-1`, `REQ-BK-8`, `REQ-BE-4` | Zero divergence through a full cycle; a wrong snapshot diverges and pauses |
 | T-011-08 | Statement: the reserve is attested, and the party by name | `REQ-BE-3`, `REQ-BE-4`, `REQ-BK-9` | Statement test |
 | T-011-09 | End to end through the ingress router and the core cycle | `REQ-BE-6`, `REQ-RQ-9`, `RISK-8` | One test runs arrival, deposit, mint, reversal, held mint, restoration, release |
+| T-011-10 | Delivery on an attested backend, on the working assumption of amendment 0016 A1: hand-over, completion by report, non-execution by report, new attempt, refund mint, the refund of an unassociated arrival | `REQ-OT-6`, `REQ-RF-1`, `REQ-RF-5`, `REQ-RQ-6`, `INV-8` | A test each, through the real paths |
+| T-011-11 | An arrival reversed before its mint, on the working assumption of 0016 A3 | `REQ-BE-6` | Binding refused; a bound deposit holds; the restoration releases both |
+| T-011-12 | Snapshot limits as configuration; two runbooks; amendment 0017 drafted | `REQ-BK-1`, `REQ-IC-2`, `REQ-RQ-9` | Past the interval an alert, past the bound a pause; `deploy/attested-backend.md` |
+| T-011-13 | The sidecar's attested test backend, opt-in, for the module's harness | `DEC-19`, `RISK-8` | `f_011_a_fiat_deposit_and_withdrawal_by_reports` |

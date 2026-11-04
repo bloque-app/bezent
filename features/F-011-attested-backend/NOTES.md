@@ -35,19 +35,23 @@ Each choice below is a reading of the spec and the plan, not a ruling. What need
    snapshot plus the movements reported after `through`. The check is then exactly "the snapshot agrees with the book
    at `through`"; later movements move both sides alike.
 7. **No snapshot is incomplete; a snapshot past the bound does not hold.** With none yet the evaluation is incomplete,
-   never a reserve of zero, and one that stays so pauses through `stalled()`. Past
-   `networks.reserve_point_lag_seconds` the snapshot counts as a head that stopped: the `final_head` difference, a pause
-   and a page, as for any network whose head stopped. The bound is a declaration: see the questions below.
+   never a reserve of zero, and one that stays so pauses through `stalled()`. Past `attested_snapshot_max_age_seconds` the
+   snapshot counts as a head that stopped: the `final_head` difference, a pause and a page, as for any network whose head
+   stopped. Past `attested_snapshot_interval_seconds`, an alert and nothing else. Configuration and not a store
+   declaration, on the owner's instruction: it is the same for every party, and changes with no migration.
+   `networks.reserve_point_lag_seconds` still has to be at most a fiat route's budget (`routes_budget_covers_lag_bound`).
 8. **No new named error.** Every refusal is an existing `ERR-*` (§10): a new one would be a SPEC change.
 9. **A reversal names the arrival it reverses, by the party's report identifier** (guardrail 5: nothing is matched by
    amount or time). The total reversed of one arrival may not exceed it. A restoration is in full, from the party that
    reported the reversal, as `book::restoration` already required (review S8).
-10. **Withdrawals hold at `Source-Final`.** See plan, "Not now". The gates (`CND-Paused`, `CND-CutOff`,
-    `CND-ReserveShort`) still apply until its payout is reported: they are conditions in place, on an edge the table has.
-    Once the payout is reported, the gates stop and any condition they left clears: the reserve has already lost this
-    withdrawal's amount, so `REQ-OT-5`'s check would count it twice. `deliver()` returns before an order on an attested
-    destination, and the store refuses one whoever writes it. The refund of an unassociated arrival on an attested network
-    holds in the same place, which amendment 0016 lists.
+10. **The hand-over.** A delivery attempt on an attested backend records no order, and the store refuses one whoever writes
+    it. `deliver()` calls `hand_over()`, which enters `Delivering` once the instructions are accepted, after checking
+    them again against the redemption's commitment (a row that misses it pages once and hands nothing over). A
+    withdrawal with no instructions waits at `Source-Final` with no deadline: §5.4 sends only a held condition there to
+    review, and no condition names the wait since `CND-AwaitingInstruction` was withdrawn (see the questions). The gates
+    apply until a payout is reported; after that they stop and any condition they left clears, since the reserve has
+    already lost that amount and `REQ-OT-5`'s check would count it twice. A payout may be reported before the hand-over
+    runs: the leg waits for it.
 11. **The commitment was read from the wrong key.** `decide_extras` read `detail ->> 'commitment'`, while the Kreivo
     endpoint records `detail.payout.commitment` (`observe.rs`, `payout_json`). The ingress tests passed because their
     fixture wrote the top-level key. Fixed, and the fixture now writes what the endpoint writes.
@@ -58,23 +62,31 @@ Each choice below is a reading of the spec and the plan, not a ruling. What need
     for it. In a requester's `/v0/log`, a refused report appears as a refusal, as any other request's; a recorded one does
     not, since that log is of its transfers and refusals and the party has its report's answer. The core's
     `attested-report-recorded` is in the event log for operators.
-14. **Test stores.** `environment::TEST_NETWORKS` names no attested network, so a store that declares one counts as
-    production (`REQ-KY-6`), the safe side. A test deployment of the attested backend adds its network's name there. No
-    deployment of it exists yet, so that waits for one.
+14. **Test stores.** `environment::TEST_NETWORKS` gains `fiat-local`, the sidecar's attested test backend, declared only with
+    `BEZENT_SIDECAR_ATTESTING`. Any other attested network counts as production (`REQ-KY-6`), the safe side.
+15. **Changing a long function by replacing its text.** `0061` changes `transitions_apply_lifecycle`,
+    `transfers_guard_writer` and the record function with `replace()` over `pg_get_functiondef`, and stops if the text is not
+    found. The migration then shows only what changes, and a contrary ruling takes it out whole. Copying 300 lines to change
+    three would hide that.
+
+## Working assumptions, and how to take each back out
+
+The owner has not ruled on any of these. `CLAUDE.md` says never to apply an unruled decision, "not even provisionally"; this
+PR does, on the instruction to complete `M-3` on the recommendations, in a draft, unmerged.
+
+| Assumption | Where | To reverse |
+|---|---|---|
+| 0016 A1: `Delivering` also means handed to the party; a report of non-execution is the proof | Migration `0061`; `Core::hand_over`, and the two lines in `deliver` and `source_final`; `Kind::PayoutNotExecuted` and `decide_not_executed` | Drop `0061`, make `deliver` return before an attested destination, remove the kind. Fiat withdrawals hold at `Source-Final` with their payout in the book. The tests that change: completion, refund, retry, refund of an unassociated arrival |
+| 0016 A3: an arrival reversed and not restored binds nothing, and holds a deposit | Migration `0062`; `reversed` in the ingress, the first lines of `Core::gate` | Drop `0062` and those calls. Such an arrival stays mintable, charged to surplus |
+| Question 4: one hour, ten minutes | `attested_snapshot_*`, two lines of configuration | Change the values, no release of the store |
+| A withdrawal with no instructions waits with no deadline | `hand_over` | See the questions |
 
 ## Questions for the owner
 
-Beyond amendment 0016 (the state after `Source-Final`, a report of non-execution, the report surface in §7.A, a reversal of
-an unminted arrival):
+Beyond amendments 0016 and 0017, and the snapshot limits, one, with a recommendation:
 
-1. **How stale may a snapshot be?** `networks.reserve_point_lag_seconds` per attested network, and how often Swaps sends
-   `positions`. Recommended: one hour, with a snapshot every ten minutes. Past the bound the asset pauses.
-2. **A report the core refuses** holds its network's queue on an append-only table, and the stale head then pauses the
-   asset. It can happen only through a forged row or a retired key, and there is no way forward but a migration owner's
-   repair. Recommended: leave it so for V0, with a runbook (`F-014`): stopping is right when the party's signature fails.
-3. **Retiring a key.** The core checks the key is declared when it records, so retiring one between intake and recording
-   refuses a real report. Recommended: runbook, not code: declare the new key, stop using the old, retire it only when no
-   report by it waits. A cycle drains the queue.
-4. **Bank data at rest.** `relayed_instructions` keeps the relayed bytes (since `F-002`). §1.3 says bezent does not hold a
-   requester's facts or need them, and bezent never pays from these bytes. Recommended: an amendment to keep only the
-   commitment and that it matched, before any real fiat flows, since the table is append-only.
+**A redemption nobody relays for.** The value is destroyed and the withdrawal waits at `Source-Final` forever, silently.
+§5.4's `Source-Final → Needs-Review` covers a held condition, and `CND-AwaitingInstruction` was withdrawn (amendment 0007).
+Recommended: a line in 0016 sending it to review at the route's deadline, with its owner. Not built: it is not on the list of
+what to assume.
+

@@ -611,6 +611,26 @@ impl fmt::Debug for Config {
 mod tests {
     use super::*;
 
+    /// F-011 NOTES 7: one hour and ten minutes unless configured, and a v0.2.0 file, with neither
+    /// key, loads as it did.
+    #[test]
+    fn req_bk_1_the_attested_snapshot_limits_default_and_may_be_configured() {
+        let config: Config =
+            toml::from_str("database_url = \"postgres://core@db/bezent\"\n").unwrap();
+        let limits = config.attested_snapshots();
+        assert_eq!(limits.max_age, chrono::Duration::hours(1));
+        assert_eq!(limits.interval, chrono::Duration::minutes(10));
+        let config: Config = toml::from_str(
+            "database_url = \"postgres://core@db/bezent\"\n\
+             attested_snapshot_max_age_seconds = 7200\n\
+             attested_snapshot_interval_seconds = 60\n",
+        )
+        .unwrap();
+        let limits = config.attested_snapshots();
+        assert_eq!(limits.max_age, chrono::Duration::hours(2));
+        assert_eq!(limits.interval, chrono::Duration::minutes(1));
+    }
+
     #[test]
     fn req_ky_1_configuration_never_prints_the_store_credentials() {
         let config: Config =

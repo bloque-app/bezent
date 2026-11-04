@@ -334,12 +334,34 @@ impl Driver {
                     body.redeemer
                 ))
             })?;
-        let payout = chain::hex_bytes(&body.payout_address, "payout_address")?;
-        if payout.len() != 20 {
-            return Err(Error::Malformed(
-                "payout_address is not an EVM address".to_owned(),
-            ));
-        }
+        // A public backend's redemption names the beneficiary; an attested one's only a commitment
+        // (REQ-RQ-9), as the Kreivo endpoint records each.
+        let (redeemed, payout) = match (&body.payout_address, &body.commitment) {
+            (Some(address), None) => {
+                let address = chain::hex_bytes(address, "payout_address")?;
+                if address.len() != 20 {
+                    return Err(Error::Malformed(
+                        "payout_address is not an EVM address".to_owned(),
+                    ));
+                }
+                (ASSET, json!({"address": hex0x(&address)}))
+            }
+            (None, Some(commitment)) => {
+                let commitment = chain::hex_bytes(commitment, "commitment")?;
+                if commitment.len() != 32 {
+                    return Err(Error::Malformed("commitment is not 32 bytes".to_owned()));
+                }
+                (
+                    setup::ATTESTED_ASSET,
+                    json!({"commitment": hex0x(&commitment)}),
+                )
+            }
+            _ => {
+                return Err(Error::Malformed(
+                    "give one of payout_address, commitment".to_owned(),
+                ));
+            }
+        };
         let reference = match &body.reference {
             Some(r) => chain::hex_bytes(r, "reference")?,
             None => setup::random_secret()
@@ -352,23 +374,34 @@ impl Driver {
         let mut tx = self.kreivo.begin().await?;
         let issuing_asset: Option<String> =
             sqlx::query_scalar("SELECT issuing_asset FROM assets WHERE asset = $1")
-                .bind(ASSET)
+                .bind(redeemed)
                 .fetch_optional(&mut *tx)
                 .await?
                 .flatten();
-        let issuing_asset = issuing_asset
-            .ok_or_else(|| Error::NotReady(format!("{ASSET} has no issuing identity declared")))?;
+        let issuing_asset = issuing_asset.ok_or_else(|| {
+            Error::NotReady(format!("{redeemed} has no issuing identity declared"))
+        })?;
+        let backend_network = if redeemed == ASSET {
+            ORIGIN
+        } else {
+            setup::ATTESTED_NETWORK
+        };
         let backend: Option<String> =
             sqlx::query_scalar("SELECT backend FROM networks WHERE network = $1")
-                .bind(ORIGIN)
+                .bind(backend_network)
                 .fetch_optional(&mut *tx)
                 .await?
                 .flatten();
-        let backend = match backend.as_deref().and_then(|b| b.strip_prefix("evm:")) {
-            Some(id) => json!({"kind": "evm", "chain_id": id.parse::<u64>().unwrap_or_default()}),
-            None => {
+        let backend = match backend.as_deref().and_then(|b| b.split_once(':')) {
+            Some(("evm", id)) => {
+                json!({"kind": "evm", "chain_id": id.parse::<u64>().unwrap_or_default()})
+            }
+            Some(("attested", id)) => {
+                json!({"kind": "attested", "id": id.parse::<u64>().unwrap_or_default()})
+            }
+            _ => {
                 return Err(Error::NotReady(format!(
-                    "{ORIGIN} has no EVM backend declared"
+                    "{backend_network} has no backend declared"
                 )));
             }
         };
@@ -386,7 +419,7 @@ impl Driver {
                 detail: json!({
                     "event": "Redeemed",
                     "backend": backend,
-                    "payout": {"address": hex0x(&payout)},
+                    "payout": payout,
                 }),
             },
         )
@@ -399,7 +432,8 @@ impl Driver {
             "amount": amount.to_string(),
             "redeemer": redeemer,
             "reference": hex0x(&reference),
-            "payout_address": hex0x(&payout),
+            "payout_address": payout.get("address"),
+            "commitment": payout.get("commitment"),
             "bridge_reference": bezent_core_service::refs::withdrawal(&redeemer, &reference),
             "final": false,
         }))
@@ -972,8 +1006,11 @@ pub struct RedemptionBody {
     pub redeemer: String,
     /// In the bridged asset's minor units on the issuing network, decimal.
     pub amount: String,
-    /// The beneficiary on the origin network.
-    pub payout_address: String,
+    /// The beneficiary on the origin network. One of this and `commitment`.
+    pub payout_address: Option<String>,
+    /// For the attested asset (`BEZENT_SIDECAR_ATTESTING`): BLAKE2b-256 of the payout instructions,
+    /// `0x` hex (`REQ-RQ-9`).
+    pub commitment: Option<String>,
     /// The redemption's on-chain reference, `0x` hex; 32 random bytes if omitted.
     pub reference: Option<String>,
 }

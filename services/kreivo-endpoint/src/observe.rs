@@ -666,3 +666,22 @@ pub async fn record_gap(
     .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `REQ-RQ-9`, F-011: an attested redemption, as the core and the ingress read it. They read
+    /// `detail.backend` and `detail.payout.commitment`; a fixture once hid that one read another key.
+    #[test]
+    fn req_rq_9_an_attested_redemption_is_recorded_as_the_core_reads_it() {
+        assert_eq!(
+            backend_json(&Backend::Attested { id: 7 }),
+            json!({"kind": "attested", "id": 7})
+        );
+        assert_eq!(
+            payout_json(&Payout::Commitment([0xab; 32])),
+            json!({"commitment": format!("0x{}", "ab".repeat(32))})
+        );
+    }
+}

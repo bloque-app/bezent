@@ -37,12 +37,23 @@ Milestone `M-3`. Serves `REQ-BE-1`–`REQ-BE-6`, `REQ-OB-7`, `REQ-RQ-4`, `REQ-RQ
   on the attested network, rolls the last snapshot forward by the reports after it, and compares with the book at zero
   tolerance. The statement says the reserve is attested and names the party from its declaration.
 
+## Built on working assumptions
+
+`Source-Final → Delivering` is normative: "a destination transaction is signed and recorded" (§5.4, `REQ-TR-6`), and bezent
+signs nothing here. The owner asked for `M-3` to be completed on the recommendations of amendment 0016 while the ruling is
+pending, on a draft PR, with `SPEC.md` and `PLAN.md` untouched. So:
+
+- **Delivery (0016 A1).** A delivery attempt enters `Delivering` when the instructions are accepted, or for the refund of an
+  unassociated arrival. A `payout` report completes it. A `payout-not-executed` report is the proof: a new attempt within
+  the budget, the refund mint past it. Migration `0061`, `Core::hand_over`.
+- **Reversed arrivals (0016 A3).** One reversed and not restored binds nothing, and holds a deposit on it unminted. Migration
+  `0062`, the core's gate, the ingress's `reversed`.
+- **Snapshot limits (question 4).** One hour and ten minutes, as configuration.
+
+`NOTES.md` says how to take each back out.
+
 ## Not now, and why
 
-- **The transfer's state after `Source-Final` on an attested backend.** `Source-Final → Delivering` is normative: "a
-  destination transaction is signed and recorded" (§5.4, `REQ-TR-6`), and bezent signs nothing here. Inventing the edge
-  would be an unruled decision, so the withdrawal holds at `Source-Final`, with its payout in the book, until the
-  owner rules on amendment 0016. The same ruling covers a report of non-execution and the refund mint behind it.
 - The module's reports side in the Swaps platform (`F-012`, `RISK-8`): described as a contract; bezent's suite drives
   its own request surface.
 - A second attester (`DEF-2`). Real keys and declarations for production (`F-014`, operator).
@@ -53,5 +64,6 @@ A report without the attesting grant, from another backend's party, or with a si
 with nothing recorded; a report becomes an observation carrying the party's identifiers; instructions that miss their
 commitment are refused and no order is ever recorded on an attested network; a reversal runs end to end through the
 request surface and the core: charged against surplus, mints paused under the floor, supply and holders untouched,
-released by the restoration; the check holds at zero divergence through all of it; the statement says the reserve is
-attested and names the party. Each test is named after the id it verifies.
+released by the restoration; a fiat withdrawal completes on its report, a failed payout ends in a new attempt or one
+refund mint, and the refund of an unassociated arrival completes; the check holds at zero divergence through all of it;
+the statement says the reserve is attested and names the party. Each test is named after the id it verifies.

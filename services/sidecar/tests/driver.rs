@@ -23,11 +23,13 @@ use bezent_core_service::reserve::readings::Recorded;
 use bezent_core_service::{Core, Settings};
 use bezent_sidecar::driver::{self, Driver, SignerLink};
 use bezent_sidecar::setup::{
-    ASSET, ISSUING, ISSUING_ASSET, ORIGIN, RESERVE, TOKEN, seed, signer_config,
+    ASSET, ATTESTED_ASSET, ATTESTED_NETWORK, ATTESTED_TOKEN, ISSUING, ISSUING_ASSET, ORIGIN,
+    RESERVE, TOKEN, seed, seed_attested, signer_config,
 };
 use bezent_signer::link::{self, Callers};
 use bezent_signer::log::Log;
 use bezent_signer::signer::Signer;
+use ed25519_dalek::{Signer as _, SigningKey};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -772,6 +774,207 @@ async fn dec_19_withdrawal_walk_through(options: PgPoolOptions, connect: PgConne
     w.ok("/driver/v0/finality", json!({"network": ORIGIN}))
         .await;
     w.until(bridge, "Completed").await;
+}
+
+// -------------------------------------------------------------------------------------------
+// Fiat, by reports (F-011; `deploy/e2e/README.md`, "Fiat, by reports").
+
+/// Signs and sends a report, as the attesting requester's harness does.
+async fn report(w: &World, key: &SigningKey, id: &str, kind: &str, fields: Value) -> Value {
+    let mut document = json!({"version": 1, "report_id": id, "network": ATTESTED_NETWORK,
+                              "kind": kind, "asset": ATTESTED_ASSET, "token": ATTESTED_TOKEN});
+    document
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    let bytes = document.to_string();
+    let signature = key.sign(&bezent_core::attested::report_message(bytes.as_bytes()));
+    let (status, answer) = send(
+        &w.ingress,
+        "/v0/reports",
+        Some(CREDENTIAL),
+        json!({"report": bytes,
+               "signature": format!("0x{}", hex::encode(signature.to_bytes())),
+               "public_key": format!("0x{}", hex::encode(key.verifying_key().to_bytes()))}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{id}: {answer}");
+    assert_eq!(answer["state"], "Recorded", "{id}: {answer}");
+    answer
+}
+
+/// The sidecar with `BEZENT_SIDECAR_ATTESTING`, end to end through the harness's own surfaces: the
+/// ingress as a requester sends to it, the core's cycle, the published test signer over its link for
+/// the mint, and the driver as the issuing network. A deposit from a report; a withdrawal by
+/// commitment, whose first payout fails and whose second completes; the reserve check over the
+/// party's reports at zero divergence. No intent is ever recorded on the attested network.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn f_011_a_fiat_deposit_and_withdrawal_by_reports(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let key = SigningKey::from_bytes(&[0x5a; 32]);
+    seed_attested(
+        &w.admin,
+        "swaps",
+        &hex::encode(key.verifying_key().to_bytes()),
+    )
+    .await
+    .unwrap();
+
+    // The deposit.
+    let arrival = report(
+        &w,
+        &key,
+        "pay-1",
+        "arrival",
+        json!({"amount": "5000", "position": "acct-1"}),
+    )
+    .await;
+    w.turn(1).await;
+    let (status, deposit) = send(
+        &w.ingress,
+        "/v0/deposits",
+        Some(CREDENTIAL),
+        json!({"request_reference": "dep-1", "coordinate": arrival["coordinate"],
+               "destination": {"network": ISSUING, "address": DESTINATION},
+               "refund_destination": {"network": ATTESTED_NETWORK, "address": "the-payer"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{deposit}");
+    let bridge = deposit["bridge_reference"].as_str().unwrap();
+    w.until(bridge, "Delivering").await;
+    w.ok(
+        "/driver/v0/deliveries/include",
+        json!({"bridge_reference": bridge}),
+    )
+    .await;
+    w.ok("/driver/v0/finality", json!({"network": ISSUING}))
+        .await;
+    w.until(bridge, "Completed").await;
+
+    // The check, over what the core recorded of the party's reports.
+    report(
+        &w,
+        &key,
+        "snap-1",
+        "positions",
+        json!({"positions": [{"position": "acct-1", "amount": "5000"}], "through": "pay-1"}),
+    )
+    .await;
+    w.turn(1).await;
+    w.ok("/driver/v0/readings", json!({"network": ISSUING}))
+        .await;
+    let pool = w.core.pool().clone();
+    let check = ReserveCheck::new(pool.clone(), Recorded::new(pool), LogPager);
+    let e = check
+        .evaluate(ATTESTED_ASSET, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(
+        e.outcome,
+        Outcome::Holds,
+        "{:?} {:?}",
+        e.reason,
+        e.differences
+    );
+    assert_eq!(e.chain.supply, 5000);
+
+    // The withdrawal: a commitment on chain, the instructions relayed, nothing signed.
+    let instructions = b"\x10bank\x24acct-0042";
+    let commitment = format!(
+        "0x{}",
+        hex::encode(bezent_core::attested::instructions_commitment(instructions))
+    );
+    let r = w
+        .ok(
+            "/driver/v0/redemptions",
+            json!({"redeemer": DESTINATION, "amount": "2000", "commitment": commitment}),
+        )
+        .await;
+    let bridge = r["bridge_reference"].as_str().unwrap();
+    w.ok("/driver/v0/finality", json!({"network": ISSUING}))
+        .await;
+    w.turn(1).await;
+    w.until(bridge, "Source-Final").await;
+    w.turn(2).await;
+    assert_eq!(
+        w.state(bridge).await.0,
+        "Source-Final",
+        "no instructions yet"
+    );
+    let (status, relayed) = send(
+        &w.ingress,
+        "/v0/withdrawals/extras",
+        Some(CREDENTIAL),
+        json!({"request_reference": "x-1", "redemption_reference": r["reference"],
+               "instructions": format!("0x{}", hex::encode(instructions))}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{relayed}");
+    assert_eq!(relayed["bridge_reference"], bridge);
+    w.until(bridge, "Delivering").await;
+
+    // The first payout fails on the rail: within its deadline, a new attempt. The second completes.
+    report(
+        &w,
+        &key,
+        "no-1",
+        "payout-not-executed",
+        json!({"bridge_reference": bridge, "attempt": 1}),
+    )
+    .await;
+    w.turn(2).await;
+    assert_eq!(w.state(bridge).await.0, "Delivering");
+    assert_eq!(
+        count(
+            &w.admin,
+            "SELECT count(*) FROM transitions t JOIN transfers x ON x.id = t.transfer_id \
+             WHERE x.kind = 'withdrawal' AND t.attempt IS NOT NULL",
+        )
+        .await,
+        2
+    );
+    report(
+        &w,
+        &key,
+        "out-1",
+        "payout",
+        json!({"amount": "2000", "position": "acct-1", "bridge_reference": bridge}),
+    )
+    .await;
+    w.until(bridge, "Completed").await;
+    assert_eq!(
+        count(
+            &w.admin,
+            "SELECT count(*) FROM intents WHERE network = 'fiat-local'",
+        )
+        .await,
+        0
+    );
+
+    w.ok("/driver/v0/finality", json!({"network": ISSUING}))
+        .await;
+    w.turn(1).await;
+    w.ok("/driver/v0/readings", json!({"network": ISSUING}))
+        .await;
+    let e = check
+        .evaluate(
+            ATTESTED_ASSET,
+            chrono::Utc::now() + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        e.outcome,
+        Outcome::Holds,
+        "{:?} {:?}",
+        e.reason,
+        e.differences
+    );
+    assert_eq!(e.chain.supply, 3000);
+    assert_eq!(e.chain.reserve[ATTESTED_NETWORK], 3000);
 }
 
 // -------------------------------------------------------------------------------------------
