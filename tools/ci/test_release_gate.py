@@ -424,7 +424,7 @@ class Gate(unittest.TestCase):
     def test_the_committed_known_unmet_list_fails_the_real_gate_and_empties_to_pass(self):
         from unittest import mock
         listed = tomllib.loads((rg.ROOT / "e2e/criteria/known_unmet.toml").read_text())["known_unmet"]
-        self.assertEqual(sorted(listed), ["AC-H3.1", "AC-I1.2", "AC-I3.1"])
+        self.assertEqual(sorted(listed), ["AC-H3.1", "AC-I1.2", "AC-I2.2", "AC-I3.1"])
         errors = rg.mechanical_map()
         self.assertTrue(any("known not met" in e and all(a in e for a in listed) for e in errors), errors)
         # Mutation: with every entry removed the same gate raises no such error, so the entries are what fail it.

@@ -852,6 +852,241 @@ async fn s5_a_compromise_signal_pauses_stops_signing_and_is_lifted_by_the_rule(
     );
 }
 
+/// Every byte string bezent has had written to a network in a scenario, labelled: on the fork, each
+/// transaction since the pinned block as signed (its input included) and each log it emitted; on the
+/// Kreivo model, each extrinsic submitted and each event the model recorded, as its raw topics and data.
+async fn written_to_the_networks(bed: &Bed) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let head = bed.anvil.number().await;
+    for number in PINNED_BLOCK + 1..=head {
+        let block = bed
+            .anvil
+            .rpc(
+                "eth_getBlockByNumber",
+                serde_json::json!([format!("{number:#x}"), true]),
+            )
+            .await;
+        for tx in block["transactions"].as_array().into_iter().flatten() {
+            let hash = tx["hash"].as_str().expect("a transaction hash");
+            let raw = bed
+                .anvil
+                .rpc("eth_getRawTransactionByHash", serde_json::json!([hash]))
+                .await;
+            let raw = raw.as_str().expect("the signed transaction");
+            out.push((
+                format!("polygon block {number} transaction {hash}"),
+                hex::decode(raw.trim_start_matches("0x")).unwrap(),
+            ));
+            let input = tx["input"].as_str().unwrap_or("0x");
+            out.push((
+                format!("polygon block {number} transaction {hash} input"),
+                hex::decode(input.trim_start_matches("0x")).unwrap(),
+            ));
+        }
+    }
+    let logs = bed
+        .anvil
+        .rpc(
+            "eth_getLogs",
+            serde_json::json!([{
+                "fromBlock": format!("{:#x}", PINNED_BLOCK + 1),
+                "toBlock": format!("{head:#x}"),
+            }]),
+        )
+        .await;
+    for log in logs.as_array().into_iter().flatten() {
+        out.push((format!("polygon log {log}"), log.to_string().into_bytes()));
+        out.push((
+            "polygon log data".to_owned(),
+            hex::decode(log["data"].as_str().unwrap().trim_start_matches("0x")).unwrap(),
+        ));
+        for topic in log["topics"].as_array().into_iter().flatten() {
+            out.push((
+                "polygon log topic".to_owned(),
+                hex::decode(topic.as_str().unwrap().trim_start_matches("0x")).unwrap(),
+            ));
+        }
+    }
+    for (i, extrinsic) in bed.chain.submitted().into_iter().enumerate() {
+        out.push((format!("kreivo extrinsic {i}"), extrinsic));
+    }
+    // The events as the model emitted them: each topic and the data, raw. (A decoded event's text
+    // prints a `[u8; 32]` as decimal numbers, which no needle can match.)
+    for (i, (topics, data)) in bed.kreivo_event_logs().await.into_iter().enumerate() {
+        for (j, topic) in topics.into_iter().enumerate() {
+            out.push((format!("kreivo event {i} topic {j}"), topic.to_vec()));
+        }
+        out.push((format!("kreivo event {i} data"), data));
+    }
+    out
+}
+
+/// Where `marker` appears in what was written: as the bytes themselves, as their hexadecimal text
+/// (either case, with or without `0x`), or as text inside a larger value. A hash of it is not "in
+/// clear" and is not looked for.
+fn appears_in<'a>(written: &'a [(String, Vec<u8>)], marker: &str) -> Vec<&'a str> {
+    let hex = hex::encode(marker);
+    let needles = [
+        marker.as_bytes().to_vec(),
+        marker.to_ascii_lowercase().into_bytes(),
+        hex.clone().into_bytes(),
+        hex.to_ascii_uppercase().into_bytes(),
+    ];
+    written
+        .iter()
+        .filter(|(_, bytes)| {
+            needles
+                .iter()
+                .any(|n| bytes.windows(n.len()).any(|w| w == n.as_slice()))
+        })
+        .map(|(label, _)| label.as_str())
+        .collect()
+}
+
+/// `INV-12` (service): no personal data, and no account reference in clear, is written to any
+/// network. The one thing a requester gives bezent in free form is its request reference (a
+/// deposit's, and the withdrawal extras'), which it may fill with an account reference or a
+/// person's identifier: here each carries one, through a deposit and a withdrawal that run to
+/// completion. Then every byte bezent had written to a network is searched for them, on the fork
+/// (each signed transaction since the pinned block, its input and its logs) and on the Kreivo
+/// model (each extrinsic and event). Before it, the search is shown to see what bezent writes: it
+/// finds the mint's on-chain reference and the beneficiary's address in what it searches. What this
+/// does not show: that no *other* input can reach a network (an input the bed never sends), and
+/// anything about data bezent never receives. The on-chain references are digests, which carry
+/// nothing of a request reference (`REQ-PV-2`); a digest is not "in clear" and is not searched for.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn s6_inv_12_nothing_a_requester_supplies_reaches_a_network_in_clear(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // Each fits in a 32-byte reference word, so a derivation from it would carry it whole.
+    const DEPOSIT_REFERENCE: &str = "acct:JUAN-PEREZ-CC80123456";
+    const EXTRAS_REFERENCE: &str = "acct:ES9121000418450200051";
+    let bed = Bed::new(pool, connect).await;
+    deposit(&bed, DEPOSIT_REFERENCE, DEPOSIT).await;
+    for _ in 0..2 {
+        bed.turn(0).await;
+    }
+
+    // The withdrawal: the redemption is final, the core makes the withdrawal, and the requester adds
+    // its extras (an expiry) under a reference of its own before it completes.
+    let redemption = [0x61; 32];
+    bed.redeem(redemption, WITHDRAWAL, BENEFICIARY);
+    bed.chain.produce();
+    bed.chain.finalize(bed.chain.best());
+    bed.anvil
+        .rpc("evm_setAutomine", serde_json::json!([false]))
+        .await;
+    bed.until("the withdrawal is made", 12, 0, || async {
+        bed.maybe_transfer("withdrawal").await.is_some()
+    })
+    .await;
+    let (status, body) = bed
+        .http(
+            "POST",
+            "/v0/withdrawals/extras",
+            Some(&serde_json::json!({
+                "request_reference": EXTRAS_REFERENCE,
+                "redemption_reference": format!("0x{}", hex::encode(redemption)),
+                "expires_at": (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
+            })),
+        )
+        .await;
+    assert!(status == 200 || status == 201, "{status} {body}");
+    bed.anvil
+        .rpc("evm_setAutomine", serde_json::json!([true]))
+        .await;
+    bed.until("the withdrawal is completed", 20, 65, || async {
+        bed.maybe_transfer("withdrawal")
+            .await
+            .is_some_and(|(_, state)| state == "Completed")
+    })
+    .await;
+    assert_eq!(
+        bed.anvil.usdc_balance(BENEFICIARY).await,
+        U256::from(WITHDRAWAL)
+    );
+    for _ in 0..3 {
+        bed.turn(65).await;
+    }
+    // The requester's references are in the store, so they reached bezent.
+    for reference in [DEPOSIT_REFERENCE, EXTRAS_REFERENCE] {
+        assert_eq!(
+            bed.count(&format!(
+                "SELECT count(*) FROM intake WHERE request_reference = '{reference}'"
+            ))
+            .await,
+            1,
+            "{reference} did not reach bezent"
+        );
+    }
+
+    let written = written_to_the_networks(&bed).await;
+    // The search sees what bezent writes: the mint's reference, the beneficiary, the payout's
+    // reference. Without this a search that sees nothing would pass.
+    let mint_reference: Vec<u8> = sqlx::query_scalar(
+        "SELECT on_chain_reference FROM intents WHERE purpose = 'mint' AND network = 'kreivo-test'",
+    )
+    .fetch_one(&bed.admin)
+    .await
+    .unwrap();
+    let payout_reference: Vec<u8> =
+        sqlx::query_scalar("SELECT destination_reference FROM transfers WHERE kind = 'withdrawal'")
+            .fetch_one(&bed.admin)
+            .await
+            .unwrap();
+    // Each half is shown to see a value known to be in it. Without this, a half that sees nothing
+    // would pass the search.
+    let beneficiary = BENEFICIARY.to_vec();
+    for (half, label, what, bytes) in [
+        (
+            "the fork's calldata",
+            "polygon block",
+            "the payout's reference",
+            &payout_reference,
+        ),
+        (
+            "the fork's calldata",
+            "polygon block",
+            "the beneficiary",
+            &beneficiary,
+        ),
+        (
+            "the fork's logs",
+            "polygon log",
+            "the beneficiary",
+            &beneficiary,
+        ),
+        (
+            "the Kreivo extrinsics",
+            "kreivo extrinsic",
+            "the mint's reference",
+            &mint_reference,
+        ),
+        (
+            "the Kreivo events",
+            "kreivo event",
+            "the mint's reference",
+            &mint_reference,
+        ),
+    ] {
+        assert!(
+            written.iter().any(|(l, w)| l.starts_with(label)
+                && w.windows(bytes.len()).any(|x| x == bytes.as_slice())),
+            "the search does not see {what} in {half} ({} values written)",
+            written.len()
+        );
+    }
+
+    for marker in [DEPOSIT_REFERENCE, EXTRAS_REFERENCE] {
+        assert_eq!(
+            appears_in(&written, marker),
+            Vec::<&str>::new(),
+            "INV-12: {marker} was written to a network in clear"
+        );
+    }
+}
+
 /// The block and hash this suite forks at are the ones `e2e/evm/forks.env` pins (that file is the
 /// one place a pin changes).
 #[test]

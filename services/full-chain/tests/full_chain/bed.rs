@@ -1018,9 +1018,9 @@ impl Bed {
         self.chain.finalize(self.chain.best());
     }
 
-    /// Every event of the contract in the Kreivo model, in order, decoded: what the model itself
-    /// says happened, not what the store recorded.
-    pub async fn kreivo_events(&self) -> Vec<ContractEvent> {
+    /// Every event of the contract in the Kreivo model, in order, as the model emitted it: the raw
+    /// topics and data, before any decoding.
+    pub async fn kreivo_event_logs(&self) -> Vec<(Vec<[u8; 32]>, Vec<u8>)> {
         let mut out = Vec::new();
         for number in 1..=self.chain.best() {
             let block = self.chain.block(number);
@@ -1028,10 +1028,22 @@ impl Bed {
                 .await
                 .expect("the model");
             for e in events.emitted {
-                out.push(kreivo::decode_event(&e.topics, &e.data).expect("the model's own event"));
+                out.push((e.topics, e.data));
             }
         }
         out
+    }
+
+    /// Every event of the contract in the Kreivo model, in order, decoded: what the model itself
+    /// says happened, not what the store recorded.
+    pub async fn kreivo_events(&self) -> Vec<ContractEvent> {
+        self.kreivo_event_logs()
+            .await
+            .into_iter()
+            .map(|(topics, data)| {
+                kreivo::decode_event(&topics, &data).expect("the model's own event")
+            })
+            .collect()
     }
 
     /// The supply of the bridged asset on the Kreivo model: minted plus refund-minted minus

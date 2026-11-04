@@ -1243,3 +1243,264 @@ async fn must_fix_2_the_signer_signs_only_bytes_that_answer_the_cores_order(
         "{recorded:?}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// INV-14 at the custody layer.
+
+/// `INV-14` (custody + chain, `REQ-RN-5`, `REQ-AR-3`): value leaves the reserve only by a transfer
+/// that carries its reference. The chain refuses anything else (the Roles scope and the unwrapper,
+/// `contracts/evm`); this is the custody half: the signer releases a signature for a payout only
+/// when the bytes are exactly the one call that pairs the origin token's `transfer` with the
+/// emitter's `emitReference`, through the vault's Roles modifier, with no value. Each variant below
+/// is the canonical payout changed in one way that moves reserve value without that pairing (or
+/// with something more than it), for an order whose body is valid and whose preparation matches:
+/// the signer refuses every one, raises the alert for each, and signs nothing; the payout itself
+/// is then signed.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_14_the_signer_signs_a_transfer_only_with_its_reference_and_nothing_else_leaves(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    use bezent_signer::delivery::{self, EvmPayout, EvmTx, keccak256};
+
+    const CALL: u8 = 0;
+    const DELEGATE_CALL: u8 = 1;
+    let f = Fixture::new(pool, connect).await;
+    let selector = |signature: &str| -> Vec<u8> { keccak256(signature.as_bytes())[..4].to_vec() };
+    let word = |n: u128| -> Vec<u8> {
+        let mut w = vec![0u8; 16];
+        w.extend_from_slice(&n.to_be_bytes());
+        w
+    };
+    let address_word = |a: &[u8; 20]| -> Vec<u8> {
+        let mut w = vec![0u8; 12];
+        w.extend_from_slice(a);
+        w
+    };
+    let padded = |b: &[u8]| -> Vec<u8> {
+        let mut out = b.to_vec();
+        out.resize(b.len().div_ceil(32) * 32, 0);
+        out
+    };
+    // The vault's token transfer and the emitter's reference call.
+    let transfer = |to: &[u8; 20], amount: u128| -> Vec<u8> {
+        let mut d = selector("transfer(address,uint256)");
+        d.extend(address_word(to));
+        d.extend(word(amount));
+        d
+    };
+    let emit = |reference: &[u8; 32]| -> Vec<u8> {
+        let mut d = selector("emitReference(bytes32)");
+        d.extend_from_slice(reference);
+        d
+    };
+    // One entry of a MultiSend batch: operation, target, value 0, data length, data.
+    let entry = |to: &[u8; 20], data: &[u8]| -> Vec<u8> {
+        let mut e = vec![CALL];
+        e.extend_from_slice(to);
+        e.extend(word(0));
+        e.extend(word(u128::try_from(data.len()).unwrap()));
+        e.extend_from_slice(data);
+        e
+    };
+    let multisend = |entries: &[Vec<u8>]| -> Vec<u8> {
+        let transactions: Vec<u8> = entries.concat();
+        let mut d = selector("multiSend(bytes)");
+        d.extend(word(32));
+        d.extend(word(u128::try_from(transactions.len()).unwrap()));
+        d.extend(padded(&transactions));
+        d
+    };
+    // execTransactionWithRole(target, 0, inner, operation, the delivery role, shouldRevert).
+    let role = contracts().role_key;
+    let with_role = |target: &[u8; 20], inner: &[u8], operation: u8| -> Vec<u8> {
+        let mut d = selector("execTransactionWithRole(address,uint256,bytes,uint8,bytes32,bool)");
+        d.extend(address_word(target));
+        d.extend(word(0));
+        d.extend(word(6 * 32));
+        d.extend(word(u128::from(operation)));
+        d.extend_from_slice(&role);
+        d.extend(word(1));
+        d.extend(word(u128::try_from(inner.len()).unwrap()));
+        d.extend(padded(inner));
+        d
+    };
+    let tx = |to: [u8; 20], value: u128, data: Vec<u8>| -> Vec<u8> {
+        delivery::evm_signing_payload(&EvmTx {
+            chain_id: 137,
+            nonce: next_nonce(),
+            priority_fee: 1,
+            max_fee: 2,
+            gas: 200_000,
+            to,
+            value,
+            data,
+        })
+    };
+
+    let reference = reference32(None);
+    let amount = 10u128;
+    let pay = transfer(&BENEFICIARY, amount);
+    let referenced = multisend(&[
+        entry(&TOKEN_ADDRESS, &pay),
+        entry(&EMITTER, &emit(&reference)),
+    ]);
+    // The builders above make the canonical payout, byte for byte: each variant is one change away
+    // from a payout the signer's own encoder builds.
+    let canonical = with_role(&MULTISEND, &referenced, DELEGATE_CALL);
+    assert_eq!(
+        canonical,
+        delivery::evm_payout_call(
+            &contracts(),
+            &EvmPayout {
+                token: TOKEN_ADDRESS,
+                to: BENEFICIARY,
+                amount,
+                reference
+            }
+        )
+    );
+
+    let to_roles = |data: Vec<u8>| tx(ROLES, 0, data);
+    let variants: Vec<(&str, Vec<u8>, &str)> = vec![
+        (
+            "the transfer alone: no reference follows it",
+            to_roles(with_role(
+                &MULTISEND,
+                &multisend(&[entry(&TOKEN_ADDRESS, &pay)]),
+                DELEGATE_CALL,
+            )),
+            "payout through the vault's delivery role",
+        ),
+        (
+            "the reference before the transfer",
+            to_roles(with_role(
+                &MULTISEND,
+                &multisend(&[
+                    entry(&EMITTER, &emit(&reference)),
+                    entry(&TOKEN_ADDRESS, &pay),
+                ]),
+                DELEGATE_CALL,
+            )),
+            "payout through the vault's delivery role",
+        ),
+        (
+            "the second entry goes to a contract that is not the emitter",
+            to_roles(with_role(
+                &MULTISEND,
+                &multisend(&[
+                    entry(&TOKEN_ADDRESS, &pay),
+                    entry(&[0x77; 20], &emit(&reference)),
+                ]),
+                DELEGATE_CALL,
+            )),
+            "payout through the vault's delivery role",
+        ),
+        (
+            "a second transfer where the reference should be",
+            to_roles(with_role(
+                &MULTISEND,
+                &multisend(&[
+                    entry(&TOKEN_ADDRESS, &pay),
+                    entry(&TOKEN_ADDRESS, &transfer(&[0x66; 20], 1)),
+                ]),
+                DELEGATE_CALL,
+            )),
+            "payout through the vault's delivery role",
+        ),
+        (
+            "a third entry that moves more after the pair",
+            to_roles(with_role(
+                &MULTISEND,
+                &multisend(&[
+                    entry(&TOKEN_ADDRESS, &pay),
+                    entry(&EMITTER, &emit(&reference)),
+                    entry(&TOKEN_ADDRESS, &transfer(&[0x66; 20], 1)),
+                ]),
+                DELEGATE_CALL,
+            )),
+            "payout through the vault's delivery role",
+        ),
+        (
+            "the token's transfer called through the role directly, with no batch",
+            to_roles(with_role(&TOKEN_ADDRESS, &pay, CALL)),
+            "payout through the vault's delivery role",
+        ),
+        (
+            "the token's transfer called on the token itself, not through the Roles modifier",
+            tx(TOKEN_ADDRESS, 0, pay.clone()),
+            "call of nothing to the vault's Roles modifier",
+        ),
+        (
+            "the canonical payout with native value attached",
+            tx(ROLES, 1, canonical.clone()),
+            "call of nothing to the vault's Roles modifier",
+        ),
+    ];
+
+    let payout_order = serde_json::json!({
+        "to": format!("0x{}", hex::encode(BENEFICIARY)), "asset": ASSET
+    });
+    let mut forged = Vec::new();
+    for (what, bytes, why) in &variants {
+        let d = Delivery {
+            order: payout_order.clone(),
+            payload: bytes.clone(),
+            message: bytes.clone(),
+        };
+        let id = f
+            .deliver(
+                "polygon-test",
+                "payout",
+                Some(&reference),
+                1,
+                &d,
+                "10",
+                None,
+            )
+            .await;
+        forged.push((*what, *why, id));
+    }
+    for (what, why, id) in &forged {
+        match refused(f.signer.sign(*id).await) {
+            Refusal::NotTheOrder { why: said, .. } => {
+                assert!(
+                    said.contains(why),
+                    "{what}: refused for {said:?}, not {why:?}"
+                );
+            }
+            other => panic!("{what}: {other:?}"),
+        }
+    }
+    assert_eq!(f.signatures().await, 0, "no variant was signed");
+    // Each is a key-compromise alert with its pause request: a bridge that was asked to sign a
+    // transfer without its reference is a bridge whose preparer is compromised.
+    assert_eq!(
+        signer_alerts(&f).await,
+        forged
+            .iter()
+            .map(|(_, _, id)| format!("intent:{id}"))
+            .collect::<Vec<_>>()
+    );
+
+    // The canonical payout of the same order is signed, and what is signed is the pair.
+    let bytes = tx(ROLES, 0, canonical);
+    let own = Delivery {
+        order: payout_order,
+        payload: bytes.clone(),
+        message: bytes,
+    };
+    let intent = f
+        .deliver(
+            "polygon-test",
+            "payout",
+            Some(&reference),
+            1,
+            &own,
+            "10",
+            None,
+        )
+        .await;
+    signed(f.signer.sign(intent).await);
+    assert_eq!(f.signatures().await, 1);
+}
