@@ -328,7 +328,11 @@ impl<C: Chain> Prover<'_, C> {
         signal::anomaly_once(
             self.pool,
             &format!("{}:signed:{}:bytes", self.network, w.id),
-            json!({"network": self.network, "signed_transaction": w.id, "reason": why}),
+            // `bytes_unreadable`: written before the chain is read, so it says nothing of whether
+            // these bytes executed; the core must not read it as "this attempt did not mint"
+            // (see `late_mint`, "What decides an attempt").
+            json!({"network": self.network, "signed_transaction": w.id, "reason": why,
+                   "bytes_unreadable": true}),
         )
         .await?;
         Ok(Err(why.to_owned()))
@@ -580,6 +584,11 @@ impl<C: Chain> Prover<'_, C> {
                         "reason": "the lane nonce was consumed by an extrinsic bezent recorded and this build cannot decode; nothing is proven (REQ-NX-3), and it stays unknown until a build that decodes it reads it",
                         "nonce": s.nonce,
                         "coordinate": coordinate(recorded_undecodable.first().copied()),
+                        // The extrinsic that consumed the nonce is a recorded attempt of bezent's
+                        // this build cannot read: it may have minted. The core must not read this
+                        // anomaly as "this attempt did not mint" (see `late_mint`, "What decides
+                        // an attempt").
+                        "recorded_undecodable": true,
                     }),
                 )
                 .await?;

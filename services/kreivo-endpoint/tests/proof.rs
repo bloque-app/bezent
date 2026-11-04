@@ -473,6 +473,9 @@ async fn ac_i1_2_a_recorded_signature_in_a_format_this_build_rejects_raises_noth
         .fetch_all(&f.admin).await.unwrap();
     assert_eq!(all.len(), 1, "{all:?}");
     assert!(all[0].contains("cannot decode"), "{all:?}");
+    // The marker the core reads: this anomaly does not say the attempt did not mint (the late-mint
+    // check holds on it, PR #80 review).
+    assert!(all[0].contains("\"recorded_undecodable\": true"), "{all:?}");
 }
 
 /// The other side of the test above: the same extrinsic with no record of it is a signature bezent

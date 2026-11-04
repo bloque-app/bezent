@@ -56,6 +56,28 @@
 //!   observer was catching up over old history (second review of PR #72). No other progress of the
 //!   prover is on record, none is needed (see below), and none is invented.
 //!
+//! # What decides an attempt
+//!
+//! A `delivery-anomaly` ends an attempt's wait only if it says the attempt itself did not mint.
+//! The kinds the Kreivo endpoint writes with `signed_transaction` (all of them name the transaction):
+//!
+//! - `reference-used`: the chain shows the transaction not executed, and the contract says its
+//!   reference was used: another call minted it. Decides: this attempt did not.
+//! - `twin`, `unrecognised-consumer`: the lane's nonce was consumed by another payload, so this
+//!   transaction cannot have executed (a nonce is consumed once). Decides. A consumer of bezent's
+//!   own that minted is an attempt of the reference with a record of its own.
+//! - `recorded-undecodable` (marked `recorded_undecodable: true`): the nonce was consumed by a
+//!   recorded extrinsic this build cannot decode. It may be an attempt of this very reference, and
+//!   it may have minted; nothing is proven (`REQ-NX-3`). Does **not** decide: the mint stays held
+//!   and pages, and the transfer is sent to review by the anomaly (`REQ-RF-1`: no refund).
+//! - the `:bytes` kinds (marked `bytes_unreadable: true`): written before the chain is read, because
+//!   the recorded bytes do not decode or do not answer their rows. The same bytes may have
+//!   executed. Does **not** decide. Rows written before the marker existed lack it and still decide:
+//!   the event log is append-only.
+//!
+//! The check reads the markers as `payload @> {...}`, never casts the value, so a malformed one an
+//! endpoint wrote cannot fail the check.
+//!
 //! Otherwise the alert is raised through the compromise path of F-005: `key-compromise` and the
 //! global `pause-requested`, once per observation (the store keeps one alert per detector and
 //! detection key, migration 0049, so a restart or a replay of the observer raises nothing twice).
@@ -539,7 +561,9 @@ async fn late(conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<Look> {
                            AND t.position_kind = 'transaction' AND t.network = $2) \
                  OR EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'delivery-anomaly' \
                             AND e.payload ->> 'signed_transaction' = st.id::text \
-                            AND e.payload ->> 'network' = $2)) AS decided, \
+                            AND e.payload ->> 'network' = $2 \
+                            AND NOT (e.payload @> '{\"recorded_undecodable\": true}') \
+                            AND NOT (e.payload @> '{\"bytes_unreadable\": true}'))) AS decided, \
                 (SELECT p.valid_from_block FROM prepared_transactions p \
                  WHERE p.id::text = i.payload ->> 'prepared') AS valid_from, \
                 (SELECT p.valid_until_block FROM prepared_transactions p \

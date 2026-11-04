@@ -292,6 +292,11 @@ Tests: `services/core/tests/cancel.rs` (`*_issue_35_*`; the S-4 test that never 
     a `delivery-anomaly-surfaced` event names the anomaly (once: a resolved review is not reopened by the anomaly
     that caused it). Nothing is refunded, retried or failed because of it (`REQ-RF-1`). **Ruled**: the §5.4 rows into
     `Needs-Review` gain this occasion by amendment 0013 (SPEC v0.5.3, pull request #47).
+   The late-mint check (`services/core/src/late_mint.rs`, "What decides an attempt") reads the same rows
+   with a different question: an anomaly ends an attempt's wait only if it says the attempt did not
+   mint. The two kinds that say the prover cannot read the attempt (`recorded_undecodable`,
+   `bytes_unreadable` in the payload) do not: the mint stays held and pages, and the transfer goes to review
+   through this section (PR #80 review).
 
 Tests: `services/core/tests/anomalies.rs` (`INV-8`).
 
