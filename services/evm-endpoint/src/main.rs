@@ -169,6 +169,7 @@ async fn run(config: Config) -> Result<(), String> {
             emitter: checked.contracts.emitter,
             declarations: &declarations,
             convertibles: &checked.convertibles,
+            delivery: checked.lane_address,
         },
         start_block: config.start_block,
         max_range: config.max_range,

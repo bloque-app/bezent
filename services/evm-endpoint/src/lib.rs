@@ -18,6 +18,7 @@
 
 pub mod config;
 pub mod evm;
+pub mod fee;
 pub mod health;
 pub mod network;
 pub mod observe;

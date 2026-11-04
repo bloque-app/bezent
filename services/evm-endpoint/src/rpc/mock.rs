@@ -31,6 +31,9 @@ struct State {
     sent: Vec<Vec<u8>>,
     fail_logs: Option<String>,
     fail_all: Option<String>,
+    fail_balance: Option<String>,
+    hang_balance: bool,
+    balance_reads: Vec<At>,
     salt: u8,
 }
 
@@ -176,6 +179,21 @@ impl MockChain {
         self.state().fail_logs = reason.map(str::to_owned);
     }
 
+    /// Every `eth_getBalance` fails with `reason` until cleared; no other read does.
+    pub fn fail_balance(&self, reason: Option<&str>) {
+        self.state().fail_balance = reason.map(str::to_owned);
+    }
+
+    /// Every `eth_getBalance` never answers while `hang` is set.
+    pub fn hang_balance(&self, hang: bool) {
+        self.state().hang_balance = hang;
+    }
+
+    /// The block of every `eth_getBalance` asked so far, in order.
+    pub fn balance_reads(&self) -> Vec<At> {
+        self.state().balance_reads.clone()
+    }
+
     /// Every read fails with `reason` until cleared.
     pub fn fail_all(&self, reason: Option<&str>) {
         self.state().fail_all = reason.map(str::to_owned);
@@ -307,8 +325,19 @@ impl Rpc for MockRpc {
             .map_or(0, |(_, nonce)| *nonce))
     }
 
-    async fn balance(&self, address: Address, _at: At) -> Result<U256, RpcError> {
+    async fn balance(&self, address: Address, at: At) -> Result<U256, RpcError> {
         self.chain.check()?;
+        let hang = {
+            let mut s = self.chain.state();
+            s.balance_reads.push(at);
+            s.hang_balance
+        };
+        if hang {
+            std::future::pending::<()>().await;
+        }
+        if let Some(reason) = self.chain.state().fail_balance.clone() {
+            return Err(RpcError(reason));
+        }
         Ok(self
             .chain
             .state()

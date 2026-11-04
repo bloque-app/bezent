@@ -56,7 +56,7 @@ The criteria map's exceptions for `AC-H3.1` and `AC-I3.1` (F-013, PR #75) are re
 
 | Criterion | Layer (SPEC §9) | State here |
 |---|---|---|
-| `AC-H3.1` | Service, over the store | **partial**: every `REQ-ST-6` item but fee positions is one read, tested; fee positions are not observable (Open 2) |
+| `AC-H3.1` | Service, over the store | **partial**: every `REQ-ST-6` item is one read, tested; fee positions are observable for EVM networks and not for Kreivo (Open 2) |
 | `AC-I1.2` | Custody + service | **Pause applied (issue #77, migration 0095); still listed `known unmet`.** The signer and the core detect a signature bezent did not record, refuse it and raise `key-compromise`, and the store pauses the bridge in the same transaction. Unmet: on an EVM network a signing intent recorded before the pause has no bound (amendment 0022 A1), and the on-chain pause is a person's act (A2), from a page nobody receives yet (`alerts.md`). The entry stays in `e2e/criteria/known_unmet.toml` until the spec owner reviews it. Open 1 |
 | `REQ-IC-2` | (requirement) | Met for "a signature it did not record" (and a late mint) by the store's pause on the alert (issue #77), with the bound of amendment 0022 A1 open (Open 1). The reserve-equation divergence, a stall that outlasts the route's budget and an unevaluable reserve are paused by the reserve check (`reserve_check.rs::req_ic_2_nfr_5_m2_*`, `ac_e2_1_*`), and a supply mismatch pauses the asset under `INV-4`. A deeper-than-expected reorganisation and an observation gap are not assessed by this change |
 | `AC-I2.1` | Service + chain | service half passes (global, asset, network, direction and route; in flight continues; a second login lifts); the chain half is `F-006`'s, `contracts/bezent` |
@@ -94,9 +94,18 @@ channel. `deploy/runbooks/alerts.md` has the table, the three kinds no filter co
    needs the store to let the core insert a global pause for that cause (the pause guard of migration 0031 admits only an
    asset's routes on a reserve cause) and a test. Not done here: it widens what the core may do to a pause and deserves its
    own review. The same applies to a late mint (PR #72, merged), which raises the same request.
-2. **Fee positions** (`REQ-ST-6`). No service reads a delivery account's balance. `fee_short_transfers` is the only signal,
-   and it fires after a delivery could not pay. Needs a balance read in each endpoint (live network) and a floor from
-   configuration (`DEC-18`).
+2. **Fee positions** (`REQ-ST-6`). **Half built (issue #14).** The EVM endpoint reads its delivery account's native
+   balance at each final head it records, from both providers, and records it with the head (`fee_position_readings`,
+   migration 0110; `ops_observables()` rows `fee_position_amount` and `fee_position_age_seconds`, one per network; NULL
+   is unknown, never zero). Not built, and waiting on the spec owner, because the spec and the plan do not decide it:
+   (a) **which amount of a Substrate account is the Kreivo delivery account's fee position**: its free balance, its free
+   balance less what is frozen, or another; a storage deposit is reserved from the account, so free and spendable differ,
+   and this is the account `DEC-18` names (the KSM float); the Kreivo endpoint therefore reads and records nothing, and
+   the issuing network's row stays NULL; (b) **where the alert floor lives**, `DEC-18` says "in configuration" and not
+   whose: the core's (a floor beside a page kind, with a cadence and a runbook), an endpoint's, or the infrastructure's
+   alarm threshold on `fee_position_amount`; no floor and no page kind is added; (c) whether any key other than the
+   delivery keys has a fee position (none was found that pays a network cost). `AC-H3.1` therefore stays in
+   `e2e/criteria/known_unmet.toml`.
 3. **Administrative acts the store does not perform** (key rotation, raising a bound, route admission, credentials,
    surplus movements) are recorded by `operator_record` when the operator does it; nothing forces it. The schema owner can
    still change declarations directly; that login is for migrations and restores, held outside the operators.
