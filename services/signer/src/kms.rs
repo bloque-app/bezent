@@ -27,6 +27,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
+use std::time::Duration;
+
+use aws_config::timeout::TimeoutConfig;
 
 use blake2::Blake2b;
 use blake2::digest::consts::U32;
@@ -358,18 +361,65 @@ impl<A: KmsApi> fmt::Debug for KmsBackend<A> {
     }
 }
 
+/// The longest one KMS request may take, retries included. The SDK sets only a connect timeout
+/// (3.1 s; aws-smithy-runtime 1.16.0, `BehaviorVersion::latest()`): no read, attempt or operation
+/// timeout, so a KMS that accepts the request and never answers would hold the call for good, and
+/// with it the signer's one signing lock, which every intent waits on. Vault's whole-request
+/// bound (`bezent-vault`) is the same 15 s.
+pub const OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The longest one attempt of a KMS request may take. The SDK retries by default (3 attempts), so
+/// this is what keeps one silent attempt from using up the whole [`OPERATION_TIMEOUT`].
+pub const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The timeouts of a KMS request: a request that exceeds them fails as an SDK timeout, which
+/// [`sdk_failed`] reports as [`KeyError::Unavailable`], like any other failure to get an answer.
+/// Nothing is recorded before the call returns, so nothing is half-done: the intent is asked for
+/// again.
+pub fn timeouts() -> TimeoutConfig {
+    TimeoutConfig::builder()
+        .operation_timeout(OPERATION_TIMEOUT)
+        .operation_attempt_timeout(ATTEMPT_TIMEOUT)
+        .build()
+}
+
 /// The real KMS, through the AWS SDK and its default credential chain.
 pub struct AwsKms {
     client: aws_sdk_kms::Client,
 }
 
 impl AwsKms {
-    /// A client for `region`; `endpoint` overrides the service URL (a VPC endpoint).
+    /// A client for `region`; `endpoint` overrides the service URL (a VPC endpoint). Every
+    /// request ends within [`timeouts`].
     pub async fn new(region: &str, endpoint: Option<&str>) -> Self {
+        Self::build(region, endpoint, None, timeouts()).await
+    }
+
+    /// A client as [`AwsKms::new`], under the fixed `credentials` and `timeouts`: for tests, which
+    /// reach no credential chain and want a bound of milliseconds.
+    pub async fn with_credentials(
+        region: &str,
+        endpoint: &str,
+        credentials: aws_sdk_kms::config::Credentials,
+        timeouts: TimeoutConfig,
+    ) -> Self {
+        Self::build(region, Some(endpoint), Some(credentials), timeouts).await
+    }
+
+    async fn build(
+        region: &str,
+        endpoint: Option<&str>,
+        credentials: Option<aws_sdk_kms::config::Credentials>,
+        timeouts: TimeoutConfig,
+    ) -> Self {
         let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_config::Region::new(region.to_owned()));
+            .region(aws_config::Region::new(region.to_owned()))
+            .timeout_config(timeouts);
         if let Some(url) = endpoint {
             loader = loader.endpoint_url(url);
+        }
+        if let Some(credentials) = credentials {
+            loader = loader.credentials_provider(credentials);
         }
         Self {
             client: aws_sdk_kms::Client::new(&loader.load().await),
