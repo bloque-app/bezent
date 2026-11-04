@@ -31,6 +31,7 @@ struct State {
     sent: Vec<Vec<u8>>,
     fail_logs: Option<String>,
     fail_all: Option<String>,
+    fail_balance: Option<String>,
     salt: u8,
 }
 
@@ -176,6 +177,11 @@ impl MockChain {
         self.state().fail_logs = reason.map(str::to_owned);
     }
 
+    /// Every `eth_getBalance` fails with `reason` until cleared; no other read does.
+    pub fn fail_balance(&self, reason: Option<&str>) {
+        self.state().fail_balance = reason.map(str::to_owned);
+    }
+
     /// Every read fails with `reason` until cleared.
     pub fn fail_all(&self, reason: Option<&str>) {
         self.state().fail_all = reason.map(str::to_owned);
@@ -309,6 +315,9 @@ impl Rpc for MockRpc {
 
     async fn balance(&self, address: Address, _at: At) -> Result<U256, RpcError> {
         self.chain.check()?;
+        if let Some(reason) = self.chain.state().fail_balance.clone() {
+            return Err(RpcError(reason));
+        }
         Ok(self
             .chain
             .state()

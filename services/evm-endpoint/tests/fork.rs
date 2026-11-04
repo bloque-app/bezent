@@ -549,6 +549,7 @@ impl World {
                 emitter: self.vault.emitter,
                 declarations: &self.declarations,
                 convertibles: &self.convertibles,
+                delivery: self.lane.address,
             },
             start_block: self.net.block + 1,
             max_range: 500,

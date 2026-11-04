@@ -7,7 +7,7 @@ id: float-top-up
 kind: procedure
 covers: [REQ-TR-5, REQ-IC-2]
 pages: []
-observables: [fee_short_transfers]
+observables: [fee_short_transfers, fee_position_amount, fee_position_age_seconds]
 tests: [services/core/tests/conditions.rs::cnd_fee_short_holds_until_the_fee_position_can_pay]
 exercised: no
 ---
@@ -22,18 +22,21 @@ delivery (`REQ-TR-5`, guardrail 10); costs go against surplus.
 
 ## Pages
 
-**None exists.** No service reads a float's balance (`features/F-014-operations/NOTES.md`, "Fee positions"), so no alert
-floor fires. The signal that exists is late: transfers held in `CND-FeeShort` (`fee_short_transfers` above zero), which
-means a delivery already could not pay. Check the floats on a schedule, from the deployment's own notes, until the balance
-read exists.
+**None exists yet.** The EVM endpoint now records its delivery account's native balance (`fee_position_amount`), but no
+floor is set and no page is raised (`alerts.md`, "Fee positions"), and the Kreivo delivery account's balance is not read at
+all (`features/F-014-operations/NOTES.md`, Open 2). The signal that exists for Kreivo is late: transfers held in
+`CND-FeeShort` (`fee_short_transfers` above zero), which means a delivery already could not pay. Check the Kreivo float on
+a schedule, from the deployment's own notes, until the balance read exists.
 
 ## Confirm
 
 ```sql
-SELECT metric, asset, network, direction, value FROM ops_observables() WHERE metric = 'fee_short_transfers';
+SELECT metric, asset, network, direction, value FROM ops_observables()
+WHERE metric IN ('fee_short_transfers', 'fee_position_amount', 'fee_position_age_seconds');
 ```
 
-and the delivery account's native balance on its network from public chain data.
+For an EVM network `fee_position_amount` is the delivery account's native balance at its latest final head, in wei and exact
+(no value means unknown). For Kreivo, read the delivery account's native balance from public chain data.
 
 ## Do
 

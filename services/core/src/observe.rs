@@ -76,7 +76,10 @@ pub async fn read(pool: &PgPool) -> sqlx::Result<Vec<Observable>> {
 fn unit(metric: &str) -> &'static str {
     if metric.ends_with("_seconds") {
         "Seconds"
-    } else if metric == "reserve_amount" || metric == "reserve_equation_outcome" {
+    } else if metric == "reserve_amount"
+        || metric == "fee_position_amount"
+        || metric == "reserve_equation_outcome"
+    {
         "None"
     } else {
         "Count"

@@ -402,6 +402,7 @@ impl Fixture {
                 emitter: contracts().emitter,
                 declarations: &self.declarations,
                 convertibles: &self.convertibles,
+                delivery: self.lane.address,
             },
             start_block: 1,
             max_range: 4,
