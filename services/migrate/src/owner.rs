@@ -5,6 +5,10 @@
 //! from which the URL is built in the process. Nothing here prints a value.
 //!
 //! ```toml
+//! # The service and operator logins this deployment made, as `--login` names them. A task's
+//! # command line is fixed, so they can be listed here instead. Before the first table.
+//! logins = ["bezent_core_login"]
+//!
 //! [vault]
 //! address = "https://vault.example:8200"
 //! mount = "bezent"
@@ -32,6 +36,9 @@ pub struct OwnerConfig {
     /// Where Vault is and how to log in to it, when a secret is read from it.
     #[serde(default)]
     pub vault: Option<VaultConfig>,
+    /// The service and operator logins this deployment made (not strays), added to `--login`.
+    #[serde(default)]
+    pub logins: Vec<String>,
     /// The store, with the owner's login and password.
     pub store: StoreSource,
 }
@@ -54,6 +61,9 @@ impl OwnerConfig {
             vault.check().map_err(|e| e.to_string())?;
         }
         self.store.check().map_err(|e| e.to_string())?;
+        if self.logins.iter().any(|l| l.trim().is_empty()) {
+            return Err("logins holds an empty name".to_owned());
+        }
         if (self.store.login.is_vault() || self.store.password.is_vault()) && self.vault.is_none() {
             return Err("a secret is read from Vault but there is no [vault] table".to_owned());
         }
@@ -88,17 +98,32 @@ mod tests {
     }
 
     #[test]
+    fn logins_are_optional_and_listed() {
+        let none = read("no-logins", &format!("{VAULT}\n{STORE}")).unwrap();
+        assert!(none.logins.is_empty());
+        let some = read(
+            "logins",
+            &format!("logins = [\"bezent_core_login\"]\n{VAULT}\n{STORE}"),
+        )
+        .unwrap();
+        assert_eq!(some.logins, ["bezent_core_login"]);
+        assert!(read(
+            "empty-login",
+            &format!("logins = [\" \"]\n{VAULT}\n{STORE}")
+        )
+        .is_err());
+    }
+
+    #[test]
     fn req_ky_1_the_owner_can_come_from_vault_and_needs_the_table_for_it() {
         assert!(read("ok", &format!("{VAULT}{STORE}")).is_ok());
         assert!(read("novault", STORE).unwrap_err().contains("[vault]"));
         assert!(read("nostore", VAULT).is_err());
-        assert!(
-            read(
-                "http",
-                &format!("{}{STORE}", VAULT.replace("https", "http"))
-            )
-            .is_err()
-        );
+        assert!(read(
+            "http",
+            &format!("{}{STORE}", VAULT.replace("https", "http"))
+        )
+        .is_err());
         assert!(read("extra", &format!("{VAULT}{STORE}[other]\n")).is_err());
     }
 
