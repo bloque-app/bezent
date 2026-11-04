@@ -92,37 +92,37 @@ and no role may DELETE or TRUNCATE anything but the dispatcher's own condition h
 | `unsigned_attempt_cancellations` | core: an attempt ordered and never signed, cancelled under an approved review resolution into `Refunding` (0051) |
 | `book_entries`, `book_postings`, `book_quarantine` | core |
 | `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_statement_objects` (0053: where the statement sink wrote each object, with its ETag and version id) | core |
-| `pauses(asset, cause, evaluation_id, quarantine_id, reading_id)` | core |
+| `pauses(asset, cause, evaluation_id, quarantine_id, reading_id)` | core; no role holds `alert_seq`: a compromise pause is the store's own, on an alert's insert (0095) |
 | `observations`, `observation_outcomes`, `observation_ranges`, `final_heads` | Kreivo endpoint, EVM endpoint: each its own networks only, the Kreivo endpoint the issuing network, the EVM endpoint the EVM origin networks (the guard of 0049 on every chain table, by the session's login and the role it acts as; 0034 and 0035 before it) |
 | `prepared_transactions`, `signed_transactions`, `non_execution_proofs` | Kreivo endpoint, EVM endpoint: each its own networks only, a preparation counting as its order's network and a signed transaction as its intent's (0049) |
 | `reserve_readings` | Kreivo endpoint, EVM endpoint: each its own networks only (0049) |
 | `signatures` | signer (with the nonce and the asset it decoded from the bytes it signed, 0049) |
 | `webhook_secrets`, `webhook_transfer_urls`, `webhook_condition_urls` | ingress |
 | `webhook_deliveries`, `webhook_condition_holds` (and DELETE), `webhook_cursor(after)` UPDATE, `webhook_deliveries(state, attempts, next_attempt_at, leased_until, last_status, last_error, finished_at)` UPDATE | webhook dispatcher |
-| `manual_actions(kind, transfer_id, to_state, network, block_number, block_hash, block_time, justification)`, `manual_approvals(action_id, justification)`, `ledger_accounts(network, address, kind, reason)` | operators |
+| `manual_actions(kind, transfer_id, to_state, network, block_number, block_hash, block_time, justification)`, `manual_approvals(action_id, justification)`, `ledger_accounts(network, address, kind, reason)`; EXECUTE `operator_pause`, `operator_request_unpause`, `operator_approve_unpause`, `operator_record` (0091: the only way an operator pauses, lifts a pause or records an administrative act) | operators |
 | `networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `endpoint_scopes`, `evm_endpoint_networks` | nobody: the migration owner's declarations |
 
 Who **reads** what (SELECT):
 
 | Role | Reads |
 |---|---|
-| core | every record but `requester_credentials`, `requesters`, `requester_grants` and the webhooks' tables |
+| core | every record but `requester_credentials`, `requesters`, `requester_grants` and the webhooks' tables; `late_mint_checks` (0075, 0076) it reads and settles (`checked_at`, `failures`, `held_cycles`, `settled_at`, `verdict` only: the store queues, nothing deletes) |
 | ingress | the declarations (`networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `pauses`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `ledger_accounts_listed`), the requests (`intake`, `intake_answers`, `relayed_instructions`), `transfers`, `transitions`, `attempt_milestones`, `observations`, `observation_outcomes`, `event_log`, `event_log_head`, and the views `transfer_status`, `event_log_position`, `book_balances`; of the webhooks' tables, `webhook_deliveries` and the unsealed columns of the secrets and URLs. **No** intent, signature, signed bytes, proof, reading, book entry or posting, or reserve record (the `book_balances` view gives it the balances only) |
 | Kreivo endpoint, EVM endpoint | (the EVM endpoint also `evm_endpoint_networks`, which logins record which EVM network, migration 0056) `networks`, `assets`, `admitted_tokens`, `reserves`, `endpoint_scopes`, `intents`, `signatures`, their own records (`observations`, `observation_outcomes`, `observation_ranges`, `observation_gaps`, `observation_watermarks`, `final_heads`, `prepared_transactions`, `signed_transactions`, `non_execution_proofs`, `reserve_readings`) and `event_log`; the Kreivo endpoint also `observation_walk_anchors` (0052: blocks of a long history walk, so it resumes). **No** transfer, request or book |
 | webhook dispatcher | `event_log`, `event_log_head`, `transfers`, `intake`, `intake_answers`, `requester_grants`, and the webhooks' tables, sealed columns included |
 | signer | `intents` (the signing intent and the core's order), `prepared_transactions`, `signatures`, and since 0049 `admitted_tokens` and `signed_transactions(id, intent_id)` (to compare the bytes it decodes with the core's order: the token an asset is paid in, a cancel's target) and `event_log(seq)` (the position of an alert it appends); nothing else |
-| operators | `manual_actions`, `manual_approvals`, `reviews`, `unassociated_arrivals`, `ledger_accounts`, `ledger_accounts_listed`, `book_quarantine`, `surplus_funding_addresses`, `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_statement_objects`, `reserve_readings` |
+| operators | `admin_actions`, `event_log`, `pauses`, `transfer_status`, `manual_actions`, `manual_approvals`, `reviews`, `unassociated_arrivals`, `ledger_accounts`, `ledger_accounts_listed`, `book_quarantine`, `surplus_funding_addresses`, `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_statement_objects`, `reserve_readings` |
 | `bezent_service`, `bezent_endpoint` | nothing |
 
 Who may **call** what (EXECUTE; the functions that run as the owner are marked *definer*):
 
 | Role | Calls |
 |---|---|
-| core | `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
+| core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
 | ingress | `source_bindable`, `funding_arrival`, `bezent_writer_holds` |
 | Kreivo endpoint, EVM endpoint | `bezent_writer_holds`, `bezent_endpoint_writer`, `bezent_evm_endpoint_writer`, `bezent_row_network`, `observation_kind_on_network`, `observation_kind_for_event`, `observation_writer_covers` (the guards' helpers, which run as the inserting login) |
 | signer | `attempt_gate_open` *definer*, `statement_place_refusal` *definer* |
-| operators | `source_bindable`, `funding_arrival`, `one_business_day_after` |
+| operators | `ops_observables` *definer* (0090), `source_bindable`, `funding_arrival`, `one_business_day_after`, `operator_pause` *definer*, `operator_request_unpause` *definer*, `operator_approve_unpause` *definer*, `operator_record` *definer* |
 
 Every service and the operators also call `bezent_applied_migrations()` *definer*, which lists the
 migrations applied to the store, for the start-up check. The trigger functions that run as the owner
@@ -160,6 +160,9 @@ The audit of PR #56 added these (0049), for every login but the owner:
 - A transition's id, like a transfer's, is the one the store's sequence drew for the session.
 - A `key-compromise` alert carries the detector and detection key the store stamps on it; a detector
   looks only for its own, so a row another role wrote never suppresses it.
+- A `key-compromise` alert pauses the bridge in the transaction that records it (0095, a definer trigger
+  no role may call): one pause per alert, naming it, global but for the core's `scope` `asset` (`INV-4`,
+  0040). No service inserts, edits or deletes such a pause, and a repeated detection makes none.
 - A bound deposit's destination is on the issuing network and its refund destination on its arrival's
   network; an unassociated arrival's refund pays out on the arrival's network; neither is accepted
   otherwise.

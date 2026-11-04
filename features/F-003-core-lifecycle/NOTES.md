@@ -197,8 +197,86 @@ Tests: `services/core/tests/cancel.rs` (named after `REQ-NX-4`, `REQ-RV-1`, `REQ
 address, as the EVM endpoint requires of an admitted token there. Items 24 and 25: `services/core/tests/unsigned_attempts.rs` (`REQ-RV-1`, `INV-8`,
 `CND-PayoutWindow`) and, in the store, `crates/store/tests/lifecycle_graph.rs` (`issue_25_*`).
 
-Not done here (review S-5): transfers already in `Needs-Review` from `Delivering` on an origin network before this
-ships get no cancel ordered; the cancel is ordered only on the deadline transition.
+Review S-5 (transfers already in `Needs-Review` from `Delivering` before the cancel shipped get no cancel ordered): **moot,
+closed in issue #35.** The cancel is ordered only on the deadline transition, and no such transfer exists: production's
+ingress has never run (the ingress and the EVM endpoint are off and the ingress secrets were never written, so no
+transfer, no payout and no review has been recorded), and nothing was signed on an origin network. Nothing is built for
+it.
+
+## Payout-window and cancel edge cases (issue #35)
+
+26. **A refusal the providers disagree on** (`REQ-RV-1`, `REQ-EO-3`; `CND-PayoutWindow`). A refusal that names no
+    condition (a Roles refusal the two providers did not return alike, or any reason nobody resumes from) was already
+    bounded by item 24 when it was steady. Two things were not. (a) A provider that flaps between the allowance's
+    refusal and such a refusal took and left the hold each time, and each exit restarted the attempt's clock, so the
+    deadline never came. A deadline now leaves out the time held, summed over every hold of the attempt, and
+    restarts where the first hold was taken (the restart of review M-1, once) (`store::held_under_window`,
+    `Core::deadline_held`). The holds of an attempt n are the ones recorded after the entry transition of attempt n-1
+    (the transition that carries the attempt), chosen by `id`, the order they were recorded in; comparing a hold's block time with the attempt's point mixed
+    the destination's clock with the source's and dropped a hold taken at a lagging destination head.
+    **A decision the specification leaves open, built as follows and put to the owner in amendment 0019:** the time
+    *between* holds counts toward the deadline (it is not held), and the time before the first hold is dropped (the
+    clock restarts where the first hold was taken, as review M-1 had it). Nothing in `SPEC.md` rules either.
+    (b) The long-hold page (review S-3) counted only the current hold; it now counts the attempt's holds already
+    left. It pages once, when the attempt's total crosses the declared bound, and again once a day while the same
+    hold lasts; taking the hold again after the crossing is no new crossing and pages nothing until a day into that
+    hold (the page records its attempt). `SPEC.md` has no requirement for this page beyond `REQ-EO-3` (a named
+    condition has an owner), so the page is a core rule, not a spec one. (c) Nothing paged on a refusal that keeps
+    coming back: after ten refused preparations of one attempt, none naming a condition, the core records
+    `payout-refusal-alert` once per attempt and logs it as a page. It changes no state: the deadline sends the
+    transfer to review, never to a refund (`REQ-RF-1`). The check for an earlier page and the insert are atomic:
+    every step runs in a transaction holding the transfer's row lock (`lock_transfer`, `FOR UPDATE`), so two cycles
+    never step one transfer at once.
+    (d) **A refund waits while an inclusion of the payout stands** (`REQ-RF-1`, `INV-16`, `INV-8`). The specification
+    says a refund is never made on an unknown. A payout observed included and not withdrawn, final or not, beside a
+    final proof that the attempt did not execute, makes the leg unknown, whatever the proof says: the two cannot both
+    hold on one chain, and the core does not choose between them. So a resolution into `Refunding` is *withheld* while
+    such an inclusion stands: no state changes, the resolution is not marked refused (it runs by itself once the
+    inclusion is withdrawn, and a later resolution is not held up behind it), and the core records
+    `resolution-blocked-by-inclusion`. When the inclusion goes final, the withheld refund still waits, and the
+    review closes as `Delivered` only by a recorded resolution (`REQ-RV-2`: a review ends by evidence a resolution
+    names; nothing closes it on its own). `REQ-RV-2` does not say a final inclusion should close it by itself, so
+    this is not built; if the owner wants that, it is an amendment. This derives no disposition from a non-final observation (`INV-16`); it only
+    withholds one. The leg is the transfer's own (its reference, destination network and event, `destination_leg`),
+    so another transfer's inclusion blocks nothing; the reference is shared by every attempt (`REQ-EO-6`) and an
+    observation carries no attempt, so the leg cannot be told apart per attempt, and an earlier attempt's included
+    payout is the delivery. Two other paths were read. In `Delivered`, the automatic path read a final proof against an
+    inclusion not yet decided and could make the refund mint; it no longer does while the inclusion stands.
+    `Delivering` already ignored a proof when a leg was observed.
+    (e) **A new attempt waits too, where the chain does not refuse a second payout** (`REQ-RF-1`, `INV-8`, `INV-16`).
+    On an origin network nothing refuses a second payout under one reference (`ReferenceEmitter` only emits it;
+    `ReferencedTransferUnwrapper` tracks no references), so a new attempt, with a new nonce, beside an inclusion
+    that is real would pay twice. The automatic path in `Delivered` (`after_proof`) and a resolution into `Delivering`
+    (`resolve`) are withheld exactly as the refund is: no state change, a resolution not marked refused, one page,
+    the same release (the endpoint writes `withdrawn`, after which `Delivered` goes to review and the resolution
+    runs, or `final`, after which the review closes as `Delivered`). On the issuing network the contract's `mint`
+    refuses a reference used before (`ReferenceUsed`, `INV-2`, `bezent/src/lib.rs`), and the reference is shared by
+    every attempt (`REQ-EO-6`), so a second mint beside a real inclusion mints nothing; there the new attempt is
+    unchanged, and `services/core/tests/review.rs` (`delivered_in_review` then a resolution into `Delivering`)
+    relies on it. Which network is which is read from `networks.role`. The one test that had a new attempt
+    beside an inclusion on an origin network, `review_findings.rs` `m2_inv_8_…`, reached review that way only as
+    setup; it now reaches it with attempt 2 signed and unknown at its deadline, and every assertion stands.
+    **A hold has no end of its own, and no override** (`REQ-GV-5`): it lasts until the endpoint writes `withdrawn`
+    for the observation, or `final` for an inclusion that is what the transfer ordered (the review then closes as
+    `Delivered`, by a recorded resolution). **A final inclusion that fails the amount or recipient check
+    (`leg_mismatch`) never releases it**: it is not withdrawn, and it cannot close the review as `Delivered`, so the
+    transfer stays in review, a refund or new-attempt resolution is withheld for good and pages daily, and nothing
+    moves. No path is added (`REQ-GV-5`): the question of what to do for value that left wrong is the owner's, a
+    point in amendment 0019 ("A point for the owner"), and the behaviour is pinned by
+    `req_rf_1_issue_35_a_final_inclusion_that_fails_the_amount_check_is_never_released`. It pages once and then once
+    a day while it lasts, durably (the last page is read from the event log), a day counted on the destination's final
+    head or on the core's clock, whichever passes first, so it does not go quiet while the destination's endpoint
+    stalls.
+27. **A payout signed after its deadline** (point 2 of the issue): **amendment 0019, proposed, not built.** The
+    specification does not say whether the clock starts when the attempt becomes signable or whether a late signature
+    gets a grace period; the choice changes what the completion budget (`NFR-2`) means.
+28. **Only a final inclusion is evidence for a review** (`REQ-RV-2`, `INV-16`). Item 23 attached the payout's inclusion as
+    the review's evidence as soon as the leg was observed. Evidence is never withdrawn, so an inclusion that was later
+    reorganised away blocked the cancel's `not-executed` evidence for good. It is attached now only when the observation's
+    outcome is `final`; a leg observed and not yet final still stops the cancel being driven (item 23), and a leg that is
+    withdrawn frees the cancel and its evidence again.
+
+Tests: `services/core/tests/cancel.rs` (`*_issue_35_*`; the S-4 test that never decided finality now does).
 
 ## Delivery anomalies (issue #24)
 
@@ -216,6 +294,11 @@ ships get no cancel ordered; the cancel is ordered only on the deadline transiti
     a `delivery-anomaly-surfaced` event names the anomaly (once: a resolved review is not reopened by the anomaly
     that caused it). Nothing is refunded, retried or failed because of it (`REQ-RF-1`). **Ruled**: the §5.4 rows into
     `Needs-Review` gain this occasion by amendment 0013 (SPEC v0.5.3, pull request #47).
+   The late-mint check (`services/core/src/late_mint.rs`, "What decides an attempt") reads the same rows
+   with a different question: an anomaly ends an attempt's wait only if it says the attempt did not
+   mint. The two kinds that say the prover cannot read the attempt (`recorded_undecodable`,
+   `bytes_unreadable` in the payload) do not: the mint stays held and pages, and the transfer goes to review
+   through this section (PR #80 review).
 
 Tests: `services/core/tests/anomalies.rs` (`INV-8`).
 

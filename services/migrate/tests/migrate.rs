@@ -535,6 +535,37 @@ async fn createrole_owner_run(pool: &PgPool, self_grant: &str) {
         "the owner can act as a store role"
     );
 
+    // 0095 (NFR-7): this owner is not a superuser, so it is `pg_has_role` that admits it to replay
+    // an alert and to load the pause row that comes with it. The store's own test cannot show the
+    // production shape (it runs as a superuser); this run does, in the CI job that runs it as
+    // a CREATEROLE owner on a server of its own.
+    sqlx::raw_sql(
+        "INSERT INTO networks (network, role, address_format) VALUES ('kreivo', 'issuing', 'ss58')",
+    )
+    .execute(&owner)
+    .await
+    .unwrap();
+    let seq: i64 = sqlx::query_scalar(
+        "INSERT INTO event_log (kind, payload) VALUES ('key-compromise', \
+           '{\"dedupe\": \"createrole-owner-replay\", \"network\": \"kreivo\"}') RETURNING seq",
+    )
+    .fetch_one(&owner)
+    .await
+    .unwrap();
+    let pauses: i64 = sqlx::query_scalar("SELECT count(*) FROM pauses")
+        .fetch_one(&owner)
+        .await
+        .unwrap();
+    assert_eq!(
+        pauses, 0,
+        "the owner's replay of an alert paused the bridge"
+    );
+    sqlx::query("INSERT INTO pauses (cause, alert_seq) VALUES ('REQ-IC-4', $1)")
+        .bind(seq)
+        .execute(&owner)
+        .await
+        .expect("the owner loads the pause row of the alert it replays");
+
     // The catalogue-wide grants check is clean, and the owner can make a service's login.
     let mut known = logins(&owner).await;
     known.push(OWNER.to_owned());

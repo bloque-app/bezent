@@ -1,0 +1,35 @@
+[
+ {
+  "sha": "3b28ebfb40e2d68b299098e92ad2ee95788976d7",
+  "filename": "Cargo.lock",
+  "status": "modified",
+  "additions": 15,
+  "deletions": 0,
+  "changes": 15,
+  "blob_url": "https://github.com/bloque-app/bezent/blob/4e84e53ed8fdd0c40d0271c81a96fdc6372a3c6f/Cargo.lock",
+  "raw_url": "https://github.com/bloque-app/bezent/raw/4e84e53ed8fdd0c40d0271c81a96fdc6372a3c6f/Cargo.lock",
+  "contents_url": "https://api.github.com/repos/bloque-app/bezent/contents/Cargo.lock?ref=4e84e53ed8fdd0c40d0271c81a96fdc6372a3c6f"
+ },
+ {
+  "sha": "5efe1e77f568791b4825fbc3e9e626b636bb9f4f",
+  "filename": "crates/store/README.md",
+  "status": "modified",
+  "additions": 1,
+  "deletions": 1,
+  "changes": 2,
+  "blob_url": "https://github.com/bloque-app/bezent/blob/4e84e53ed8fdd0c40d0271c81a96fdc6372a3c6f/crates%2Fstore%2FREADME.md",
+  "raw_url": "https://github.com/bloque-app/bezent/raw/4e84e53ed8fdd0c40d0271c81a96fdc6372a3c6f/crates%2Fstore%2FREADME.md",
+  "contents_url": "https://api.github.com/repos/bloque-app/bezent/contents/crates%2Fstore%2FREADME.md?ref=4e84e53ed8fdd0c40d0271c81a96fdc6372a3c6f"
+ },
+ {
+  "sha": "ee8c98f7a13a5e2e9711de00281c1a557613d178",
+  "filename": "crates/store/migrations/0052_walk_anchors.up.sql",
+  "status": "added",
+  "additions": 47,
+  "deletions": 0,
+  "changes": 47,
+  "blob_url": "https://github.com/bloque-app/bezent/blob/4e84e53ed8fdd0c40d0271c81a96fdc6372a3c6f/crates%2Fstore%2Fmigrations%2F0052_walk_anchors.up.sql",
+  "raw_url": "https://github.com/bloque-app/bezent/raw/4e84e53ed8fdd0c40d0271c81a96fdc6372a3c6f/crates%2Fstore%2Fmigrations%2F0052_walk_anchors.up.sql",
+  "contents_url": "https://api.github.com/repos/bloque-app/bezent/contents/crates%2Fstore%2Fmigrations%2F0052_walk_anchors.up.sql?ref=4e84e53ed8fdd0c40d0271c81a96fdc6372a3c6f"
+ }
+]

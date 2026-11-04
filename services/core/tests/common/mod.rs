@@ -15,7 +15,11 @@
 
 #![allow(dead_code)]
 
+pub mod pagelog;
 pub mod reserve;
+
+#[allow(unused_imports)]
+pub use pagelog::{PageLog, assert_page};
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -190,7 +190,7 @@ impl fmt::Display for LinkError {
             } => write!(
                 f,
                 "signer link: the signature returned for intent {intent} is not over its recorded \
-                 bytes (AC-I1.2, INV-9); key-compromise at {alert_seq}, pause requested at {pause_seq}"
+                 bytes (AC-I1.2, INV-9); key-compromise at {alert_seq}, pause recorded at {pause_seq}"
             ),
             Self::Store(why) => write!(f, "signer link: store: {why}"),
         }

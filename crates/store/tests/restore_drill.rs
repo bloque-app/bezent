@@ -110,6 +110,28 @@ async fn populate(pool: &PgPool) {
         )
         .await;
     }
+
+    // Two compromise alerts (migration 0095, issue #77): one whose pause stands, one whose pause
+    // was lifted. A restore must bring back exactly the pauses there were, never one more.
+    exec(
+        pool,
+        "INSERT INTO event_log (kind, payload) VALUES \
+           ('key-compromise', '{\"dedupe\":\"drill-standing\"}'), \
+           ('key-compromise', '{\"dedupe\":\"drill-lifted\"}'); \
+         INSERT INTO pauses (cause, alert_seq) \
+           SELECT 'REQ-IC-4', seq FROM event_log WHERE payload ->> 'dedupe' = 'drill-standing' \
+           ON CONFLICT DO NOTHING; \
+         DELETE FROM pauses WHERE alert_seq IN ( \
+           SELECT seq FROM event_log WHERE payload ->> 'dedupe' = 'drill-lifted')",
+    )
+    .await;
+}
+
+async fn pauses(conn: &mut PgConnection) -> Vec<String> {
+    sqlx::query_scalar("SELECT row_to_json(v)::text FROM pauses v ORDER BY id")
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap()
 }
 
 /// Every derived view, as text rows in a fixed order.
@@ -141,6 +163,10 @@ async fn derived_views(conn: &mut PgConnection) -> Vec<(String, Vec<String>)> {
         (
             "transitions",
             "SELECT row_to_json(v)::text FROM transitions v ORDER BY id",
+        ),
+        (
+            "pauses",
+            "SELECT row_to_json(v)::text FROM pauses v ORDER BY id",
         ),
     ] {
         let rows: Vec<String> = sqlx::query_scalar(sql)
@@ -276,6 +302,10 @@ async fn nfr_7_restore_drill_rederives_every_view(pool: PgPool) {
         "INV-9",
         "a signing intent over other bytes after restore",
     );
+
+    // Issue #77 review: the compromise pauses came back as they were: the standing one, and not
+    // one for the alert whose pause was lifted.
+    assert_eq!(pauses(&mut restored).await.len(), 1);
 
     drop(restored);
     restored_pool.close().await;

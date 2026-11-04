@@ -355,6 +355,63 @@ async fn req_eo_3_an_order_written_after_the_deadline_still_has_one_when_the_end
     assert_eq!(w.state(id).await.0, "Needs-Review");
 }
 
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_issue_48_a_pause_is_not_a_never_prepared_attempt_and_it_resumes_with_its_budget(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // The never-prepared deadline asks only when nothing holds the transfer (a gate's condition is
+    // its own wait, `unprepared_deadline`). A pause that lifts inside the budget leaves the
+    // attempt as it was: no review, and the endpoint still has the rest of its time.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [12; 32]).await;
+    endpoint_absent(&w, id, 1).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    head(&w.admin, ORIGIN, 22 + BUDGET - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    exec(&w.admin, "DELETE FROM pauses").await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+    // The endpoint returns inside the budget: the delivery proceeds.
+    deliver(&w, id, 1, t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_issue_48_time_under_a_pause_counts_but_only_a_lifted_pause_is_read_as_never_prepared(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // PINS THE EXISTING CLOCK RULE, which this fix does not change: a pause "resumes by itself and
+    // never" sends a transfer to review (`Condition::blocks_delivery`), so under the pause nothing
+    // moves however long it lasts; and the time under a gate counts (`unprepared_deadline`), so
+    // once it lifts an endpoint that never prepared the order within the route's time is read as
+    // never having prepared it.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [13; 32]).await;
+    endpoint_absent(&w, id, 1).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    w.settle(t0()).await;
+    head(&w.admin, ORIGIN, 22 + BUDGET + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+    exec(&w.admin, "DELETE FROM pauses").await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Needs-Review".into(), None));
+}
+
 /// Operator `by` records, as their own login, a resolution of transfer `id` into `to` resting on
 /// the final head (`network`, `block`).
 async fn resolution(w: &World, id: i64, to: &str, network: &str, block: i64, by: usize) -> i64 {

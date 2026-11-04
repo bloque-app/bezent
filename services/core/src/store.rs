@@ -229,6 +229,49 @@ pub async fn final_point(
     }))
 }
 
+/// The holds `transfer` has had in `CND-PayoutWindow` and left since its attempt's clock started:
+/// those recorded after the entry transition of delivery attempt `after` (0 for none; the entry
+/// transition is the one carrying the attempt, with the highest `id` among attempts up to `after`;
+/// the clock of attempt n passes n-1). They are chosen by `id`, the order they were recorded in,
+/// and never by comparing clocks, since a hold rests on the destination's head and the attempt's
+/// point may rest on the source's. Returns when the first was taken (`start`, the attempt's
+/// point, for a hold taken before any final head was recorded) and how long they lasted together.
+/// A hold still open counts nothing here. A deadline leaves the time held out and starts when the
+/// first hold was taken (review M-1: the clock restarts when the hold is left); summing keeps a
+/// provider that flaps in and out of the hold from restarting it each time (issue #35).
+pub async fn held_under_window(
+    conn: &mut PgConnection,
+    transfer: i64,
+    after: i32,
+    start: Option<DateTime<Utc>>,
+) -> sqlx::Result<Option<(DateTime<Utc>, chrono::Duration)>> {
+    let row: (Option<DateTime<Utc>>, Option<i64>) = sqlx::query_as(
+        "SELECT min(i.taken), sum(extract(epoch FROM i.released - i.taken))::bigint FROM ( \
+             SELECT coalesce(x.block_time, $2) AS taken, \
+                    (SELECT y.block_time FROM transitions y \
+                      WHERE y.transfer_id = x.transfer_id AND y.id > x.id \
+                        AND y.condition IS DISTINCT FROM 'CND-PayoutWindow' \
+                      ORDER BY y.id LIMIT 1) AS released \
+             FROM ( SELECT id, transfer_id, block_time, condition, \
+                           lag(condition) OVER (ORDER BY id) AS before \
+                    FROM transitions WHERE transfer_id = $1) x \
+             WHERE x.condition = 'CND-PayoutWindow' \
+               AND x.before IS DISTINCT FROM 'CND-PayoutWindow' \
+               AND x.id > coalesce((SELECT max(id) FROM transitions \
+                                     WHERE transfer_id = $1 AND attempt <= $3), 0)) i \
+         WHERE i.taken IS NOT NULL AND i.released IS NOT NULL",
+    )
+    .bind(transfer)
+    .bind(start)
+    .bind(after)
+    .fetch_one(conn)
+    .await?;
+    Ok(match row {
+        (Some(first), Some(secs)) => Some((first, chrono::Duration::seconds(secs))),
+        _ => None,
+    })
+}
+
 /// The latest final head recorded for `network`.
 pub async fn latest_head(conn: &mut PgConnection, network: &str) -> sqlx::Result<Option<Point>> {
     let row: Option<(i64, Vec<u8>, DateTime<Utc>)> = sqlx::query_as(
