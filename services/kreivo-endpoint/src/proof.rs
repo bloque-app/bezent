@@ -562,7 +562,27 @@ impl<C: Chain> Prover<'_, C> {
         let Some((index, d, x)) = found else {
             if undecodable.is_empty() && !recorded_undecodable.is_empty() {
                 // The nonce was consumed by an extrinsic bezent recorded and this decoder cannot
-                // read: nothing is proven (REQ-NX-3), and nothing is alarming either.
+                // read: nothing is proven (REQ-NX-3), and nothing is alarming either, so no
+                // compromise. It is not silent: the transfer would wait on this nonce every cycle
+                // with no trail, so it is recorded once as an anomaly for the operator. It is not
+                // resolved through `events` by the hash: a success or a failure of an extrinsic
+                // this build cannot read says nothing of which reference it carried, and a proof
+                // from it would be one on a payload nobody decoded (INV-8).
+                signal::anomaly_once(
+                    self.pool,
+                    &format!(
+                        "{}:signed:{}:recorded-undecodable:{}",
+                        self.network, w.id, recorded_undecodable[0]
+                    ),
+                    json!({
+                        "network": self.network,
+                        "signed_transaction": w.id,
+                        "reason": "the lane nonce was consumed by an extrinsic bezent recorded and this build cannot decode; nothing is proven (REQ-NX-3), and it stays unknown until a build that decodes it reads it",
+                        "nonce": s.nonce,
+                        "coordinate": coordinate(recorded_undecodable.first().copied()),
+                    }),
+                )
+                .await?;
                 return Ok(unknown(format!(
                     "the nonce {} was consumed at block {} by a transaction bezent recorded in a format this build does not decode",
                     s.nonce, at.number
