@@ -191,6 +191,14 @@ impl Anvil {
                 &net.block.to_string(),
                 "--port",
                 &port.to_string(),
+                // A public upstream drops or rate-limits some requests: tried again, patiently,
+                // before anvil gives up (it aborts when a state read fails for good).
+                "--retries",
+                "12",
+                "--fork-retry-backoff",
+                "1000",
+                "--timeout",
+                "60000",
             ])
             .stdout(Stdio::from(out.try_clone().unwrap()))
             .stderr(Stdio::from(out))
@@ -247,6 +255,12 @@ impl Anvil {
         let log = std::fs::read_to_string(&self.log)
             .unwrap_or_default()
             .replace(&self.upstream, "<upstream>");
+        // What anvil said before its backtrace: the panic's own message.
+        let cause: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("panicked") || l.to_lowercase().contains("error"))
+            .take(5)
+            .collect();
         let tail: Vec<&str> = log
             .lines()
             .filter(|l| !l.contains("Endpoint"))
@@ -254,7 +268,8 @@ impl Anvil {
             .take(30)
             .collect();
         panic!(
-            "{method}: {last}; anvil exited: {status:?}; its last lines:\n{}",
+            "{method}: {last}; anvil exited: {status:?}; its first errors:\n{}\nits last lines:\n{}",
+            cause.join("\n"),
             tail.into_iter().rev().collect::<Vec<_>>().join("\n")
         )
     }
