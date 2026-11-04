@@ -25,7 +25,7 @@
 //!   derived sr25519 seed for the Kreivo mint key. The signer holds them; no endpoint does.
 
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
@@ -133,6 +133,7 @@ pub struct Anvil {
     rpc: RpcClient,
     log: PathBuf,
     upstream: String,
+    _scratch: Scratch,
 }
 
 impl Drop for Anvil {
@@ -143,7 +144,24 @@ impl Drop for Anvil {
     }
 }
 
-fn temp_dir() -> PathBuf {
+/// A scratch directory (the test keys, the signer's socket and configuration, anvil's log),
+/// removed when its owner drops, a panicking scenario's unwinding included.
+pub struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn temp_dir() -> Scratch {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -152,7 +170,7 @@ fn temp_dir() -> PathBuf {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    Scratch(dir)
 }
 
 fn my_uid() -> u32 {
@@ -166,8 +184,23 @@ fn my_uid() -> u32 {
 }
 
 impl Anvil {
+    /// Starts the fork. The port is chosen by binding and releasing it, which another process can
+    /// win in between: a start that fails (anvil exits, or never answers) is tried again, on a
+    /// new port, up to three times.
     pub async fn start() -> Anvil {
         let upstream = upstream();
+        let mut last = String::new();
+        for _ in 0..3 {
+            match Anvil::try_start(&upstream).await {
+                Ok(anvil) => return anvil,
+                Err(why) => last = why,
+            }
+        }
+        panic!("anvil did not start in three tries: {last}");
+    }
+
+    async fn try_start(upstream: &str) -> Result<Anvil, String> {
+        let upstream = upstream.to_owned();
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -175,7 +208,8 @@ impl Anvil {
             .port();
         // anvil prints the upstream URL in its banner and the URL may carry a key: its output goes
         // to a file that is redacted before anything prints it.
-        let log = temp_dir().join("anvil.log");
+        let scratch = temp_dir();
+        let log = scratch.join("anvil.log");
         let out = std::fs::File::create(&log).unwrap();
         let child = Command::new("anvil")
             .args([
@@ -204,14 +238,19 @@ impl Anvil {
             rpc,
             log,
             upstream,
+            _scratch: scratch,
         };
         for _ in 0..120 {
             if anvil.call("eth_blockNumber", json!([])).await.is_ok() {
-                return anvil;
+                return Ok(anvil);
+            }
+            let exited = anvil.child.lock().unwrap().try_wait().ok().flatten();
+            if let Some(status) = exited {
+                return Err(format!("anvil exited ({status}): {}", anvil.tail()));
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        panic!("anvil did not answer: {}", anvil.tail());
+        Err(format!("anvil did not answer: {}", anvil.tail()))
     }
 
     pub fn url(&self, host: &str) -> String {
@@ -279,6 +318,14 @@ impl Anvil {
     /// Mines past finality: anvil's `finalized` tag is 64 blocks below its latest.
     pub async fn finalize(&self) {
         self.mine(65).await;
+    }
+
+    /// The number of the block anvil serves as `finalized`.
+    pub async fn finalized(&self) -> u64 {
+        let b = self
+            .rpc("eth_getBlockByNumber", json!(["finalized", false]))
+            .await;
+        u64::from_str_radix(b["number"].as_str().unwrap().trim_start_matches("0x"), 16).unwrap()
     }
 
     pub async fn number(&self) -> u64 {
@@ -420,6 +467,8 @@ fn deploy(anvil: &Anvil, lane: Address) -> Vault {
 // The signer: one process-shaped signer with both lanes and two callers.
 
 struct Signing {
+    /// The signer's socket and configuration, removed with the bed.
+    _scratch: Scratch,
     evm: EvmLink,
     kreivo: KreivoLink,
     evm_lane: EvmLane,
@@ -432,7 +481,7 @@ fn seed_of(id: &str) -> [u8; 32] {
 
 /// The two keys' file, and the public keys, before the signer exists: the vault's delivery member is
 /// the lane's address, so the vault is deployed before the signer's configuration can name it.
-fn write_keys() -> (PathBuf, FileBackend) {
+fn write_keys() -> (Scratch, PathBuf, FileBackend) {
     let dir = temp_dir();
     let path = dir.join("keys.json");
     std::fs::write(
@@ -450,7 +499,7 @@ fn write_keys() -> (PathBuf, FileBackend) {
     )
     .unwrap();
     let backend = FileBackend::load(&path).unwrap();
-    (path, backend)
+    (dir, path, backend)
 }
 
 async fn start_signer(
@@ -528,6 +577,7 @@ async fn start_signer(
     let mint_public = backend.public_key(MINT_KEY).unwrap();
     let chain_account = chain.register_key(Scheme::Sr25519, &mint_public);
     Signing {
+        _scratch: dir,
         evm: EvmLink {
             dialer: Dialer::Unix {
                 socket: socket.clone(),
@@ -585,6 +635,8 @@ pub struct Bed {
     pub core_pool: PgPool,
     pub ops: [PgPool; 2],
     signing: Signing,
+    /// The test keys' directory, removed with the bed.
+    _keys: Scratch,
     declarations: Declarations,
     core: Core,
     pub check: ReserveCheck<Recorded, LogPager>,
@@ -604,7 +656,7 @@ impl Bed {
         // The delivery key and the vault. Foundry's account 4 carries an EIP-7702 delegation on
         // Polygon at the pinned block (anyone can sign one with a published key); bezent's delivery
         // key has none, so it is cleared here (F-009's fork tests do the same).
-        let (keys_path, backend) = write_keys();
+        let (keys_dir, keys_path, backend) = write_keys();
         let lane_address = evm::address_of(&backend.public_key(LANE_KEY).unwrap()).unwrap();
         anvil
             .rpc("anvil_setCode", json!([lane_address, "0x"]))
@@ -768,6 +820,7 @@ impl Bed {
             core_pool,
             ops,
             signing,
+            _keys: keys_dir,
             declarations,
             core,
             check,

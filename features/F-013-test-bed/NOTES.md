@@ -61,6 +61,15 @@ follower, supplies, submitter and prover, with two operator logins. It lives und
   clocks (two hours past the fork's present), and the reserve check's clock is the model's.
 - **anvil.** `anvil_reorg` is not used: on a fork, in 1.7.1, it drops the transaction but leaves its effect in the token's
   storage. The reorganisation is `evm_snapshot` / `evm_revert` followed by other blocks.
+- **What S4 and S5 show.** S4: the EVM follower and the core run over the fork while the arrival is in a block that is not final (the
+  scenario asserts anvil's `finalized` is below it) and record nothing; the block is then reverted and replaced, and nothing is
+  minted, then or after finality. A follower reading `latest` fails it (checked by mutation: `At::Latest` in `evm-endpoint/src/pair.rs`).
+  A reorganisation of an arrival the endpoint already recorded is not exercised: it records only final blocks, so such a record could
+  exist only through a follower bug, which the mutation shows S4 catches. S5: while
+  the pause stands, the core orders, records and signs no new work, held for the pause; that is the core holding work, not the signer
+  refusing a request, and a signing intent recorded before the pause is still signed (`AC-I1.2` stays in `known_unmet.toml`, issue #77).
+- **The reserve check runs on the model's clock** (the Kreivo model's block time), so how it treats a stale reading (a lag past its
+  bound) is not covered here.
 - **Not wired: the same scenarios on zombienet.** The Kreivo endpoint's light client (`LightChain`) would have to be pointed at
   the spawned relay and parachain chain specs, the redemption would be a holder's signed call (polkadot-api, as
   `e2e/kreivo/` signs), and the supply would be read from the chain; the pool's job skips on pull requests and could not be

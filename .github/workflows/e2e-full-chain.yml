@@ -106,5 +106,9 @@ jobs:
             echo
             echo "Not run on zombienet or on a real Kreivo."
             echo
+            echo "- S4 shows that an arrival in a block the fork then abandons, before it is final, is never recorded: the services run over it while it exists (a follower reading \`latest\` records it and fails the scenario), then it is reorganised away. It does not show a reorganisation of a block already final."
+            echo "- S5 shows that, under a compromise pause, the core orders, records and signs no new work (the signer's count of signatures does not move). It does not show that the signer itself refuses: work recorded before the pause is still signed (AC-I1.2, known unmet, issue #77)."
+            echo "- The reserve check runs on the model's clock, so staleness handling is not covered."
+            echo
             grep -E '^test ' full-chain.log | sed 's/^/- /'
           } >> "$GITHUB_STEP_SUMMARY"

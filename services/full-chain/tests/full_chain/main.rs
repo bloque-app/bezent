@@ -434,7 +434,7 @@ async fn s3_a_payout_not_executed_is_refunded_once_and_never_paid(
         again.is_err(),
         "the dropped payout was accepted again: {again:?}"
     );
-    // A second refund of the same redemption is refused (INV-8): the transfer is terminal.
+    // A second refund of the same redemption is not made (INV-8): the transfer is terminal.
     let second = sqlx::query_scalar::<_, i64>(
         "INSERT INTO manual_actions (kind, transfer_id, to_state, network, block_number, \
              block_hash, block_time, justification) \
@@ -446,14 +446,18 @@ async fn s3_a_payout_not_executed_is_refunded_once_and_never_paid(
     .bind(time)
     .fetch_one(&bed.ops[0])
     .await;
-    if let Ok(action) = second {
-        let _ = sqlx::query(
-            "INSERT INTO manual_approvals (action_id, justification) VALUES ($1, 'again')",
-        )
-        .bind(action)
-        .execute(&bed.ops[1])
-        .await;
-    }
+    // What happens, observed: the store accepts the second request and its approval, so what
+    // declines it is the core, which acts on neither. Both are asserted: if the store starts to
+    // refuse the insert, or the core to act on it, this fails instead of skipping the block.
+    let action =
+        second.expect("the store takes a second resolution request of a refunded transfer");
+    let approved =
+        sqlx::query("INSERT INTO manual_approvals (action_id, justification) VALUES ($1, 'again')")
+            .bind(action)
+            .execute(&bed.ops[1])
+            .await
+            .expect("the store takes the second approval");
+    assert_eq!(approved.rows_affected(), 1);
     for _ in 0..2 {
         bed.turn(0).await;
     }
@@ -492,6 +496,33 @@ async fn assert_nothing_minted(bed: &Bed) {
     assert_eq!(bed.kreivo_supply().await, 0);
 }
 
+/// The reserve check, evaluated now: it holds, it stands on a final point of each network (Polygon's
+/// below `below`, when given: the arrival's block), and neither what the networks show nor what the
+/// book holds lists a reserve or a supply. Called while the fork's latest chain holds an arrival
+/// that is not final, so it fails for a reading of `latest`.
+async fn assert_reserve_reads_nothing(bed: &Bed, below: Option<u64>) {
+    use bezent_core_service::reserve::check::Outcome;
+    let e = bed.check_reserve().await;
+    assert_eq!(e.outcome, Outcome::Holds, "{e:#?}");
+    assert!(e.differences.is_empty(), "{e:#?}");
+    let polygon = e.points.get("polygon").expect("a Polygon point");
+    assert!(e.points.contains_key("kreivo-test"), "{e:#?}");
+    if let Some(n) = below {
+        assert!(
+            polygon.block_number < i64::try_from(n).unwrap(),
+            "the check stands on block {} of Polygon, not below the arrival's {n}: {e:#?}",
+            polygon.block_number
+        );
+    }
+    for (what, terms) in [("the networks", &e.chain), ("the book", &e.book)] {
+        assert!(
+            terms.reserve.values().all(|v| *v == 0),
+            "{what} show a reserve: {e:#?}"
+        );
+        assert_eq!(terms.supply, 0, "{what} show a supply: {e:#?}");
+    }
+}
+
 /// `INV-6`, `INV-16`: a reorganisation of the fork across an arrival, before it
 /// is final. The arrival is in a block; the fork then abandons that block for another at the same
 /// height; the requester points at the coordinate it read; the endpoint, which records only final
@@ -516,6 +547,28 @@ async fn s4_a_reorg_across_an_arrival_before_finality_mints_nothing(
     let old_hash = coordinate["block_hash"].as_str().unwrap().to_owned();
     bed.anvil.mine(3).await;
     assert_eq!(bed.reserve_balance().await, DEPOSIT);
+
+    // The window in which the services can see the reorganisation: the arrival is in the fork's
+    // latest chain, not final (anvil's `finalized` tag is 64 blocks below its latest), and the
+    // endpoint and the core run over it. A follower that read `latest` would record the arrival
+    // here; one that reads `finalized` does not.
+    let finalized = bed.anvil.finalized().await;
+    assert!(
+        finalized < number,
+        "the arrival (block {number}) is already final (finalized {finalized}): this scenario tests nothing"
+    );
+    for _ in 0..3 {
+        // Each turn is the EVM pass and the core's pass (and the Kreivo model's), as in a run.
+        bed.turn(0).await;
+    }
+    assert_eq!(
+        bed.count("SELECT count(*) FROM observations WHERE detail ->> 'event' = 'Arrival'")
+            .await,
+        0,
+        "the endpoint recorded an arrival that is not final"
+    );
+    assert_nothing_minted(&bed).await;
+    assert_reserve_reads_nothing(&bed, Some(number)).await;
 
     // The reorganisation: the chain goes back to before the arrival and grows other blocks.
     let reverted = bed
@@ -578,7 +631,7 @@ async fn s4_a_reorg_across_an_arrival_before_finality_mints_nothing(
         bed.turn(0).await;
     }
     assert_nothing_minted(&bed).await;
-    bed.assert_balanced(0, 0).await;
+    assert_reserve_reads_nothing(&bed, None).await;
 }
 
 /// What the compromise left in the store: the alerts, and the pauses resting on them.
