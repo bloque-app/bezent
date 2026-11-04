@@ -109,7 +109,7 @@ async fn req_ar_3_signer_role_holds_no_privilege_but_its_own(pool: PgPool) {
     let columns: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM information_schema.column_privileges \
          WHERE grantee = $1 \
-           AND table_name NOT IN ('admitted_tokens', 'event_log', 'intents', \
+           AND table_name NOT IN ('admitted_tokens', 'event_log', 'intents', 'networks', \
                                   'prepared_transactions', 'signatures', 'signed_transactions')",
     )
     .bind(bezent_store::SIGNER_ROLE)
@@ -155,6 +155,21 @@ async fn req_ar_3_signer_role_holds_no_privilege_but_its_own(pool: PgPool) {
             .expect_err(&format!("the signer role ran: {sql}"));
         assert_error_sqlstate(&err, bezent_store::REFUSAL_SQLSTATE, &sql);
     }
+}
+
+/// The signer's start-up check of its keys' environment reads the networks' names as its own role
+/// (`REQ-KY-6`), and nothing else of that table (`REQ-AR-3`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_ky_6_signer_role_reads_the_networks_names_only(pool: PgPool) {
+    let mut tx = as_role(&pool, bezent_store::SIGNER_ROLE).await;
+    sqlx::query("SELECT network FROM networks")
+        .fetch_all(&mut *tx)
+        .await
+        .expect("the signer's role reads the networks' names");
+    let wider = sqlx::query("SELECT * FROM networks")
+        .fetch_all(&mut *tx)
+        .await;
+    assert!(wider.is_err(), "and no other column");
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
