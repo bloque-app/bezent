@@ -786,6 +786,7 @@ async fn ac_i1_2_a_prover_that_never_decides_pages_once_without_a_pause_and_the_
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
+    let log = PageLog::start();
     let (id, reference) = proven_deposit(&w, 100).await;
     deliver(&w, id, 2, now()).await;
     let second = signed_of(&w.admin, id, 2).await;
@@ -836,6 +837,7 @@ async fn ac_i1_2_a_prover_that_never_decides_pages_once_without_a_pause_and_the_
     assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
     assert_eq!(verdict(&w, m).await.as_deref(), Some("alerted"));
     assert_eq!(silent_pages(&w).await, 1);
+    assert_page(&log, "late-mint-prover-silent", 1);
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -918,6 +920,7 @@ async fn ac_i1_2_a_core_that_cannot_list_the_mints_warns_then_pages_once_per_str
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
+    let log = PageLog::start();
     let (_, reference) = proven_deposit(&w, 100).await;
     let m = mint_at(&w.admin, 105, &reference).await;
     // The core's login cannot read the queue: the candidate query fails every cycle.
@@ -949,6 +952,7 @@ async fn ac_i1_2_a_core_that_cannot_list_the_mints_warns_then_pages_once_per_str
         w.cycle(now()).await;
     }
     assert_eq!(watch_pages(&w).await, 2, "the next streak pages again");
+    assert_page(&log, "late-mint-watch-failed", 2);
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -1181,6 +1185,7 @@ async fn ac_i1_2_a_mint_that_cannot_be_checked_pages_and_blocks_none_of_the_othe
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
+    let log = PageLog::start();
     let (_, first_ref) = proven_deposit_from(&w, 10, 100).await;
     let (_, second_ref) = proven_deposit_from(&w, 11, 101).await;
     // The first one's look settles it (at the proof's own block, no match), the second is a late
@@ -1219,6 +1224,7 @@ async fn ac_i1_2_a_mint_that_cannot_be_checked_pages_and_blocks_none_of_the_othe
             .await
             .unwrap();
     assert_eq!(page["observation"], json!(stuck.to_string()));
+    assert_page(&log, "late-mint-check-failed", 1);
     // When the failure clears, it settles.
     exec(&w.admin, "DROP TRIGGER refuse_settling ON late_mint_checks").await;
     w.cycle(now()).await;

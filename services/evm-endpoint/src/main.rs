@@ -32,7 +32,7 @@ use bezent_evm_endpoint::submit::{GasBounds, Lane, SignerLink, Submitter};
 const NAME: &str = "bezent-evm-endpoint";
 
 fn main() -> ExitCode {
-    tracing_subscriber::fmt().with_target(false).init();
+    bezent_logging::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let [cmd, rest @ ..] = args.as_slice()
         && cmd == "health"

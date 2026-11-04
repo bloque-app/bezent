@@ -37,7 +37,7 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    tracing_subscriber::fmt().with_target(false).init();
+    bezent_logging::init();
     let config = match bezent_ingress::Config::from_file(&PathBuf::from(arg)) {
         Ok(config) => config,
         Err(e) => {

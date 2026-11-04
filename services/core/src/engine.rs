@@ -941,7 +941,7 @@ impl Core {
                             "head_time": head.block_time.to_rfc3339(),
                             "bound_seconds": bound.num_seconds()});
         store::event(conn, "payout-window-alert", Some(t.id), &detail).await?;
-        tracing::error!(kind = "payout-window-alert", transfer = %t.bridge_reference, %detail,
+        tracing::error!(kind = %"payout-window-alert", transfer = %t.bridge_reference, %detail,
             "page: CND-PayoutWindow held past its bound; is the payout above the allowance's maximum, or the refill off?");
         Ok(())
     }
@@ -1971,7 +1971,7 @@ impl Core {
                             "attempt": attempt, "refusals": unnamed,
                             "network": t.destination_network});
         store::event(conn, "payout-refusal-alert", Some(t.id), &detail).await?;
-        tracing::error!(kind = "payout-refusal-alert", transfer = %t.bridge_reference, %detail,
+        tracing::error!(kind = %"payout-refusal-alert", transfer = %t.bridge_reference, %detail,
             "page: the payout's preparation is refused again and again with no named condition; it goes to review at its deadline");
         Ok(())
     }
@@ -3007,7 +3007,7 @@ impl Core {
                             "hold": hold, "manual_action_id": action.map(|a| a.to_string()),
                             "resolution": to, "at": at.to_rfc3339()});
         store::event(conn, "resolution-blocked-by-inclusion", Some(t.id), &detail).await?;
-        tracing::error!(kind = "resolution-blocked-by-inclusion", transfer = %t.bridge_reference, %detail,
+        tracing::error!(kind = %"resolution-blocked-by-inclusion", transfer = %t.bridge_reference, %detail,
             "page: a refund or a new attempt waits, because the payout is observed included and not withdrawn");
         Ok(Did::default())
     }

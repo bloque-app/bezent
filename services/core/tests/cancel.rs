@@ -639,6 +639,7 @@ async fn cnd_payout_window_s3_a_hold_past_its_bound_pages_once_then_daily(
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
+    let log = PageLog::start();
     let taken = 1_000;
     head(&w.admin, ORIGIN, taken).await;
     let id = held(&w, 51).await;
@@ -680,6 +681,8 @@ async fn cnd_payout_window_s3_a_hold_past_its_bound_pages_once_then_daily(
     w.settle(t0()).await;
     w.settle(t0()).await;
     assert_eq!(window_pages(&w, id).await.len(), 2, "then daily");
+    // The event log and the log agree: the same two pages, as lines a filter matches.
+    assert_page(&log, "payout-window-alert", 2);
     assert_eq!(
         w.state(id).await,
         ("Source-Final".into(), Some("CND-PayoutWindow".into()))
@@ -907,6 +910,7 @@ async fn req_rv_1_issue_35_a_repeated_refusal_pages_once_and_reaches_review_at_t
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
+    let log = PageLog::start();
     reserve(&w.admin, 1_000_000).await;
     let id = withdrawal(&w, 20, [61; 32], 700).await;
     w.cycle(t0()).await;
@@ -930,6 +934,7 @@ async fn req_rv_1_issue_35_a_repeated_refusal_pages_once_and_reaches_review_at_t
     assert_eq!(w.state(id).await.0, "Needs-Review");
     assert_eq!(events(&w, id, "payout-refusal-alert").await.len(), 1);
     assert_eq!(refunds(&w).await, 0);
+    assert_page(&log, "payout-refusal-alert", 1);
 }
 
 /// CND-PayoutWindow, issue #35 point 1: the long-hold page counts the time held across a flap, so
@@ -1198,6 +1203,7 @@ async fn req_rf_1_issue_35_a_withheld_refund_pages_once_and_runs_when_the_inclus
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
+    let log = PageLog::start();
     let (id, _signed) = cancel_signed_in_review(&w, 69).await;
     // Another transfer's payout is included, not final: it is not this transfer's leg.
     let other = withdrawal(&w, 40, [70; 32], 700).await;
@@ -1227,6 +1233,7 @@ async fn req_rf_1_issue_35_a_withheld_refund_pages_once_and_runs_when_the_inclus
     assert_eq!(w.state(id).await.0, "Refunding");
     assert_eq!(refunds(&w).await, 1);
     assert_eq!(blocked_pages(&w, id).await, 1);
+    assert_page(&log, "resolution-blocked-by-inclusion", 1);
 }
 
 /// REQ-RF-1, issue #35: in `Delivered`, a payout observed included and not decided, beside a
