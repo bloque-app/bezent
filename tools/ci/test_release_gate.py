@@ -301,6 +301,24 @@ class Gate(unittest.TestCase):
         ev["signoff"]["maintainer"]["pr"] = True
         self.assertTrue(any("cannot run" in e for e in self.signoffs(ev=ev)))
 
+    def test_a_name_that_is_not_a_string_fails_in_every_item_that_names_who_did_it(self):
+        for bad in (True, 1, ["x"], ""):
+            for path in (("exit", "divergence"), ("exit", "legs"), ("soak",)):
+                ev = complete_evidence()
+                d = ev
+                for k in path:
+                    d = d[k]
+                d["by"] = bad
+                self.assertTrue(any(f"{'.'.join(path)}: `by`" in e for e in human(ev=ev)), (path, bad))
+            ev = complete_evidence()
+            ev["runbook"][rg.named_conditions()[0]]["by"] = bad
+            self.assertTrue(any("`by`" in e for e in human(ev=ev)), bad)
+
+    def test_an_unhashable_network_is_an_error_not_a_traceback(self):
+        ev = complete_evidence()
+        ev["runbook"][rg.named_conditions()[0]]["network"] = ["zombienet"]
+        self.assertTrue(any("one of" in e for e in human(ev=ev)))
+
     def test_a_missing_or_mistyped_signoff_table_is_never_skipped_online(self):
         ev = complete_evidence()
         del ev["signoff"]["maintainer"]

@@ -136,10 +136,10 @@ def human(gate, ev, release, conds, incidents):
         n0 = len(errors)
         if e.get("status") != "exercised":
             errors.append(f"{where}: status is {e.get('status')!r}, not 'exercised'")
-        need(e, "network", errors, where, lambda v: v in NETWORKS, f"one of {sorted(NETWORKS)} (NFR-9: a test network)")
+        need(e, "network", errors, where, lambda v: isinstance(v, str) and v in NETWORKS, f"one of {sorted(NETWORKS)} (NFR-9: a test network)")
         need(e, "on", errors, where, is_date, "an ISO date")
         need(e, "evidence", errors, where, is_url, "an https link")
-        need(e, "by", errors, where)
+        need(e, "by", errors, where, is_name, "a name (a string)")
         if len(errors) == n0:
             lines.append(f"runbook {item}: exercised on {e['network']} by {e['by']}")
     for item in sorted(set(rb) - set(conds) - set(incidents)):
@@ -157,13 +157,13 @@ def human(gate, ev, release, conds, incidents):
     if not is_zero(div.get("divergences")):
         errors.append(f"exit.divergence: `divergences` is {div.get('divergences')!r}, must be exactly 0 (zero tolerance)")
     need(div, "evidence", errors, "exit.divergence", is_url, "an https link")
-    need(div, "by", errors, "exit.divergence")
+    need(div, "by", errors, "exit.divergence", is_name, "a name (a string)")
     legs = sub(ex, "legs", errors, "exit")
     if not is_zero(legs.get("unresolved")):
         errors.append(f"exit.legs: `unresolved` is {legs.get('unresolved')!r}: every final source leg must be "
                       "delivered, refunded or held in a named condition with an owner (must be exactly 0)")
     need(legs, "evidence", errors, "exit.legs", is_url, "an https link")
-    need(legs, "by", errors, "exit.legs")
+    need(legs, "by", errors, "exit.legs", is_name, "a name (a string)")
 
     soak, want = sub(ev, "soak", errors, "evidence"), sub(gate, "soak", errors, "release/gate.toml")
     hours, per_day = want.get("hours"), want.get("statements_per_day")
@@ -177,7 +177,7 @@ def human(gate, ev, release, conds, incidents):
         if not is_zero(soak.get("divergences")):
             errors.append(f"soak: `divergences` is {soak.get('divergences')!r}; a divergence restarts the clock (DEC-19)")
     need(soak, "evidence", errors, "soak", is_url, "an https link")
-    need(soak, "by", errors, "soak")
+    need(soak, "by", errors, "soak", is_name, "a name (a string)")
 
     required = sub(gate, "signoff", errors, "release/gate.toml").get("required", [])
     if not isinstance(required, list) or not all(is_name(r) for r in required):
