@@ -906,9 +906,10 @@ impl Core {
             .or(t.source_final_block_time)
             .unwrap_or(head.block_time);
         // This page stays on the destination's clock, unlike the hold of an inclusion (`withheld`):
-        // the hold itself is measured there (amendment 0012: the allowance refills on that chain),
-        // and a destination whose head has stopped is a stalled endpoint, which the observables
-        // (`REQ-ST-6`) and the reserve check page on their own.
+        // the hold itself is measured there (amendment 0012: the allowance refills on that chain), so
+        // a day of it is a day of that chain. A destination whose head has stopped does not page
+        // from here; it shows in the observables as transfers that stop getting younger on chain
+        // time (`oldest_nonfinal_transfer_age_seconds`, `REQ-ST-6`), which is a metric, not a page.
         let bound = self.settings.payout_window_alert_after;
         // The holds of this attempt already left count too: a provider that flaps in and out of
         // the hold does not start the page over (issue #35).
@@ -2707,7 +2708,8 @@ impl Core {
         // no new attempt where the chain does not refuse a second delivery of one reference.
         // Such a resolution is withheld, not refused (a later one is not held up behind it): it
         // runs when the inclusion is withdrawn, and the review closes as Delivered, by a
-        // resolution, when it goes final. Nothing is derived from the observation, only withheld.
+        // resolution, when it goes final and is what was ordered (a final inclusion that fails the
+        // amount or recipient check releases nothing: F-003 NOTES item 26 (e)). Nothing is derived from the observation, only withheld.
         let blocked = matches!(before, State::Delivering | State::Delivered)
             && self.inclusion_stands(conn, t).await?;
         let mut withheld = vec!["Refunding"];
@@ -2970,8 +2972,9 @@ impl Core {
     /// The hold while an inclusion of the payout stands (`REQ-RF-1`, issue #35): `to` (a refund or
     /// a new attempt), by resolution `action` or by the automatic path, changes no state and pages
     /// a human: once, then once a day while it lasts (a day on the destination's final head or on the
-    /// core's clock, whichever comes first). It lasts until the endpoint decides the
-    /// inclusion (`withdrawn` or `final`); there is no override (`REQ-GV-5`). The last page is read
+    /// core's clock, whichever comes first). It lasts until the endpoint writes
+    /// `withdrawn` for the inclusion, or `final` for one that is what was ordered; a final one that
+    /// fails the amount or recipient check never releases it. There is no override (`REQ-GV-5`). The last page is read
     /// from the event log, so a restart repeats nothing early and forgets nothing.
     async fn withheld(
         &self,

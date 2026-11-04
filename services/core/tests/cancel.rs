@@ -1348,12 +1348,12 @@ async fn req_rf_1_issue_35_a_hold_pages_daily_on_the_core_s_clock_when_the_desti
 }
 
 /// REQ-RF-1, REQ-GV-5, REQ-TR-5, review of the fix round of #35: PINS TODAY'S BEHAVIOUR, which is not
-/// desired and is not a ruling. A payout whose inclusion is final yet fails the amount check is a
+/// a ruling. A payout whose inclusion is final yet fails the amount check is a
 /// leg that stands, so a refund or a new attempt is withheld for good (a page a day, no release,
 /// no override), and the review cannot close as `Delivered` (the leg is not what was ordered). There
 /// is no path out inside bezent, and none may be added that moves value or edits a status
-/// (`REQ-GV-5`). What to do with such a transfer is the owner's (amendment 0019, "What waits").
-/// Change this test only when that is ruled.
+/// (`REQ-GV-5`). What to do with such a transfer is the owner's (amendment 0019, "A point for the
+/// owner"). Change this test only when that is ruled.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_rf_1_issue_35_a_final_inclusion_that_fails_the_amount_check_is_never_released(
     options: PgPoolOptions,

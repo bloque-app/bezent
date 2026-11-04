@@ -65,9 +65,9 @@
 //! The wait must not be silent, and must not be for ever without a human knowing. A held row stays
 //! open and raises nothing; each cycle that finds an attempt undecided **with its era over at the
 //! final head** (so the prover could have decided it) counts in `late_mint_checks.held_cycles`
-//! (migration 0076). At [`HELD_PAGE_AFTER_CYCLES`] the core pages once, durably across restarts (an
-//! event of its own kind, `late-mint-prover-silent`, deduplicated by the observation, as the
-//! `late-mint-check-failed` page is), naming the reference, the attempt and the signed transaction:
+//! (migration 0076). At [`HELD_PAGE_AFTER_CYCLES`] the core pages, durably across restarts (an
+//! event of its own kind, `late-mint-prover-silent`, one per observation and day, from the log;
+//! see [`HELD_REPAGE_EVERY`]), naming the reference, the attempt and the signed transaction:
 //! the prover is not deciding and a mint waits on it. It is never a pause and never the alert: it
 //! asks an operator to look, and the operator learns either that the prover is stuck or that a key
 //! may be compromised. While the row is still held with the prover still silent, the page repeats

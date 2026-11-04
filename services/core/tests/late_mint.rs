@@ -801,8 +801,8 @@ async fn ac_i1_2_a_prover_that_never_decides_pages_once_without_a_pause_and_the_
     assert_eq!((silent_pages(&w).await, alerts(&w).await), (0, 0));
     w.cycle(now()).await;
     assert_eq!(silent_pages(&w).await, 1, "the page, at the bound");
-    // Once, however long it goes on, and across a restart; the row stays open; nothing is raised,
-    // and nothing is paused.
+    // Once within the day, however many cycles, and across a restart (the clock here is fixed; the
+    // next test moves it); the row stays open; nothing is raised, and nothing is paused.
     for _ in 0..3 {
         w.cycle(now()).await;
     }
