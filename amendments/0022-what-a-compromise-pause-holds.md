@@ -81,6 +81,20 @@ Add to `NFR-8`: "A pause a detection requires MUST be in force when the detectio
 it, whichever component detected it and whether or not any other component is running." It states what is built, so no
 code waits on it.
 
+### Points for the owner
+
+Found in review of the pull request for issue #77. Neither is built; both are the owner's to rule.
+
+- **P1. Who may pause the bridge.** Every detector login (the core, both endpoints, the signer) can now pause it globally,
+  by writing an alert under a `dedupe` of its own choosing (0049: free text, unique per detector). Nothing limits how many
+  alerts, and so pauses, one login can make, and an alert is permanent. Before, the same act only paged a person. Options:
+  keep it (a buggy or captured detector is an outage, not a loss); limit which detector may raise which alert kind, or the
+  `dedupe` to a form the store can check; or let a detector request and have a second, independent signal confirm.
+- **P2. A second provider's agreement before the EVM `lane_use` and `lane_runs_code` raise.** `pair.rs` takes the higher
+  of two providers' nonces (right for choosing a nonce, wrong for an alarm); `has_code` takes either provider's word; and
+  `lane_use`'s `dedupe` holds the nonce, so a flaky provider that flaps between two values adds a row, and so a pause, each
+  time. Requiring both providers to agree before either raises would turn a single bad RPC into no pause. Not built.
+
 ## What this changes in `SPEC.md`
 
 Nothing until ruled. The options above name their own wording. `INV-15` and `AC-I2.1` stand under each.

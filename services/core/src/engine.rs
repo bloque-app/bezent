@@ -1061,15 +1061,7 @@ impl Core {
         let Some((asset, network, direction)) = t.route() else {
             return Ok(None);
         };
-        let paused: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pauses WHERE (asset IS NULL OR asset = $1) \
-               AND (network IS NULL OR network = $2) AND (direction IS NULL OR direction = $3))",
-        )
-        .bind(&asset)
-        .bind(&network)
-        .bind(direction)
-        .fetch_one(&mut *conn)
-        .await?;
+        let paused = Self::route_paused(conn, &asset, &network, direction).await?;
         let held = paused && !self.attempt_signed(conn, t, attempt).await?;
         // REQ-BE-6: a reversal that took the surplus below its floor pauses new mints of the
         // asset until the attesting party restores the reserve (F-004).
@@ -1101,6 +1093,25 @@ impl Core {
             }
         }
         Ok(None)
+    }
+
+    /// Whether a pause covers the route (`REQ-GV-1`): a row that is silent on a dimension matches
+    /// every value of it.
+    async fn route_paused(
+        conn: &mut PgConnection,
+        asset: &str,
+        network: &str,
+        direction: &str,
+    ) -> sqlx::Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pauses WHERE (asset IS NULL OR asset = $1) \
+               AND (network IS NULL OR network = $2) AND (direction IS NULL OR direction = $3))",
+        )
+        .bind(asset)
+        .bind(network)
+        .bind(direction)
+        .fetch_one(&mut *conn)
+        .await
     }
 
     /// Whether a signature is recorded for attempt `attempt` of `t`.
@@ -1564,7 +1575,16 @@ impl Core {
             }
             let mut did = self.hold(conn, t, held).await?;
             // A failed dry run is not prepared again: a new order, after a while (F-007 NOTES 5).
-            if retry_due {
+            // Not under a pause that only the signed attempt got past: its in-flight exception
+            // (`gate`) is for what was signed, and a new order is new work (`INV-15`, issue #77).
+            let in_flight_under_pause = self.attempt_signed(conn, t, attempt).await?
+                && match t.route() {
+                    Some((asset, network, direction)) => {
+                        Self::route_paused(conn, &asset, &network, direction).await?
+                    }
+                    None => false,
+                };
+            if retry_due && !in_flight_under_pause {
                 self.record_intent(conn, t, purpose, &reference, scope, attempt, &order)
                     .await?;
                 did.intents += 1;

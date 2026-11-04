@@ -100,7 +100,7 @@ bezent MUST pause. Recovery is in `deploy/compromise-pause.md`; what the specifi
 |---|---|
 | Ingress | Refuses new requests (`ERR-RoutePaused`, `intake.rs`, the `NULL`-matches-all test) on the next request |
 | Core | `gate` reads `pauses` on every step: before each phase of a first attempt (the transfer stays `Source-Final` until a signature is ready), a new attempt, a resolution. It records no further order or signing intent. So the signer has nothing new to sign (`INV-9`) |
-| Core, an attempt already signed | Passes, under any pause, a person's or the reserve check's too: it is in flight (`REQ-GV-1`, `INV-15`). Before #77 the gate held it `Source-Final` with `CND-Paused` while its transaction was on chain; the auto-pause would have made that common |
+| Core, an attempt already signed | Passes, under any pause, a person's or the reserve check's too: it is in flight (`REQ-GV-1`, `INV-15`). Before #77 the gate held it `Source-Final` with `CND-Paused` while its transaction was on chain; the auto-pause would have made that common. A later preparation of the same order that fails its dry run (the signed transaction was never persisted and its era passed) records no new order while a pause covers the route (`deliver`; test `inv_15_a_signed_attempt_whose_new_preparation_fails_orders_nothing_under_a_pause`) |
 | Refund mint, refund payout, cancel, statement | Keep being ordered and signed, by design (`t.route()` is `None`; F-006 NOTES 1; `REQ-NX-4`; `REQ-PR-1`). "Stops new signing" (issue #77) means new delivery signing |
 | Endpoint and signer | Read no pause. **A signing intent recorded before the pause is still signed and submitted**, at the next poll, or whenever a stopped endpoint returns. On Kreivo for at most one era (`MAX_ERA`, 64 blocks) from its preparation: past it nothing is signed (`req_hn_3_a_prepared_transaction_whose_era_passed_is_never_signed`). **On an EVM network with no bound**: nothing expires (`NO_EXPIRY`). Whether that is new work is not settled: amendment 0022, A1. `REQ-GV-1` and `INV-15` forbid stopping more than new work, so it is not built |
 | Already-signed transactions | Stored bytes are submitted and resent: in flight, and unstoppable anyway once anyone holds them. On Kreivo an era ends them; on an EVM network only the nonce does |
@@ -132,12 +132,16 @@ knows by construction; and a raiser could forget the insert, or commit an alert 
 by naming an alert, an old alert cannot be replayed, a pause cannot be narrowed by its writer, and no alert exists without its
 pause. The guard gains only the check that `alert_seq` is a `key-compromise` row, which the owner is held to as well.
 
-A service **cannot use this as a free switch beyond what it already had**. The ingress, the webhook dispatcher and the
-operators' logins cannot write an alert (0020, 0046, 0049). A login of a detector can write a false one, with its role
-stamped on it, in the log forever, and that pauses the bridge: an outage, not a loss, and the same login could already
-send a person running by the same act. It cannot name a scope (`detector` is the store's stamp, so only the core has the
-`asset` exception), lift a pause or edit one. `REQ-AR-3` and the key rules are untouched: no key near the store, nothing
-new in the signer process.
+**This gives every detector login a power it did not have: to pause the whole bridge.** Before, a detector's alert
+asked a person (`pause-requested`, read by nothing). Now the alert is the pause. A detector login (the core, either
+endpoint, the signer) can write an alert with a `dedupe` of its own choosing (a free-text key, 0049: it has no meaning to
+the store beyond uniqueness within the detector), and every new `dedupe` is a new alert, so a new global pause, until two
+operators lift it. A compromised or buggy detector can therefore hold the bridge down, repeatedly, and an alert stays in the
+log for ever. It is an outage, not a loss (it stops new work only, `INV-15`), and the same login could already page a person
+by the same act; but it is a new authority, and it is the owner's to accept or narrow: amendment 0022, "Points for the
+owner". It still cannot name a scope (`detector` is the store's stamp, so only the core has the `asset` exception), lift a
+pause or edit one. The ingress, the webhook dispatcher and the operators' logins cannot write an alert (0020, 0046, 0049).
+`REQ-AR-3` and the key rules are untouched: no key near the store, nothing new in the signer process.
 
 ### 3. The bound
 
@@ -174,14 +178,47 @@ two-login lift (`AC-I2.2`): no new path. "Flag" means I would not want to pause 
 | EVM `submit.rs` `lane_runs_code` | The lane holds code (EIP-7702) | **One provider's word**: any code on either counts | **Flag** |
 | EVM `submit.rs` `lane_use` | The lane's nonce is past every nonce signed plus one | **One provider's word**: `latest_nonce` takes the higher of two, right for picking a nonce, wrong for an alarm. Also a restored store | **Flag: the one I most want hardened** |
 | EVM `submit.rs` signer-key | The answer is not the lane key's | A half-done rotation | Yes |
-| Kreivo `proof.rs` `raise_once` | A nonce consumed by an extrinsic it cannot decode, or by none | **A runtime upgrade that changes the extrinsic format makes bezent's own extrinsics undecodable** | **Flag** |
+| Kreivo `proof.rs` `raise_once` | A nonce consumed by an extrinsic of the lane's account that is not one bezent recorded and cannot decode, or by none | An extrinsic bezent recorded in an older format is recognised by its hash against every recorded signed transaction of the lane before anything is called undecodable. **A runtime upgrade does not reach this path** (below). Otherwise true | Yes |
 | Kreivo `submit.rs` `signer_mismatch` | The answer is not the lane key's | A half-done rotation | Yes |
 | Kreivo `submit.rs` `check_idle_use` | The nonce at the finalized head is past every nonce signed plus one | A restored store | Yes |
 | Core, `late_mint.rs` | A final mint of a reference after its proof, or with nothing signed | A restored store; the prover-behind case was removed in PR #72 | Yes |
 | Core, `reserve/check.rs` `supply_breach` (`INV-4`, not through `raise`) | The contract's count and the issuance differ | Unchanged: it pauses the asset under 0040, the trigger leaves it alone | Yes, the asset |
 
-Hardening the flagged ones (ask both providers before alarming, read the block from both, recognise an extrinsic bezent
-recorded by hash before calling it undecodable) changes when they fire, not the spec; it is not in this change.
+Hardening the flagged EVM ones (ask both providers before alarming, read the block from both) changes when they fire,
+not the spec; it is not in this change (amendment 0022, "Points for the owner"). The Kreivo one is done (review of this
+change): an extrinsic of the lane's account that `decode_extrinsic` rejects is matched, by `blake2_256`, against every
+signed transaction recorded for that lane, not only the one watched, before it is called undecodable. A match is bezent's
+own: nothing is proven (`REQ-NX-3`), and nothing is raised. An unrecorded one still pauses.
+
+**Does a runtime upgrade reach it? No.** `decode_extrinsic` is fixed-format code (`SIGNED_V4`, the address, a
+`PassAuthenticate` of `None`, no fee asset) and reads nothing from the chain. A runtime upgrade does not change the bytes of
+a transaction already on chain. One bezent signed before an upgrade carries the old `spec_version` and `transaction_version`
+in what it signed, so the chain refuses it afterwards and it never lands. After an upgrade bezent builds and signs nothing
+for a `spec_version` it has no format for (`SPEC_VERSIONS`; the payload check in `submit.rs`), until a build that knows
+that format, and the same build decodes it. So an extrinsic of the lane's account that this decoder rejects, in a block
+after an upgrade, is one bezent did not sign. What can make a recorded one undecodable is a code deploy that changes the
+decoder, and the hash match covers that. The earlier reading of this table, and of the runbook, was wrong.
+
+### Restoring the store (`NFR-7`)
+
+The trigger is not applied to a session of the schema owner or a superuser (`session_user`; the exemption of 0020, 0047,
+0049, 0050): a restore replays alerts whose pauses were lifted or are in the same dump, and applying it would resurrect
+the first and collide with the second (`pauses_one_per_alert`). The restore drill (`restore_drill.rs`: `pg_dump` plain,
+`psql` as the owner) creates the trigger after the data, so it never fired there, and it now also checks that a standing
+pause is restored and a lifted one is not. A restore that loads into a store already migrated does fire it, and is
+covered by `nfr_7_an_alert_the_owner_replays_pauses_nothing_and_its_own_pause_row_still_loads`. **An alert the owner writes
+outside a restore pauses nothing either**: the owner is not a service, holds every privilege already, and pauses by
+inserting the pause naming the alert (the guard admits it). No service connects as the owner.
+
+### The other late-mint rules
+
+`late_mint.rs` was read again for a path by which a normal delivery raises. None found. "Nothing signed" needs a mint of a
+reference with an order and no `signed_transactions` row, and the endpoint stores the bytes before it submits (`REQ-EO-1`):
+only a store restored to before that row, or a mint by something else, gives one. "After a proof" with an attempt that
+legitimately follows (`REQ-RF-5`) is explained by that attempt's inclusion in the mint's block, and while the prover has not
+yet recorded the inclusion it is held (a page after a bound, never a raise). The count rule (`events <= executed`) errs
+toward explaining. The remaining true positives are a restored store and a backfill of history that predates
+`signed_transactions`, which 0075 ran once, long before this change.
 
 ### 5. Idempotence and replay
 

@@ -406,3 +406,32 @@ async fn inv_4_only_the_core_s_asset_alert_pauses_less_than_the_bridge(pool: PgP
         );
     }
 }
+
+/// `NFR-7`, issue #77 review: the owner restores and replays the log (the exemption of 0020, 0047,
+/// 0049, 0050), and replaying an alert as the owner pauses nothing: it would pause the bridge again
+/// for an alert whose pause was lifted, and collide with the pause row the same restore brings.
+/// The `pg_dump` plain restore of `restore_drill` creates the trigger after the data, so it never
+/// fires there; a restore that loads rows into a store that is already migrated does. An alert a
+/// detector's login writes still pauses (every test above).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn nfr_7_an_alert_the_owner_replays_pauses_nothing_and_its_own_pause_row_still_loads(
+    pool: PgPool,
+) {
+    declare(&pool).await;
+    let seq = raise(&pool, "owner", "replayed").await.unwrap();
+    assert_eq!(pause_of(&pool, seq).await, None, "a replayed alert paused");
+    assert_eq!(all_pauses(&pool).await, 0);
+    // The pause row the same restore brings loads, rather than colliding with one made on the way.
+    exec(
+        &pool,
+        &format!("INSERT INTO pauses (cause, alert_seq) VALUES ('REQ-IC-4', {seq})"),
+    )
+    .await;
+    assert!(pause_of(&pool, seq).await.is_some());
+    // A detector's login, in the same store, still pauses.
+    let signer = login(&pool, bezent_store::SIGNER_ROLE).await;
+    let live = raise(&signer, bezent_store::SIGNER_ROLE, "live")
+        .await
+        .unwrap();
+    assert!(pause_of(&pool, live).await.is_some());
+}

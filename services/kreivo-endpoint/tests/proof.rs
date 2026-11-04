@@ -415,6 +415,84 @@ async fn ac_i1_2_a_transaction_of_the_delivery_key_bezent_did_not_record_starts_
     );
 }
 
+/// A signed transaction of the lane in a format `decode_extrinsic` rejects (a trailing byte after
+/// the extrinsic, so its length prefix no longer matches), still read as the lane's by its sender.
+fn in_a_format_this_build_rejects(bytes: &[u8]) -> Vec<u8> {
+    let mut old = bytes.to_vec();
+    old.push(0);
+    assert!(kreivo::decode_extrinsic(&old).is_none());
+    assert!(kreivo::signed_sender(&old).is_some());
+    old
+}
+
+/// `REQ-IC-4` ("a signature bezent did *not* record"), `AC-I1.2`, issue #77 review: an extrinsic of
+/// the delivery key that this build cannot decode is bezent's own when its hash is one bezent
+/// recorded for the lane, whichever of the lane's signed transactions it is. It raises nothing; an
+/// undecodable one bezent never recorded still does (the next test).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_recorded_signature_in_a_format_this_build_rejects_raises_nothing(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    let watched = signed_but_not_sent(&f, [7; 32]).await;
+    let bytes: Vec<u8> = sqlx::query_scalar("SELECT bytes FROM signed_transactions WHERE id = $1")
+        .bind(watched)
+        .fetch_one(&f.admin)
+        .await
+        .unwrap();
+    // Another recorded signed transaction of the same lane (not the one watched first), written in
+    // the older format; it is the one that landed.
+    let old = in_a_format_this_build_rejects(&bytes);
+    sqlx::query(
+        "INSERT INTO signed_transactions (intent_id, attempt, bytes, tx_hash) \
+         SELECT intent_id, 2, $1, $2 FROM signed_transactions WHERE id = $3",
+    )
+    .bind(&old)
+    .bind(kreivo::blake2_256(&old).as_slice())
+    .bind(watched)
+    .execute(&f.admin)
+    .await
+    .unwrap();
+    f.chain.consume_nonce(f.lane.account);
+    f.chain.include_raw(old);
+    f.chain.advance(1);
+    for _ in 0..2 {
+        f.prover().step().await.unwrap();
+    }
+    assert_eq!(compromises(&f).await, 0);
+    assert_eq!(f.count("SELECT count(*) FROM pauses").await, 0);
+    assert_eq!(
+        f.count("SELECT count(*) FROM non_execution_proofs").await,
+        0,
+        "a consumer that is not identified proves nothing"
+    );
+}
+
+/// The other side of the test above: the same extrinsic with no record of it is a signature bezent
+/// did not record, and pauses.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_an_unrecorded_extrinsic_this_build_rejects_still_pauses(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    let watched = signed_but_not_sent(&f, [7; 32]).await;
+    let bytes: Vec<u8> = sqlx::query_scalar("SELECT bytes FROM signed_transactions WHERE id = $1")
+        .bind(watched)
+        .fetch_one(&f.admin)
+        .await
+        .unwrap();
+    let unrecorded = in_a_format_this_build_rejects(&bytes);
+    f.chain.consume_nonce(f.lane.account);
+    f.chain.include_raw(unrecorded);
+    f.chain.advance(1);
+    for _ in 0..2 {
+        f.prover().step().await.unwrap();
+    }
+    assert_eq!(compromises(&f).await, 1);
+}
+
 /// A call of `pallet-utility` (`batch` 0, `batch_all` 2, `force_batch` 4) wrapping `calls`. The
 /// pallet's index does not matter: the endpoint reads into no wrapper.
 fn utility(call_index: u8, calls: &[Vec<u8>]) -> Vec<u8> {

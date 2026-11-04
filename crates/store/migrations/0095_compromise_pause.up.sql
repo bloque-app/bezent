@@ -14,6 +14,8 @@
 --     REQ-ST-4).
 --     The one exception is the core's supply mismatch (`scope` `asset`, INV-4), which pauses the
 --     asset's routes under 0040 and names a flagged reading.
+--   * The owner and a superuser are exempt (NFR-7): a restore or replay of the log must not pause the
+--     bridge again for an old alert, nor collide with the pause row it brings.
 --   * A repeated detection writes no alert (0049's unique index), so it pauses nothing, however long
 --     after the pause was lifted. A new detection is a new alert and a new pause, whatever else is
 --     in force: another alert's pause or a person's can be lifted by someone who never saw this one.
@@ -99,6 +101,16 @@ CREATE FUNCTION event_log_compromise_pauses() RETURNS trigger
     SET search_path = pg_catalog, public, pg_temp
     AS $$
 BEGIN
+    -- The owner (and a superuser) restores and replays the log (NFR-7; the exemption of 0020, 0047,
+    -- 0049, 0050): replaying an old alert must not pause the bridge again, or resurrect a pause that
+    -- was lifted, or collide with the pause row the same restore brings. `session_user`, not
+    -- `current_user`: this function runs as its owner. A service never connects as the owner, so
+    -- this admits no detector. An alert the owner writes outside a restore pauses nothing either;
+    -- the owner pauses by inserting the pause, naming the alert (the guard admits it).
+    IF pg_has_role(session_user, (SELECT relowner FROM pg_class WHERE oid = TG_RELID), 'USAGE')
+       OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user) THEN
+        RETURN NULL;
+    END IF;
     IF NEW.payload ->> 'detector' = 'core' AND NEW.payload ->> 'scope' = 'asset' THEN
         RETURN NULL;
     END IF;

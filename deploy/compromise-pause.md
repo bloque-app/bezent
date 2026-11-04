@@ -50,7 +50,7 @@ coordinate, the sender, the recipient, the amount.
 | `lane's nonce on chain is past every nonce bezent signed` (EVM) | One provider answered high: the check takes the higher of the two. The other, and a block explorer, show the lower | Fix or replace the provider. If the nonce really moved, it is real |
 | `the delivery key holds code` | One provider returned code: any code on either counts | Same |
 | `transactions of the lane at its nonce in the consuming block` | Zero or several, from an incomplete block read | Read the block from a public source |
-| `an extrinsic of the delivery key that the endpoint cannot decode` (Kreivo) | A runtime upgrade changed the format of bezent's own extrinsics. The extrinsic is one bezent recorded | Ship the endpoint that decodes it, or every such extrinsic raises again |
+| `an extrinsic of the delivery key that the endpoint cannot decode` (Kreivo) | None known. An extrinsic bezent recorded is recognised by its hash against every signed transaction of the lane, so it raises nothing, in whatever format. A runtime upgrade does not make bezent's own undecodable: bezent signs nothing for a runtime it has no format for | Treat it as real: the key signed something bezent never recorded |
 | `the bytes asked to be signed do not answer the core's order` (signer) | A new format or version skew between the endpoint and the signer's decoder | Align the versions |
 | `a signature that is not the lane key's`; `signer-link`, `signer-key` | The key was rotated in the signer and not in the endpoint, or the other way round | Finish the rotation |
 | A signature or a mint "bezent did not record" | The store was restored to before it was recorded (`NFR-7`) | Compare with the signer's log and the chain |
@@ -80,7 +80,16 @@ detector and detection key); a new one does, which is correct.
 Lifting does not clear what the detection found: an EVM lane whose nonce is past what bezent signed, or that holds code,
 is refused by the endpoint until the lane itself is dealt with, pause or no pause. That usually means rotating the key.
 
+## An alert written by the schema owner
+
+The schema owner (and a superuser) is exempt from the trigger, as it is from the other guards, so that a restore does not
+replay old alerts into new pauses (`NFR-7`). An alert you write by hand as the owner therefore pauses nothing: insert the
+pause too, `INSERT INTO pauses (cause, alert_seq) VALUES ('REQ-IC-4', <the alert's seq>)`. No service connects as the owner.
+
 ## Before deploying this
+
+**Do not merge or deploy this before pull request #76.** Without `operator_request_unpause` and `operator_approve_unpause`
+only the schema owner can lift a pause, and a false alert is a global outage with no operator path out of it.
 
 An alert recorded before migration 0095 has no pause, and its repeat never gets one. Run
 `SELECT seq, payload FROM event_log WHERE kind = 'key-compromise'` on the target first and account for each.

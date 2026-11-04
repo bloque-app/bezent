@@ -14,6 +14,7 @@
 mod common;
 
 use bezent_core_service::{Core, Settings};
+use bezent_kreivo_endpoint::chain::fake::DryRunMode;
 use bezent_kreivo_endpoint::kreivo;
 use bezent_kreivo_endpoint::signal::{self, Seen};
 use bezent_kreivo_endpoint::submit::{Prepared, Submitted, signing_intent_payload};
@@ -441,4 +442,64 @@ async fn ac_i2_1_an_attempt_signed_before_the_pause_is_in_flight_and_moves_on(
     cycle(&core, now).await;
     assert_eq!(state(&f, id).await, ("Delivering".into(), None));
     assert_eq!(f.count(COMPROMISE_PAUSES).await, 1, "the pause stands");
+}
+
+/// `INV-15`, `REQ-GV-1`, issue #77 review: an attempt whose signature is recorded passes the pause
+/// as in flight, but a preparation made after it that fails its dry run must not order a new
+/// transaction under the pause. The signer recorded its signature and the endpoint went down before
+/// persisting the signed transaction; the era passed; the endpoint prepared the order again and
+/// the dry run was refused. Before the fix the core, with the gate open for the signed attempt,
+/// recorded a new order for it.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_15_a_signed_attempt_whose_new_preparation_fails_orders_nothing_under_a_pause(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect.clone()).await;
+    let core = core(&f, &connect).await;
+    let now: DateTime<Utc> = "2026-10-13T01:00:00Z".parse().unwrap();
+    let id = deposit(&f).await;
+    let s = f.submitter();
+    cycle(&core, now).await;
+    cycle(&core, now).await;
+    let (order, _) = intent_with(&f, id, "order").await.expect("the order");
+    assert!(matches!(
+        s.prepare(order).await.unwrap(),
+        Prepared::Ready { .. }
+    ));
+    cycle(&core, now).await;
+    let (signing, _) = intent_with(&f, id, "prepared")
+        .await
+        .expect("the signing intent");
+    // The signer's signature is recorded; the endpoint never persisted the signed transaction.
+    exec(
+        &f.admin,
+        &format!(
+            "INSERT INTO signatures (intent_id, key_id, scheme, public_key, signature, amount) \
+             VALUES ({signing}, 'lane', 'sr25519', '\\x01', '\\x02', 0)"
+        ),
+    )
+    .await;
+    // The era passes; the order is prepared again and its dry run is refused.
+    f.chain.advance(kreivo::MAX_ERA + 1);
+    f.chain.set_dry_run(DryRunMode::Refuse(6));
+    let finalized = f.chain.finalized_ref();
+    assert_eq!(s.orders_to_prepare(&finalized).await.unwrap(), vec![order]);
+    assert!(matches!(
+        s.prepare(order).await.unwrap(),
+        Prepared::DryRunFailed { .. }
+    ));
+
+    let orders = "SELECT count(*) FROM intents WHERE payload ? 'order'";
+    let before = f.count(orders).await;
+    assert_eq!(detect(&f, 3).await, Seen::Compromise);
+    assert_eq!(f.count(COMPROMISE_PAUSES).await, 1, "no pause applied");
+    for _ in 0..3 {
+        cycle(&core, now).await;
+    }
+    assert_eq!(
+        f.count(orders).await,
+        before,
+        "the core ordered new work under the pause"
+    );
 }
