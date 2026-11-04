@@ -321,10 +321,12 @@ async fn req_be_6_a_reversal_and_a_restoration_name_what_they_answer(pool: PgPoo
         (restoration("s-2", "299", "v-3"), Some("ERR-SourceMismatch")),
         (restoration("s-3", "300", "v-3"), None),
         (restoration("s-4", "300", "v-3"), Some("ERR-SourceConsumed")),
-        // S2: a restored reversal no longer counts against the arrival. 200 stands, so another
-        // 300 is a second real chargeback and 301 is too much.
+        // Finding 3: "restored" is the store's rule, the restoration taken in as an observation by
+        // the core, which these tests have not got. Until then v-3 still counts, so 200 + 300
+        // is too much. (The taken-in side, a second chargeback accepted after the core ran, is
+        // `req_be_6_a_reversal_is_restored_only_once_its_restoration_is_taken_in`.)
         (reversal("v-7", "301", "a-1"), Some("ERR-SourceMismatch")),
-        (reversal("v-8", "300", "a-1"), None),
+        (reversal("v-8", "300", "a-1"), Some("ERR-SourceMismatch")),
         (reversal("v-9", "1", "a-1"), Some("ERR-SourceMismatch")),
     ];
     for (d, error) in cases {

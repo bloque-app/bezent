@@ -1729,6 +1729,15 @@ impl Core {
                 return Ok(Did::default());
             }
         }
+        // The attempt's clock starts here, at the attested network's final head (F-011 NOTES 10):
+        // not at the source leg's finality, which a late relay or a late release has long passed,
+        // and not at the point the transition rests on, which a review resolution takes from its
+        // evidence. Without a head there is no clock to record, and an attempt with no recorded
+        // hand-over time can never be proven not executed or refunded (`after_proof`), so it is
+        // not handed over until the attested network has a head.
+        let Some(head) = store::latest_head(conn, &t.destination_network).await? else {
+            return Ok(Did::default());
+        };
         store::append(
             conn,
             t.id,
@@ -1742,28 +1751,22 @@ impl Core {
             },
         )
         .await?;
-        // The attempt's clock starts here, at the attested network's final head (F-011 NOTES 10):
-        // not at the source leg's finality, which a late relay or a late release has long passed,
-        // and not at the point the transition rests on, which a review resolution takes from its
-        // evidence. Without a head there is no clock to record and the old one stands.
-        if let Some(head) = store::latest_head(conn, &t.destination_network).await? {
-            store::event(
-                conn,
-                HANDED_OVER,
-                Some(t.id),
-                &json!({"spec": "REQ-RF-5, F-011 NOTES 10", "bridge_reference": t.bridge_reference,
-                        "attempt": attempt, "network": head.network,
-                        "head_block": head.block_number,
-                        "head_time": head.block_time.to_rfc3339()}),
-            )
-            .await?;
-        }
+        store::event(
+            conn,
+            HANDED_OVER,
+            Some(t.id),
+            &json!({"spec": "REQ-RF-5, F-011 NOTES 10", "bridge_reference": t.bridge_reference,
+                    "attempt": attempt, "network": head.network,
+                    "head_block": head.block_number,
+                    "head_time": head.block_time.to_rfc3339()}),
+        )
+        .await?;
         Ok(Did::moved())
     }
 
     /// When attempt `attempt` of `t` was handed to the attesting party, by the attested network's
-    /// clock (the head it was handed over at); `None` for a transfer never handed over, or one
-    /// with no head then.
+    /// clock (the head it was handed over at, the first time it was); `None` for a transfer never
+    /// handed over.
     async fn handed_over_at(
         &self,
         conn: &mut PgConnection,
@@ -1773,7 +1776,7 @@ impl Core {
         let at: Option<String> = sqlx::query_scalar(
             "SELECT payload ->> 'head_time' FROM event_log \
              WHERE kind = $1 AND transfer_id = $2 AND (payload ->> 'attempt')::int = $3 \
-             ORDER BY seq DESC LIMIT 1",
+             ORDER BY seq ASC LIMIT 1",
         )
         .bind(HANDED_OVER)
         .bind(t.id)
@@ -2485,13 +2488,25 @@ impl Core {
         manual: Option<i64>,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
+        let attested = self.attested_destination(conn, t).await?;
+        // On an attested backend a proof of non-execution rests on the attempt's hand-over time,
+        // the attested network's clock; the proof's own time is that network's too, and the
+        // source leg's is another network's. No recorded hand-over time means no proof: nothing
+        // is retried or refunded on a comparison across two clocks (amendment 0016).
+        if attested && self.handed_over_at(conn, t, attempt).await?.is_none() {
+            tracing::error!(transfer = %t.bridge_reference, attempt, "REQ-RF-5: a proof of non-execution for an attempt with no recorded hand-over time; no retry and no refund");
+            return Ok(Did::default());
+        }
         let retrying = store::attempt_has_intents(conn, t.id, attempt + 1).await?;
         if t.kind == "withdrawal" && !retrying {
             let mut start = t.source_final_block_time.unwrap_or(proof.block_time);
             // On an attested backend the withdrawal's clock runs from its first hand-over, not
             // from its source leg: a late relay must not turn the first report of non-execution
             // into a refund (F-011 NOTES 10).
-            if let Some(handed) = self.handed_over_at(conn, t, 1).await? {
+            if attested {
+                let Some(handed) = self.handed_over_at(conn, t, 1).await? else {
+                    return Ok(Did::default());
+                };
                 start = handed;
             }
             let deadline = self.deadline(conn, t, start).await?;

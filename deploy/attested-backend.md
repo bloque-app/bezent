@@ -40,6 +40,9 @@ whether it should go to review at the route's deadline is not ruled (`amendments
    wrote an expiry and no instructions, the withdrawal cannot take them (`ERR-ReferenceConflict`); an attested backend now
    refuses an expiry without instructions, so only a request taken in before that can be in this state.
 2. Once the instructions are accepted, the next cycle hands the withdrawal over, and its deadline runs from then.
+   The hand-over also needs a final head on the attested network, which any report gives; on a fresh backend with no
+   report at all it waits for the first. A sum of reported amounts that overflows the book (2^127 - 1) makes the reserve
+   check fail closed, which pauses the asset: it is not repaired through the services (`attested_reports` is append-only).
 3. If they cannot be had, it is a case for the owner. There is no administrative way to move it (`REQ-GV-5`).
 
 ## Runbook: a report the core refused

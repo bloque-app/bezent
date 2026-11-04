@@ -882,9 +882,9 @@ fn committed() -> (&'static [u8], String) {
     (instructions, commitment)
 }
 
-/// The world up to a fiat withdrawal of 700 handed to the party: funded, deposited, minted, redeemed,
-/// the instructions relayed, attempt 1 entered. Returns its id and bridge reference.
-async fn handed_over(f: &Fiat) -> (i64, String) {
+/// The world up to a fiat withdrawal of 700 whose instructions are relayed, before the core has
+/// handed it over. Returns its bridge reference.
+async fn relayed(f: &Fiat) -> String {
     f.funded(1_000).await;
     let first = f.deposited("pay-1", 700).await;
     f.w.cycle(now()).await;
@@ -901,7 +901,13 @@ async fn handed_over(f: &Fiat) -> (i64, String) {
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{answer}");
-    let bridge = answer["bridge_reference"].as_str().unwrap().to_owned();
+    answer["bridge_reference"].as_str().unwrap().to_owned()
+}
+
+/// The world up to a fiat withdrawal of 700 handed to the party: funded, deposited, minted, redeemed,
+/// the instructions relayed, attempt 1 entered. Returns its id and bridge reference.
+async fn handed_over(f: &Fiat) -> (i64, String) {
+    let bridge = relayed(f).await;
     f.w.cycle(now()).await;
     let id: i64 = scalar(
         &f.w.admin,
@@ -911,6 +917,93 @@ async fn handed_over(f: &Fiat) -> (i64, String) {
     assert_eq!(f.w.state(id).await, ("Delivering".into(), None));
     assert_eq!(f.orders(id).await, 0);
     (id, bridge)
+}
+
+/// Review finding 1, the first hand-over on a fresh backend: with no head on the attested network
+/// there is no clock to record, so nothing is handed over until there is one. Otherwise an
+/// attempt with no hand-over time would later have its proof of non-execution measured against the
+/// issuing network's clock.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_5_nothing_is_handed_over_before_the_attested_network_has_a_head(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    let _bridge = relayed(&f).await;
+    exec(
+        &f.w.admin,
+        &format!(
+            "ALTER TABLE final_heads DISABLE TRIGGER USER; \
+             DELETE FROM final_heads WHERE network = '{RAIL}'; \
+             ALTER TABLE final_heads ENABLE TRIGGER USER"
+        ),
+    )
+    .await;
+    f.w.cycle(now()).await;
+    let id: i64 = scalar(
+        &f.w.admin,
+        "SELECT id FROM transfers WHERE kind = 'withdrawal'",
+    )
+    .await;
+    assert_ne!(f.w.state(id).await.0, "Delivering");
+    assert_eq!(
+        f.w.count("SELECT count(*) FROM event_log WHERE kind = 'attested-handed-over'")
+            .await,
+        0
+    );
+    // The party's next report is a head; the hand-over follows it, with its time recorded.
+    f.reported(
+        "tick-1",
+        "positions",
+        json!({"positions": [], "through": "fund-1"}),
+    )
+    .await;
+    f.w.settle(now()).await;
+    assert_eq!(f.w.state(id).await.0, "Delivering");
+    assert_eq!(
+        f.w.count("SELECT count(*) FROM event_log WHERE kind = 'attested-handed-over'")
+            .await,
+        1
+    );
+}
+
+/// Review finding 1, the guard itself: a delivering attempt with no recorded hand-over time, with a
+/// report of non-execution on record, is neither refunded nor retried. Without the guard the
+/// withdrawal's clock fell back to the issuing network's `source_final_block_time` and the report's
+/// time, the attested network's, was compared with it.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_5_no_recorded_hand_over_time_means_no_proof_and_no_refund(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    let (id, bridge) = handed_over(&f).await;
+    tight(&f, "AND direction = 'withdrawal'").await;
+    exec(
+        &f.w.admin,
+        "ALTER TABLE event_log DISABLE TRIGGER USER; \
+         DELETE FROM event_log WHERE kind = 'attested-handed-over'; \
+         ALTER TABLE event_log ENABLE TRIGGER USER",
+    )
+    .await;
+    f.reported(
+        "no-1",
+        "payout-not-executed",
+        json!({"bridge_reference": bridge, "attempt": 1}),
+    )
+    .await;
+    for _ in 0..2 {
+        f.w.cycle(now()).await;
+    }
+    assert_eq!(f.w.state(id).await, ("Delivering".into(), None));
+    assert_eq!(
+        f.w.count(&format!(
+            "SELECT count(*) FROM transfers WHERE refund_of = {id}"
+        ))
+        .await,
+        0,
+        "no refund mint"
+    );
 }
 
 /// `REQ-OT-6`, `REQ-RF-1`, `INV-8`, amendment 0016 A1 (a working assumption): a fiat payout the party
@@ -1771,6 +1864,84 @@ async fn req_be_6_a_second_reversal_after_a_restoration_is_taken_and_the_book_ag
     f.w.settle(now()).await;
     let e = f.holds().await;
     assert_eq!((e.chain.reserve[RAIL], e.book.surplus), (6_000, 1_000));
+}
+
+/// Review finding 3: ingress counts a reversal as restored by the store's own rule: the restoration
+/// has been taken in as an observation. Until then the first reversal still holds, and a second
+/// full reversal of the same arrival is refused instead of recorded.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_be_6_a_reversal_is_restored_only_once_its_restoration_is_taken_in(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    f.funded(1_000).await;
+    let first = f.deposited("pay-1", 5_000).await;
+    f.w.cycle(now()).await;
+    f.minted(first, 100, 5_000).await;
+
+    let reversal = |id: &str| json!({"amount": "5000", "position": "acct-1", "reverses": "pay-1", "ids": {"cb": id}});
+    f.reported("rev-1", "reversal", reversal("1")).await;
+    // Accepted at the surface, not yet taken in by the core.
+    f.reported(
+        "rest-1",
+        "restoration",
+        json!({"amount": "5000", "position": "acct-1", "restores": "rev-1"}),
+    )
+    .await;
+    let (_, again) = f.report("rev-2", "reversal", reversal("2")).await;
+    assert_eq!(again["error"], "ERR-SourceMismatch", "{again}");
+    // Taken in: the first reversal no longer stands, and the second is as good as the first.
+    f.w.settle(now()).await;
+    let (status, answer) = f.report("rev-3", "reversal", reversal("3")).await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["state"], "Recorded", "{answer}");
+}
+
+/// Review finding 2: an amount whose value, scaled by its token's ratio to the book unit, does not
+/// fit the book's signed 128 bits is refused at the surface, where the reserve check could not
+/// evaluate it. A smaller one is taken.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_11_an_amount_that_overflows_once_scaled_is_refused_at_ingress(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    // A finer token of the asset, on another network: `cop` is now scaled by 10^18 into the book unit.
+    exec(
+        &f.w.admin,
+        &format!(
+            "INSERT INTO networks (network, role, address_format) VALUES ('fine-origin', 'origin', 'evm'); \
+             INSERT INTO admitted_tokens (network, token, asset, precision) \
+               VALUES ('fine-origin', 'cop-fine', '{COPM}', 20)"
+        ),
+    )
+    .await;
+    // Under i128::MAX unscaled (1.7e38), over it scaled (1e39).
+    let (status, answer) = f
+        .report(
+            "big-1",
+            "arrival",
+            json!({"amount": "1000000000000000000000", "position": "acct-1"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(answer["error"], "ERR-Malformed", "{answer}");
+    let (status, answer) = f
+        .report(
+            "big-2",
+            "positions",
+            json!({"positions": [{"position": "acct-1", "amount": "1000000000000000000000"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    // Scaled, 1e36: it fits.
+    f.reported(
+        "ok-1",
+        "arrival",
+        json!({"amount": "1000000000000000000", "position": "acct-1"}),
+    )
+    .await;
 }
 
 /// S4: a payout reported for a transfer voids a report of its non-execution in the store, whichever

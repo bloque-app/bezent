@@ -450,6 +450,44 @@ async fn decide(conn: &mut PgConnection, d: &Document) -> Result<Decision, ApiEr
     if !declared {
         return Ok(Decision::Refuse(UNKNOWN_ROUTE));
     }
+    // The reserve check scales every amount by this token's ratio to the book unit (INV-11): an
+    // amount that does not fit once scaled would be recorded and then be one the check cannot
+    // evaluate, stalling the backend on an append-only table. Refused here instead.
+    let ratio: Option<i16> = sqlx::query_scalar(
+        "SELECT (SELECT max(precision) FROM admitted_tokens WHERE asset = $2) - precision \
+         FROM admitted_tokens WHERE network = $1 AND asset = $2 AND token = $3",
+    )
+    .bind(&d.network)
+    .bind(&d.asset)
+    .bind(&d.token)
+    .fetch_one(&mut *conn)
+    .await?;
+    let scale = ratio
+        .and_then(|e| u32::try_from(e).ok())
+        .and_then(|e| 10u128.checked_pow(e));
+    let scaled_fits = |text: &str| -> bool {
+        scale.is_some_and(|r| {
+            text.parse::<u128>()
+                .ok()
+                .and_then(|n| n.checked_mul(r))
+                .is_some_and(|n| i128::try_from(n).is_ok())
+        })
+    };
+    let too_large = || {
+        ApiError::Malformed(
+            "an amount, in the book unit of this asset, is at most 2^127 - 1 (INV-11)".into(),
+        )
+    };
+    if let Some(a) = &d.amount
+        && !scaled_fits(a)
+    {
+        return Err(too_large());
+    }
+    if let Some(lines) = &d.positions
+        && lines.iter().any(|l| !scaled_fits(&l.amount))
+    {
+        return Err(too_large());
+    }
     let amount = d.amount.as_deref().unwrap_or("0");
     let reported: u128 = amount.parse().unwrap_or(0);
     match d.kind {
@@ -478,7 +516,9 @@ async fn decide(conn: &mut PgConnection, d: &Document) -> Result<Decision, ApiEr
         }
         // REQ-BE-6: of a payment reported final, named by its report; never more than it. A reversal
         // that was restored is no longer reversed, so it does not count against the arrival: a
-        // second real chargeback after a restoration is as good as the first.
+        // second real chargeback after a restoration is as good as the first. "Restored" is the
+        // store's rule (`attested_arrival_reversed`, 0062): the restoration has been taken in as an
+        // observation, not merely accepted at the surface.
         Kind::Reversal => {
             let reverses = d.reverses.as_deref().unwrap_or("");
             let Some(arrival) = earlier(conn, &d.network, &d.asset, "arrival", reverses).await?
@@ -490,6 +530,9 @@ async fn decide(conn: &mut PgConnection, d: &Document) -> Result<Decision, ApiEr
                  WHERE v.network = $1 AND v.asset = $2 AND v.kind = 'reversal' \
                    AND v.body ->> 'reverses' = $3 \
                    AND NOT EXISTS (SELECT 1 FROM attested_reports r \
+                                   JOIN observations o ON o.network = r.network \
+                                                      AND o.block_number = r.seq \
+                                                      AND o.block_hash = r.digest \
                                    WHERE r.network = v.network AND r.kind = 'restoration' \
                                      AND r.body ->> 'restores' = v.report_id)",
             )

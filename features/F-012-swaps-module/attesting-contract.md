@@ -48,7 +48,11 @@ Common fields of the document. Unknown fields are refused.
 | `occurred_at` | RFC 3339 | Optional. When it happened, by Swaps' clock; recorded, never used to decide anything |
 
 Amounts are decimal strings of exact integer minor units of the origin token (`INV-11`), at most 2^127 - 1
-(`170141183460469231731687303715884105727`): the book is signed, and a larger amount is `ERR-Malformed`.
+(`170141183460469231731687303715884105727`): the book is signed, and a larger amount is `ERR-Malformed`. The bound is on
+the amount in the asset's book unit, the amount times the ratio of its token's precision to the finest admitted token's,
+so for a token coarser than the finest the largest accepted amount is smaller; a larger one is `ERR-Malformed` too. Sums
+are not bounded at the surface: if the reports since a snapshot add up past 2^127 - 1 in the book unit, the reserve check
+cannot evaluate and fails closed (the backend's routes pause and a human is paged) rather than wrapping.
 
 | `kind` | Fields | When to send it |
 |---|---|---|
@@ -64,7 +68,8 @@ Amounts are decimal strings of exact integer minor units of the origin token (`I
   a contribution to surplus and no deposit can bind it (`REQ-BK-5`).
 - `reverses` is the `report_id` of an `arrival` of the same asset; the reversals of one arrival that stand may not exceed
   it. One that was restored no longer stands, so a second real chargeback after a restoration is reported as a new
-  reversal.
+  reversal. A reversal counts as restored once bezent has taken its restoration in as an observation, which follows the
+  `201` of the restoration by a cycle: a second reversal sent before then is `ERR-SourceMismatch`; send it again after.
 - `restores` is the `report_id` of a `reversal`, and `amount` must equal it. Only the party that reported it restores it.
 - `through` is the `report_id` of the last report the balances reflect; `null` when none. **A snapshot must be computed
   from Swaps' own record of what it reported, not read from the bank.** A payment the bank shows and Swaps has not
@@ -112,7 +117,8 @@ Report the outcome (working assumption, `amendments/0016-attested-delivery.md`, 
   attempt can no longer be reported paid: a `payout` right after it answers `not-final` until the next attempt begins, and
   `ERR-SourceConsumed` if it is refunding instead.
 - Nothing, past the budget: `Needs-Review`, with an owner. Nothing is refunded on a timer (`REQ-RF-1`). The budget runs
-  from the hand-over, by the clock of the reports (the latest report's time), and not from the redemption's finality: a
+  from the hand-over, by the clock of the reports (the latest report's time; with no report yet, nothing is handed over),
+  and not from the redemption's finality: a
   late relay does not shorten it, and neither does a late release out of review.
 
 **A refund of an unassociated arrival.** `POST /v0/refunds` as for any arrival. It waits for the operator's second approver.

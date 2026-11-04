@@ -54,7 +54,10 @@ apply, except the one marked "Proposed".
   leg did, and whatever point the transition rests on. Without this a late relay, a late release of an unassociated
   refund or a late release out of review reaches `Needs-Review` on the first cycle, and a first report of non-execution
   after a late relay is a refund mint instead of a second attempt. The refund-or-retry choice of `REQ-RF-5` is measured
-  from the first hand-over.
+  from the first hand-over (the earliest one recorded for the attempt). The hand-over and its time are one act: with no
+  final head on the attested network there is no clock, so nothing is handed over until there is one, and an attempt
+  with no recorded hand-over time is never proven not executed, retried or refunded. Otherwise the first hand-over on a
+  fresh backend would compare the attested network's report time with the issuing network's clock.
 - **A withdrawal nobody relays for.** The value is destroyed, §5.4 has no edge for the wait, and `CND-AwaitingInstruction`
   was withdrawn (amendment 0007). **Proposed, not built:** it goes to `Needs-Review` at the route's deadline, measured from
   its source leg's finality, with an owner. **Built:** one page (`attested-withdrawal-unrelayed`) once it has waited the
@@ -62,7 +65,10 @@ apply, except the one marked "Proposed".
   hands it over as usual. Going to review is the question, not the page.
 - **Reversals once restored.** The sum of reversals that bounds a new one counts only those not restored, so a second real
   chargeback after a restoration is taken. A restoration binds again what a reversal held only once the core has recorded
-  it, after it checked the signature, and not when it is taken in: a row nobody verified must not release a hold.
+  it, after it checked the signature, and not when it is taken in: a row nobody verified must not release a hold. The
+  ingress and the store apply the same rule: a reversal is restored once its restoration is an observation (the store's
+  `attested_arrival_reversed`, 0062). Until then the reversal still counts against the arrival, and a second full
+  reversal of it is `ERR-SourceMismatch`. What a deposit gets in that gap (`ERR-SourceConsumed`) is an open ruling.
 - **The attested network's head and clock.** An attested network has a final head of its own, which is the latest report
   recorded, at the time the store took it in. Its deadline clock is that head, so a party that stops reporting stops the
   clock: a handed-over payout then never reaches its deadline, and only the snapshot bound pauses the asset and pages. The
