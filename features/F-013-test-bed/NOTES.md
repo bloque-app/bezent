@@ -22,3 +22,16 @@ SPDX-License-Identifier: CC-BY-4.0
 - The zombienet job needs an x86-64 machine with enough memory for a relay chain and Kreivo; GitHub-hosted runners
   are too small for it. It is therefore opt-in: it runs only where the repository variable `ZOMBIENET_RUNS_ON` names a
   self-hosted runner label (see `.github/workflows/e2e-zombienet.yml`), and on manual dispatch.
+
+## The criteria map and the release gate (2026-11-04)
+
+- **Naming convention.** A criterion counts as covered when a runnable test names it in its function name (`ac_a2_1_...`)
+  or in the doc comment attached to it (`/// AC-A2.1 ...`), or in the id of an `await check(...)` of `e2e/kreivo`. A mention in a
+  module header, a section comment, the body or an error string does not count. An `#[ignore]` test does not count. The map proves
+  a test names a criterion at its layer; that it verifies it is for the reviewer: never name a test that does not.
+- **Layer.** Decided by the path of the test (`contracts/` and `e2e/kreivo/` chain, `crates/store/` store, `services/signer/` and
+  `crates/vault/` custody, the rest service) against `e2e/criteria/layers.toml`. A criterion that cites an invariant needs a test at
+  every layer section 9 gives it (`REQ-AR-5`).
+- **A new criterion** (an amendment) fails the map until it has a layer entry and a test or an exception.
+- **The release gate** says in its header what is mechanical and what is human. The window of "sustained" is unruled
+  (amendment 0021); `release/gate.toml` leaves it unset on purpose.

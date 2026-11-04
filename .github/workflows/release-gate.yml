@@ -1,0 +1,44 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# F-013 (DEC-19, SPEC section 15): the release gate. It runs on a release tag and by hand, never on a pull
+# request, and holds no secret: it reads the commit's check runs and the sign-off pull requests with the
+# workflow's own token. It fails closed (tools/ci/release_gate.py says what it requires and which parts are human).
+# Dispatch ci, contracts, evm-contracts, e2e-evm and e2e-zombienet on the release commit first; the gate reads them there.
+# The release commit is the code; the commit the workflow runs on adds release/evidence.toml and nothing else.
+# It fails while ZOMBIENET_RUNS_ON is unset (a skipped check is a failure) and can be dispatched only once this file is
+# on the default branch. Who may sign off is release/roles.toml: the token below cannot read organisation teams.
+name: Release gate
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Full sha of the code being released (default: the release_commit of release/evidence.toml)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+
+jobs:
+  gate:
+    name: release gate
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # The evidence is added by a commit after the release commit, so the checkout is the workflow's own ref, in full.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gate
+        shell: bash
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          python3 tools/ci/release_gate.py ${RELEASE:+--release "$RELEASE"} --online --repo "$GITHUB_REPOSITORY" | tee gate.md
+          cat gate.md >> "$GITHUB_STEP_SUMMARY"

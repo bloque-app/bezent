@@ -13,7 +13,7 @@
 //   AC-B5.2   the same (redeemer, reference) again is refused
 //   F-006     a whole-balance redemption after `approve_transfer` leaves the redeemer at zero: the
 //             `Assets::transfer_approved` path through `call_runtime`, which no unit test can dispatch
-//   INV-8     one refund mint for a redemption succeeds; a second is refused
+//   AC-B1.3   one refund mint (INV-8) for a redemption succeeds; a second is refused
 //   AC-I2.1   a pause by the pause role stops mints
 //   AC-I2.2   an unpause by the pause role is refused (governance only)
 //   REQ-HN-7  every event the contract emitted in the run carries the next sequence number
@@ -205,7 +205,7 @@ try {
     return `approve_transfer, then redeem ${whole}: Transferred //Ferdie → contract out of the approval (used up), Burned from the contract; //Ferdie at 0, asset account reaped`;
   });
 
-  await check('INV-8', 'one refund mint for a redemption succeeds; a second is refused', async () => {
+  await check('AC-B1.3 / INV-8', 'one refund mint for a redemption succeeds; a second is refused', async () => {
     const before = await snapshot(B, eve.address);
     const { res, events } = await accept(roles.delivery, 'refund_mint', { redeemer: eve.address, redemption_reference: r1 }, "refund //Eve's redemption");
     const after = await snapshot(B, eve.address);
