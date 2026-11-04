@@ -60,6 +60,7 @@ const TABLES: &[&str] = &[
     "webhook_condition_holds",
     "webhook_deliveries",
     "unsigned_attempt_cancellations",
+    "late_mint_checks",
 ];
 
 async fn bezent_objects(pool: &PgPool) -> Vec<String> {

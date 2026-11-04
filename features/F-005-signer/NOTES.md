@@ -50,6 +50,24 @@ is left.
 11. **No core dumps** (review S4, `REQ-CU-1`). The process sets `RLIMIT_CORE` to 0 (soft and hard) and, on Linux,
     `PR_SET_DUMPABLE 0`, before it reads a key. On Linux a failure stops the start; on macOS there is no
     `PR_SET_DUMPABLE` and a failure is only logged.
+12. **A mint of a reference bezent did not deliver is a signature it did not record** (issue #26, PR #72; `AC-I1.2`,
+    `REQ-IC-4`, `INV-8`, `INV-9`). The check is the core's (`services/core/src/late_mint.rs`), over the observer's
+    final `Minted` and `RefundMinted`; it raises through the compromise path above, once per observation. It raises
+    when a reference bezent ordered was minted (a) after a signed transaction of it was proven not executed at a final
+    block below the mint, or (b) with no signed transaction of it at all: the endpoint stores the exact bytes before it
+    submits (`INV-9`), so a bezent mint always has its `signed_transactions` row first. A mint of a reference with no
+    order is not matched: it is `REQ-IC-2`'s reserve check. A later attempt explains a mint (`REQ-RF-5`) only if it was
+    executed in the mint's block and the block has no more mint events of the reference than executed attempts, or it
+    is undecided and its era covers the mint and the final head has not passed the era's end. An attempt with no era
+    on record (the signing path always records it, migration 0037) holds for 128 blocks past the mint, with an error
+    logged each cycle. *Not tied to the extrinsic*: the observation's position is the event's index in the block, not
+    its extrinsic's, so the count is what the record supports; tying them needs the endpoint to record the event's
+    phase (`ApplyExtrinsic(i)`, read in `chain/light.rs` as `ev.phase()` and dropped) in the observation's `detail`.
+    The alarm is a global pause: every widening has a test that a normal delivery raises nothing, and an undecided
+    attempt is held, never raised on, while it can still explain the mint. Migration 0075 keeps a queue
+    (`late_mint_checks`), filled by the store in the outcome's own transaction, so a cycle reads only the mints not
+    yet settled and no id or time order can make it skip one; a look that fails is counted and pages after three
+    in a row (`late-mint-check-failed`), without stopping the others.
 
 ## Open — these block `M-1` (real keys)
 

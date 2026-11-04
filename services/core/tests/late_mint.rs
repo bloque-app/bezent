@@ -6,7 +6,13 @@
 //!
 //! Each case that must alert drives the whole core cycle, so removing the one call that wires the
 //! check into the cycle fails it on an assertion. The cases that must not alert pass either way,
-//! and are there to keep the check from over-reaching.
+//! and are there to keep the check from over-reaching: the alarm is a global pause, so a false
+//! alarm is an outage.
+//!
+//! What is real here: the core (`Core::cycle`, on its own login), the signer (`World::sign`), the
+//! store's triggers and grants (the queue of migration 0075 is filled by the store, not by the
+//! tests). What is a fixture: the endpoints (a prepared transaction, the signed bytes, an
+//! inclusion, a proof) and the chain (a `Minted` observation), written as the endpoint writes them.
 
 mod common;
 
@@ -22,9 +28,14 @@ fn now() -> chrono::DateTime<chrono::Utc> {
 /// A deposit whose first mint attempt is signed and proven not executed at the issuing network's
 /// final block `proof_at`. The core has then ordered attempt 2 (`REQ-RF-5`, same reference).
 async fn proven_deposit(w: &World, proof_at: i64) -> (i64, Vec<u8>) {
-    let a = arrival(&w.admin, 10, 5_000).await;
-    let id = deposit(&w.admin, 10, 5_000).await;
-    decide(&w.admin, a, "final", 12).await;
+    proven_deposit_from(w, 10, proof_at).await
+}
+
+/// [`proven_deposit`] of the arrival at origin block `block`.
+async fn proven_deposit_from(w: &World, block: i64, proof_at: i64) -> (i64, Vec<u8>) {
+    let a = arrival(&w.admin, block, 5_000).await;
+    let id = deposit(&w.admin, block, 5_000).await;
+    decide(&w.admin, a, "final", block + 2).await;
     w.settle(now()).await;
     deliver(w, id, 1, now()).await;
     assert_eq!(w.state(id).await.0, "Delivering");
@@ -126,6 +137,75 @@ async fn pauses(w: &World) -> i64 {
                AND a.seq::text = p.payload ->> 'alert_seq')",
     )
     .await
+}
+
+/// Observations of the check still open (not settled).
+async fn open_checks(w: &World) -> i64 {
+    w.count("SELECT count(*) FROM late_mint_checks WHERE settled_at IS NULL")
+        .await
+}
+
+async fn checked(w: &World, observation: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+    sqlx::query_scalar("SELECT checked_at FROM late_mint_checks WHERE observation_id = $1")
+        .bind(observation)
+        .fetch_one(&w.admin)
+        .await
+        .unwrap()
+}
+
+async fn pages(w: &World) -> i64 {
+    w.count("SELECT count(*) FROM event_log WHERE kind = 'late-mint-check-failed'")
+        .await
+}
+
+async fn verdict(w: &World, observation: i64) -> Option<String> {
+    sqlx::query_scalar("SELECT verdict FROM late_mint_checks WHERE observation_id = $1")
+        .bind(observation)
+        .fetch_one(&w.admin)
+        .await
+        .unwrap()
+}
+
+/// A `Minted` of `reference` at (`ISSUING`, `block`, `hash`, log `index`), not yet decided.
+async fn mint_seen<'e, E>(db: E, block: i64, hash: Vec<u8>, index: i64, reference: &[u8]) -> i64
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query_scalar(
+        "INSERT INTO observations (network, block_number, block_hash, block_time, position_kind, \
+             position_index, token, amount, recipient, on_chain_reference, executed, detail, kind) \
+         VALUES ($1, $2, $3, $4, 'log', $5, $6, 5000, $7, $8, true, $9, \
+             observation_kind_for_event('Minted')) RETURNING id",
+    )
+    .bind(ISSUING)
+    .bind(block)
+    .bind(hash)
+    .bind(t0() + chrono::Duration::seconds(block))
+    .bind(index)
+    .bind(ISSUING_ASSET)
+    .bind(DESTINATION_ACCOUNT)
+    .bind(reference)
+    .bind(json!({"event": "Minted"}))
+    .fetch_one(db)
+    .await
+    .unwrap()
+}
+
+/// Observation `id` is final, decided at the issuing network's block `at`.
+async fn finalise<'e, E>(db: E, id: i64, at: i64)
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(
+        "INSERT INTO observation_outcomes (observation_id, outcome, final_block_number, \
+             final_block_hash) VALUES ($1, 'final', $2, $3)",
+    )
+    .bind(id)
+    .bind(at)
+    .bind(hash(ISSUING, at))
+    .execute(db)
+    .await
+    .unwrap();
 }
 
 /// A withdrawal's refund, up to the refund mint's order: attempts 1 and 2 proven not executed, the
@@ -379,9 +459,10 @@ async fn req_ic_2_a_mint_with_no_reference_of_bezents_is_not_this_alert_and_dive
     // A reference no order, no proof and no signature names: the supply the book does not explain
     // is a divergence of the reserve equation (`req_bk_1_a_mint_no_deposit_explains_diverges_on_supply`
     // in reserve_check.rs), not this check's: backfilled history may hold such mints.
-    mint_at(&w.admin, 105, &[0xee; 32]).await;
+    let m = mint_at(&w.admin, 105, &[0xee; 32]).await;
     w.cycle(now()).await;
     assert_eq!(alerts(&w).await, 0);
+    assert_eq!(verdict(&w, m).await.as_deref(), Some("not-late"));
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -442,7 +523,7 @@ async fn ac_i1_2_inv_8_a_refund_mint_while_the_refund_is_ordered_and_unsigned_ra
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn ac_i1_2_a_deposits_mint_order_with_nothing_signed_is_not_matched(
+async fn ac_i1_2_req_ic_4_inv_9_a_mint_of_a_pending_deposits_reference_with_nothing_signed_raises(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -453,9 +534,425 @@ async fn ac_i1_2_a_deposits_mint_order_with_nothing_signed_is_not_matched(
     w.settle(now()).await;
     assert!(order(&w.admin, id, 1).await.is_some(), "mint ordered");
     let reference = reference_of(&w.admin, id).await;
-    // The issue names a proof or a refund order; a pending deposit's mint order is neither. The
-    // case is left open (see the pull request): nothing is raised here.
+    // The endpoint stores a transaction's exact bytes before it submits it (INV-9): a mint of a
+    // reference with an order and no signed transaction is a signature bezent did not record.
+    let m = mint_at(&w.admin, 105, &reference).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+    assert_eq!(verdict(&w, m).await.as_deref(), Some("alerted"));
+    let reason: String = sqlx::query_scalar(
+        "SELECT payload ->> 'reason' FROM event_log WHERE kind = 'key-compromise' \
+           AND payload ->> 'source' = 'late-mint'",
+    )
+    .fetch_one(&w.admin)
+    .await
+    .unwrap();
+    assert!(reason.contains("signed nothing"), "{reason}");
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_9_a_delivery_bezent_signed_never_raises_whatever_is_recorded_first(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let a = arrival(&w.admin, 10, 5_000).await;
+    let id = deposit(&w.admin, 10, 5_000).await;
+    decide(&w.admin, a, "final", 12).await;
+    w.settle(now()).await;
+    deliver(&w, id, 1, now()).await;
+    let signed = signed_of(&w.admin, id, 1).await;
+    let reference = reference_of(&w.admin, id).await;
+    // The mint is seen final before the endpoint records the transaction's inclusion: nothing is
+    // raised, and the check keeps the observation until the inclusion is there.
+    let m = mint_at(&w.admin, 105, &reference).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, open_checks(&w).await), (0, 1));
+    included(&w.admin, signed, 105, &reference, true).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, open_checks(&w).await), (0, 0));
+    assert_eq!(verdict(&w, m).await.as_deref(), Some("not-late"));
+    assert_eq!(
+        w.count(
+            "SELECT count(*) FROM event_log WHERE kind IN ('pause-requested', 'key-compromise')"
+        )
+        .await,
+        0
+    );
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_8_a_second_mint_in_the_block_of_an_executed_attempt_is_not_explained_by_it(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    let second = signed_of(&w.admin, id, 2).await;
+    // Attempt 2 is included, and executed, at block 105 ...
+    included(&w.admin, second, 105, &reference, true).await;
+    // ... and block 105 holds two mint events of the reference: the contract mints one once
+    // (INV-8), so one of them is not the attempt's. The observation does not say which extrinsic
+    // emitted an event, so the two cannot be told apart; the surplus is what raises.
+    for index in [0, 1] {
+        let m = mint_seen(&w.admin, 105, hash(ISSUING, 105), index, &reference).await;
+        decide(&w.admin, m, "final", 107).await;
+    }
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, pauses(&w).await), (2, 2));
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_an_attempt_never_decided_holds_the_alert_only_until_the_head_passes_its_era(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    set_era(&w, id, 2, 90, 150).await;
+    let m = mint_at(&w.admin, 105, &reference).await;
+    // Within the era (up to its last block), and never decided: the check waits.
+    head(&w.admin, ISSUING, 150).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, open_checks(&w).await), (0, 1));
+    // The final head passes the era's end and the endpoint still has not decided it: it no longer
+    // explains the mint.
+    head(&w.admin, ISSUING, 151).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+    assert_eq!(verdict(&w, m).await.as_deref(), Some("alerted"));
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_real_signing_rows_always_name_their_era_and_one_without_is_held_then_bounded(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    // The signing path: the core records a signing intent that names its prepared transaction (a
+    // number, checked against the order by migration 0037), the endpoint signs only such an
+    // intent. So every real signed transaction has an era.
+    assert_eq!(
+        w.count(
+            "SELECT count(*) FROM signed_transactions st JOIN intents i ON i.id = st.intent_id \
+             WHERE NOT EXISTS (SELECT 1 FROM prepared_transactions p \
+                               WHERE p.id::text = i.payload ->> 'prepared')"
+        )
+        .await,
+        0
+    );
+    // And the store refuses, to the core's own login, a signing intent that names none.
+    let core = login_pool(&w.admin, CORE_LOGIN, bezent_store::CORE_ROLE, 1).await;
+    let refused = sqlx::query(
+        "INSERT INTO intents (transfer_id, network, purpose, on_chain_reference, attempt, payload) \
+         SELECT transfer_id, network, purpose, on_chain_reference, 2, \
+                '{\"prepared\": 999999, \"message\": \"0x00\", \"amount\": \"1\"}'::jsonb \
+         FROM intents WHERE transfer_id = $1 AND attempt = 2 AND payload ? 'order'",
+    )
+    .bind(id)
+    .execute(&core)
+    .await;
+    let refused = refused.expect_err("migration 0037").to_string();
+    assert!(refused.contains("signing intent refused"), "{refused}");
+
+    // A fixture for the case that should not occur: a signed row on an intent with no prepared
+    // transaction, so no era. It holds the alert back for UNKNOWN_ERA_BLOCKS past the mint, loudly,
+    // and no longer.
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO signed_transactions (intent_id, attempt, bytes) \
+             SELECT id, 1, '\\xbeef' FROM intents \
+             WHERE transfer_id = {id} AND attempt = 2 AND payload ? 'order' AND NOT payload ? 'prepared'"
+        ),
+    )
+    .await;
+    // (Attempt 2's own signing intent also has a signed row: the unknown-era row is the other.)
     mint_at(&w.admin, 105, &reference).await;
+    head(&w.admin, ISSUING, 233).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, open_checks(&w).await), (0, 1));
+    head(&w.admin, ISSUING, 234).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_mint_finalised_after_a_later_one_or_committed_after_it_is_still_looked_at(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (_, first_ref) = proven_deposit_from(&w, 10, 100).await;
+    let (_, second_ref) = proven_deposit_from(&w, 11, 101).await;
+    let (_, third_ref) = proven_deposit_from(&w, 12, 102).await;
+
+    // A: the lowest id, seen now and finalised only later.
+    let a = mint_seen(&w.admin, 105, hash(ISSUING, 105), 0, &first_ref).await;
+    // C: an id between, whose transaction commits after B's (the observer's write is slow).
+    let mut slow = w.admin.begin().await.unwrap();
+    let c = mint_seen(&mut *slow, 107, hash(ISSUING, 107), 0, &third_ref).await;
+    finalise(&mut *slow, c, 109).await;
+    // B: the highest id, final and committed at once.
+    let b = mint_at(&w.admin, 106, &second_ref).await;
+    assert!(a < c && c < b);
+
+    w.cycle(now()).await;
+    assert_eq!(
+        alerts(&w).await,
+        1,
+        "B only: A is not final, C not committed"
+    );
+    assert_eq!(verdict(&w, b).await.as_deref(), Some("alerted"));
+
+    slow.commit().await.unwrap();
+    w.cycle(now()).await;
+    assert_eq!(alerts(&w).await, 2, "C, committed after B");
+    assert_eq!(verdict(&w, c).await.as_deref(), Some("alerted"));
+
+    finalise(&w.admin, a, 108).await;
+    w.cycle(now()).await;
+    assert_eq!(alerts(&w).await, 3, "A, finalised after both");
+    assert_eq!(verdict(&w, a).await.as_deref(), Some("alerted"));
+    assert_eq!(open_checks(&w).await, 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn a_settled_mint_is_not_read_again_and_an_undecided_one_stays_in_the_set(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    set_era(&w, id, 2, 90, 500).await;
+    let settled = mint_at(&w.admin, 100, &[0xee; 32]).await;
+    let held = mint_at(&w.admin, 105, &reference).await;
+    w.cycle(now()).await;
+    let (settled_at, held_at) = (checked(&w, settled).await, checked(&w, held).await);
+    assert_eq!(verdict(&w, settled).await.as_deref(), Some("not-late"));
+    assert_eq!(verdict(&w, held).await, None);
+    for _ in 0..3 {
+        w.cycle(now()).await;
+    }
+    assert_eq!(
+        checked(&w, settled).await,
+        settled_at,
+        "a settled mint is not read"
+    );
+    assert!(
+        checked(&w, held).await > held_at,
+        "an undecided one is looked at again"
+    );
+    assert_eq!((open_checks(&w).await, alerts(&w).await), (1, 0));
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_the_dedupe_survives_a_restart_in_the_middle_of_a_raise_and_of_a_wait(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    let second = signed_of(&w.admin, id, 2).await;
+    set_era(&w, id, 2, 90, 150).await;
+    let m = mint_at(&w.admin, 105, &reference).await;
+    // Waiting on the undecided attempt: a core restarted from the store waits too.
+    w.cycle(now()).await;
+    let restarted = w.restarted().await;
+    restarted.cycle(now()).await.unwrap();
+    assert_eq!((alerts(&w).await, open_checks(&w).await), (0, 1));
+    // The attempt is refused; the restarted core raises, once.
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO event_log (kind, payload) VALUES ('delivery-anomaly', \
+               '{{\"network\": \"{ISSUING}\", \"signed_transaction\": {second}, \"reason\": \"x\"}}')"
+        ),
+    )
+    .await;
+    restarted.cycle(now()).await.unwrap();
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+    // A crash between the alert and the settling leaves the observation open: the next core finds
+    // the alert recorded, settles it, and raises nothing more.
+    exec(
+        &w.admin,
+        &format!("UPDATE late_mint_checks SET settled_at = NULL, verdict = NULL WHERE observation_id = {m}"),
+    )
+    .await;
+    w.restarted().await.cycle(now()).await.unwrap();
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+    assert_eq!(verdict(&w, m).await.as_deref(), Some("alerted"));
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_16_a_mint_withdrawn_in_a_reorganisation_and_final_again_elsewhere_raises_once(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (_, reference) = proven_deposit(&w, 100).await;
+    let abandoned = mint_seen(&w.admin, 105, vec![0xdd; 8], 0, &reference).await;
+    decide(&w.admin, abandoned, "withdrawn", 107).await;
     w.cycle(now()).await;
     assert_eq!(alerts(&w).await, 0);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM late_mint_checks WHERE observation_id = {abandoned}"
+        ))
+        .await,
+        0,
+        "a withdrawn observation is never queued"
+    );
+    // The block is rebuilt with another hash, and the mint is in it, final.
+    let again = mint_seen(&w.admin, 105, hash(ISSUING, 105), 0, &reference).await;
+    decide(&w.admin, again, "final", 108).await;
+    w.cycle(now()).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+    let at: String = sqlx::query_scalar(
+        "SELECT payload -> 'coordinate' ->> 'block_hash' FROM event_log \
+         WHERE kind = 'key-compromise' AND payload ->> 'source' = 'late-mint'",
+    )
+    .fetch_one(&w.admin)
+    .await
+    .unwrap();
+    assert_eq!(at, format!("0x{}", hex::encode(hash(ISSUING, 105))));
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_5_a_legitimate_retry_seen_again_after_a_reorganisation_raises_nothing(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    let second = signed_of(&w.admin, id, 2).await;
+    included(&w.admin, second, 105, &reference, true).await;
+    let abandoned = mint_seen(&w.admin, 105, vec![0xdd; 8], 0, &reference).await;
+    decide(&w.admin, abandoned, "withdrawn", 107).await;
+    let again = mint_seen(&w.admin, 105, hash(ISSUING, 105), 0, &reference).await;
+    decide(&w.admin, again, "final", 108).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, open_checks(&w).await), (0, 0));
+    assert_eq!(verdict(&w, again).await.as_deref(), Some("explained"));
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_the_first_walk_over_a_backlog_of_delivered_history_raises_nothing(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    // The deliveries first (the core cycles while they are made) ...
+    let mut delivered = Vec::new();
+    // Three deposits whose first attempt was proven not executed and whose retry was executed.
+    for (k, block) in [10_i64, 11, 12].into_iter().enumerate() {
+        let k = k as i64;
+        let (id, reference) = proven_deposit_from(&w, block, 100 + k).await;
+        deliver(&w, id, 2, now()).await;
+        delivered.push((signed_of(&w.admin, id, 2).await, reference, 105 + k));
+    }
+    // Two delivered at the first attempt.
+    for block in [13_i64, 14] {
+        let a = arrival(&w.admin, block, 5_000).await;
+        let id = deposit(&w.admin, block, 5_000).await;
+        decide(&w.admin, a, "final", block + 2).await;
+        w.settle(now()).await;
+        deliver(&w, id, 1, now()).await;
+        delivered.push((
+            signed_of(&w.admin, id, 1).await,
+            reference_of(&w.admin, id).await,
+            200 + block,
+        ));
+    }
+    // ... then the history the chain shows, all of it final, with no cycle of the core after it.
+    let mut history = 0;
+    for (signed, reference, at) in delivered {
+        included(&w.admin, signed, at, &reference, true).await;
+        mint_at(&w.admin, at, &reference).await;
+        history += 1;
+    }
+    // A mint of an earlier deployment (no order here), and one seen and withdrawn.
+    mint_at(&w.admin, 300, &[0xee; 32]).await;
+    history += 1;
+    let gone = mint_seen(&w.admin, 301, vec![0xdd; 8], 0, &[0xef; 32]).await;
+    decide(&w.admin, gone, "withdrawn", 303).await;
+
+    // The core has not looked at any of it. Its first walk, from a cold start.
+    assert_eq!(open_checks(&w).await, history);
+    assert_eq!(alerts(&w).await, 0);
+    w.restarted().await.cycle(now()).await.unwrap();
+    assert_eq!(
+        w.count(
+            "SELECT count(*) FROM event_log WHERE kind IN ('pause-requested', 'key-compromise')"
+        )
+        .await,
+        0
+    );
+    assert_eq!(open_checks(&w).await, 0, "every one of them is settled");
+    assert_eq!(
+        w.count("SELECT count(*) FROM late_mint_checks WHERE verdict = 'alerted'")
+            .await,
+        0
+    );
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_mint_that_cannot_be_checked_pages_and_blocks_none_of_the_others(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (_, first_ref) = proven_deposit_from(&w, 10, 100).await;
+    let (_, second_ref) = proven_deposit_from(&w, 11, 101).await;
+    // The first one's look settles it (at the proof's own block, no match), the second is a late
+    // mint. The store refuses to settle the first: a persistent failure of one candidate (an
+    // injected fixture), with the lowest id, so that it comes first every time.
+    let stuck = mint_at(&w.admin, 100, &first_ref).await;
+    let late = mint_at(&w.admin, 105, &second_ref).await;
+    exec(
+        &w.admin,
+        &format!(
+            "CREATE FUNCTION refuse_settling() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN IF NEW.settled_at IS NOT NULL THEN RAISE EXCEPTION 'injected failure'; END IF; \
+             RETURN NEW; END $$; \
+             CREATE TRIGGER refuse_settling BEFORE UPDATE ON late_mint_checks \
+             FOR EACH ROW WHEN (OLD.observation_id = {stuck}) EXECUTE FUNCTION refuse_settling();"
+        ),
+    )
+    .await;
+    w.cycle(now()).await;
+    assert_eq!(
+        verdict(&w, late).await.as_deref(),
+        Some("alerted"),
+        "the failure of one does not stop the next"
+    );
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+    assert_eq!(pages(&w).await, 0, "one failure only warns");
+    w.cycle(now()).await;
+    assert_eq!(pages(&w).await, 0);
+    w.cycle(now()).await;
+    assert_eq!(pages(&w).await, 1, "a persistent one pages");
+    w.cycle(now()).await;
+    assert_eq!(pages(&w).await, 1, "once");
+    let page: Value =
+        sqlx::query_scalar("SELECT payload FROM event_log WHERE kind = 'late-mint-check-failed'")
+            .fetch_one(&w.admin)
+            .await
+            .unwrap();
+    assert_eq!(page["observation"], json!(stuck.to_string()));
+    // When the failure clears, it settles.
+    exec(&w.admin, "DROP TRIGGER refuse_settling ON late_mint_checks").await;
+    w.cycle(now()).await;
+    assert_eq!(verdict(&w, stuck).await.as_deref(), Some("not-late"));
 }

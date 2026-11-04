@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Pagos Cube LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! A mint of a reference after its proof of non-execution (issue #26; `AC-I1.2`, `REQ-IC-4`,
-//! `INV-8`, `INV-16`).
+//! A mint of a reference bezent did not deliver (issue #26; `AC-I1.2`, `REQ-IC-4`, `INV-8`,
+//! `INV-9`, `INV-16`).
 //!
 //! The Kreivo endpoint reads the contract's single-use state at the final block that proves a
 //! delivery not executed, and records no proof if the reference was used by then (`INV-8`). That
@@ -22,48 +22,83 @@
 //! 1. **after a proof**: a signed transaction of `R` has a proof of non-execution whose final block
 //!    is below `b`. At or above `b`, the endpoint's own read already covers the mint (it records an
 //!    anomaly, not a proof), so nothing is matched;
-//! 2. **a refund ordered, nothing signed**: for a `RefundMinted` only, a refund mint is ordered
-//!    for `R` and no transaction of `R` was ever signed. Nothing may be submitted before its exact
-//!    bytes are stored (`INV-9`), so a refund mint of `R` cannot be bezent's. A deposit's mint
-//!    order with nothing signed yet is not matched (the issue names a proof or a refund order):
-//!    that case is left to the owner, see the pull request.
+//! 2. **nothing signed**: an order for `R` is recorded and no transaction of `R` was ever signed.
+//!    The endpoint stores a transaction's exact bytes before it submits it (`INV-9`, `REQ-EO-1`),
+//!    so a bezent mint always has its `signed_transactions` row first; a mint of `R` with none is
+//!    a signature bezent did not record (`AC-I1.2`, `REQ-IC-4`), for a deposit's `Minted` as for a
+//!    `RefundMinted`. A reference with **no order at all** is not matched: it is not one of
+//!    bezent's, and `REQ-IC-2` makes the unexplained supply a divergence of the reserve equation
+//!    (`REQ-BK-1`, `INV-4`), which the reserve check pauses for; backfilled history may hold such
+//!    mints.
 //!
 //! and it is **not explained** by a later attempt of the same reference, which is legitimate
 //! (`REQ-RF-5`: after a proof, a new attempt carries the same reference):
 //!
 //! - *explained*: a signed transaction of `R` was included, and executed, in the observation's own
-//!   block (the endpoint records the inclusion as an observation, `REQ-OB-6`);
-//! - *undecided*: a signed transaction of `R` has no proof, no inclusion and no anomaly yet, and
-//!   its era covers `b`. The endpoint decides it when it next looks; the check waits, and decides
-//!   when it has. The era bounds the wait: a transaction that has expired is settled by the
-//!   endpoint, and then no longer holds anything back.
+//!   block (the endpoint records the inclusion as an observation, `REQ-OB-6`), and the block holds
+//!   no more mint events of `R` than executed attempts. The contract mints a reference once
+//!   (`INV-8`), so one executed attempt is one mint event; a second event in the block is not the
+//!   attempt's. The observation does not record which extrinsic emitted an event (its position is
+//!   the event's index in the block), so the two cannot be tied one to one; the count is what the
+//!   record supports. Tying them needs the endpoint to record the event's extrinsic index (its
+//!   phase, `ApplyExtrinsic(i)`) in the observation's `detail`, to compare with the inclusion's
+//!   `position_index`;
+//! - *undecided*: a signed transaction of `R` has no proof, no inclusion and no anomaly yet, and its
+//!   era covers `b`. The endpoint decides it when it next looks; the check waits, and decides when
+//!   it has. The wait ends when the network's final head passes the era's end: an attempt the
+//!   endpoint has not decided by then no longer explains anything. A transaction whose era is not
+//!   on record (the signing path always records it: a signing intent names its prepared
+//!   transaction, migration 0037) is held, with an error logged each cycle, until the head is
+//!   [`UNKNOWN_ERA_BLOCKS`] past the mint.
 //!
 //! Otherwise the alert is raised through the compromise path of F-005: `key-compromise` and the
 //! global `pause-requested`, once per observation (the store keeps one alert per detector and
 //! detection key, migration 0049, so a restart or a replay of the observer raises nothing twice).
 //!
+//! # What is looked at, and how often
+//!
+//! Migration 0075 queues every final `Minted` and `RefundMinted` of an issuing network in
+//! `late_mint_checks`, in the transaction that records its outcome, whatever its id or the time it
+//! is finalised. A cycle reads the open rows only, a bounded batch, least recently looked at first,
+//! and looks at each on its own: a failure of one is logged, counted, and pages a human when it
+//! persists ([`PAGE_AFTER_FAILURES`]), and never stops the others. A row is **settled** when its
+//! verdict cannot change: alerted; explained by an attempt executed in its block; or not matched
+//! with every signed transaction of the reference proven or decided (a proof is written once per
+//! transaction, so none can arrive to match it later). A row that waits on an undecided attempt, or
+//! on a transaction the endpoint has not yet decided, stays open.
+//!
 //! # Finality
 //!
-//! Only observations with a `final` outcome are read (`INV-16`, `REQ-OB-5`): the alert is a safety
-//! signal, not a disposition, but it rests on the same data and acts only on what is final; the
-//! observer writes nothing else. A `withdrawn` or undecided observation raises nothing.
+//! Only observations with a `final` outcome are queued (`INV-16`, `REQ-OB-5`): the alert is a
+//! safety signal, not a disposition, but it rests on the same data and acts only on what is final;
+//! the observer writes nothing else. A `withdrawn` or undecided observation raises nothing.
 //!
 //! # A mint with no reference of bezent's at all
 //!
-//! Not matched here, and not meant to be: with no order recorded the reference is not one of
-//! bezent's, and a backfilled history may hold mints of earlier deployments. `REQ-IC-2` makes the
-//! unexplained supply a divergence of the reserve equation, which the reserve check pauses the
-//! asset for (`REQ-BK-1`, `INV-4`).
+//! Not matched here, and not meant to be: see 2 above.
 
 use serde_json::json;
 use sqlx::{PgConnection, PgPool};
 
 use crate::refs;
+use crate::store;
 use bezent_signer::compromise;
+
+/// How many consecutive failed looks at one mint page a human.
+pub const PAGE_AFTER_FAILURES: i32 = 3;
+
+/// How far past a mint's block the final head must be before a transaction whose era is not on
+/// record stops holding the alert back: twice the longest era the endpoint signs (64 blocks,
+/// `DEC-5`). The signing path always records the era, so this bounds a case that should not occur.
+pub const UNKNOWN_ERA_BLOCKS: i64 = 128;
+
+/// How many open rows one cycle looks at.
+const BATCH: i64 = 1_000;
 
 /// A final mint observation to look at.
 #[derive(Debug, sqlx::FromRow)]
 struct Candidate {
+    observation_id: i64,
     network: String,
     block_number: i64,
     block_hash: Vec<u8>,
@@ -71,6 +106,8 @@ struct Candidate {
     recipient: Option<String>,
     reference: Vec<u8>,
     event: String,
+    /// The final block its outcome was decided at: the head it was read under.
+    final_block: i64,
 }
 
 /// One delivery (an intent) of the reference.
@@ -108,85 +145,155 @@ fn dedupe(c: &Candidate) -> String {
     )
 }
 
-/// Looks at the final mint observations whose reference may have been minted late, and raises the
-/// key-compromise alert and the global pause request for each that was. Returns how many alerts it
-/// raised. `pool` connects as the core's login. Safe to repeat: an observation raises at most one.
+/// Looks at the open final mint observations, and raises the key-compromise alert and the global
+/// pause request for each that was a late mint. Returns how many alerts it raised. `pool` connects
+/// as the core's login. Safe to repeat: an observation raises at most one. One mint that cannot be
+/// looked at never stops the others.
 pub async fn watch(pool: &PgPool) -> sqlx::Result<usize> {
     let mut conn = pool.acquire().await?;
-    // Only a reference that has a proof, or an order and no signature, can be late: a few rows.
     let candidates: Vec<Candidate> = sqlx::query_as(
-        "SELECT o.network, o.block_number, o.block_hash, o.position_index, o.recipient, \
-                o.on_chain_reference AS reference, o.detail ->> 'event' AS event \
-         FROM observations o \
+        "SELECT o.id AS observation_id, o.network, o.block_number, o.block_hash, o.position_index, \
+                o.recipient, o.on_chain_reference AS reference, o.detail ->> 'event' AS event, \
+                x.final_block_number AS final_block \
+         FROM late_mint_checks k \
+         JOIN observations o ON o.id = k.observation_id \
          JOIN observation_outcomes x ON x.observation_id = o.id AND x.outcome = 'final' \
-         JOIN networks n ON n.network = o.network AND n.role = 'issuing' \
-         WHERE o.executed AND o.on_chain_reference IS NOT NULL \
-           AND o.detail ->> 'event' IN ('Minted', 'RefundMinted') \
-           AND EXISTS ( \
-             SELECT 1 FROM intents i \
-             WHERE i.network = o.network AND i.on_chain_reference = o.on_chain_reference \
-               AND i.purpose = CASE o.detail ->> 'event' \
-                                 WHEN 'Minted' THEN 'mint' ELSE 'refund-mint' END \
-               AND (EXISTS (SELECT 1 FROM signed_transactions st \
-                            JOIN non_execution_proofs p ON p.signed_transaction_id = st.id \
-                            JOIN intents si ON si.id = st.intent_id \
-                            WHERE si.network = i.network AND si.purpose = i.purpose \
-                              AND si.on_chain_reference = i.on_chain_reference \
-                              AND p.final_block_number < o.block_number) \
-                    OR (i.purpose = 'refund-mint' \
-                        AND NOT EXISTS (SELECT 1 FROM signed_transactions st \
-                                        JOIN intents si ON si.id = st.intent_id \
-                                        WHERE si.network = i.network AND si.purpose = i.purpose \
-                                          AND si.on_chain_reference = i.on_chain_reference)))) \
-         ORDER BY o.id",
+         WHERE k.settled_at IS NULL \
+         ORDER BY k.checked_at NULLS FIRST, k.observation_id \
+         LIMIT $1",
     )
+    .bind(BATCH)
     .fetch_all(&mut *conn)
     .await?;
     let mut raised = 0;
     for c in candidates {
-        if compromise::raised(
-            &mut *conn,
-            compromise::DETECTOR_CORE,
-            &format!("dedupe:{}", dedupe(&c)),
-        )
-        .await?
-        {
-            continue;
+        match look(pool, &mut conn, &c).await {
+            Ok(true) => raised += 1,
+            Ok(false) => {}
+            Err(e) => failed(&mut conn, &c, &e).await,
         }
-        let Some(why) = late(&mut conn, &c).await? else {
-            continue;
-        };
-        let alert = json!({
-            "spec": "AC-I1.2, REQ-IC-4, INV-8",
-            "source": "late-mint",
-            "dedupe": dedupe(&c),
-            "network": c.network,
-            "reason": why.text(),
-            "event": c.event,
-            "on_chain_reference": hex0x(&c.reference),
-            "recipient": c.recipient,
-            "coordinate": {
-                "network": c.network,
-                "block_number": c.block_number,
-                "block_hash": hex0x(&c.block_hash),
-                "position_kind": "log",
-                "position_index": c.position_index,
-            },
-            "proof": why.proof(),
-            "actions": ["pause", "rotate", "report"],
-        });
-        let (alert_seq, pause_seq) = compromise::raise(pool, &alert).await?;
-        tracing::error!(
-            network = c.network,
-            block = c.block_number,
-            alert_seq,
-            pause_seq,
-            reason = why.text(),
-            "AC-I1.2: a reference was minted that bezent did not deliver; key-compromise and a global pause request are in the event log"
-        );
-        raised += 1;
     }
     Ok(raised)
+}
+
+/// Looks at one candidate, and settles it or leaves it open. Returns whether it raised the alert.
+async fn look(pool: &PgPool, conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<bool> {
+    if compromise::raised(
+        &mut *conn,
+        compromise::DETECTOR_CORE,
+        &format!("dedupe:{}", dedupe(c)),
+    )
+    .await?
+    {
+        settle(conn, c, "alerted").await?;
+        return Ok(false);
+    }
+    match late(conn, c).await? {
+        Look::NotLate => settle(conn, c, "not-late").await?,
+        Look::Explained => settle(conn, c, "explained").await?,
+        Look::Held => touch(conn, c).await?,
+        Look::Late(why) => {
+            let alert = json!({
+                "spec": "AC-I1.2, REQ-IC-4, INV-8",
+                "source": "late-mint",
+                "dedupe": dedupe(c),
+                "network": c.network,
+                "reason": why.text(),
+                "event": c.event,
+                "on_chain_reference": hex0x(&c.reference),
+                "recipient": c.recipient,
+                "coordinate": {
+                    "network": c.network,
+                    "block_number": c.block_number,
+                    "block_hash": hex0x(&c.block_hash),
+                    "position_kind": "log",
+                    "position_index": c.position_index,
+                },
+                "proof": why.proof(),
+                "actions": ["pause", "rotate", "report"],
+            });
+            let (alert_seq, pause_seq) = compromise::raise(pool, &alert).await?;
+            tracing::error!(
+                network = c.network,
+                block = c.block_number,
+                alert_seq,
+                pause_seq,
+                reason = why.text(),
+                "AC-I1.2: a reference was minted that bezent did not deliver; key-compromise and a global pause request are in the event log"
+            );
+            settle(conn, c, "alerted").await?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Settles the candidate: its verdict cannot change.
+async fn settle(conn: &mut PgConnection, c: &Candidate, verdict: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE late_mint_checks SET settled_at = now(), verdict = $2, checked_at = now(), \
+             failures = 0 WHERE observation_id = $1 AND settled_at IS NULL",
+    )
+    .bind(c.observation_id)
+    .bind(verdict)
+    .execute(conn)
+    .await
+    .map(|_| ())
+}
+
+/// The candidate was looked at and stays open.
+async fn touch(conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE late_mint_checks SET checked_at = now(), failures = 0 WHERE observation_id = $1",
+    )
+    .bind(c.observation_id)
+    .execute(conn)
+    .await
+    .map(|_| ())
+}
+
+/// The look at the candidate failed: it stays open and is tried again, and a failure that persists
+/// pages a human, once (the same event log record and `page:` line as the core's other pages).
+async fn failed(conn: &mut PgConnection, c: &Candidate, error: &sqlx::Error) {
+    tracing::error!(
+        observation = c.observation_id,
+        network = c.network,
+        block = c.block_number,
+        error = %error,
+        "AC-I1.2: a mint could not be checked for a late mint; it stays queued and the others go on"
+    );
+    let failures: sqlx::Result<i32> = sqlx::query_scalar(
+        "UPDATE late_mint_checks SET failures = failures + 1, checked_at = now() \
+         WHERE observation_id = $1 RETURNING failures",
+    )
+    .bind(c.observation_id)
+    .fetch_one(&mut *conn)
+    .await;
+    let Ok(failures) = failures else { return };
+    let id = c.observation_id.to_string();
+    if failures < PAGE_AFTER_FAILURES
+        || store::has_event(conn, "late-mint-check-failed", None, "observation", &id)
+            .await
+            .unwrap_or(true)
+    {
+        return;
+    }
+    let detail = json!({
+        "spec": "AC-I1.2, REQ-IC-4",
+        "observation": id,
+        "network": c.network,
+        "block_number": c.block_number,
+        "on_chain_reference": hex0x(&c.reference),
+        "failures": failures,
+        "error": error.to_string(),
+    });
+    if store::event(conn, "late-mint-check-failed", None, &detail)
+        .await
+        .is_ok()
+    {
+        tracing::error!(kind = "late-mint-check-failed", %detail,
+            "page: a mint of the issuing network cannot be checked against its proofs, again and again; a late mint would go unseen");
+    }
 }
 
 /// Why a mint is late.
@@ -204,7 +311,7 @@ impl Late {
                 "the reference was minted after its proof of non-execution, by no transaction bezent signed"
             }
             Late::Unsigned => {
-                "the refund mint was made though bezent signed nothing for its reference"
+                "the reference was minted though bezent signed nothing for it (a signature it did not record)"
             }
         }
     }
@@ -217,8 +324,20 @@ impl Late {
     }
 }
 
+/// What the look at a candidate found.
+enum Look {
+    /// Not a late mint, and nothing that is still to be recorded can make it one.
+    NotLate,
+    /// Explained by an attempt executed in its block.
+    Explained,
+    /// Not decided yet: an attempt is still to be decided, within its era.
+    Held,
+    /// A late mint that no attempt of bezent's explains.
+    Late(Late),
+}
+
 /// Whether `c` is a late mint that no attempt of bezent's explains, and not one still undecided.
-async fn late(conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<Option<Late>> {
+async fn late(conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<Look> {
     let purpose = if c.event == "Minted" {
         "mint"
     } else {
@@ -245,21 +364,22 @@ async fn late(conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<Option<Lat
         .map(|d| d.id)
         .collect();
     if ids.is_empty() {
-        return Ok(None);
+        return Ok(Look::NotLate);
     }
     let signed: Vec<Signed> = sqlx::query_as(
         "SELECT (SELECT min(p.final_block_number) FROM non_execution_proofs p \
                  WHERE p.signed_transaction_id = st.id) AS proof, \
                 EXISTS (SELECT 1 FROM observations t \
-                        WHERE t.network = $2 AND t.block_hash = $3 AND t.position_kind = 'transaction' \
-                          AND t.executed AND t.detail ->> 'signed_transaction' = st.id::text) \
+                        WHERE t.detail ->> 'signed_transaction' = st.id::text \
+                          AND t.position_kind = 'transaction' \
+                          AND t.network = $2 AND t.block_hash = $3 AND t.executed) \
                   AS executed_here, \
                 (EXISTS (SELECT 1 FROM observations t \
-                         WHERE t.network = $2 AND t.position_kind = 'transaction' \
-                           AND t.detail ->> 'signed_transaction' = st.id::text) \
+                         WHERE t.detail ->> 'signed_transaction' = st.id::text \
+                           AND t.position_kind = 'transaction' AND t.network = $2) \
                  OR EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'delivery-anomaly' \
-                            AND e.payload ->> 'network' = $2 \
-                            AND e.payload ->> 'signed_transaction' = st.id::text)) AS decided, \
+                            AND e.payload ->> 'signed_transaction' = st.id::text \
+                            AND e.payload ->> 'network' = $2)) AS decided, \
                 (SELECT p.valid_from_block FROM prepared_transactions p \
                  WHERE p.id::text = i.payload ->> 'prepared') AS valid_from, \
                 (SELECT p.valid_until_block FROM prepared_transactions p \
@@ -273,7 +393,7 @@ async fn late(conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<Option<Lat
     .fetch_all(&mut *conn)
     .await?;
 
-    // The late-mint rule: after a proof, or before any signature.
+    // The late-mint rule: after a proof, or with no signature recorded.
     let after_proof = signed
         .iter()
         .filter_map(|s| s.proof)
@@ -281,22 +401,66 @@ async fn late(conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<Option<Lat
         .min();
     let matched = match after_proof {
         Some(proof) => Late::AfterProof { proof },
-        None if signed.is_empty() && c.event == "RefundMinted" => Late::Unsigned,
-        None => return Ok(None),
+        None if signed.is_empty() => Late::Unsigned,
+        None => {
+            // Not matched. A transaction with no proof and no decision may still be proven not
+            // executed, at a final block below this mint's (a prover that reads behind the
+            // observer): the candidate stays open until each has one or the other.
+            let pending = signed.iter().any(|s| s.proof.is_none() && !s.decided);
+            return Ok(if pending { Look::Held } else { Look::NotLate });
+        }
     };
-    // A transaction of the reference executed in this very block explains it.
-    if signed.iter().any(|s| s.executed_here) {
-        return Ok(None);
+    // A transaction of the reference executed in this very block explains one mint event of it:
+    // the contract mints a reference once, so a second event in the block is not that attempt's.
+    let executed = signed.iter().filter(|s| s.executed_here).count() as i64;
+    if executed > 0 {
+        let events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM observations o \
+             JOIN observation_outcomes x ON x.observation_id = o.id AND x.outcome = 'final' \
+             WHERE o.network = $1 AND o.block_hash = $2 AND o.position_kind = 'log' \
+               AND o.on_chain_reference = $3 AND o.detail ->> 'event' = $4 AND o.executed \
+               AND ($4 = 'Minted' OR o.recipient IS NOT DISTINCT FROM $5)",
+        )
+        .bind(&c.network)
+        .bind(&c.block_hash)
+        .bind(&c.reference)
+        .bind(&c.event)
+        .bind(&c.recipient)
+        .fetch_one(&mut *conn)
+        .await?;
+        if events <= executed {
+            return Ok(Look::Explained);
+        }
     }
-    // A transaction still to be decided, whose era covers the block, may yet be the one.
-    let undecided = signed.iter().any(|s| {
-        s.proof.is_none()
-            && !s.decided
-            && matches!((s.valid_from, s.valid_until),
-                        (Some(from), Some(until)) if from <= c.block_number && c.block_number <= until)
-    });
-    if undecided {
-        return Ok(None);
+    // A transaction still to be decided, whose era covers the block, may yet be the one, until the
+    // final head passes the era's end.
+    let head = store::latest_head(conn, &c.network)
+        .await?
+        .map_or(0, |p| p.block_number)
+        .max(c.final_block);
+    let mut held = false;
+    for s in signed.iter().filter(|s| s.proof.is_none() && !s.decided) {
+        match (s.valid_from, s.valid_until) {
+            (Some(from), Some(until)) => {
+                held |= from <= c.block_number && c.block_number <= until && head <= until;
+            }
+            _ => {
+                if head <= c.block_number + UNKNOWN_ERA_BLOCKS {
+                    tracing::error!(
+                        observation = c.observation_id,
+                        network = c.network,
+                        block = c.block_number,
+                        head,
+                        "AC-I1.2: a signed transaction of a late mint's reference has no era on record; holding the alert for {UNKNOWN_ERA_BLOCKS} blocks, which should not occur"
+                    );
+                    held = true;
+                }
+            }
+        }
     }
-    Ok(Some(matched))
+    Ok(if held {
+        Look::Held
+    } else {
+        Look::Late(matched)
+    })
 }
