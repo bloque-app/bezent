@@ -100,9 +100,9 @@ bezent MUST pause. Recovery is in `deploy/compromise-pause.md`; what the specifi
 |---|---|
 | Ingress | Refuses new requests (`ERR-RoutePaused`, `intake.rs`, the `NULL`-matches-all test) on the next request |
 | Core | `gate` reads `pauses` on every step: before each phase of a first attempt (the transfer stays `Source-Final` until a signature is ready), a new attempt, a resolution. It records no further order or signing intent. So the signer has nothing new to sign (`INV-9`) |
-| Core, an attempt already signed | Passes: it is in flight (`INV-15`). Before #77 the gate held it `Source-Final` with `CND-Paused` while its transaction was on chain; the auto-pause would have made that common |
+| Core, an attempt already signed | Passes, under any pause, a person's or the reserve check's too: it is in flight (`REQ-GV-1`, `INV-15`). Before #77 the gate held it `Source-Final` with `CND-Paused` while its transaction was on chain; the auto-pause would have made that common |
 | Refund mint, refund payout, cancel, statement | Keep being ordered and signed, by design (`t.route()` is `None`; F-006 NOTES 1; `REQ-NX-4`; `REQ-PR-1`). "Stops new signing" (issue #77) means new delivery signing |
-| Endpoint and signer | Read no pause. **A signing intent recorded before the pause is still signed and submitted**, at the next poll, or whenever a stopped endpoint returns. Whether that is new work is not settled: amendment 0022, A1. `REQ-GV-1` and `INV-15` forbid stopping more than new work, so it is not built |
+| Endpoint and signer | Read no pause. **A signing intent recorded before the pause is still signed and submitted**, at the next poll, or whenever a stopped endpoint returns. On Kreivo for at most one era (`MAX_ERA`, 64 blocks) from its preparation: past it nothing is signed (`req_hn_3_a_prepared_transaction_whose_era_passed_is_never_signed`). **On an EVM network with no bound**: nothing expires (`NO_EXPIRY`). Whether that is new work is not settled: amendment 0022, A1. `REQ-GV-1` and `INV-15` forbid stopping more than new work, so it is not built |
 | Already-signed transactions | Stored bytes are submitted and resent: in flight, and unstoppable anyway once anyone holds them. On Kreivo an era ends them; on an EVM network only the nonce does |
 | On-chain component, vault | **Not touched.** Their pause is a separate act of a separate role (`REQ-HN-9`, §7.F, `AC-I2.*`), a person's today: runbook step 1; amendment 0022, A2 |
 
@@ -147,7 +147,10 @@ new in the signer process.
   (`INV-9`), and the detector raises again at its next look.
 - **Pause to no new signing intent: the next `pauses` read of the next step**, at `READ COMMITTED`; the core loop is
   sequential, so at most one step already past its gate at the commit records one more intent. Inside `NFR-8`.
-- **Not bounded by this:** the signing intents of 1 above.
+- **Not bounded by this:** the signing intents of 1 above: one era on Kreivo, unbounded on an EVM network. So issue #77's
+  "stops new signing within a stated bound" holds in full for what the pause stops, for intents recorded after it, and for
+  Kreivo's recorded intents within an era; it holds on an EVM network only for intents recorded after the pause, until A1 is
+  ruled.
 - **Detection itself lags the event**, separately from all of this: for what the endpoints see on chain, finality, plus
   observer lag (`NFR-6`), plus the prover's cadence; a lane's idle use is seen only at the next preparation. The core's
   late-mint check runs in its cycle (`Core::cycle`), so a slow `check.tick`, which has no timeout, delays that detection and
@@ -198,9 +201,11 @@ recorded by hash before calling it undecodable) changes when they fire, not the 
 
 `crates/store/tests/compromise_pause.rs` (the store: real logins for each role, guard, unpause refused, repeat, second
 alert, pause in place, one transaction, concurrency). `services/kreivo-endpoint/tests/delivery.rs` (service, each process on
-its own role: `ac_i1_2_a_detection_stops_signing_end_to_end`, core down, signed attempt in flight). Each raiser's existing
-route test now also asserts the pause, in the signer, core and endpoint suites. Each was proved to fail without the change
-by dropping the trigger; the in-flight test by reverting the gate. `e2e/criteria/exceptions.toml` holds no `AC-I1.2` entry, so
+its own role: `ac_i1_2_a_detection_stops_signing_end_to_end`, core down, signed attempt in flight).
+`services/ingress/tests/limits.rs` (new requests refused). Every row of the table in 4 has a test that asserts the pause and
+fails without it, in the signer, core and endpoint suites, except the core's statement caller of `Client::sign`, which is the
+same function as the link test's (`ac_i1_2_core_refuses_a_returned_signature_over_other_bytes`). Each was proved to fail by
+dropping the trigger; the in-flight test by reverting the gate. `e2e/criteria/exceptions.toml` holds no `AC-I1.2` entry, so
 there was none to remove: the map was satisfied by tests that named the criterion and verified only the alert.
 
 ## Open — these block `M-1` (real keys)

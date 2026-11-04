@@ -437,6 +437,49 @@ async fn req_nx_3_a_consumer_bezent_did_not_sign_proves_nothing_and_raises_compr
     );
 }
 
+/// `AC-I1.2`, `REQ-NX-3`, issue #77: the lane's nonce moved in a block that holds no transaction of
+/// the lane at that nonce. Nothing is proven, and the alert pauses the bridge.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_nonce_consumed_with_no_consumer_in_its_block_pauses_the_bridge(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect, 5).await;
+    let (signed, _) = f.signed_payout(reference(1), 700).await;
+    for c in f.chains() {
+        let h = c.mine();
+        c.set_nonce(f.lane.address, h.number, 1);
+    }
+    f.advance(1);
+    let Outcome::Unknown(why) = outcome(&f, signed).await else {
+        panic!("a nonce with no consumer decided something");
+    };
+    assert!(why.contains("0 transactions of the lane"), "{why}");
+    assert_eq!(proofs(&f).await, 0);
+    assert_eq!(f.compromises().await, 1);
+}
+
+/// `AC-I1.2`, `REQ-NX-3`, issue #77: the lane's nonce was consumed by a transaction bezent does not
+/// build (not EIP-1559). Nothing is proven, and the alert pauses the bridge.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_consumer_bezent_does_not_build_pauses_the_bridge(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect, 5).await;
+    let (signed, _) = f.signed_payout(reference(1), 700).await;
+    let mut legacy = sign_outside(&lane_tx(0, Address::repeat_byte(0x42), vec![]));
+    legacy.tx_type = 0;
+    f.mine_tx(legacy, true);
+    f.advance(1);
+    let Outcome::Unknown(why) = outcome(&f, signed).await else {
+        panic!("a consumer bezent does not build decided something");
+    };
+    assert!(why.contains("not an EIP-1559 transaction"), "{why}");
+    assert_eq!(proofs(&f).await, 0);
+    assert_eq!(f.compromises().await, 1);
+}
+
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn inv_8_a_reference_already_on_chain_blocks_the_proof(
     pool: PgPoolOptions,

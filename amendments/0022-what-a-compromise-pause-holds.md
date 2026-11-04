@@ -22,7 +22,8 @@ pause, which is the only thing that stops a stolen key.
    attempt as new work: it holds the transfer in `Source-Final` and records no further intent (and since issue #77, an
    attempt with a recorded signature passes the pause as in flight). The endpoints and the signer read no pause. So a
    signing intent recorded before the pause commits is still signed and submitted after it. Normally that is the next
-   poll of the endpoint, a window of seconds, but it has no bound: an endpoint or signer down at the pause signs that
+   poll of the endpoint, a window of seconds. On the issuing network it ends with the transaction's era (`MAX_ERA`, 64
+   blocks). On an origin network nothing expires, so it has no bound: an endpoint or signer down at the pause signs that
    intent when it returns, hours into the incident, while the core reports the transfer as `CND-Paused`.
 2. **The chain half.** §7.F gives the on-chain component a pause (pause role or governance) and `AC-I2.1` has a chain
    half, but `REQ-IC-2` and `REQ-IC-4` say only that "bezent" pauses. A stolen key signs by itself: no off-chain pause
