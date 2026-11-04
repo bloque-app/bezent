@@ -8,7 +8,7 @@
 # Reviewed by the spec owner (CODEOWNERS).
 
 # No criterion is an exception at the moment: each has a test at its layer. A criterion with a test can still be
-# partial or failing (see the feature notes); this map cannot say so.
+# partial or failing: that is listed in known_unmet.toml.
 [exception]
 
 # A V0 story that SPEC section 6 gives no acceptance criterion. Listed so that a new one cannot appear silently.

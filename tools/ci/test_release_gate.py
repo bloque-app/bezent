@@ -341,6 +341,32 @@ class Gate(unittest.TestCase):
                 errors, _ = rg.run("", str(ev), True, "o/r", api=self.api(runs, approved), git_fn=git)
                 self.assertEqual(len(errors), 1)
 
+    def test_a_known_unmet_criterion_fails_the_gate_as_an_exception_does(self):
+        table = [{"ac": "AC-X1.1", "status": "covered"},
+                 {"ac": "AC-X1.2", "status": "known unmet", "known_unmet": {"missing": "the pause", "closed_by": "#77"}}]
+        errors = rg.blockers(table)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("AC-X1.2", errors[0])
+        self.assertIn("#77", errors[0])
+        self.assertEqual(rg.blockers(table[:1]), [])
+        self.assertIn("AC-X1.3", rg.blockers([{"ac": "AC-X1.3", "status": "exception"}])[0])
+
+    def test_the_committed_known_unmet_list_fails_the_real_gate_and_empties_to_pass(self):
+        from unittest import mock
+        listed = tomllib.loads((rg.ROOT / "e2e/criteria/known_unmet.toml").read_text())["known_unmet"]
+        self.assertEqual(sorted(listed), ["AC-H3.1", "AC-I1.2", "AC-I3.1"])
+        errors = rg.mechanical_map()
+        self.assertTrue(any("known not met" in e and all(a in e for a in listed) for e in errors), errors)
+        # Mutation: with every entry removed the same gate raises no such error, so the entries are what fail it.
+        real_load = rg.criteria_map.load_config
+
+        def emptied():
+            cfg = real_load()
+            cfg["known_unmet"] = {}
+            return cfg
+        with mock.patch.object(rg.criteria_map, "load_config", emptied):
+            self.assertEqual(rg.mechanical_map(), [])
+
     def test_no_release_commit_anywhere_fails(self):
         errors, _ = rg.run("", "/nonexistent/evidence.toml", online=False, repo="o/r")
         self.assertTrue(any("no release commit" in e for e in errors))
