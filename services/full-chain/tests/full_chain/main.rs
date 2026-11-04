@@ -854,7 +854,7 @@ async fn s5_a_compromise_signal_pauses_stops_signing_and_is_lifted_by_the_rule(
 
 /// Every byte string bezent has had written to a network in a scenario, labelled: on the fork, each
 /// transaction since the pinned block as signed (its input included) and each log it emitted; on the
-/// Kreivo model, each extrinsic submitted and each event the model recorded (rendered as text).
+/// Kreivo model, each extrinsic submitted and each event the model recorded, as its raw topics and data.
 async fn written_to_the_networks(bed: &Bed) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     let head = bed.anvil.number().await;
@@ -910,11 +910,13 @@ async fn written_to_the_networks(bed: &Bed) -> Vec<(String, Vec<u8>)> {
     for (i, extrinsic) in bed.chain.submitted().into_iter().enumerate() {
         out.push((format!("kreivo extrinsic {i}"), extrinsic));
     }
-    for (i, event) in bed.kreivo_events().await.into_iter().enumerate() {
-        out.push((
-            format!("kreivo event {i}"),
-            format!("{event:?}").into_bytes(),
-        ));
+    // The events as the model emitted them: each topic and the data, raw. (A decoded event's text
+    // prints a `[u8; 32]` as decimal numbers, which no needle can match.)
+    for (i, (topics, data)) in bed.kreivo_event_logs().await.into_iter().enumerate() {
+        for (j, topic) in topics.into_iter().enumerate() {
+            out.push((format!("kreivo event {i} topic {j}"), topic.to_vec()));
+        }
+        out.push((format!("kreivo event {i} data"), data));
     }
     out
 }
@@ -1033,29 +1035,48 @@ async fn s6_inv_12_nothing_a_requester_supplies_reaches_a_network_in_clear(
             .fetch_one(&bed.admin)
             .await
             .unwrap();
-    for (what, bytes) in [
-        ("the mint's reference", mint_reference),
-        ("the payout's reference", payout_reference),
-        ("the beneficiary", BENEFICIARY.to_vec()),
+    // Each half is shown to see a value known to be in it. Without this, a half that sees nothing
+    // would pass the search.
+    let beneficiary = BENEFICIARY.to_vec();
+    for (half, label, what, bytes) in [
+        (
+            "the fork's calldata",
+            "polygon block",
+            "the payout's reference",
+            &payout_reference,
+        ),
+        (
+            "the fork's calldata",
+            "polygon block",
+            "the beneficiary",
+            &beneficiary,
+        ),
+        (
+            "the fork's logs",
+            "polygon log",
+            "the beneficiary",
+            &beneficiary,
+        ),
+        (
+            "the Kreivo extrinsics",
+            "kreivo extrinsic",
+            "the mint's reference",
+            &mint_reference,
+        ),
+        (
+            "the Kreivo events",
+            "kreivo event",
+            "the mint's reference",
+            &mint_reference,
+        ),
     ] {
         assert!(
-            written
-                .iter()
-                .any(|(_, w)| w.windows(bytes.len()).any(|x| x == bytes.as_slice())),
-            "the search does not see {what} among {} written values",
+            written.iter().any(|(l, w)| l.starts_with(label)
+                && w.windows(bytes.len()).any(|x| x == bytes.as_slice())),
+            "the search does not see {what} in {half} ({} values written)",
             written.len()
         );
     }
-    assert!(
-        written
-            .iter()
-            .any(|(l, _)| l.starts_with("kreivo extrinsic")),
-        "nothing was written to the Kreivo model"
-    );
-    assert!(
-        written.iter().any(|(l, _)| l.starts_with("polygon block")),
-        "nothing was written to the fork"
-    );
 
     for marker in [DEPOSIT_REFERENCE, EXTRAS_REFERENCE] {
         assert_eq!(

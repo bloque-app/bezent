@@ -706,19 +706,27 @@ abstract contract GovernanceTest is GovernanceBase {
         bytes memory raise = raised();
         bytes memory viaDelay =
             abi.encodeCall(IDelay.execTransactionFromModule, (d.safe, 0, enable, Enum.Operation.Call));
-        assertFalse(
-            ownersExec(d.delay, viaDelay, Enum.Operation.Call, 1), "one owner cannot queue the unpause"
-        );
+        // Each is refused by the Safe's threshold itself: its signature check reverts "GS020" (signatures
+        // data too short), not the guard and not any other failure.
+        bool ok2;
+        bytes memory ret;
+        (ok2, ret) = ownersTry(d.delay, viaDelay, Enum.Operation.Call, 1);
+        assertFalse(ok2, "one owner cannot queue the unpause");
+        assertEq(ret, reason("GS020"), "refused for the threshold");
         viaDelay = abi.encodeCall(IDelay.execTransactionFromModule, (d.roles, 0, raise, Enum.Operation.Call));
-        assertFalse(ownersExec(d.delay, viaDelay, Enum.Operation.Call, 1), "one owner cannot queue the raise");
+        (ok2, ret) = ownersTry(d.delay, viaDelay, Enum.Operation.Call, 1);
+        assertFalse(ok2, "one owner cannot queue the raise");
+        assertEq(ret, reason("GS020"), "refused for the threshold");
         assertEq(delayMod.queueNonce(), 0, "nothing was queued by one owner");
 
         // Directly, one owner cannot do either, and the owners at the threshold are refused by the guard
         // (the change must be delayed), so the queue is the only way and it takes the threshold.
-        assertFalse(ownersExec(d.safe, enable, Enum.Operation.Call, 1), "one owner cannot enable the module");
-        assertFalse(
-            ownersExec(d.roles, raise, Enum.Operation.Call, 1), "one owner cannot raise the allowance"
-        );
+        (ok2, ret) = ownersTry(d.safe, enable, Enum.Operation.Call, 1);
+        assertFalse(ok2, "one owner cannot enable the module");
+        assertEq(ret, reason("GS020"), "refused for the threshold");
+        (ok2, ret) = ownersTry(d.roles, raise, Enum.Operation.Call, 1);
+        assertFalse(ok2, "one owner cannot raise the allowance");
+        assertEq(ret, reason("GS020"), "refused for the threshold");
         assertGuardRefuses(d.safe, enable, "VaultGuard: Safe change must be delayed");
         assertGuardRefuses(d.roles, raise, "VaultGuard: allowance cap raised");
 
