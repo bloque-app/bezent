@@ -888,7 +888,7 @@ async fn should_fix_no_login_chooses_or_claims_a_transition_id(pool: PgPool) {
         &pool,
         "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
              destination_network, destination, state) \
-         VALUES ('bz-d-2', 'req-2', 'deposit', 'usd', 1000000, 'kreivo', '0xdest', 'Received')",
+         VALUES ('bz-d-2', 'req-2', 'deposit', 'usd', 1000000, 'kreivo', '0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20', 'Received')",
     )
     .await;
     let ingress = login(&pool, "audit_ingress_for_tests", bezent_store::INGRESS_ROLE).await;
@@ -1023,6 +1023,8 @@ async fn should_fix_the_destination_network_rules_hold_in_the_store(pool: PgPool
     delivery_declarations(&pool).await;
     make_final(&pool, "polygon", 10, "bb").await;
     let ingress = login(&pool, "audit_ingress_for_tests", bezent_store::INGRESS_ROLE).await;
+    // A deposit's destination on the issuing network is a 32-byte account (migration 0080).
+    const ACCOUNT: &str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
     let deposit = |index: i64, destination: &str, refund: &str| {
         format!(
             "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
@@ -1030,7 +1032,7 @@ async fn should_fix_the_destination_network_rules_hold_in_the_store(pool: PgPool
                  refund_destination, state, source_network, source_block_number, \
                  source_block_hash, source_position_kind, source_position_index) \
              VALUES ('bz-d-{index}', 'req-{index}', 'deposit', 'usd', 1000000, '{destination}', \
-                 '0xdest', '{refund}', '0xback', 'Received', 'polygon', 10, '\\xaa', 'log', {index})"
+                 '0x{ACCOUNT}', '{refund}', '0xback', 'Received', 'polygon', 10, '\\xaa', 'log', {index})"
         )
     };
     let refund = |index: i64, destination: &str| {
