@@ -1599,6 +1599,7 @@ fn req_rf_4_refund_mint_refuses_when_the_mint_window_would_be_exceeded() {
         .expect("in the next window");
 }
 
+/// `AC-I1.1`, `INV-3` on Kreivo: a refund mint, which the delivery key also makes, counts against the same window.
 #[test]
 fn req_rf_4_refund_mint_counts_against_the_mint_window() {
     let mut contract = redeemed();
