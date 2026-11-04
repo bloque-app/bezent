@@ -1533,6 +1533,9 @@ impl Core {
         // 2. The endpoint's preparation (F-007's `prepared_transactions`).
         // Whether the retry delay has passed is read on the store's clock, the one that stamped
         // the preparation.
+        // The current order's own row is read first, whatever rows other orders of the attempt have
+        // and whenever they arrived: a late row of an earlier order must not hide it. A resolution
+        // reads no row of an order from before it (INV-9).
         // PR #39 second review MF1 (INV-9): only a preparation on the order's own network, the
         // transfer's destination, is read; the store refuses any other (0036), and the networks
         // are compared again below before a signing intent is recorded.
@@ -1543,13 +1546,17 @@ impl Core {
              FROM prepared_transactions p JOIN intents o ON o.id = p.order_intent_id \
              WHERE o.transfer_id = $1 AND o.attempt = $2 AND o.purpose = $3 \
                AND p.network = o.network AND o.network = $5 \
-             ORDER BY p.id DESC LIMIT 1",
+               AND ($7::bigint IS NULL OR o.recorded_at >= \
+                    (SELECT recorded_at FROM manual_actions WHERE id = $7)) \
+             ORDER BY (p.order_intent_id = $6) DESC, p.id DESC LIMIT 1",
         )
         .bind(t.id)
         .bind(attempt)
         .bind(purpose)
         .bind(self.settings.retry_preparation_after.num_seconds())
         .bind(&t.destination_network)
+        .bind(order_id)
+        .bind(manual)
         .fetch_optional(&mut *conn)
         .await?;
         let Some((
@@ -2013,10 +2020,15 @@ impl Core {
     /// resume by themselves (§10), and `CND-DestinationRefused` has its own deadline.
     ///
     /// A preparation that never happens (the endpoint is down, so no row exists) has the same
-    /// deadline (issue #48), counted from the later of the attempt's clock and the order's (`ordered`).
+    /// deadline (issue #48), counted from the later of the attempt's clock and the first final head
+    /// the core saw at or after the order (`ordered`). The budget is the route's time on the
+    /// destination's clock from that head; it is not promised to be the whole of it in wall time: a
+    /// head older than the order (an observer that lags) or a stall after that head both count.
     /// Only the endpoint path in [`Core::deliver`] asks.
     ///
-    /// Not for a delivery a review resolution runs: the transfer is in review already.
+    /// A delivery a review resolution runs is not moved to review again: the transfer is in review
+    /// already. Where such an order has no preparation after the same time it pages, once per order
+    /// ([`Core::resolution_unprepared_page`]).
     async fn unprepared_deadline(
         &self,
         conn: &mut PgConnection,
@@ -2026,7 +2038,12 @@ impl Core {
         attempt: i32,
         ordered: Option<i64>,
     ) -> sqlx::Result<Did> {
-        if from == State::NeedsReview || held.is_some() || t.condition().is_some() {
+        if held.is_some() || t.condition().is_some() {
+            return Ok(Did::default());
+        }
+        // In review the transfer is not moved; only an order a resolution made, waiting for a
+        // preparation that does not come, is measured, and it pages (below).
+        if from == State::NeedsReview && ordered.is_none() {
             return Ok(Did::default());
         }
         let start = if attempt <= 1 {
@@ -2042,24 +2059,72 @@ impl Core {
         };
         let mut start = start;
         if let Some(order) = ordered {
-            // The endpoint is given the route's time from when the order was written, on the
-            // destination's clock: the latest final head the core had seen then.
+            // The endpoint is given the route's time from the first final head the core sees at or
+            // after the order, on the destination's clock. A head read before the order would count
+            // the time the head feed stood still against an endpoint that was never asked: after a
+            // stall of the route's length the first head would send a healthy order to review. No
+            // such head yet: the order has not started to age.
             let at: Option<DateTime<Utc>> = sqlx::query_scalar(
-                "SELECT max(h.block_time) FROM final_heads h JOIN intents o ON o.id = $1 \
-                 WHERE h.network = $2 AND h.seen_at <= o.recorded_at",
+                "SELECT h.block_time FROM final_heads h JOIN intents o ON o.id = $1 \
+                 WHERE h.network = $2 AND h.seen_at >= o.recorded_at \
+                 ORDER BY h.seen_at, h.block_number LIMIT 1",
             )
             .bind(order)
             .bind(&t.destination_network)
-            .fetch_one(&mut *conn)
+            .fetch_optional(&mut *conn)
             .await?;
-            start = at.map_or(start, |a| a.max(start));
+            let Some(at) = at else {
+                return Ok(Did::default());
+            };
+            start = at.max(start);
         }
         let deadline = self.deadline_held(conn, t, attempt, start).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
         };
+        if let (State::NeedsReview, Some(order)) = (from, ordered) {
+            self.resolution_unprepared_page(conn, t, attempt, order, &head)
+                .await?;
+            return Ok(Did::default());
+        }
         tracing::info!(transfer = %t.bridge_reference, attempt, "REQ-RV-1: the attempt's preparation never passed by its deadline; review");
         self.deadline_review(conn, t, t.state(), None, &head).await
+    }
+
+    /// Pages a human, once per order, when the order a review resolution made for its delivery has
+    /// had no preparation for the route's time (`unprepared_deadline` measures it): the endpoint is
+    /// down or has not answered, and the resolution cannot run. It changes nothing: the transfer is
+    /// in review already, the resolution waits for its preparation, and nothing is refunded or
+    /// failed (`REQ-RF-1`, `REQ-EO-3`). Another resolution makes another order and may page again.
+    async fn resolution_unprepared_page(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        attempt: i32,
+        order: i64,
+        head: &Point,
+    ) -> sqlx::Result<()> {
+        let order = order.to_string();
+        if store::has_event(
+            conn,
+            "resolution-unprepared-alert",
+            Some(t.id),
+            "order",
+            &order,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        let detail = json!({"spec": "REQ-EO-3", "bridge_reference": t.bridge_reference,
+                            "attempt": attempt.to_string(), "order": order,
+                            "network": t.destination_network,
+                            "head_block": head.block_number,
+                            "head_time": head.block_time.to_rfc3339()});
+        store::event(conn, "resolution-unprepared-alert", Some(t.id), &detail).await?;
+        tracing::error!(kind = %"resolution-unprepared-alert", transfer = %t.bridge_reference, %detail,
+            "page: the order of a review resolution has no preparation after the route's time; is the endpoint down? The resolution waits");
+        Ok(())
     }
 
     /// Whether a transaction on `network` never expires, so that its non-execution is proven only

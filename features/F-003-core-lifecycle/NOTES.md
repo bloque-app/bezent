@@ -166,9 +166,14 @@ Still open from the verification: F3 (an attempt ordered but never signed blocks
     waits for the allowance (no review, amendment 0012) and `CND-DestinationRefused` has its own deadline. Time spent
     under a gate counts, since §10 gives it no restart. It is never a refund or a retry on its own (`REQ-RF-1`).
     An attempt whose preparation never happens at all (the endpoint is down, so no preparation row, refused or not,
-    exists) has the same deadline (issue #48), counted from the later of the attempt's clock and the moment the
-    order was written, on the destination's clock: `deliver` asks `unprepared_deadline` where it finds an order and no
-    preparation. It is read only on the endpoint path; a backend with no endpoint has no such path. **Not ruled:** the
+    exists) has the same deadline (issue #48), counted from the later of the attempt's clock and the first final head the
+    core sees at or after the order was written, on the destination's clock (a head read before the order would count
+    a stall of the head feed against an endpoint that was never asked; the route's time is still not promised in full, since
+    a stall after that head or an observer that lags counts): `deliver` asks `unprepared_deadline` where it finds an order
+    and no preparation. It is read only on the endpoint path; a backend with no endpoint has no such path. The order's own
+    preparation is read before any other row of the attempt, so a late row of an earlier order hides nothing. A delivery a
+    review resolution runs is not sent to review again; with no preparation after the same time it pages once per order
+    (`resolution-unprepared-alert`) and changes no state. **Not ruled:** the
     never-prepared occasion is amendment 0020, proposed; pull request #71 waits for the ruling.
     **Ruled:** the §5.4 rows gain the refused-preparation occasion by amendment 0013 (SPEC v0.5.3, pull request #47).
     A resolution's delivery orders anew and never signs over a preparation of an earlier order (`INV-9`).

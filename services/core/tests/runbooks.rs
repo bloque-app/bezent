@@ -265,6 +265,7 @@ fn f_014_every_page_the_services_log_has_a_runbook_and_a_row_in_alerts() {
         "payout-window-alert",
         "payout-refusal-alert",
         "resolution-blocked-by-inclusion",
+        "resolution-unprepared-alert",
         "late-mint-prover-silent",
         "late-mint-watch-failed",
         "late-mint-check-failed",
