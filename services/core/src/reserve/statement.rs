@@ -1472,14 +1472,13 @@ fn compose(
     movements: &[Value],
 ) -> Value {
     let attested = a.positions.iter().any(super::Position::attested);
-    let parties: Vec<Value> = chain["reserve"]
-        .as_array()
-        .map(|r| {
-            r.iter()
-                .filter_map(|p| p.get("attested_by").cloned())
-                .collect()
-        })
-        .unwrap_or_default();
+    // REQ-BE-2, REQ-BE-4: the party by its declared name, whatever the terms happen to hold.
+    let parties: Vec<&str> = a
+        .positions
+        .iter()
+        .filter(|p| p.attested())
+        .filter_map(|p| p.party.as_deref())
+        .collect();
     let (recomputable, on_reports): (Vec<&str>, Vec<&str>) = if attested {
         (
             vec!["supply", "in_transit"],
@@ -1498,7 +1497,7 @@ fn compose(
             vec![],
         )
     };
-    json!({
+    let mut statement = json!({
         "statement": "bezent reserve statement",
         "version": 1,
         "asset": a.asset,
@@ -1559,7 +1558,21 @@ fn compose(
             "outcome": outcome,
         },
         "signing_key": {"scheme": "ed25519", "public_key": hex0x(public_key)},
-    })
+    });
+    // REQ-BE-4: only an attested asset's statement carries this, so a public asset's is unchanged.
+    if attested {
+        let names = if parties.is_empty() {
+            "no party declared".to_owned()
+        } else {
+            parties.join(", ")
+        };
+        statement["reserve_attested"] = json!(format!(
+            "The reserve of {} is attested: it rests on the reports of {names}, and no public \
+             data can confirm it. See rest_on_reports.",
+            a.asset
+        ));
+    }
+    statement
 }
 
 /// Why a statement does not verify.

@@ -11,7 +11,7 @@ use bezent_core_service::refs::{self, Coordinate};
 use bezent_core_service::reserve::book::{self, Cost, Report};
 use bezent_core_service::reserve::check::{Clock, Outcome};
 use bezent_core_service::reserve::coordinate_key;
-use bezent_core_service::reserve::readings::AttestedPosition;
+use bezent_core_service::reserve::readings::{AttestedPosition, AttestedSnapshot};
 use chrono::{Duration, Utc};
 use common::reserve::*;
 use common::*;
@@ -505,12 +505,15 @@ async fn req_be_6_a_reversal_not_restored_within_one_business_day_alerts(
     let (check, readings, pager) = checker(&w);
     readings.chain().attested.insert(
         ("COPM".into(), "attested-test".into()),
-        vec![AttestedPosition {
-            position: "acct-1".into(),
-            amount: "900".into(),
-            party: "swaps".into(),
-            report: "balance-7".into(),
-        }],
+        AttestedSnapshot {
+            positions: vec![AttestedPosition {
+                position: "acct-1".into(),
+                amount: "900".into(),
+                party: "swaps".into(),
+                report: "balance-7".into(),
+            }],
+            ..AttestedSnapshot::default()
+        },
     );
     let e = check.evaluate("COPM", later).await.unwrap();
     assert_eq!(e.outcome, Outcome::Holds, "{:?}", e.differences);

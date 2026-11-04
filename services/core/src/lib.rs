@@ -19,8 +19,10 @@
 //!   statement.
 //! - [`signals`] (`F-014`): a key-compromise alert raised by the signer or an endpoint, put in front of a human.
 //! - [`observe`] (`F-014`): the observables of `REQ-ST-6`, written once a minute for the alarms.
+//! - [`attested`] (`F-011`): an attesting party's reports become observations.
 //! - [`config`]: the configuration file.
 
+pub mod attested;
 pub mod config;
 pub mod cutoff;
 pub mod engine;

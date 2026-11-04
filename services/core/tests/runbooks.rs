@@ -200,8 +200,9 @@ fn req_ic_6_each_incident_requirement_is_answered_by_a_runbook() {
 }
 
 /// Every kind the services log as a page, from the places that emit one: a `Page { kind: "…" }`,
-/// and the first lines of a `tracing::error!(` call (`kind = %"…"`, or a quoted one, which
-/// `pages.rs` refuses).
+/// the first lines of a `tracing::error!(` call (`kind = %"…"`, or a quoted one, which `pages.rs`
+/// refuses), and the kind literal a call of the engine's `page_held` passes (F-011: it logs the
+/// kind it is given, so its callers name the pages).
 fn page_kinds_in_source() -> BTreeSet<String> {
     let mut files = Vec::new();
     for service in [
@@ -224,6 +225,7 @@ fn page_kinds_in_source() -> BTreeSet<String> {
         for (site, window, opens) in [
             ("Page {", 3, ["kind: \"", "kind: \""]),
             ("tracing::error!(", 2, ["kind = %\"", "kind = \""]),
+            ("self.page_held(", 5, ["\"", "\""]),
         ] {
             let mut rest = src.as_str();
             while let Some(at) = rest.find(site) {
@@ -268,6 +270,10 @@ fn f_014_every_page_the_services_log_has_a_runbook_and_a_row_in_alerts() {
         "late-mint-prover-silent",
         "late-mint-watch-failed",
         "late-mint-check-failed",
+        "attested-withdrawal-unrelayed",
+        "attested-withdrawal-awaiting-head",
+        "attested-report-refused",
+        "attested-instructions-refused",
     ] {
         assert!(
             in_source.contains(k),

@@ -744,9 +744,16 @@ async fn withdrawal(
     reference: &str,
     commitment: Option<&str>,
 ) {
+    // As the Kreivo endpoint records it (`payout_json`).
     let detail = match commitment {
-        Some(c) => json!({ "commitment": c }),
+        Some(c) => json!({ "payout": { "commitment": c } }),
         None => json!({}),
+    };
+    let network = if asset == ATTESTED {
+        attested_backend(pool).await;
+        ATTESTED_NETWORK
+    } else {
+        ORIGIN
     };
     sqlx::query(
         "INSERT INTO observations (network, block_number, block_hash, block_time, position_kind, \
@@ -773,7 +780,7 @@ async fn withdrawal(
     .bind(ISSUING)
     .bind(asset)
     .bind(reference)
-    .bind(ORIGIN)
+    .bind(network)
     .bind(ORIGIN_ADDRESS)
     .bind(block)
     .execute(pool)
@@ -912,17 +919,18 @@ async fn req_rq_4_extras_of_an_attested_backend_need_the_attesting_grant(pool: P
         "INSERT INTO requester_grants (requester, grant_kind) VALUES ('beta', 'withdrawal')",
     )
     .await;
-    withdrawal(
-        &pool,
-        1,
-        ATTESTED,
-        "b1",
-        Some(&format!("0x{}", "11".repeat(32))),
-    )
-    .await;
+    let instructions = b"\x04bank-account-and-reference";
+    let commitment = {
+        use blake2::Digest;
+        hex::encode(blake2::Blake2b::<blake2::digest::consts::U32>::digest(
+            instructions,
+        ))
+    };
+    withdrawal(&pool, 1, ATTESTED, "b1", Some(&format!("0x{commitment}"))).await;
     let extras = json!({
         "request_reference": "x-1",
         "redemption_reference": "0xb1",
+        "instructions": format!("0x{}", hex::encode(instructions)),
         "expires_at": "2026-12-01T00:00:00Z",
     });
     let (status, answer) = ingress.post("/v0/withdrawals/extras", BETA, &extras).await;
@@ -930,9 +938,28 @@ async fn req_rq_4_extras_of_an_attested_backend_need_the_attesting_grant(pool: P
     assert_eq!(answer["error"], "ERR-NotAuthorised");
     assert_eq!(count(&pool, "intake").await, 0);
 
+    // REQ-RQ-4, REQ-RQ-9: extras are written once, and an attested redemption's write is its
+    // instructions. An expiry alone would spend it, and the instructions after it would be
+    // ERR-ReferenceConflict, with the withdrawal waiting for them. Refused, with
+    // nothing recorded: the reference is not spent either.
+    let expiry_only = json!({
+        "request_reference": "x-0",
+        "redemption_reference": "0xb1",
+        "expires_at": "2026-12-01T00:00:00Z",
+    });
+    let (status, answer) = ingress
+        .post("/v0/withdrawals/extras", ALPHA, &expiry_only)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(answer["error"], "ERR-Malformed");
+    assert_eq!(count(&pool, "intake").await, 0);
+
     let (status, answer) = ingress.post("/v0/withdrawals/extras", ALPHA, &extras).await;
     assert_eq!(status, StatusCode::CREATED, "{answer}");
     assert!(answer.get("error").is_none(), "{answer}");
+    assert_eq!(count(&pool, "relayed_instructions").await, 1);
+    let (_, status) = ingress.get("/v0/transfers/by-bridge/bz-w-b1", ALPHA).await;
+    assert_eq!(status["expires_at"], "2026-12-01T00:00:00Z");
 }
 
 /// `ERR-Malformed` (§10): a request that does not parse, or lacks a field its kind requires.
@@ -1100,7 +1127,8 @@ async fn req_id_4_a_second_requesters_extras_on_one_redemption_are_refused_and_s
         ))
     };
     withdrawal(&pool, 1, ASSET, "a1", None).await;
-    withdrawal(&pool, 2, ATTESTED, "b1", Some(&format!("0x{commitment}"))).await;
+    withdrawal(&pool, 2, ASSET, "a3", None).await;
+    withdrawal(&pool, 3, ATTESTED, "b1", Some(&format!("0x{commitment}"))).await;
     let relayed = format!("0x{}", hex::encode(instructions));
 
     // The review's reproduction: both withdrawals are held while two requesters send extras for
@@ -1123,13 +1151,13 @@ async fn req_id_4_a_second_requesters_extras_on_one_redemption_are_refused_and_s
         ),
         (
             ALPHA,
-            json!({ "request_reference": "i-a", "redemption_reference": "0xb1",
-                "instructions": relayed }),
+            json!({ "request_reference": "y-a", "redemption_reference": "0xa3",
+                "expires_at": "2026-12-01T00:00:00Z" }),
         ),
         (
             BETA,
-            json!({ "request_reference": "i-b", "redemption_reference": "0xb1",
-                "instructions": relayed }),
+            json!({ "request_reference": "y-b", "redemption_reference": "0xa3",
+                "expires_at": "2027-01-01T00:00:00Z" }),
         ),
     ];
     let mut tasks = Vec::new();
@@ -1151,7 +1179,7 @@ async fn req_id_4_a_second_requesters_extras_on_one_redemption_are_refused_and_s
         assert_eq!(status, StatusCode::CREATED, "{answer}");
         answers.push(answer);
     }
-    for (pair, reference) in [([0, 1], "bz-w-a1"), ([2, 3], "bz-w-b1")] {
+    for (pair, reference) in [([0, 1], "bz-w-a1"), ([2, 3], "bz-w-a3")] {
         let won: Vec<usize> = pair
             .into_iter()
             .filter(|&i| answers[i].get("error").is_none())
@@ -1186,6 +1214,28 @@ async fn req_id_4_a_second_requesters_extras_on_one_redemption_are_refused_and_s
         assert_eq!(status, StatusCode::OK);
     }
 
+    // An attested backend's extras are only its party's, grant or not (REQ-RQ-4; F-011): the
+    // second requester holds the attesting grant and is refused, with nothing recorded.
+    let relay = |credential, reference: &str| {
+        (
+            credential,
+            json!({ "request_reference": reference, "redemption_reference": "0xb1",
+                    "instructions": relayed }),
+        )
+    };
+    let (credential, body) = relay(BETA, "i-b");
+    let (status, answer) = ingress
+        .post("/v0/withdrawals/extras", credential, &body)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
+    assert_eq!(answer["error"], "ERR-NotAuthorised");
+    let (credential, body) = relay(ALPHA, "i-a");
+    let (status, answer) = ingress
+        .post("/v0/withdrawals/extras", credential, &body)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["bridge_reference"], "bz-w-b1");
+
     // The store holds one answer per withdrawal, and one relay of the instructions.
     let linked: i64 = scalar(
         &pool,
@@ -1193,7 +1243,7 @@ async fn req_id_4_a_second_requesters_extras_on_one_redemption_are_refused_and_s
          WHERE t.kind = 'withdrawal'",
     )
     .await;
-    assert_eq!(linked, 2);
+    assert_eq!(linked, 3);
     assert_eq!(count(&pool, "relayed_instructions").await, 1);
     // Only the winner's field was written on the public withdrawal.
     let expiry: String = scalar(
@@ -1206,6 +1256,52 @@ async fn req_id_4_a_second_requesters_extras_on_one_redemption_are_refused_and_s
         ["2026", "2027"].contains(&expiry.as_str()),
         "one requester wrote the withdrawal: {expiry}"
     );
+}
+
+/// `REQ-RQ-4`, `REQ-ID-4`: the party's own two relays of one commitment, racing on the row lock:
+/// one wins, the other is a named refusal, and one relay is kept (the race of the review above, on
+/// an attested backend, where only the party may relay).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rq_4_two_relays_of_one_commitment_race_to_one(pool: PgPool) {
+    let ingress = std::sync::Arc::new(Ingress::new(&pool).await);
+    let instructions = b"\x04bank-account-and-reference";
+    let commitment = {
+        use blake2::Digest;
+        hex::encode(blake2::Blake2b::<blake2::digest::consts::U32>::digest(
+            instructions,
+        ))
+    };
+    withdrawal(&pool, 1, ATTESTED, "b1", Some(&format!("0x{commitment}"))).await;
+    let relayed = format!("0x{}", hex::encode(instructions));
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM transfers WHERE kind = 'withdrawal' FOR UPDATE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let mut tasks = Vec::new();
+    for reference in ["i-1", "i-2"] {
+        let ingress = std::sync::Arc::clone(&ingress);
+        let body = json!({ "request_reference": reference, "redemption_reference": "0xb1",
+                           "instructions": relayed });
+        tasks.push(tokio::spawn(async move {
+            ingress.post("/v0/withdrawals/extras", ALPHA, &body).await
+        }));
+    }
+    until_waiting_on_locks(&pool, 2).await;
+    holder.commit().await.unwrap();
+    let mut refused = 0;
+    for t in tasks {
+        let (status, answer) = t.await.unwrap();
+        assert_eq!(status, StatusCode::CREATED, "{answer}");
+        if answer.get("error").is_some() {
+            assert_refused(&answer, "ERR-ReferenceConflict");
+            refused += 1;
+        } else {
+            assert_eq!(answer["bridge_reference"], "bz-w-b1");
+        }
+    }
+    assert_eq!(refused, 1);
+    assert_eq!(count(&pool, "relayed_instructions").await, 1);
 }
 
 // --- REQ-LM-2 --------------------------------------------------------------------------------

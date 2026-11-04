@@ -10,6 +10,7 @@ use crate::api::{
     WithdrawalExtrasRequest,
 };
 use crate::error::ErrorBody;
+use crate::reports::{ReportEnvelope, ReportStatus};
 use crate::webhooks::api::{
     CallbackRegistration, ConditionCallback, DeliveryList, DeliveryOut, TransferCallback,
     WebhookSecret,
@@ -61,6 +62,7 @@ impl Modify for Bearer {
         crate::intake::deposit,
         crate::intake::withdrawal_extras,
         crate::intake::refund,
+        crate::reports::report,
         crate::query::by_request,
         crate::query::by_bridge,
         crate::query::by_coordinate,
@@ -77,6 +79,7 @@ impl Modify for Bearer {
     components(schemas(
         CapacityOut, CoordinateBody, CoordinateOut, DepositRequest, DestinationBody, ErrorBody,
         Health, LogEntry, LogPage, Milestone, PositionBody, PositionKind, RefundRequest,
+        ReportEnvelope, ReportStatus,
         ReserveEquation, ReserveOut, Reserves, RouteOut, RouteTable, TransferList, TransferStatus,
         WindowOut, WithdrawalExtrasRequest, CallbackRegistration, ConditionCallback, DeliveryList,
         DeliveryOut, TransferCallback, WebhookSecret,

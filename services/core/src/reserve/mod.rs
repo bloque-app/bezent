@@ -97,6 +97,8 @@ pub struct Position {
     pub address: String,
     /// `evm:<chain id>` or `attested:<id>` (`networks.backend`).
     pub backend: Option<String>,
+    /// The attesting party of an attested backend, as declared (`REQ-BE-2`, `attesting_parties`).
+    pub party: Option<String>,
     /// The origin token admitted for the asset on this network, with its precision.
     pub token: Option<(String, i16)>,
     /// The addresses the operator declared it funds this reserve from (`REQ-BK-5`): a final
@@ -209,11 +211,13 @@ impl Asset {
             Option<String>,
             Option<i16>,
             bool,
+            Option<String>,
         )> = sqlx::query_as(
             "SELECT r.network, r.address, n.backend, k.token, k.precision, \
-                    n.address_format = 'evm' \
+                    n.address_format = 'evm', p.party \
              FROM reserves r JOIN networks n ON n.network = r.network \
              LEFT JOIN admitted_tokens k ON k.network = r.network AND k.asset = r.asset \
+             LEFT JOIN attesting_parties p ON p.network = r.network \
              WHERE r.asset = $1 ORDER BY r.network, k.token",
         )
         .bind(&asset)
@@ -237,21 +241,24 @@ impl Asset {
         .await?;
         let positions = rows
             .into_iter()
-            .map(|(network, address, backend, token, p, evm)| Position {
-                funding: funding
-                    .iter()
-                    .filter(|(n, _, _)| *n == network)
-                    .map(|(_, a, b)| Funding {
-                        address: a.clone(),
-                        from_block: *b,
-                    })
-                    .collect(),
-                evm,
-                network,
-                address,
-                backend,
-                token: token.zip(p),
-            })
+            .map(
+                |(network, address, backend, token, p, evm, party)| Position {
+                    party,
+                    funding: funding
+                        .iter()
+                        .filter(|(n, _, _)| *n == network)
+                        .map(|(_, a, b)| Funding {
+                            address: a.clone(),
+                            from_block: *b,
+                        })
+                        .collect(),
+                    evm,
+                    network,
+                    address,
+                    backend,
+                    token: token.zip(p),
+                },
+            )
             .collect();
         let levels_declared = floor.is_some() && alert.is_some();
         let floor: u128 = floor.and_then(|f| f.parse().ok()).unwrap_or(0);

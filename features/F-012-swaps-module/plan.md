@@ -29,8 +29,9 @@ bezent's core is ready.
 
 ## Not now
 
-Attested reports (`F-011`, `M-3`); the full-chain job; client-facing API changes (none intended: the module is
-internal to Swaps).
+Attested reports (`F-011`, `M-3`; what they must send is in `attesting-contract.md`, and bezent's own suite drives that
+surface meanwhile, `RISK-8`); the full-chain job; client-facing API changes (none intended: the module is internal to
+Swaps).
 
 ## Done when
 

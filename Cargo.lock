@@ -1832,6 +1832,7 @@ dependencies = [
  "bs58",
  "chacha20poly1305",
  "chrono",
+ "ed25519-dalek",
  "getrandom 0.3.4",
  "hex",
  "hmac 0.12.1",
@@ -1906,6 +1907,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "axum",
+ "bezent-core",
  "bezent-core-service",
  "bezent-evm-endpoint",
  "bezent-ingress",
@@ -1913,6 +1915,7 @@ dependencies = [
  "bezent-signer",
  "bezent-store",
  "chrono",
+ "ed25519-dalek",
  "hex",
  "http-body-util",
  "serde",

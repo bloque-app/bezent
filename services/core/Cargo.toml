@@ -51,6 +51,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # The ingress's router, for the seam between a deposit request and the mint (tests/conversions.rs,
 # as the kreivo-endpoint's tests take the core for the two-step delivery): the request goes in
 # through the real ingress, on its own login, and the core mints from what the store then holds.
+# Also the attesting party of F-011, which drives the real request surface (RISK-8; tests/attested.rs).
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 bezent-ingress = { path = "../ingress" }
 http-body-util = "0.1"

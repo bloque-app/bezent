@@ -31,6 +31,7 @@ use crate::refs;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
+use bezent_core::attested::REPORT_POSITION_INDEX;
 use bezent_core::{Coordinate, Position};
 use bezent_core::{Listing, listing};
 use serde::Serialize;
@@ -70,12 +71,12 @@ enum Outcome {
 type Answer = Result<(StatusCode, Json<TransferStatus>), ApiError>;
 
 /// Records the request, or finds the one it repeats (`REQ-ID-1`).
-enum Recorded {
+pub(crate) enum Recorded {
     New(i64),
     Repeat(i64),
 }
 
-async fn record(
+pub(crate) async fn record(
     tx: &mut PgConnection,
     requester: &str,
     kind: &str,
@@ -298,8 +299,24 @@ async fn source(
     .bind(kind)
     .bind(index)
     .bind(purpose.as_str())
-    .fetch_optional(conn)
+    .fetch_optional(&mut *conn)
     .await?;
+    // An attested backend's arrival is taken in as a report before the core records it as the
+    // observation (REQ-BE-5): not final yet, never "nothing there", so the reference is not spent.
+    if row.is_none() {
+        let reported: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM attested_reports \
+               WHERE network = $1 AND seq = $2 AND digest = $3 AND kind = 'arrival')",
+        )
+        .bind(c.network.as_str())
+        .bind(block_number(c)?)
+        .bind(c.block_hash.as_bytes())
+        .fetch_one(conn)
+        .await?;
+        if reported && kind == "log" && index == i64::from(REPORT_POSITION_INDEX) {
+            return Ok(Source::NotFinal);
+        }
+    }
     Ok(match row {
         Some((Some(token), Some(amount), Some(recipient), Some(outcome), true))
             if outcome == "final" =>
@@ -313,6 +330,21 @@ async fn source(
         Some((_, _, _, None, true)) => Source::NotFinal,
         _ => Source::None,
     })
+}
+
+/// Whether the attested arrival at `c` was reversed and not restored. WORKING ASSUMPTION, amendment
+/// 0016 A3, proposed and not ruled: such an arrival binds nothing (`ERR-SourceConsumed`), since
+/// minting against a payment known reversed spends surplus for nothing. The store refuses the
+/// binding too (0107).
+async fn reversed(conn: &mut PgConnection, c: &Coordinate) -> Result<bool, ApiError> {
+    Ok(
+        sqlx::query_scalar("SELECT attested_arrival_reversed($1, $2, $3)")
+            .bind(c.network.as_str())
+            .bind(block_number(c)?)
+            .bind(c.block_hash.as_bytes())
+            .fetch_one(conn)
+            .await?,
+    )
 }
 
 /// Whether the arrival at `c` is from an address the operator declared it funds `asset`'s
@@ -658,6 +690,9 @@ async fn decide_deposit(
         Source::NotFinal => return Ok(Outcome::NotFinal),
         Source::None => return Ok(Outcome::Refused(SOURCE_NOT_FOUND)),
     };
+    if reversed(conn, c).await? {
+        return Ok(Outcome::Refused(SOURCE_CONSUMED));
+    }
     let Some(asset) = admitted_asset(conn, network, &arrival.token).await? else {
         return Ok(Outcome::Refused(UNKNOWN_ROUTE));
     };
@@ -804,6 +839,9 @@ async fn decide_refund(
         Source::NotFinal => return Ok(Outcome::NotFinal),
         Source::None => return Ok(Outcome::Refused(SOURCE_NOT_FOUND)),
     };
+    if reversed(conn, c).await? {
+        return Ok(Outcome::Refused(SOURCE_CONSUMED));
+    }
     let at_reserve: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM reserves WHERE network = $1 AND address = $2)",
     )
@@ -911,6 +949,8 @@ struct Withdrawal {
     assurance_class: String,
     commitment: Option<String>,
     has_extras: bool,
+    /// Whether the requester is the attesting party of the withdrawal's backend (`REQ-RQ-4`).
+    attesting: bool,
 }
 
 async fn decide_extras(
@@ -939,26 +979,46 @@ async fn decide_extras(
         return Ok(Outcome::Refused(SOURCE_NOT_FOUND));
     };
     // With the commitment its redemption carried: the redemption's observation records it in the
-    // network's own data (REQ-ST-3).
+    // network's own data, under the redemption's payout (REQ-ST-3; the Kreivo endpoint's
+    // `payout_json`).
     let w: Withdrawal = sqlx::query_as(
         "SELECT t.id, is_terminal_state(t.state) AS terminal, \
                 t.expires_at IS NOT NULL AS has_expiry, a.assurance_class, \
-                (SELECT o.detail ->> 'commitment' FROM observations o \
+                (SELECT o.detail -> 'payout' ->> 'commitment' FROM observations o \
                    WHERE o.network = t.source_network AND o.block_number = t.source_block_number \
                      AND o.block_hash = t.source_block_hash \
                      AND o.position_kind = t.source_position_kind \
                      AND o.position_index = t.source_position_index) AS commitment, \
-                EXISTS (SELECT 1 FROM intake_answers x WHERE x.transfer_id = t.id) AS has_extras \
+                EXISTS (SELECT 1 FROM intake_answers x WHERE x.transfer_id = t.id) AS has_extras, \
+                EXISTS (SELECT 1 FROM attesting_parties p \
+                        WHERE p.network = t.destination_network AND p.requester = $2) AS attesting \
          FROM transfers t JOIN assets a ON a.asset = t.asset \
          WHERE t.id = $1",
     )
     .bind(id)
+    .bind(&who.name)
     .fetch_one(&mut *conn)
     .await?;
-    // For an attested backend only the requester holding the attesting grant may add extras
-    // (REQ-RQ-4, REQ-PN-2). Nothing is recorded: the request is not this requester's to make.
+    // For an attested backend only the requester holding that backend's attesting grant may add
+    // extras (REQ-RQ-4, REQ-PN-2). Nothing is recorded: the request is not this requester's to make.
     if w.assurance_class == "attested" {
         who.require(Grant::Attest)?;
+        if !w.attesting {
+            return Err(ApiError::NotAuthorised);
+        }
+        // Extras are written once (REQ-RQ-4), and an attested redemption's one write is the
+        // instructions its commitment stands for (REQ-RQ-9). An expiry alone would spend the
+        // only write, and the instructions after it would be a different body for the same
+        // redemption (`ERR-ReferenceConflict`) while the withdrawal waits for them. Nothing is
+        // recorded, so the request reference is not spent (`ERR-Malformed`: lacks a field its
+        // kind requires).
+        if request.instructions.is_none() {
+            return Err(ApiError::Malformed(
+                "an attested backend's extras carry the instructions, with or without an expiry \
+                 (REQ-RQ-4, REQ-RQ-9)"
+                    .into(),
+            ));
+        }
     }
     // Never to a finished withdrawal.
     if w.terminal {

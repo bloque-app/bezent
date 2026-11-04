@@ -59,6 +59,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "admitted_tokens",
             "assets",
             "attempt_milestones",
+            "attested_reports",
+            "attesting_keys",
+            "attesting_parties",
             "book_balances",
             "book_entries",
             "book_postings",
@@ -138,6 +141,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "attempt_proof(bigint,integer)",
             "attempts_unproven(bigint)",
             "bezent_applied_migrations()",
+            // A report becomes an observation only through it (0105): no write on the chain tables.
+            "bezent_record_attested_observation(bigint)",
+            "attested_arrival_reversed(text,bigint,bytea)",
             "bezent_writer_holds(text,oid)",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
@@ -156,6 +162,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "admitted_tokens",
             "assets",
             "attempt_milestones",
+            "attested_reports",
+            "attesting_keys",
+            "attesting_parties",
             "book_balances",
             "event_log",
             "event_log_head",
@@ -188,6 +197,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         crate::INGRESS_ROLE,
         "INSERT",
         &[
+            "attested_reports",
             "event_log",
             "intake",
             "intake_answers",
@@ -204,6 +214,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         crate::INGRESS_ROLE,
         "EXECUTE",
         &[
+            "attested_arrival_reversed(text,bigint,bytea)",
             "bezent_applied_migrations()",
             "bezent_writer_holds(text,oid)",
             "funding_arrival(text,text,text,bigint)",
@@ -303,6 +314,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         "SELECT",
         &[
             "admin_actions",
+            "attested_reports",
             "book_quarantine",
             "event_log",
             "ledger_accounts",

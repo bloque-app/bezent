@@ -194,6 +194,10 @@ fn gate_condition(c: Condition) -> bool {
     )
 }
 
+/// The event that records when an attempt was handed to an attesting party, and by which head
+/// (`Core::hand_over`): the attempt's clock on an attested backend.
+const HANDED_OVER: &str = "attested-handed-over";
+
 /// The Roles modifier's `Status.AllowanceExceeded` (Zodiac Roles v2): the status of its
 /// `ConditionViolation(uint8 status, bytes32 info)` when a call is over an allowance, whose key is
 /// `info`.
@@ -282,6 +286,11 @@ impl Core {
     /// One cycle at wall-clock time `now`: withdrawals from new redemptions, then a step for every
     /// open transfer, then the per-(asset, network) conditions raised and cleared.
     pub async fn cycle(&self, now: DateTime<Utc>) -> sqlx::Result<Report> {
+        // F-011: an attesting party's reports become observations first (REQ-BE-5); a store that
+        // cannot answer stops nothing else.
+        if let Err(e) = crate::attested::record_pending(&self.pool).await {
+            tracing::warn!(error = %e, "REQ-BE-5: pending reports not recorded; the cycle goes on");
+        }
         // F-004: every final movement is in the book before anything reads it (REQ-BK-7). An
         // observation the book cannot post is quarantined and paged there; nothing it does stops
         // the cycle (INV-1, review M1).
@@ -365,33 +374,48 @@ impl Core {
         // The backend the redemption names, as the endpoint records it (F-007): {"kind", "chain_id"
         // or "id"}, mapped to an origin network by declaration.
         let backend = &o.detail["backend"];
-        let backend = match (backend["kind"].as_str(), backend["chain_id"].as_u64()) {
-            (Some("evm"), Some(id)) => format!("evm:{id}"),
+        let (backend, destination) = match (backend["kind"].as_str(), backend["chain_id"].as_u64())
+        {
+            (Some("evm"), Some(id)) => {
+                // A public backend's payout instructions are inline: the beneficiary's address
+                // (REQ-RQ-9, REQ-OT-4).
+                let Some(address) = o.detail["payout"].get("address").and_then(Value::as_str)
+                else {
+                    tracing::warn!(
+                        observation = o.id,
+                        "a redemption to a public backend with no payout address; no withdrawal"
+                    );
+                    return Ok(false);
+                };
+                (format!("evm:{id}"), address.to_owned())
+            }
             (Some("attested"), _) => {
                 // REQ-RQ-9: an attested backend's redemption carries only a commitment, never an
-                // address; its payout is the requester's, reported against the relayed
-                // instructions, not an EVM payout. A commitment never becomes a destination
-                // (review S2), so the core makes no payout from it.
-                tracing::warn!(
-                    observation = o.id,
-                    "a redemption to an attested backend; no EVM payout is made from a commitment"
-                );
-                return Ok(false);
+                // address. The withdrawal is made, so the requester can relay its instructions, and
+                // its destination is the commitment, marked: nothing is ever ordered or signed for
+                // it (review S2; `deliver` returns first, and the store refuses an order there).
+                let commitment = o.detail["payout"]
+                    .get("commitment")
+                    .and_then(Value::as_str)
+                    .filter(|c| {
+                        c.strip_prefix("0x")
+                            .and_then(|h| hex::decode(h).ok())
+                            .is_some_and(|b| b.len() == 32)
+                    });
+                let (Some(id), Some(commitment)) = (o.detail["backend"]["id"].as_u64(), commitment)
+                else {
+                    tracing::warn!(
+                        observation = o.id,
+                        "a redemption to an attested backend with no 32-byte commitment; no withdrawal"
+                    );
+                    return Ok(false);
+                };
+                (
+                    format!("attested:{id}"),
+                    bezent_core::attested::commitment_destination(commitment),
+                )
             }
             _ => return Ok(false),
-        };
-        // A public backend's payout instructions are inline: the beneficiary's address (REQ-RQ-9,
-        // REQ-OT-4).
-        let Some(destination) = o.detail["payout"]
-            .get("address")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        else {
-            tracing::warn!(
-                observation = o.id,
-                "a redemption to a public backend with no payout address; no withdrawal"
-            );
-            return Ok(false);
         };
         let row: Option<(String, String, i16, i16)> = sqlx::query_as(
             "SELECT a.asset, n.network, a.precision, t.precision FROM assets a \
@@ -946,6 +970,20 @@ impl Core {
         Ok(())
     }
 
+    /// Whether `t`'s destination is an attested backend (`REQ-BE-2`).
+    async fn attested_destination(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+    ) -> sqlx::Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM networks WHERE network = $1 AND backend LIKE 'attested:%')",
+        )
+        .bind(&t.destination_network)
+        .fetch_one(conn)
+        .await
+    }
+
     /// `Source-Final`: the gates, then the first delivery attempt; or review when a condition that
     /// blocks delivery is past its deadline (§5.4, `REQ-IN-9`, `REQ-CV-6`).
     async fn source_final(
@@ -954,6 +992,20 @@ impl Core {
         t: &Transfer,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
+        // A fiat payout the party already reported (F-011 NOTES 10): the gates are before a payout,
+        // and this one is done. The reserve the check below would read has already lost this
+        // transfer's own amount, so it would raise a `CND-ReserveShort` nothing ever clears
+        // (`REQ-OT-5`). Any gate condition it still holds clears, and it goes on to its leg.
+        if self.attested_destination(conn, t).await?
+            && matches!(self.destination_leg(conn, t).await?, Leg::One(_))
+        {
+            if t.condition().is_some_and(gate_condition) {
+                return self.hold(conn, t, None).await;
+            }
+            return self
+                .deliver(conn, t, State::SourceFinal, 1, None, None)
+                .await;
+        }
         if let Some(c) = t.condition().filter(|c| c.blocks_delivery()) {
             let start = t.source_final_block_time.unwrap_or(now);
             let deadline = self.deadline(conn, t, start).await?;
@@ -1058,6 +1110,22 @@ impl Core {
         attempt: i32,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Option<Condition>> {
+        // WORKING ASSUMPTION, amendment 0016 A3, proposed and not ruled: an arrival reversed and not
+        // restored mints nothing and refunds nothing while it stands; it clears by the restoration.
+        if t.refund_of.is_none()
+            && t.kind != "withdrawal"
+            && let Some(source) = t.source()
+        {
+            let reversed: bool = sqlx::query_scalar("SELECT attested_arrival_reversed($1, $2, $3)")
+                .bind(&source.network)
+                .bind(source.block_number)
+                .bind(&source.block_hash)
+                .fetch_one(&mut *conn)
+                .await?;
+            if reversed {
+                return Ok(Some(Condition::Paused));
+            }
+        }
         let Some((asset, network, direction)) = t.route() else {
             return Ok(None);
         };
@@ -1496,6 +1564,10 @@ impl Core {
             tracing::error!(transfer = %t.bridge_reference, "no destination reference; nothing is delivered (REQ-OT-2)");
             return Ok(Did::default());
         };
+        // REQ-RQ-9, DEC-14: bezent signs nothing on an attested backend (F-011 NOTES 10).
+        if self.attested_destination(conn, t).await? {
+            return self.hand_over(conn, t, from, attempt, point, manual).await;
+        }
         let scope = scope.as_deref();
         let (purpose, _) = purpose(t);
         let Some((order, amount)) = self.order(conn, t).await? else {
@@ -1676,6 +1748,193 @@ impl Core {
         )
         .await?;
         Ok(Did::moved())
+    }
+
+    /// Delivery attempt `attempt` on an attested backend: handed to the attesting party, with nothing
+    /// ordered or signed. WORKING ASSUMPTION, amendment 0016 A1, proposed and not ruled: `Delivering`
+    /// also means the relayed instructions were accepted (§5.4; F-011 NOTES 10).
+    ///
+    /// A withdrawal waits for its instructions, and they are checked here again against the
+    /// commitment its redemption carried, whatever the ingress recorded (`REQ-RQ-9`): a row that
+    /// misses it pages once and hands nothing over. The refund of an unassociated arrival names its
+    /// destination in its request, so it has nothing to wait for. The store holds the same rule
+    /// (`bezent_attested_hand_over_open`).
+    async fn hand_over(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        from: State,
+        attempt: i32,
+        point: Option<&Point>,
+        manual: Option<i64>,
+    ) -> sqlx::Result<Did> {
+        if t.kind == "withdrawal" {
+            let relayed: Option<(Vec<u8>, Option<String>)> = sqlx::query_as(
+                "SELECT r.instructions, \
+                        (SELECT o.detail -> 'payout' ->> 'commitment' FROM observations o \
+                         WHERE o.network = t.source_network \
+                           AND o.block_number = t.source_block_number \
+                           AND o.block_hash = t.source_block_hash \
+                           AND o.position_kind = t.source_position_kind \
+                           AND o.position_index = t.source_position_index) \
+                 FROM relayed_instructions r JOIN transfers t ON t.id = r.transfer_id \
+                 WHERE r.transfer_id = $1",
+            )
+            .bind(t.id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let Some((instructions, commitment)) = relayed else {
+                // Nobody relays for it: it waits, and a page says so once it has waited the
+                // route's budget (F-011 NOTES 10). Its state is not changed: whether it goes to
+                // review is unruled (amendment 0016, "A withdrawal nobody relays for").
+                if from == State::SourceFinal {
+                    self.page_held(
+                        conn,
+                        t,
+                        "attested-withdrawal-unrelayed",
+                        "a redemption on an attested backend is final and nobody has relayed its instructions; its value is destroyed and nothing moves it",
+                    )
+                    .await?;
+                }
+                return Ok(Did::default());
+            };
+            let digest = hex0x(&bezent_core::attested::instructions_commitment(
+                &instructions,
+            ));
+            if commitment.as_deref() != Some(digest.as_str()) {
+                if !store::has_event(
+                    conn,
+                    "attested-instructions-refused",
+                    Some(t.id),
+                    "bridge_reference",
+                    &t.bridge_reference,
+                )
+                .await?
+                {
+                    store::event(
+                        conn,
+                        "attested-instructions-refused",
+                        Some(t.id),
+                        &json!({"spec": "REQ-RQ-9", "bridge_reference": t.bridge_reference}),
+                    )
+                    .await?;
+                    tracing::error!(kind = %"attested-instructions-refused", transfer = %t.bridge_reference,
+                        "page: relayed instructions on record do not hash to the redemption's commitment; nothing is handed over");
+                }
+                return Ok(Did::default());
+            }
+        }
+        // The attempt's clock starts here, at the attested network's final head (F-011 NOTES 10):
+        // not at the source leg's finality, which a late relay or a late release has long passed,
+        // and not at the point the transition rests on, which a review resolution takes from its
+        // evidence. Without a head there is no clock to record, and an attempt with no recorded
+        // hand-over time can never be proven not executed or refunded (`after_proof`), so it is
+        // not handed over until the attested network has a head.
+        let Some(head) = store::latest_head(conn, &t.destination_network).await? else {
+            // The instructions are relayed and the value is destroyed, and the wait for the party's
+            // first report is the other silence: one page after the route's budget, on the issuing
+            // network's clock (this wait has no clock of its own), state unchanged, so the first
+            // head still hands it over (amendment 0016, "A withdrawal nobody relays for").
+            if t.kind == "withdrawal" && from == State::SourceFinal {
+                self.page_held(
+                    conn,
+                    t,
+                    "attested-withdrawal-awaiting-head",
+                    "a redemption on an attested backend is final, its instructions are relayed and its value is destroyed, but the attested network has no final head, so nothing can be handed over",
+                )
+                .await?;
+            }
+            return Ok(Did::default());
+        };
+        store::append(
+            conn,
+            t.id,
+            &Move {
+                from,
+                to: State::Delivering,
+                condition: None,
+                point,
+                attempt: Some(attempt),
+                manual_action: manual,
+            },
+        )
+        .await?;
+        store::event(
+            conn,
+            HANDED_OVER,
+            Some(t.id),
+            &json!({"spec": "REQ-RF-5, F-011 NOTES 10", "bridge_reference": t.bridge_reference,
+                    "attempt": attempt, "network": head.network,
+                    "head_block": head.block_number,
+                    "head_time": head.block_time.to_rfc3339()}),
+        )
+        .await?;
+        Ok(Did::moved())
+    }
+
+    /// When attempt `attempt` of `t` was handed to the attesting party, by the attested network's
+    /// clock (the head it was handed over at, the first time it was); `None` for a transfer never
+    /// handed over.
+    async fn handed_over_at(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        attempt: i32,
+    ) -> sqlx::Result<Option<DateTime<Utc>>> {
+        let at: Option<String> = sqlx::query_scalar(
+            "SELECT payload ->> 'head_time' FROM event_log \
+             WHERE kind = $1 AND transfer_id = $2 AND (payload ->> 'attempt')::int = $3 \
+             ORDER BY seq ASC LIMIT 1",
+        )
+        .bind(HANDED_OVER)
+        .bind(t.id)
+        .bind(attempt)
+        .fetch_optional(&mut *conn)
+        .await?
+        .flatten();
+        Ok(at.and_then(|a| DateTime::parse_from_rfc3339(&a).ok().map(|d| d.to_utc())))
+    }
+
+    /// A withdrawal on an attested backend held at `Source-Final` past the route's budget, either
+    /// because nobody has relayed instructions for it (`attested-withdrawal-unrelayed`) or because
+    /// the attested network has no final head to hand it over at
+    /// (`attested-withdrawal-awaiting-head`): one page of that `kind`, once, with its state
+    /// unchanged (F-011 NOTES 10; amendment 0016). The value is already destroyed. The clock is the source
+    /// network's own, the one `source_final_block_time` was read on: the attested network's head
+    /// stops when the party is silent, and a silent party is the case to page for.
+    async fn page_held(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        kind: &str,
+        message: &str,
+    ) -> sqlx::Result<()> {
+        let (Some(start), Some(source)) = (t.source_final_block_time, t.source_network.as_deref())
+        else {
+            return Ok(());
+        };
+        let deadline = self.deadline(conn, t, start).await?;
+        let Some(head) = self.past(conn, source, deadline).await? else {
+            return Ok(());
+        };
+        if store::has_event(
+            conn,
+            kind,
+            Some(t.id),
+            "bridge_reference",
+            &t.bridge_reference,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        let detail = json!({"spec": "REQ-RQ-9, REQ-RV-1", "bridge_reference": t.bridge_reference,
+                            "held_since": start.to_rfc3339(), "deadline": deadline.to_rfc3339(),
+                            "network": head.network, "head_block": head.block_number,
+                            "head_time": head.block_time.to_rfc3339()});
+        store::event(conn, kind, Some(t.id), &detail).await?;
+        tracing::error!(kind = %kind, transfer = %t.bridge_reference, %detail, "page: {message}");
+        Ok(())
     }
 
     /// Whether a recorded signature is exactly the named key's over its intent's recorded bytes.
@@ -1913,7 +2172,12 @@ impl Core {
         .bind(attempt)
         .fetch_one(&mut *conn)
         .await?;
-        let started = started.or(t.source_final_block_time).unwrap_or(now);
+        let mut started = started.or(t.source_final_block_time).unwrap_or(now);
+        // On an attested backend the attempt starts when it was handed over, whatever it took to
+        // get there (F-011 NOTES 10).
+        if let Some(handed) = self.handed_over_at(conn, t, attempt).await? {
+            started = started.max(handed);
+        }
         let deadline = self.deadline_held(conn, t, attempt, started).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
@@ -2384,9 +2648,27 @@ impl Core {
         standing: bool,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
+        let attested = self.attested_destination(conn, t).await?;
+        // On an attested backend a proof of non-execution rests on the attempt's hand-over time,
+        // the attested network's clock; the proof's own time is that network's too, and the
+        // source leg's is another network's. No recorded hand-over time means no proof: nothing
+        // is retried or refunded on a comparison across two clocks (amendment 0016).
+        if attested && self.handed_over_at(conn, t, attempt).await?.is_none() {
+            tracing::error!(transfer = %t.bridge_reference, attempt, "REQ-RF-5: a proof of non-execution for an attempt with no recorded hand-over time; no retry and no refund");
+            return Ok(Did::default());
+        }
         let retrying = store::attempt_has_intents(conn, t.id, attempt + 1).await?;
         if t.kind == "withdrawal" && !retrying {
-            let start = t.source_final_block_time.unwrap_or(proof.block_time);
+            let mut start = t.source_final_block_time.unwrap_or(proof.block_time);
+            // On an attested backend the withdrawal's clock runs from its first hand-over, not
+            // from its source leg: a late relay must not turn the first report of non-execution
+            // into a refund (F-011 NOTES 10).
+            if attested {
+                let Some(handed) = self.handed_over_at(conn, t, 1).await? else {
+                    return Ok(Did::default());
+                };
+                start = handed;
+            }
             let deadline = self.deadline(conn, t, start).await?;
             if proof.block_time > deadline {
                 // An inclusion of the payout stands: the leg is unknown, no refund (REQ-RF-1).

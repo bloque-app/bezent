@@ -252,12 +252,15 @@ pub(crate) async fn by_request(
     who: Requester,
     Path(reference): Path<String>,
 ) -> Result<Json<TransferStatus>, ApiError> {
-    let id: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM intake WHERE requester = $1 AND request_reference = $2")
-            .bind(&who.name)
-            .bind(&reference)
-            .fetch_optional(app.pool())
-            .await?;
+    // A report is no transfer: its answer is the report surface's (F-011).
+    let id: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM intake WHERE requester = $1 AND request_reference = $2 \
+           AND kind <> 'report'",
+    )
+    .bind(&who.name)
+    .bind(&reference)
+    .fetch_optional(app.pool())
+    .await?;
     let id = id.ok_or(ApiError::NotFound)?;
     Ok(Json(status_of_intake(app.pool(), id).await?))
 }

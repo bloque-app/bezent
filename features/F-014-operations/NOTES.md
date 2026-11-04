@@ -103,7 +103,7 @@ channel. `deploy/runbooks/alerts.md` has the table, the three kinds no filter co
 4. **Alarms**: see `alerts.md`. Not changed here (read only).
 5. Credentials have no revocation or expiry (`F-002` notes); not in this change.
 6. PR #72 (the late-mint pages) is on `develop`: its three kinds are recorded with `%`, tested against real emissions
-   (`late_mint.rs`) and no longer `not_on_base`. After PR #66 merges, `pages.rs` and `runbooks.rs` fail until its pages record
-   the kind with `%` and the runbooks' `not_on_base` markers are removed. That is the point of both tests.
+   (`late_mint.rs`) and no longer `not_on_base`. PR #66's attested pages record the kind with `%` too, and their runbook has no `not_on_base` marker, so
+   `pages.rs` and `runbooks.rs` pass when it is merged. That was the point of both tests.
 
 No amendment is proposed: nothing here depends on a decision SPEC does not make.

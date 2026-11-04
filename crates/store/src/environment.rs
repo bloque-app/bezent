@@ -20,6 +20,8 @@ pub const TEST_NETWORKS: &[&str] = &[
     // The public test networks of the other origin networks.
     "base-sepolia",
     "bnb-testnet",
+    // The sidecar's attested test backend (F-011).
+    "fiat-local",
     // The ids the services' tests and the zombienet harness declare.
     "kreivo-test",
     "polygon-test",
@@ -50,6 +52,25 @@ pub async fn networks_outside(pool: &PgPool, allowed: &[&str]) -> sqlx::Result<V
 /// store is a test store exactly when this is empty.
 pub async fn production_networks(pool: &PgPool) -> sqlx::Result<Vec<String>> {
     networks_outside(pool, TEST_NETWORKS).await
+}
+
+/// The attested networks `pool`'s store declares with an address format other than `opaque`, by
+/// name (F-011, S3). A fiat backend has no addresses: a destination on it is a commitment, and a
+/// format that parses addresses would send every withdrawal to review. None when the store has no
+/// `networks` table yet. Read-only.
+pub async fn misdeclared_attested_networks(pool: &PgPool) -> sqlx::Result<Vec<String>> {
+    let present: bool = sqlx::query_scalar("SELECT to_regclass('networks') IS NOT NULL")
+        .fetch_one(pool)
+        .await?;
+    if !present {
+        return Ok(Vec::new());
+    }
+    sqlx::query_scalar(
+        "SELECT network FROM networks \
+         WHERE backend LIKE 'attested:%' AND address_format <> 'opaque' ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await
 }
 
 #[cfg(test)]

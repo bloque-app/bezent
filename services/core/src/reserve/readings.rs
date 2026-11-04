@@ -22,8 +22,8 @@
 //! number and hash), so every term rests on one point per network. Nothing recorded there, or a
 //! reading recorded as unknown (the providers disagreed, a read failed), is a [`ReadError`]: the
 //! evaluation is incomplete, and one that stays so past the network's bound pauses the asset
-//! (`REQ-IC-2`). Attested backends' reports (F-011) are not wired: an attested position is a
-//! [`ReadError`], "no attested assets configured".
+//! (`REQ-IC-2`). An attested backend's positions are the last `positions` report the core recorded
+//! (F-011); none yet is a [`ReadError`].
 //!
 //! # A supply mismatch is a breach of `INV-4` (PLAN `DEC-16`, 2026-10-15; PR #50 review M1)
 //!
@@ -37,7 +37,9 @@
 use std::fmt;
 use std::future::Future;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::{PgConnection, PgPool};
 
 use super::FinalPoint;
@@ -76,6 +78,18 @@ pub struct AttestedPosition {
     pub report: String,
 }
 
+/// An attesting party's last report of a reserve's positions (`REQ-BE-4`, `REQ-AS-8`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AttestedSnapshot {
+    /// The block number, on the attested network, of the last report the balances reflect; zero
+    /// when none. The check rolls the balances forward from here (F-011 NOTES 6).
+    pub through: i64,
+    /// When bezent took the snapshot in: how old it is against the network's bound.
+    pub reported_at: DateTime<Utc>,
+    /// Its balances.
+    pub positions: Vec<AttestedPosition>,
+}
+
 /// The readings the reserve check makes (`REQ-BK-8`). Each is at the final point named, or fails.
 pub trait Readings: Send + Sync {
     /// Total supply of `issuing_asset` on the issuing network at `at`, in the asset's minor units.
@@ -109,7 +123,7 @@ pub trait Readings: Send + Sync {
         &self,
         asset: &str,
         network: &str,
-    ) -> impl Future<Output = Result<Vec<AttestedPosition>, ReadError>> + Send;
+    ) -> impl Future<Output = Result<AttestedSnapshot, ReadError>> + Send;
 }
 
 /// The readings the endpoints recorded at final heads (`reserve_readings`, migration 0039).
@@ -216,16 +230,57 @@ impl Readings for Recorded {
             .collect()
     }
 
-    async fn attested(
-        &self,
-        asset: &str,
-        network: &str,
-    ) -> Result<Vec<AttestedPosition>, ReadError> {
-        // F-011 (issue #11): the attesting party's reports are not wired yet.
-        Err(ReadError(format!(
-            "no attested assets configured: {asset} on {network} rests on an attesting party's \
-             reports, which bezent does not read yet (F-011)"
-        )))
+    /// The last `positions` report the core recorded as an observation: a report it has not checked
+    /// and recorded says nothing (F-011 NOTES 2). None yet is a [`ReadError`]: the evaluation is
+    /// incomplete, never a reserve of zero.
+    async fn attested(&self, asset: &str, network: &str) -> Result<AttestedSnapshot, ReadError> {
+        #[allow(clippy::type_complexity)]
+        let row: Option<(i64, DateTime<Utc>, String, String, sqlx::types::Json<Value>)> =
+            sqlx::query_as(
+                "SELECT COALESCE((SELECT t.seq FROM attested_reports t \
+                              WHERE t.network = r.network AND t.report_id = r.body ->> 'through'), \
+                             0), \
+                    r.received_at, r.party, r.report_id, r.body \
+             FROM attested_reports r \
+             JOIN observations o ON o.network = r.network AND o.block_number = r.seq \
+               AND o.block_hash = r.digest \
+             WHERE r.network = $1 AND r.asset = $2 AND r.kind = 'positions' \
+             ORDER BY r.seq DESC LIMIT 1",
+            )
+            .bind(network)
+            .bind(asset)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| ReadError(format!("store: {e}")))?;
+        let Some((through, reported_at, party, report, body)) = row else {
+            return Err(ReadError(format!(
+                "no report of {asset}'s positions on {network} is recorded yet"
+            )));
+        };
+        let positions = body.0["positions"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .map(
+                |line| match (line["position"].as_str(), line["amount"].as_str()) {
+                    (Some(position), Some(amount)) => Ok(AttestedPosition {
+                        position: position.to_owned(),
+                        amount: amount.to_owned(),
+                        party: party.clone(),
+                        report: report.clone(),
+                    }),
+                    _ => Err(ReadError(format!(
+                        "report {report} has a position with no name or amount"
+                    ))),
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(AttestedSnapshot {
+            through,
+            reported_at,
+            positions,
+        })
     }
 }
 

@@ -5,6 +5,10 @@ database_url = "postgres://bezent_core_login@localhost:5432/bezent"
 cycle_seconds = 5
 retry_preparation_seconds = 60
 default_deadline_seconds = 86400
+# An attested backend's snapshots (F-011, deploy/attested-backend.md). These are the defaults, and
+# a working assumption until the owner rules on them.
+attested_snapshot_interval_seconds = 600
+attested_snapshot_max_age_seconds = 3600
 # A test deployment: the statement key below is the published test fixture's, refused elsewhere.
 environment = "test"
 

@@ -6,7 +6,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 `ghcr.io/bloque-app/bezent-sidecar` is bezent for a CI service container: the ingress, the core's
 cycle and a test signer in one process, on a PostgreSQL the harness provides. It is **test only**.
-It signs with the published test keys, serves two test networks (`kreivo-local`, `polygon-amoy`) and
+It signs with the published test keys, serves two test networks (`kreivo-local`, `polygon-amoy`; a third on request, [Fiat, by reports](#fiat-by-reports)) and
 one bridged asset (`bUSDC`, 6 decimals, `Here(101)` on the issuing network, a deposit and a
 withdrawal route), and refuses to start unless `BEZENT_SIDECAR_ENVIRONMENT=test` and every network
 already in the store is one of those two. There is no chain behind it: the harness makes the
@@ -68,6 +68,7 @@ is safe: it signs only with the published test keys and refuses to start outside
 | `BEZENT_SIDECAR_ENVIRONMENT` | exactly `test`; anything else, or unset, and it exits | required |
 | `BEZENT_SIDECAR_DATABASE_URL` | the owner login of an empty database (a superuser, or a role that can create roles and tables); migrations run as it. Or a path in `BEZENT_SIDECAR_DATABASE_URL_FILE` | required |
 | `BEZENT_SIDECAR_REQUESTERS` | `name=<credential id>.<secret>;…`: each requester is granted deposit, withdrawal and refund; the secret is at least 16 characters. A request carries `Authorization: Bearer <credential id>.<secret>` | required |
+| `BEZENT_SIDECAR_ATTESTING` | `<requester>=<public key>`: declares the attested test backend, see [Fiat, by reports](#fiat-by-reports) | unset |
 | `BEZENT_SIDECAR_LISTEN` | the ingress address; `health` probes this port on the loopback | `0.0.0.0:8080` |
 | `BEZENT_SIDECAR_SIGNER_SOCKET` | the test signer's Unix socket inside the container | `/tmp/bezent-signer.sock` |
 | `BEZENT_SIDECAR_SIGNER_TOKEN` | the signer link's token; a random one, kept in memory, if unset | unset |
@@ -96,7 +97,7 @@ writes a transfer's state or an intent, and a requester's request still only poi
 coordinate (guardrail 3, `REQ-RQ-7`).
 
 **Test only.** It exists only in the sidecar, which runs only with `BEZENT_SIDECAR_ENVIRONMENT=test`
-on a store of its two test networks. It is bound only when `BEZENT_SIDECAR_DRIVER_TOKEN` is set,
+on a store of its test networks. It is bound only when `BEZENT_SIDECAR_DRIVER_TOKEN` is set,
 and refuses to bind on a store that declares any other network (the store's rule,
 `bezent_store::environment`, shared with the core). Every call checks that rule again before it
 writes, and answers `404 absent` once a production network is declared; the sidecar itself stops
@@ -130,7 +131,7 @@ submitted: `deliveries/include` or `deliveries/not-executed` says what the chain
 | Call | Body | What it writes | Answer |
 |---|---|---|---|
 | `/driver/v0/arrivals` | `amount`; `sender`, `token` optional | on `polygon-amoy`, a new block with an arrival at the reserve, kind `arrival` (or `other_arrival` for a token not admitted), not final | `coordinate`, as `/v0/deposits` takes it |
-| `/driver/v0/redemptions` | `redeemer` (SS58 or `0x` 32 bytes), `amount` (the asset's minor units on Kreivo), `payout_address`; `reference` optional (random) | on `kreivo-local`, a new block with a `Redeemed` event, kind `redemption`, backend `evm:80002`, not final | `coordinate`, `redeemer`, `reference`, and the withdrawal's `bridge_reference` |
+| `/driver/v0/redemptions` | `redeemer` (SS58 or `0x` 32 bytes), `amount` (the asset's minor units on Kreivo), `payout_address`, or for the attested asset `commitment`; `reference` optional (random) | on `kreivo-local`, a new block with a `Redeemed` event, kind `redemption`, backend `evm:80002`, not final | `coordinate`, `redeemer`, `reference`, and the withdrawal's `bridge_reference` |
 | `/driver/v0/finality` | `network`; `coordinate` and `outcome` (`final`, or `withdrawn` with a coordinate) optional | the network's tip as a final head, every block up to it as read, and each open observation (or the one named) decided at it | `final_head`, `decided` |
 | `/driver/v0/deliveries/include` | `bridge_reference`; `amount`, `recipient` optional | the signed delivery of the transfer's current attempt, included: a new block with the leg the core matches by its reference (`Minted`, `RefundMinted` or `Payout`), the ordered amount to the ordered recipient unless the body says otherwise (the core then sends it to review), not final. `409 not-ready` until the stand-in has signed it | `coordinate`, `kind`, `amount`, `recipient` |
 | `/driver/v0/deliveries/not-executed` | `bridge_reference` | for every signed transaction of the current attempt, a proof of non-execution (`nonce-unconsumed`) at a final head past its validity window; the core then orders the next attempt (or, for a withdrawal past its deadline, the refund mint) | `final_head`, `proofs` |
@@ -190,6 +191,35 @@ Two details a harness needs (found wiring a requester's integration):
 
 The driver's tests (`services/sidecar/tests/driver.rs`) run both walk-throughs, one test per call,
 and the refusals.
+
+### Fiat, by reports
+
+For a harness that drives a requester's reports (`F-011`; the contract is
+`features/F-012-swaps-module/attesting-contract.md`). Set `BEZENT_SIDECAR_ATTESTING` to
+`<requester>=<public key, 64 hexadecimal digits>`: the harness holds its own test key. It declares a third test network
+(`fiat-local`, an attested backend, `attested:1`), the asset `COPM` (2 decimals, `Here(100)`, token `COP`) with both routes,
+and that requester as its party, with the attesting grant. Left unset, none of that exists.
+
+There is no driver call for a report: reports go to the ingress, as the requester sends them. The driver only plays the
+issuing network.
+
+```sh
+# 1. The party reports a final payment; take its coordinate from the answer.
+POST /v0/reports {"report": "<document>", "signature": …, "public_key": …}   # → {"coordinate": C, …}
+# 2. Within a cycle, bind it. Until then the deposit answers not-final, with nothing recorded.
+POST /v0/deposits {"request_reference", "coordinate": C, "destination", "refund_destination"}
+# 3. The mint, as in a deposit above: deliveries/include, then finality on kreivo-local.
+# 4. A redemption by commitment, not a payout address, final on kreivo-local.
+$D -d '{"redeemer":"<SS58>","amount":"2000","commitment":"0x…"}' localhost:8091/driver/v0/redemptions
+$D -d '{"network":"kreivo-local"}' localhost:8091/driver/v0/finality
+# 5. bezent: the withdrawal holds at Source-Final until the instructions are relayed, then Delivering.
+POST /v0/withdrawals/extras {"request_reference", "redemption_reference": R, "instructions": "0x…"}
+# 6. The party reports the outcome: `payout`, to Completed, or `payout-not-executed`, to a new attempt.
+POST /v0/reports …
+```
+
+Send a `positions` report before reading the reserve check for `COPM`: without one its evaluation is incomplete.
+`services/sidecar/tests/driver.rs` (`f_011_a_fiat_deposit_and_withdrawal_by_reports`) runs all of this.
 
 > **Run the sidecar on its own PostgreSQL server (or container), one that hosts no non-test bezent database.**
 > Its database logins are server-wide: it creates logins that are members of `bezent_kreivo_endpoint` and

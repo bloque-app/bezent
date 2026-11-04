@@ -159,7 +159,8 @@ async fn main() -> ExitCode {
     };
     // The reserve check reads what the endpoints recorded at final heads; it pages through the
     // service's log (issue #42; NFR-5, REQ-BK-8, REQ-IC-2).
-    let check = ReserveCheck::new(pool.clone(), Recorded::new(pool.clone()), LogPager);
+    let check = ReserveCheck::new(pool.clone(), Recorded::new(pool.clone()), LogPager)
+        .with_attested_snapshots(config.attested_snapshots());
     let check_pool = pool.clone();
     let core = bezent_core_service::Core::new(pool, config.settings());
     let mut tick = tokio::time::interval(Duration::from_secs(config.cycle_seconds));
@@ -260,7 +261,18 @@ async fn confirm_environment(
     let production = bezent_store::environment::production_networks(pool)
         .await
         .map_err(|e| format!("store: {e}"))?;
-    config.confirm_environment(&production)
+    config.confirm_environment(&production)?;
+    // An attested network is declared `opaque` (F-011, S3; deploy/attested-backend.md).
+    let misdeclared = bezent_store::environment::misdeclared_attested_networks(pool)
+        .await
+        .map_err(|e| format!("store: {e}"))?;
+    if misdeclared.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "an attested backend has no addresses, and its network must be declared with address_format = 'opaque': {} (REQ-BE-2)",
+        misdeclared.join(", ")
+    ))
 }
 
 /// Resolves on SIGINT or, on Unix, SIGTERM.

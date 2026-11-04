@@ -323,6 +323,102 @@
         ]
       }
     },
+    "/v0/reports": {
+      "post": {
+        "tags": [
+          "requests"
+        ],
+        "summary": "Take in a report of an attested backend (`REQ-BE-5`).",
+        "operationId": "report",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A repeat of the same bytes: the original's answer (REQ-ID-1)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportStatus"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Taken in now: `Recorded`, with the coordinate its observation has; or `Refused` with its named error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ERR-NotAuthorised: no attesting grant, not this backend's party, an undeclared key or a signature that does not verify. Nothing recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ERR-Overloaded: nothing recorded; retry. not-final: a payout of a redemption not final yet; nothing recorded; send the same bytes again. outcome-unknown: repeat the same request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/v0/reserve-equation": {
       "get": {
         "tags": [
@@ -1589,6 +1685,66 @@
           }
         },
         "additionalProperties": false
+      },
+      "ReportEnvelope": {
+        "type": "object",
+        "description": "A signed report (`DEC-14`).",
+        "required": [
+          "report",
+          "signature",
+          "public_key"
+        ],
+        "properties": {
+          "public_key": {
+            "type": "string",
+            "description": "The key that signed, `0x`-prefixed hexadecimal: one declared for the backend."
+          },
+          "report": {
+            "type": "string",
+            "description": "The report, a JSON document, as a string. Its UTF-8 bytes are what is signed, exactly as\nsent. See `features/F-012-swaps-module/attesting-contract.md`."
+          },
+          "signature": {
+            "type": "string",
+            "description": "The ed25519 signature over `bezent-attested-report-v1`, one zero byte, and those bytes,\n`0x`-prefixed hexadecimal."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReportStatus": {
+        "type": "object",
+        "description": "What became of a report (`REQ-RQ-1`).",
+        "required": [
+          "report_id",
+          "state"
+        ],
+        "properties": {
+          "coordinate": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CoordinateOut",
+                "description": "The coordinate the report's observation has: what a deposit names (`REQ-RQ-3`)."
+              }
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The named error of a refusal (§10)."
+          },
+          "report_id": {
+            "type": "string",
+            "description": "The party's own identifier for it (`REQ-BE-4`)."
+          },
+          "state": {
+            "type": "string",
+            "description": "`Recorded`, or `Refused` with its named error."
+          }
+        }
       },
       "ReserveEquation": {
         "type": "object",
