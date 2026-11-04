@@ -47,13 +47,18 @@ Each choice below is a reading of the spec and the plan, not a ruling. What need
 10. **The hand-over.** A delivery attempt on an attested backend records no order, and the store refuses one whoever writes
     it. `deliver()` calls `hand_over()`, which enters `Delivering` once the instructions are accepted, after checking
     them again against the redemption's commitment (a row that misses it pages once and hands nothing over). A
-    withdrawal with no instructions waits at `Source-Final` with no deadline: §5.4 sends only a held condition there to
-    review, and no condition names the wait since `CND-AwaitingInstruction` was withdrawn (see the questions). The gates
+    withdrawal with no instructions waits at `Source-Final`, with its state unchanged: §5.4 sends only a held condition there to
+    review, and no condition names the wait since `CND-AwaitingInstruction` was withdrawn. It pages once (`attested-withdrawal-
+    unrelayed`) when it has waited the route's budget from its source leg's finality, on the issuing network's clock; whether
+    it goes to review is the owner's (see the questions). The gates
     apply until a payout is reported; after that they stop and any condition they left clears, since the reserve has
     already lost that amount and `REQ-OT-5`'s check would count it twice. A payout may be reported before the hand-over
-    runs: the leg waits for it. **A gap, stated plainly:** the deadline's clock on an attested backend is the latest
-    report's time. If the party stops sending reports altogether, a handed-over payout never reaches its deadline, and
-    only the snapshot bound pauses the asset and pages (note 7). The page is what ends the silence.
+    runs: the leg waits for it. **The attempt's clock starts at the hand-over,** at the attested network's final head, which
+    `hand_over` records in the `attested-handed-over` event: a late relay, or a late release, does not start an attempt past
+    its deadline, and the refund-or-retry choice after a first report of non-execution is measured from the first hand-over.
+    **A gap, stated plainly:** that clock is the latest report's time. If the party stops sending reports altogether, a
+    handed-over payout never reaches its deadline, and only the snapshot bound pauses the asset and pages (note 7). The page
+    is what ends the silence.
 11. **The commitment was read from the wrong key.** `decide_extras` read `detail ->> 'commitment'`, while the Kreivo
     endpoint records `detail.payout.commitment` (`observe.rs`, `payout_json`). The ingress tests passed because their
     fixture wrote the top-level key. Fixed, and the fixture now writes what the endpoint writes.
@@ -81,14 +86,13 @@ PR does, on the instruction to complete `M-3` on the recommendations, in a draft
 | 0016 A1: `Delivering` also means handed to the party; a report of non-execution is the proof | Migration `0061`; `Core::hand_over`, and the two lines in `deliver` and `source_final`; `Kind::PayoutNotExecuted` and `decide_not_executed` | Drop `0061`, make `deliver` return before an attested destination, remove the kind. Fiat withdrawals hold at `Source-Final` with their payout in the book. The tests that change: completion, refund, retry, refund of an unassociated arrival |
 | 0016 A3: an arrival reversed and not restored binds nothing, and holds a deposit | Migration `0062`; `reversed` in the ingress, the first lines of `Core::gate`. One held deposit reads to the webhook dispatcher as `CND-Paused` held on the route (0016 A3, trade-off) | Drop `0062` and those calls. Such an arrival stays mintable, charged to surplus |
 | Question 4: one hour, ten minutes | `attested_snapshot_*`, two lines of configuration | Change the values, no release of the store |
-| A withdrawal with no instructions waits with no deadline | `hand_over` | See the questions |
+| A withdrawal with no instructions waits at `Source-Final` and pages once past the budget; it does not go to review | `hand_over`, `page_unrelayed` | See the questions |
 
 ## Questions for the owner
 
 Beyond amendments 0016 and 0017, and the snapshot limits, one, with a recommendation:
 
-**A redemption nobody relays for.** The value is destroyed and the withdrawal waits at `Source-Final` forever, silently.
-§5.4's `Source-Final → Needs-Review` covers a held condition, and `CND-AwaitingInstruction` was withdrawn (amendment 0007).
-Recommended: a line in 0016 sending it to review at the route's deadline, with its owner. Not built: it is not on the list of
-what to assume.
-
+**A redemption nobody relays for.** The value is destroyed and the withdrawal waits at `Source-Final`. §5.4's
+`Source-Final → Needs-Review` covers a held condition, and `CND-AwaitingInstruction` was withdrawn (amendment 0007).
+**Built:** a page, once, when it has waited the route's budget; its state is not changed. **Recommended, not built:** a line
+in 0016 sending it to review at the route's deadline, with its owner. Going to review is unruled.

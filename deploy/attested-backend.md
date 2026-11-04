@@ -19,6 +19,29 @@ The core's configuration (`services/core/fixtures/core.toml`), both optional:
 Both values are a working assumption until the owner rules on them (`features/F-011-attested-backend/NOTES.md`). Lifting
 that pause is the operator's, as for any divergence, once a current snapshot agrees with the book.
 
+## Declaring the network
+
+An attested backend's network is declared with `address_format = 'opaque'`: it has no addresses, and a withdrawal's
+destination is the redemption's commitment (`commitment:0x...`), which no other format accepts. The core checks this at
+start-up and refuses to start, naming the network, if any network declared `attested:<id>` has another format. Fix the
+declaration, by migration, and start it again.
+
+## Runbook: a redemption nobody relayed for
+
+**You see:** the page `attested-withdrawal-unrelayed`, with `bridge_reference`, `held_since` and `deadline`, in the
+service's log and in `event_log`. Once, for that withdrawal.
+
+**What it means:** a redemption on an attested backend is final, its value is destroyed, and no instructions were relayed for
+it, so the party has nothing to pay. The withdrawal waits at `Source-Final`. **Nothing times it out or refunds it** (`REQ-RF-1`):
+whether it should go to review at the route's deadline is not ruled (`amendments/0016-attested-delivery.md`).
+
+1. Ask the requester that holds the attesting grant why no instructions came. They relay with
+   `POST /v0/withdrawals/extras`, by the redemption's on-chain reference. Extras are written once: if an earlier request
+   wrote an expiry and no instructions, the withdrawal cannot take them (`ERR-ReferenceConflict`); an attested backend now
+   refuses an expiry without instructions, so only a request taken in before that can be in this state.
+2. Once the instructions are accepted, the next cycle hands the withdrawal over, and its deadline runs from then.
+3. If they cannot be had, it is a case for the owner. There is no administrative way to move it (`REQ-GV-5`).
+
 ## Runbook: a report the core refused
 
 **You see:** the page `attested-report-refused`, with `network`, `report_id`, `kind` and `reason`, in the service's log and

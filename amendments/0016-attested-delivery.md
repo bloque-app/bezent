@@ -43,6 +43,32 @@ trust `REQ-BE-5` already places in the party for a mint, and the mint window bou
 
 *Rejected: a terminal state of its own for fiat.* It forks every status reader and the sequenced log for one backend.
 
+## What the code does where the amendment is silent
+
+These are choices of the working build (#66), each stated so a ruling can replace it. They are not recommendations to
+apply, except the one marked "Proposed".
+
+- **The attempt's clock starts at the hand-over.** An attested attempt has no signed transaction, so its deadline cannot
+  start there; `REQ-RF-5` and `REQ-RV-1` measure the route's budget from it. The build starts it when the attempt enters
+  `Delivering`, at the attested network's latest final head (its latest report's time), whatever the attempt's source
+  leg did, and whatever point the transition rests on. Without this a late relay, a late release of an unassociated
+  refund or a late release out of review reaches `Needs-Review` on the first cycle, and a first report of non-execution
+  after a late relay is a refund mint instead of a second attempt. The refund-or-retry choice of `REQ-RF-5` is measured
+  from the first hand-over.
+- **A withdrawal nobody relays for.** The value is destroyed, §5.4 has no edge for the wait, and `CND-AwaitingInstruction`
+  was withdrawn (amendment 0007). **Proposed, not built:** it goes to `Needs-Review` at the route's deadline, measured from
+  its source leg's finality, with an owner. **Built:** one page (`attested-withdrawal-unrelayed`) once it has waited the
+  route's budget on the issuing network's clock, and nothing else: its state does not change, and a relay after the page
+  hands it over as usual. Going to review is the question, not the page.
+- **Reversals once restored.** The sum of reversals that bounds a new one counts only those not restored, so a second real
+  chargeback after a restoration is taken. A restoration binds again what a reversal held only once the core has recorded
+  it, after it checked the signature, and not when it is taken in: a row nobody verified must not release a hold.
+- **The attested network's head and clock.** An attested network has a final head of its own, which is the latest report
+  recorded, at the time the store took it in. Its deadline clock is that head, so a party that stops reporting stops the
+  clock: a handed-over payout then never reaches its deadline, and only the snapshot bound pauses the asset and pages. The
+  unrelayed withdrawal's page does not wait on it. A network of this backend is declared with `address_format = 'opaque'`
+  (a destination is a commitment, not an address), and the core refuses to start otherwise.
+
 ## A2 — Recommended: add the report to §7.A
 
 **`REQ-RQ-10`** **Report, for an attested backend:** the party's report of an arrival, a payout, a payout's non-execution,

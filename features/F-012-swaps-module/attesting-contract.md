@@ -25,8 +25,11 @@ never report for a production backend. To relay instructions it also needs the `
   "public_key": "0x<32 bytes>" }
 ```
 
-- `signature` is ed25519 over `bezent-attested-report-v1`, one zero byte, then the UTF-8 bytes of `report`, exactly as
-  sent. There is no canonical form to reproduce: the bytes are signed as they are.
+- `signature` is ed25519 over `bezent-attested-report-v1`, one zero byte, then the UTF-8 bytes of `report`, the string
+  the JSON envelope carries **once decoded**: the value of the `report` field, not its JSON-escaped spelling on the wire.
+  A signer that signs the escaped text (`\"` for a quote, `\u00e9` for an accented letter) signs other bytes than bezent
+  checks. Sign the document as the string you put in the field, and put it in the field with any valid escaping. There
+  is no canonical form to reproduce: those bytes are signed as they are.
 - `public_key` must be one declared for the backend. A new key is declared beside the old one, then the old one retired,
   so reports in flight survive a rotation.
 - Swaps' signing key belongs to Swaps. bezent holds only the public half.
@@ -44,7 +47,8 @@ Common fields of the document. Unknown fields are refused.
 | `ids` | object of strings | Optional. Swaps' other identifiers (order, rail reference), recorded with the observation (`REQ-BE-4`). At most 16 entries. **Never personal data**: the module sends references, not people |
 | `occurred_at` | RFC 3339 | Optional. When it happened, by Swaps' clock; recorded, never used to decide anything |
 
-Amounts are decimal strings of exact integer minor units of the origin token (`INV-11`).
+Amounts are decimal strings of exact integer minor units of the origin token (`INV-11`), at most 2^127 - 1
+(`170141183460469231731687303715884105727`): the book is signed, and a larger amount is `ERR-Malformed`.
 
 | `kind` | Fields | When to send it |
 |---|---|---|
@@ -58,7 +62,9 @@ Amounts are decimal strings of exact integer minor units of the origin token (`I
 - `position` names one of Swaps' accounts (`REQ-AS-8`). The account's name is public in the statement.
 - `funder` marks the operator's own money: an arrival from an address declared as a funding address of the reserve is
   a contribution to surplus and no deposit can bind it (`REQ-BK-5`).
-- `reverses` is the `report_id` of an `arrival` of the same asset; several reversals of one arrival may not exceed it.
+- `reverses` is the `report_id` of an `arrival` of the same asset; the reversals of one arrival that stand may not exceed
+  it. One that was restored no longer stands, so a second real chargeback after a restoration is reported as a new
+  reversal.
 - `restores` is the `report_id` of a `reversal`, and `amount` must equal it. Only the party that reported it restores it.
 - `through` is the `report_id` of the last report the balances reflect; `null` when none. **A snapshot must be computed
   from Swaps' own record of what it reported, not read from the bank.** A payment the bank shows and Swaps has not
@@ -90,7 +96,11 @@ reference (`instructions`, hexadecimal). Its answer carries the withdrawal's `br
 withdrawal reads through the status and the log like any of the module's. Pay on the rail, and report the `payout` under
 that `bridge_reference`. `ERR-CommitmentMismatch` means the bytes are not the ones committed to: do not pay. A relay
 that names a redemption bezent has not observed yet is refused with `ERR-SourceNotFound` and spends its reference, so wait
-for finality on the issuing network before relaying.
+for finality on the issuing network before relaying. Extras are written once (`REQ-RQ-4`), and an attested redemption's one
+write is its instructions: a request with an expiry and no instructions is `ERR-Malformed`, with nothing recorded, so send
+the instructions with the expiry, or only the instructions. Relay for every redemption: one nobody relays for waits at
+`Source-Final` with its value destroyed, and bezent pages a human once it has waited the route's completion budget
+(`attested-withdrawal-unrelayed`). Its state does not change.
 
 **After the relay.** The next core cycle hands the withdrawal over: `Delivering`, attempt 1, with nothing ordered or signed.
 Report the outcome (working assumption, `amendments/0016-attested-delivery.md`, A1, proposed and not ruled):
@@ -101,7 +111,9 @@ Report the outcome (working assumption, `amendments/0016-attested-delivery.md`, 
   the only report that can start a refund mint, so send it only for a payment that can never execute. Once sent, that
   attempt can no longer be reported paid: a `payout` right after it answers `not-final` until the next attempt begins, and
   `ERR-SourceConsumed` if it is refunding instead.
-- Nothing, past the budget: `Needs-Review`, with an owner. Nothing is refunded on a timer (`REQ-RF-1`).
+- Nothing, past the budget: `Needs-Review`, with an owner. Nothing is refunded on a timer (`REQ-RF-1`). The budget runs
+  from the hand-over, by the clock of the reports (the latest report's time), and not from the redemption's finality: a
+  late relay does not shorten it, and neither does a late release out of review.
 
 **A refund of an unassociated arrival.** `POST /v0/refunds` as for any arrival. It waits for the operator's second approver.
 Once released it is handed over the same way, with no instructions: the request named the destination. Report its
@@ -110,4 +122,6 @@ Once released it is handed over the same way, with no instructions: the request 
 **Reversal.** Report it as soon as it is known; restore within one business day (`REQ-BE-6`). Past that, bezent pages. While
 the surplus is under its floor, new mints of the asset hold `CND-Paused`. Holders keep what they hold. An arrival reversed
 and not restored binds no deposit and no refund (`ERR-SourceConsumed`), and a deposit bound to it holds `CND-Paused` until the
-restoration, unless its mint is already signed (working assumption, amendment 0016 A3).
+restoration, unless its mint is already signed (working assumption, amendment 0016 A3). The restoration releases them
+once bezent has recorded it, a core cycle after it is taken in: a request for the arrival in between is still
+`ERR-SourceConsumed`, and the reference is spent, so send it again under a new one.
