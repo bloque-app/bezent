@@ -70,8 +70,8 @@ Files cannot do these; they are repository settings, and the maintainers' to cha
 is a report: it runs, but nothing stops a release it fails, and a release commit can change the gate it is judged by.
 
 1. **`main` and `develop`** (ruleset or branch protection): require pull requests with a review by the code owners
-   (this is what makes `CODEOWNERS` bind, including the lines for `tools/ci/`, `release-gate.yml` and
-   `CODEOWNERS` itself); dismiss stale approvals; require the checks of `release/gate.toml` that run on pull
+   (this is what makes `CODEOWNERS` bind, including the lines for `tools/ci/`, `release-gate.yml`, the incident classes the gate reads
+   (`notes/BRIDGE-REQUIREMENTS.md`) and `CODEOWNERS` itself); dismiss stale approvals; require the checks of `release/gate.toml` that run on pull
    requests, above all `criteria map and release gate self-test`; no bypass actors, and `enforce_admins` on.
 2. **Tags `v*`** (tag ruleset): creation, update and deletion limited to named people, so that the tag the gate
    judges cannot be moved after it passes.

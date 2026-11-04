@@ -15,6 +15,10 @@
 /REUSE.toml             @bloque-app/bezent-maintainers
 /LICENSES/              @bloque-app/bezent-spec-owner
 
+# What the release gate reads besides the specification: the incident classes it demands a runbook for
+# (tools/ci/release_gate.py, `incident_classes`, REQ-IC-6). A change there changes what the gate demands.
+/notes/BRIDGE-REQUIREMENTS.md  @bloque-app/bezent-spec-owner
+
 # The criteria map and the release gate: what V0 must show before it carries value.
 /e2e/criteria/          @bloque-app/bezent-spec-owner
 /e2e/criteria/known_unmet.toml  @bloque-app/bezent-spec-owner
