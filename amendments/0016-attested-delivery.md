@@ -19,7 +19,8 @@ attesting party reports.
 edges. For an attested backend the requester relays the instructions (`REQ-RQ-9`) and pays on its rail; `REQ-BE-5` makes
 its report of the payout the observation. `F-011` therefore holds such a withdrawal at `Source-Final` with its payout
 posted to the book. It never completes, `REQ-OT-6`'s refund mint has no way to start, and `REQ-BE-1`'s "evidence of
-non-execution" has no carrier.
+non-execution" has no carrier. The refund of an unassociated arrival on an attested network (`REQ-RQ-6`) stops in the same
+place: the operator can release it, and nothing delivers it.
 
 ## A1 — Recommended: read the §5.4 words per assurance class
 

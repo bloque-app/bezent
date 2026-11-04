@@ -161,6 +161,10 @@ async fn req_be_4_a_report_is_recorded_as_signed_under_the_partys_own_identifier
         .post(REPORTS, ALPHA, &signed(&arrival_report("r-2", "700")))
         .await;
     assert_eq!(next["coordinate"]["block_number"], 2);
+
+    // A report is no transfer: nothing of it reads as one.
+    let (status, _) = ingress.get("/v0/transfers/by-request/r-1", ALPHA).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 /// `REQ-ID-1`: the party's identifier is the request reference.

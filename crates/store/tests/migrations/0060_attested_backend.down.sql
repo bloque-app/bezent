@@ -1,3 +1,4 @@
+-- Copyright (c) 2026 Pagos Cube LLC
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- Reverts 0060_attested_backend, in tests only.
 

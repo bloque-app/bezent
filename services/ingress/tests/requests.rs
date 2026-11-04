@@ -1238,6 +1238,52 @@ async fn req_id_4_a_second_requesters_extras_on_one_redemption_are_refused_and_s
     );
 }
 
+/// `REQ-RQ-4`, `REQ-ID-4`: the party's own two relays of one commitment, racing on the row lock:
+/// one wins, the other is a named refusal, and one relay is kept (the race of the review above, on
+/// an attested backend, where only the party may relay).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rq_4_two_relays_of_one_commitment_race_to_one(pool: PgPool) {
+    let ingress = std::sync::Arc::new(Ingress::new(&pool).await);
+    let instructions = b"\x04bank-account-and-reference";
+    let commitment = {
+        use blake2::Digest;
+        hex::encode(blake2::Blake2b::<blake2::digest::consts::U32>::digest(
+            instructions,
+        ))
+    };
+    withdrawal(&pool, 1, ATTESTED, "b1", Some(&format!("0x{commitment}"))).await;
+    let relayed = format!("0x{}", hex::encode(instructions));
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM transfers WHERE kind = 'withdrawal' FOR UPDATE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let mut tasks = Vec::new();
+    for reference in ["i-1", "i-2"] {
+        let ingress = std::sync::Arc::clone(&ingress);
+        let body = json!({ "request_reference": reference, "redemption_reference": "0xb1",
+                           "instructions": relayed });
+        tasks.push(tokio::spawn(async move {
+            ingress.post("/v0/withdrawals/extras", ALPHA, &body).await
+        }));
+    }
+    until_waiting_on_locks(&pool, 2).await;
+    holder.commit().await.unwrap();
+    let mut refused = 0;
+    for t in tasks {
+        let (status, answer) = t.await.unwrap();
+        assert_eq!(status, StatusCode::CREATED, "{answer}");
+        if answer.get("error").is_some() {
+            assert_refused(&answer, "ERR-ReferenceConflict");
+            refused += 1;
+        } else {
+            assert_eq!(answer["bridge_reference"], "bz-w-b1");
+        }
+    }
+    assert_eq!(refused, 1);
+    assert_eq!(count(&pool, "relayed_instructions").await, 1);
+}
+
 // --- REQ-LM-2 --------------------------------------------------------------------------------
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]

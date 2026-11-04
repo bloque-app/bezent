@@ -696,6 +696,68 @@ async fn req_rq_9_relayed_instructions_match_their_commitment_and_nothing_is_ord
     );
 }
 
+/// `REQ-OT-5`, F-011 NOTES 10: the check before a payout must not count the payout twice. The last
+/// holder redeems nearly all of the reserve; once the party reports it paid, the reserve is small and
+/// the withdrawal, which holds at `Source-Final`, raises no `CND-ReserveShort`.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_ot_5_a_fiat_withdrawal_reported_paid_holds_no_reserve_short(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    f.funded(10).await;
+    let first = f.deposited("pay-1", 700).await;
+    f.w.cycle(now()).await;
+    f.minted(first, 100, 700).await;
+
+    let instructions = b"\x10bank\x24acct-0042";
+    let commitment = {
+        use blake2::Digest as _;
+        format!(
+            "0x{}",
+            hex::encode(blake2::Blake2b::<blake2::digest::consts::U32>::digest(
+                instructions
+            ))
+        )
+    };
+    attested_redemption(&f.w.admin, 200, [9; 32], &commitment).await;
+    f.w.settle(now()).await;
+    let (status, answer) = f
+        .post(
+            "/v0/withdrawals/extras",
+            &json!({"request_reference": "x-1",
+                    "redemption_reference": format!("0x{}", hex::encode([9u8; 32])),
+                    "instructions": format!("0x{}", hex::encode(instructions))}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    let bridge = answer["bridge_reference"].as_str().unwrap();
+    f.reported(
+        "out-1",
+        "payout",
+        json!({"amount": "700", "position": "acct-1", "bridge_reference": bridge}),
+    )
+    .await;
+    f.w.settle(now()).await;
+    f.w.settle(now()).await;
+
+    let id: i64 = scalar(
+        &f.w.admin,
+        "SELECT id FROM transfers WHERE kind = 'withdrawal'",
+    )
+    .await;
+    assert_eq!(f.w.state(id).await, ("Source-Final".into(), None));
+    assert_eq!(
+        f.w.count(
+            "SELECT count(*) FROM event_log WHERE kind = 'condition-raised' \
+             AND payload ->> 'condition' = 'CND-ReserveShort'"
+        )
+        .await,
+        0
+    );
+    assert_eq!(f.holds().await.chain.reserve[RAIL], 10);
+}
+
 /// `REQ-RQ-9`: a redemption without a whole commitment makes no withdrawal to the backend.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_rq_9_a_redemption_with_no_whole_commitment_makes_no_withdrawal(

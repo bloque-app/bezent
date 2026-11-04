@@ -921,6 +921,20 @@ impl Core {
         Ok(())
     }
 
+    /// Whether `t`'s destination is an attested backend (`REQ-BE-2`).
+    async fn attested_destination(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+    ) -> sqlx::Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM networks WHERE network = $1 AND backend LIKE 'attested:%')",
+        )
+        .bind(&t.destination_network)
+        .fetch_one(conn)
+        .await
+    }
+
     /// `Source-Final`: the gates, then the first delivery attempt; or review when a condition that
     /// blocks delivery is past its deadline (§5.4, `REQ-IN-9`, `REQ-CV-6`).
     async fn source_final(
@@ -929,6 +943,18 @@ impl Core {
         t: &Transfer,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
+        // A fiat withdrawal the party reported paid (F-011 NOTES 10): the gates are before a payout,
+        // and this one is done. The reserve the check below would read has already lost this
+        // withdrawal's own amount, so it would raise a `CND-ReserveShort` nothing ever clears
+        // (`REQ-OT-5`). Any gate condition it still holds clears.
+        if self.attested_destination(conn, t).await?
+            && matches!(self.destination_leg(conn, t).await?, Leg::One(_))
+        {
+            if t.condition().is_some_and(gate_condition) {
+                return self.hold(conn, t, None).await;
+            }
+            return Ok(Did::default());
+        }
         if let Some(c) = t.condition().filter(|c| c.blocks_delivery()) {
             let start = t.source_final_block_time.unwrap_or(now);
             let deadline = self.deadline(conn, t, start).await?;
@@ -1439,13 +1465,7 @@ impl Core {
         // REQ-RQ-9, DEC-14: bezent signs nothing on an attested backend. `Delivering` is "a destination
         // transaction is signed and recorded" (§5.4), so the transfer holds at `Source-Final`
         // until the owner rules on amendment 0016 (F-011 NOTES 10).
-        let attested: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM networks WHERE network = $1 AND backend LIKE 'attested:%')",
-        )
-        .bind(&t.destination_network)
-        .fetch_one(&mut *conn)
-        .await?;
-        if attested {
+        if self.attested_destination(conn, t).await? {
             return Ok(Did::default());
         }
         let Some((reference, scope)) = self.delivery_reference(conn, t).await? else {
