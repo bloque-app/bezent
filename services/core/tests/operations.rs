@@ -208,6 +208,9 @@ async fn ac_h3_1_the_core_reads_every_req_st_6_observable_and_writes_the_minute_
         "undelivered_notifications",
         "undelivered_notifications_oldest_age_seconds",
         "fee_short_transfers",
+        // Fee positions (issue #14): a row per network, whether or not a reading exists.
+        "fee_position_amount",
+        "fee_position_age_seconds",
     ] {
         // `fee_short_transfers` has a row only while a transfer is held for a fee position.
         if required == "fee_short_transfers" {
@@ -239,5 +242,69 @@ async fn ac_h3_1_the_core_reads_every_req_st_6_observable_and_writes_the_minute_
     for l in &lines {
         serde_json::from_str::<serde_json::Value>(l).expect("one JSON object");
         assert!(!l.contains(&reference), "a line must not name a transfer");
+    }
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_h3_1_a_fee_position_reaches_the_minute_line_and_an_unknown_one_is_named_not_zero(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let metric_in = |lines: &[String], name: &str, network: &str| -> Option<serde_json::Value> {
+        lines
+            .iter()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .find(|v| v["Network"] == network && v.get(name).is_some())
+            .map(|v| v[name].clone())
+    };
+    let unknown_in = |lines: &[String], name: &str, network: &str| -> bool {
+        lines
+            .iter()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .any(|v| {
+                v["Network"] == network
+                    && v["unknown"]
+                        .as_array()
+                        .is_some_and(|u| u.iter().any(|m| m == name))
+            })
+    };
+
+    // No endpoint has recorded one: unknown on every network, and no number in the line.
+    let lines = observe::emf_lines(
+        &observe::read(w.core.pool()).await.unwrap(),
+        1_700_000_000_000,
+    );
+    for network in [ISSUING, ORIGIN] {
+        assert!(
+            unknown_in(&lines, "fee_position_amount", network),
+            "{network}"
+        );
+        assert!(metric_in(&lines, "fee_position_amount", network).is_none());
+    }
+
+    // One is recorded at a final head: a number in the origin network's line only.
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO final_heads (network, block_number, block_hash, block_time) \
+               VALUES ('{ORIGIN}', 9000, '\\x9000', now()); \
+             INSERT INTO fee_position_readings (network, block_number, block_hash, holder, amount) \
+               VALUES ('{ORIGIN}', 9000, '\\x9000', '0xlane', 250000000000000000)"
+        ),
+    )
+    .await;
+    let lines = observe::emf_lines(
+        &observe::read(w.core.pool()).await.unwrap(),
+        1_700_000_000_000,
+    );
+    assert_eq!(
+        metric_in(&lines, "fee_position_amount", ORIGIN),
+        Some(serde_json::json!(250000000000000000.0))
+    );
+    assert!(!unknown_in(&lines, "fee_position_amount", ORIGIN));
+    assert!(unknown_in(&lines, "fee_position_amount", ISSUING));
+    for l in &lines {
+        assert!(!l.contains("0xlane"), "a line must not carry an address");
     }
 }
