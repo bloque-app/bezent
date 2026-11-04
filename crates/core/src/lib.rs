@@ -17,6 +17,7 @@
 
 mod account;
 mod amount;
+pub mod attested;
 mod coordinate;
 mod ids;
 mod reference;

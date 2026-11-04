@@ -84,9 +84,12 @@ bezent mints only what the report says, within the contract's mint window and ce
 
 **Withdrawal.** The redeemer redeems on the issuing network with a commitment: BLAKE2b-256 of the SCALE-encoded payout
 instructions. bezent never decodes the bytes, so their layout is Swaps'; only the hash binds. Personal and bank data never
-reach the issuing network (`REQ-PV-1`). Read the redemption from the log, relay the bytes with
-`POST /v0/withdrawals/extras` (`instructions`, hexadecimal), pay on the rail, and report the `payout`.
-`ERR-CommitmentMismatch` means the bytes are not the ones committed to: do not pay.
+reach the issuing network (`REQ-PV-1`). Relay the bytes with `POST /v0/withdrawals/extras`, by the redemption's on-chain
+reference (`instructions`, hexadecimal). Its answer carries the withdrawal's `bridge_reference`; from then on the
+withdrawal reads through the status and the log like any of the module's. Pay on the rail, and report the `payout` under
+that `bridge_reference`. `ERR-CommitmentMismatch` means the bytes are not the ones committed to: do not pay. A relay
+that names a redemption bezent has not observed yet is refused with `ERR-SourceNotFound` and spends its reference, so wait
+for finality on the issuing network before relaying.
 
 **After the payout.** The withdrawal holds at `Source-Final` with its payout in the book, until the owner rules on the
 state after `Source-Final` for an attested backend (`amendments/0016-attested-delivery.md`). A report of a payout that

@@ -5,7 +5,7 @@
 use crate::config::Config;
 use crate::error::ApiError;
 use crate::webhooks::{self, Dispatcher, Webhooks};
-use crate::{intake, query};
+use crate::{intake, query, reports};
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Request, State};
 use axum::http::request::Parts;
@@ -157,6 +157,7 @@ pub fn router(app: App) -> Router {
         .route("/v0/deposits", post(intake::deposit))
         .route("/v0/withdrawals/extras", post(intake::withdrawal_extras))
         .route("/v0/refunds", post(intake::refund))
+        .route("/v0/reports", post(reports::report))
         .route(
             "/v0/transfers/by-request/{reference}",
             get(query::by_request),

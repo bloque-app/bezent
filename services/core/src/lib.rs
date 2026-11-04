@@ -16,8 +16,10 @@
 //! - [`cutoff`]: route cut-offs (`CND-CutOff`, amendment 0010 A2).
 //! - [`reserve`] (`F-004`): the reserve book, the one-minute reserve check and the daily signed
 //!   statement.
+//! - [`attested`] (`F-011`): an attesting party's reports become observations.
 //! - [`config`]: the configuration file.
 
+pub mod attested;
 pub mod config;
 pub mod cutoff;
 pub mod engine;

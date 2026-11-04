@@ -12,3 +12,4 @@ SPDX-License-Identifier: CC-BY-4.0
 | T-012-03 | The graph step: pause with callback token, callback URL only after persist, resume on bezent's notification, log recovery | `REQ-ST-5` | Unit tests incl. lost callback |
 | T-012-04 | Stall alarm; no pro-rata splitting; no fees_deducted | `REQ-TR-5` | Tests |
 | T-012-05 | CI job with bezent-sidecar pinned by digest | `pl-pr-e2e` | Job green |
+| T-012-06 | The reports side (`M-3`): sign and send reports as `attesting-contract.md` says; relay instructions; never report a payment final before its rail guarantees it. Waits for the owner to lift the module's draft ruling | `DEC-14`, `REQ-BE-5`, `REQ-BE-6`, `REQ-OB-7`, `REQ-RQ-9` | Unit tests against the contract; driven against the sidecar |

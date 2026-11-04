@@ -271,6 +271,11 @@ impl Core {
     /// One cycle at wall-clock time `now`: withdrawals from new redemptions, then a step for every
     /// open transfer, then the per-(asset, network) conditions raised and cleared.
     pub async fn cycle(&self, now: DateTime<Utc>) -> sqlx::Result<Report> {
+        // F-011: an attesting party's reports become observations first (REQ-BE-5); a store that
+        // cannot answer stops nothing else.
+        if let Err(e) = crate::attested::record_pending(&self.pool).await {
+            tracing::warn!(error = %e, "REQ-BE-5: pending reports not recorded; the cycle goes on");
+        }
         // F-004: every final movement is in the book before anything reads it (REQ-BK-7). An
         // observation the book cannot post is quarantined and paged there; nothing it does stops
         // the cycle (INV-1, review M1).
@@ -352,33 +357,48 @@ impl Core {
         // The backend the redemption names, as the endpoint records it (F-007): {"kind", "chain_id"
         // or "id"}, mapped to an origin network by declaration.
         let backend = &o.detail["backend"];
-        let backend = match (backend["kind"].as_str(), backend["chain_id"].as_u64()) {
-            (Some("evm"), Some(id)) => format!("evm:{id}"),
+        let (backend, destination) = match (backend["kind"].as_str(), backend["chain_id"].as_u64())
+        {
+            (Some("evm"), Some(id)) => {
+                // A public backend's payout instructions are inline: the beneficiary's address
+                // (REQ-RQ-9, REQ-OT-4).
+                let Some(address) = o.detail["payout"].get("address").and_then(Value::as_str)
+                else {
+                    tracing::warn!(
+                        observation = o.id,
+                        "a redemption to a public backend with no payout address; no withdrawal"
+                    );
+                    return Ok(false);
+                };
+                (format!("evm:{id}"), address.to_owned())
+            }
             (Some("attested"), _) => {
                 // REQ-RQ-9: an attested backend's redemption carries only a commitment, never an
-                // address; its payout is the requester's, reported against the relayed
-                // instructions, not an EVM payout. A commitment never becomes a destination
-                // (review S2), so the core makes no payout from it.
-                tracing::warn!(
-                    observation = o.id,
-                    "a redemption to an attested backend; no EVM payout is made from a commitment"
-                );
-                return Ok(false);
+                // address. The withdrawal is made, so the requester can relay its instructions, and
+                // its destination is the commitment, marked: nothing is ever ordered or signed for
+                // it (review S2; `deliver` returns first, and the store refuses an order there).
+                let commitment = o.detail["payout"]
+                    .get("commitment")
+                    .and_then(Value::as_str)
+                    .filter(|c| {
+                        c.strip_prefix("0x")
+                            .and_then(|h| hex::decode(h).ok())
+                            .is_some_and(|b| b.len() == 32)
+                    });
+                let (Some(id), Some(commitment)) = (o.detail["backend"]["id"].as_u64(), commitment)
+                else {
+                    tracing::warn!(
+                        observation = o.id,
+                        "a redemption to an attested backend with no 32-byte commitment; no withdrawal"
+                    );
+                    return Ok(false);
+                };
+                (
+                    format!("attested:{id}"),
+                    bezent_core::attested::commitment_destination(commitment),
+                )
             }
             _ => return Ok(false),
-        };
-        // A public backend's payout instructions are inline: the beneficiary's address (REQ-RQ-9,
-        // REQ-OT-4).
-        let Some(destination) = o.detail["payout"]
-            .get("address")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        else {
-            tracing::warn!(
-                observation = o.id,
-                "a redemption to a public backend with no payout address; no withdrawal"
-            );
-            return Ok(false);
         };
         let row: Option<(String, String, i16, i16)> = sqlx::query_as(
             "SELECT a.asset, n.network, a.precision, t.precision FROM assets a \
@@ -1414,6 +1434,18 @@ impl Core {
     ) -> sqlx::Result<Did> {
         if !self.source_is_final(conn, t).await? {
             tracing::error!(transfer = %t.bridge_reference, "INV-6, INV-7, INV-16: the source leg is not final as observed; nothing is delivered");
+            return Ok(Did::default());
+        }
+        // REQ-RQ-9, DEC-14: bezent signs nothing on an attested backend. `Delivering` is "a destination
+        // transaction is signed and recorded" (§5.4), so the transfer holds at `Source-Final`
+        // until the owner rules on amendment 0016 (F-011 NOTES 10).
+        let attested: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM networks WHERE network = $1 AND backend LIKE 'attested:%')",
+        )
+        .bind(&t.destination_network)
+        .fetch_one(&mut *conn)
+        .await?;
+        if attested {
             return Ok(Did::default());
         }
         let Some((reference, scope)) = self.delivery_reference(conn, t).await? else {

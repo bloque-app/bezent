@@ -36,6 +36,7 @@ mod intake;
 pub mod openapi;
 mod query;
 mod refs;
+mod reports;
 pub mod webhooks;
 
 pub use app::{App, Limits, connect, router, run, serve};

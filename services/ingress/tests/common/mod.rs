@@ -30,6 +30,14 @@ pub const TOKEN: &str = "usdc";
 pub const ROUTELESS_TOKEN: &str = "routeless";
 /// An attested asset (REQ-BE-2).
 pub const ATTESTED: &str = "bFIAT";
+/// `ATTESTED`'s backend, its origin token and its reserve, as [`attested_backend`] declares them.
+pub const ATTESTED_NETWORK: &str = "fiat-rail";
+pub const ATTESTED_TOKEN: &str = "fiat";
+pub const ATTESTED_RESERVE: &str = "party-accounts";
+/// The attesting party's name, as the statement gives it. `alpha` speaks for it.
+pub const PARTY: &str = "The Party";
+/// The party's test key (the seed of a key that signs nothing but these tests' reports).
+pub const PARTY_KEY_SEED: [u8; 32] = [0x7a; 32];
 /// The reserve address of `ASSET` on `ORIGIN`.
 pub const RESERVE: &str = "0x00000000000000000000000000000000000000aa";
 /// A well-formed address on `ORIGIN`.
@@ -105,6 +113,34 @@ pub async fn seed(pool: &PgPool) {
             credential("alpha", ALPHA),
             credential("beta", BETA),
             credential("gamma", GAMMA),
+        ),
+    )
+    .await;
+}
+
+/// `ATTESTED`'s attested backend: the network, the token, the reserve, and `alpha` as its attesting
+/// party with its key (`REQ-BE-2`, `REQ-RQ-4`). Idempotent. Not part of [`seed`]: the other tests
+/// read the route table and the reserves whole.
+pub async fn attested_backend(pool: &PgPool) {
+    use ed25519_dalek::SigningKey;
+    let public = hex::encode(
+        SigningKey::from_bytes(&PARTY_KEY_SEED)
+            .verifying_key()
+            .to_bytes(),
+    );
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO networks (network, role, address_format, backend) VALUES \
+               ('{ATTESTED_NETWORK}', 'origin', 'opaque', 'attested:1') ON CONFLICT DO NOTHING; \
+             INSERT INTO admitted_tokens (network, token, asset, precision) VALUES \
+               ('{ATTESTED_NETWORK}', '{ATTESTED_TOKEN}', '{ATTESTED}', 2) ON CONFLICT DO NOTHING; \
+             INSERT INTO reserves (asset, network, address) VALUES \
+               ('{ATTESTED}', '{ATTESTED_NETWORK}', '{ATTESTED_RESERVE}') ON CONFLICT DO NOTHING; \
+             INSERT INTO attesting_parties (network, requester, party) VALUES \
+               ('{ATTESTED_NETWORK}', 'alpha', '{PARTY}') ON CONFLICT DO NOTHING; \
+             INSERT INTO attesting_keys (network, public_key) VALUES \
+               ('{ATTESTED_NETWORK}', '\\x{public}') ON CONFLICT DO NOTHING;"
         ),
     )
     .await;

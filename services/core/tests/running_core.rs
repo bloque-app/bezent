@@ -195,7 +195,7 @@ async fn req_ic_2_dec_12_a_reading_the_providers_disagree_on_is_incomplete_and_p
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_be_4_attested_reserve_reports_are_a_stub_no_attested_assets_configured(
+async fn req_be_4_an_attested_reserve_with_no_report_recorded_is_a_read_error_never_zero(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -204,7 +204,7 @@ async fn req_be_4_attested_reserve_reports_are_a_stub_no_attested_assets_configu
         .attested(ASSET, "swaps-test")
         .await
         .unwrap_err();
-    assert!(err.0.contains("no attested assets configured"), "{err}");
+    assert!(err.0.contains("no report"), "{err}");
 }
 
 /// A world the fake networks agree with, evaluated once (the statement states that evaluation).

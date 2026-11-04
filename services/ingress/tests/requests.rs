@@ -744,9 +744,16 @@ async fn withdrawal(
     reference: &str,
     commitment: Option<&str>,
 ) {
+    // As the Kreivo endpoint records it (`payout_json`).
     let detail = match commitment {
-        Some(c) => json!({ "commitment": c }),
+        Some(c) => json!({ "payout": { "commitment": c } }),
         None => json!({}),
+    };
+    let network = if asset == ATTESTED {
+        attested_backend(pool).await;
+        ATTESTED_NETWORK
+    } else {
+        ORIGIN
     };
     sqlx::query(
         "INSERT INTO observations (network, block_number, block_hash, block_time, position_kind, \
@@ -773,7 +780,7 @@ async fn withdrawal(
     .bind(ISSUING)
     .bind(asset)
     .bind(reference)
-    .bind(ORIGIN)
+    .bind(network)
     .bind(ORIGIN_ADDRESS)
     .bind(block)
     .execute(pool)
@@ -1100,7 +1107,8 @@ async fn req_id_4_a_second_requesters_extras_on_one_redemption_are_refused_and_s
         ))
     };
     withdrawal(&pool, 1, ASSET, "a1", None).await;
-    withdrawal(&pool, 2, ATTESTED, "b1", Some(&format!("0x{commitment}"))).await;
+    withdrawal(&pool, 2, ASSET, "a3", None).await;
+    withdrawal(&pool, 3, ATTESTED, "b1", Some(&format!("0x{commitment}"))).await;
     let relayed = format!("0x{}", hex::encode(instructions));
 
     // The review's reproduction: both withdrawals are held while two requesters send extras for
@@ -1123,13 +1131,13 @@ async fn req_id_4_a_second_requesters_extras_on_one_redemption_are_refused_and_s
         ),
         (
             ALPHA,
-            json!({ "request_reference": "i-a", "redemption_reference": "0xb1",
-                "instructions": relayed }),
+            json!({ "request_reference": "y-a", "redemption_reference": "0xa3",
+                "expires_at": "2026-12-01T00:00:00Z" }),
         ),
         (
             BETA,
-            json!({ "request_reference": "i-b", "redemption_reference": "0xb1",
-                "instructions": relayed }),
+            json!({ "request_reference": "y-b", "redemption_reference": "0xa3",
+                "expires_at": "2027-01-01T00:00:00Z" }),
         ),
     ];
     let mut tasks = Vec::new();
@@ -1151,7 +1159,7 @@ async fn req_id_4_a_second_requesters_extras_on_one_redemption_are_refused_and_s
         assert_eq!(status, StatusCode::CREATED, "{answer}");
         answers.push(answer);
     }
-    for (pair, reference) in [([0, 1], "bz-w-a1"), ([2, 3], "bz-w-b1")] {
+    for (pair, reference) in [([0, 1], "bz-w-a1"), ([2, 3], "bz-w-a3")] {
         let won: Vec<usize> = pair
             .into_iter()
             .filter(|&i| answers[i].get("error").is_none())
@@ -1186,6 +1194,28 @@ async fn req_id_4_a_second_requesters_extras_on_one_redemption_are_refused_and_s
         assert_eq!(status, StatusCode::OK);
     }
 
+    // An attested backend's extras are only its party's, grant or not (REQ-RQ-4; F-011): the
+    // second requester holds the attesting grant and is refused, with nothing recorded.
+    let relay = |credential, reference: &str| {
+        (
+            credential,
+            json!({ "request_reference": reference, "redemption_reference": "0xb1",
+                    "instructions": relayed }),
+        )
+    };
+    let (credential, body) = relay(BETA, "i-b");
+    let (status, answer) = ingress
+        .post("/v0/withdrawals/extras", credential, &body)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
+    assert_eq!(answer["error"], "ERR-NotAuthorised");
+    let (credential, body) = relay(ALPHA, "i-a");
+    let (status, answer) = ingress
+        .post("/v0/withdrawals/extras", credential, &body)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["bridge_reference"], "bz-w-b1");
+
     // The store holds one answer per withdrawal, and one relay of the instructions.
     let linked: i64 = scalar(
         &pool,
@@ -1193,7 +1223,7 @@ async fn req_id_4_a_second_requesters_extras_on_one_redemption_are_refused_and_s
          WHERE t.kind = 'withdrawal'",
     )
     .await;
-    assert_eq!(linked, 2);
+    assert_eq!(linked, 3);
     assert_eq!(count(&pool, "relayed_instructions").await, 1);
     // Only the winner's field was written on the public withdrawal.
     let expiry: String = scalar(

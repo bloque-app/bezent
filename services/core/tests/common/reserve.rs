@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use bezent_core_service::reserve::FinalPoint;
 use bezent_core_service::reserve::check::{Clock, Page, Pager, ReserveCheck};
-use bezent_core_service::reserve::readings::{AttestedPosition, Holding, ReadError, Readings};
+use bezent_core_service::reserve::readings::{AttestedSnapshot, Holding, ReadError, Readings};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use sqlx::PgPool;
@@ -32,7 +32,7 @@ pub struct Chain {
     /// Convertible holdings per address.
     pub convertible: HashMap<String, Vec<Holding>>,
     /// Attested positions per (asset, network).
-    pub attested: HashMap<(String, String), Vec<AttestedPosition>>,
+    pub attested: HashMap<(String, String), AttestedSnapshot>,
     /// Every final point a reading was asked at.
     pub asked: Vec<FinalPoint>,
     /// When set, every reading fails.
@@ -92,11 +92,7 @@ impl Readings for FakeReadings {
         down(&c, v)
     }
 
-    async fn attested(
-        &self,
-        asset: &str,
-        network: &str,
-    ) -> Result<Vec<AttestedPosition>, ReadError> {
+    async fn attested(&self, asset: &str, network: &str) -> Result<AttestedSnapshot, ReadError> {
         let c = self.chain();
         let v = c
             .attested

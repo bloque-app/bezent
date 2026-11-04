@@ -220,7 +220,8 @@ const PENDING: &str = "SELECT {OBS} FROM observations o \
      WHERE x.outcome = 'final' AND o.executed AND o.amount > 0 \
        AND NOT EXISTS (SELECT 1 FROM book_entries e WHERE e.observation_id = o.id) \
        AND NOT EXISTS (SELECT 1 FROM book_quarantine q WHERE q.observation_id = o.id) \
-       AND (o.detail ->> 'event' IN ('Minted', 'Redeemed', 'RefundMinted', 'Payout') \
+       AND (o.detail ->> 'event' IN ('Minted', 'Redeemed', 'RefundMinted', 'Payout', 'Reversal', \
+                                     'Restoration') \
             OR EXISTS (SELECT 1 FROM reserves r \
                        JOIN admitted_tokens k ON k.network = r.network AND k.asset = r.asset \
                        WHERE r.network = o.network AND r.address = o.recipient \
@@ -405,6 +406,8 @@ async fn movement(
         (true, "RefundMinted") => refund_mint(conn, o, cache).await,
         (true, _) => Ok(None),
         (false, "Payout") => payout(conn, o, cache).await,
+        (false, "Reversal") => reversal_observed(conn, o, cache).await,
+        (false, "Restoration") => restoration_observed(conn, o, cache).await,
         (false, _) => arrival(conn, o, cache).await,
     }
 }
@@ -1012,6 +1015,129 @@ pub async fn reversal(
         Some(id) => Ok(id),
         None => refused("the report is already recorded (INV-17)"),
     }
+}
+
+/// The party and its identifier, from a report's observation (`REQ-BE-4`), and the asset and the
+/// amount in book units it moves.
+async fn reported<'a>(
+    conn: &mut PgConnection,
+    o: &Observation,
+    cache: &'a mut HashMap<String, Option<Asset>>,
+) -> sqlx::Result<Option<(&'a Asset, u128, String)>> {
+    let Some(party) = o.detail.get("party").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let party = party.to_owned();
+    let found: Option<(String, i16)> = sqlx::query_as(
+        "SELECT asset, precision FROM admitted_tokens WHERE network = $1 AND token = $2",
+    )
+    .bind(&o.network)
+    .bind(&o.token)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((name, precision)) = found else {
+        return Ok(None);
+    };
+    let Some(a) = asset(conn, cache, &name).await? else {
+        return Ok(None);
+    };
+    Ok(a.token_ratio(precision)
+        .zip(o.amount())
+        .and_then(|(r, m)| m.checked_mul(r))
+        .map(|amount| (a, amount, party)))
+}
+
+/// The entry of a `reversal` report's observation (`REQ-BE-6`): as [`reversal`], resting on the
+/// report's own block, so the check reads it at the same point as the rest of the backend.
+async fn reversal_observed(
+    conn: &mut PgConnection,
+    o: &Observation,
+    cache: &mut HashMap<String, Option<Asset>>,
+) -> sqlx::Result<Option<Entry>> {
+    let Some((a, amount, party)) = reported(conn, o, cache).await? else {
+        unexplained(o, "a reversal of a token admitted for no asset");
+        return Ok(None);
+    };
+    let (Some(report), Some(position)) = (
+        o.detail.get("report_id").and_then(Value::as_str),
+        o.detail.get("position").and_then(Value::as_str),
+    ) else {
+        unexplained(o, "a reversal that names no report or position");
+        return Ok(None);
+    };
+    let report = Report {
+        party: &party,
+        report,
+    };
+    Ok(Some(Entry {
+        kind: "reversal",
+        reference: report.reference(),
+        memo: format!("reversal reported by {party}"),
+        point: Some(point_of(o)),
+        observation: Some(o.id),
+        transfer: None,
+        corrects: None,
+        asset: a.asset.clone(),
+        postings: vec![
+            Posting::new("surplus", Side::Debit, amount),
+            Posting::new("reserve", Side::Credit, amount)
+                .on(&o.network)
+                .item(position),
+        ],
+    }))
+}
+
+/// The entry of a `restoration` report's observation (`REQ-BE-6`): the reserve the named reversal
+/// took, in full, resting on the report's own block.
+async fn restoration_observed(
+    conn: &mut PgConnection,
+    o: &Observation,
+    cache: &mut HashMap<String, Option<Asset>>,
+) -> sqlx::Result<Option<Entry>> {
+    let Some((a, amount, party)) = reported(conn, o, cache).await? else {
+        unexplained(o, "a restoration of a token admitted for no asset");
+        return Ok(None);
+    };
+    let (Some(report), Some(restores)) = (
+        o.detail.get("report_id").and_then(Value::as_str),
+        o.detail.get("restores").and_then(Value::as_str),
+    ) else {
+        unexplained(o, "a restoration that names no reversal");
+        return Ok(None);
+    };
+    let reversal = Report {
+        party: &party,
+        report: restores,
+    };
+    let found: Option<(Option<String>, String)> = sqlx::query_as(
+        "SELECT p.item, p.amount::text FROM book_entries e \
+         JOIN book_postings p ON p.entry_id = e.id AND p.account = 'reserve' \
+         WHERE e.kind = 'reversal' AND e.reference = $1 AND p.asset = $2",
+    )
+    .bind(reversal.reference())
+    .bind(&a.asset)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((item, _)) = found.filter(|(_, r)| r.parse::<u128>() == Ok(amount)) else {
+        unexplained(
+            o,
+            "a restoration that does not answer a booked reversal in full",
+        );
+        return Ok(None);
+    };
+    let mut debit = Posting::new("reserve", Side::Debit, amount).on(&o.network);
+    debit.item = item;
+    Ok(Some(Entry {
+        kind: "restoration",
+        reference: reversal.reference(),
+        memo: format!("restored, reported by {party} as {report}"),
+        point: Some(point_of(o)),
+        observation: Some(o.id),
+        transfer: None,
+        corrects: None,
+        asset: a.asset.clone(),
+        postings: vec![debit, Posting::new("surplus", Side::Credit, amount)],
+    }))
 }
 
 /// Records the attesting party's report that it restored the reserve a reversal took
