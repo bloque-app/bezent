@@ -676,15 +676,17 @@ impl Core {
     /// [`Core::deadline`] for an attempt whose clock started at `start`, with the time the transfer
     /// was held in `CND-PayoutWindow` since then left out, and the clock restarted where the first
     /// hold was taken (amendment 0012; review M-1). Every hold counts, so a provider that flaps in
-    /// and out of the hold restarts nothing (issue #35).
+    /// and out of the hold restarts nothing (issue #35). The holds are those recorded after the
+    /// last transition of the attempt before `attempt` (see [`store::held_under_window`]).
     async fn deadline_held(
         &self,
         conn: &mut PgConnection,
         t: &Transfer,
+        attempt: i32,
         start: DateTime<Utc>,
     ) -> sqlx::Result<DateTime<Utc>> {
         Ok(
-            match store::held_under_window(conn, t.id, Some(start)).await? {
+            match store::held_under_window(conn, t.id, attempt - 1, Some(start)).await? {
                 Some((first, held)) => self.deadline(conn, t, first.max(start)).await? + held,
                 None => self.deadline(conn, t, start).await?,
             },
@@ -896,29 +898,36 @@ impl Core {
             .or(t.source_final_block_time)
             .unwrap_or(head.block_time);
         let bound = self.settings.payout_window_alert_after;
-        // The holds already left count too: a provider that flaps in and out of the hold does not
-        // start the page over (issue #35).
-        let before = store::held_under_window(conn, t.id, None)
+        // The holds of this attempt already left count too: a provider that flaps in and out of
+        // the hold does not start the page over (issue #35).
+        let after = store::current_attempt(conn, t.id).await?;
+        let before = store::held_under_window(conn, t.id, after, None)
             .await?
             .map_or(Duration::zero(), |(_, held)| held);
         if head.block_time <= since + bound - before.min(bound) {
             return Ok(());
         }
+        // One page when the attempt's total crosses the bound, then once a day while the same
+        // hold lasts. Taking the hold again later is no new crossing: the total only grows, so
+        // the reminder is counted from that hold's start (issue #35).
+        let attempt = (after + 1).to_string();
         let hold = hold.to_string();
-        let paged_today: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM event_log WHERE kind = 'payout-window-alert' \
-               AND transfer_id = $1 \
-               AND (payload ->> 'head_time')::timestamptz > $2 - interval '1 day')",
+        let last: Option<(String, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT payload ->> 'hold', (payload ->> 'head_time')::timestamptz FROM event_log \
+             WHERE kind = 'payout-window-alert' AND transfer_id = $1 AND payload ->> 'attempt' = $2 \
+             ORDER BY seq DESC LIMIT 1",
         )
         .bind(t.id)
-        .bind(head.block_time)
-        .fetch_one(&mut *conn)
+        .bind(&attempt)
+        .fetch_optional(&mut *conn)
         .await?;
-        if paged_today {
+        if let Some((paged_hold, at)) = last
+            && head.block_time < (if paged_hold == hold { at } else { since }) + Duration::days(1)
+        {
             return Ok(());
         }
         let detail = json!({"spec": "CND-PayoutWindow", "bridge_reference": t.bridge_reference,
-                            "hold": hold, "held_since": since.to_rfc3339(),
+                            "hold": hold, "attempt": attempt, "held_since": since.to_rfc3339(),
                             "held_before_seconds": before.num_seconds(),
                             "network": head.network, "head_block": head.block_number,
                             "head_time": head.block_time.to_rfc3339(),
@@ -1848,7 +1857,7 @@ impl Core {
         .fetch_one(&mut *conn)
         .await?;
         let started = started.or(t.source_final_block_time).unwrap_or(now);
-        let deadline = self.deadline_held(conn, t, started).await?;
+        let deadline = self.deadline_held(conn, t, attempt, started).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
         };
@@ -1951,7 +1960,7 @@ impl Core {
         let Some(start) = start else {
             return Ok(Did::default());
         };
-        let deadline = self.deadline_held(conn, t, start).await?;
+        let deadline = self.deadline_held(conn, t, attempt, start).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
         };

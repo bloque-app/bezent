@@ -229,17 +229,20 @@ pub async fn final_point(
     }))
 }
 
-/// The holds `transfer` has had in `CND-PayoutWindow` and left, on the destination network's
-/// clock, among those taken at or after `since` (all of them when `None`): when the first was
-/// taken (the attempt's start, for a hold taken before any final head was recorded), and how
-/// long they lasted together. A hold still open counts nothing here. A deadline
-/// leaves the time held out and starts when the first hold was taken (review M-1: the clock
-/// restarts when the hold is left); summing keeps a provider that flaps in and out of the hold
-/// from restarting it each time (issue #35).
+/// The holds `transfer` has had in `CND-PayoutWindow` and left since its attempt's clock started:
+/// those recorded after the last transition of delivery attempt `after` or an earlier one (0 for
+/// none), chosen by the order they were recorded in and never by comparing clocks, since a hold
+/// rests on the destination's head and the attempt's point may rest on the source's. Returns when
+/// the first was taken (`start`, the attempt's point, for a hold taken before any final head was
+/// recorded) and how long they lasted together. A hold still open counts nothing here. A
+/// deadline leaves the time held out and starts when the first hold was taken (review M-1: the clock restarts when
+/// the hold is left); summing keeps a provider that flaps in and out of the hold from restarting
+/// it each time (issue #35).
 pub async fn held_under_window(
     conn: &mut PgConnection,
     transfer: i64,
-    since: Option<DateTime<Utc>>,
+    after: i32,
+    start: Option<DateTime<Utc>>,
 ) -> sqlx::Result<Option<(DateTime<Utc>, chrono::Duration)>> {
     let row: (Option<DateTime<Utc>>, Option<i64>) = sqlx::query_as(
         "SELECT min(i.taken), sum(extract(epoch FROM i.released - i.taken))::bigint FROM ( \
@@ -253,11 +256,13 @@ pub async fn held_under_window(
                     FROM transitions WHERE transfer_id = $1) x \
              WHERE x.condition = 'CND-PayoutWindow' \
                AND x.before IS DISTINCT FROM 'CND-PayoutWindow' \
-               AND ($2::timestamptz IS NULL OR x.block_time IS NULL OR x.block_time >= $2)) i \
+               AND x.id > coalesce((SELECT max(id) FROM transitions \
+                                     WHERE transfer_id = $1 AND attempt <= $3), 0)) i \
          WHERE i.taken IS NOT NULL AND i.released IS NOT NULL",
     )
     .bind(transfer)
-    .bind(since)
+    .bind(start)
+    .bind(after)
     .fetch_one(conn)
     .await?;
     Ok(match row {
