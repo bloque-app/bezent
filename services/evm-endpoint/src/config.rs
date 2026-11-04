@@ -180,7 +180,10 @@ pub struct Config {
     pub delivery_role: String,
     /// The first block to read.
     pub start_block: u64,
-    /// The most blocks one `eth_getLogs` range covers.
+    /// The most blocks one `eth_getLogs` range covers. The range is this size every time (default
+    /// 500) and does not shrink when a read fails, and a request to a provider ends after 30 s
+    /// (`rpc::REQUEST_TIMEOUT`): a range the provider always takes longer than that to answer is
+    /// retried as a gap for good, so choose a value the provider answers well within 30 s.
     #[serde(default = "default_range")]
     pub max_range: u64,
     /// How often the endpoint looks, in milliseconds.
