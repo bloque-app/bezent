@@ -277,6 +277,10 @@ impl Core {
         if let Err(e) = crate::reserve::book::post_pending(&self.pool).await {
             tracing::warn!(error = %e, "REQ-BK-7: pending movements not posted; the cycle goes on");
         }
+        // Issue #26 (AC-I1.2, INV-8): a mint of a reference after its proof raises the alert.
+        if let Err(e) = crate::late_mint::watch(&self.pool).await {
+            tracing::warn!(error = %e, "AC-I1.2: late mints not checked; the cycle goes on");
+        }
         let mut report = Report {
             withdrawals: self.withdrawals_from_redemptions().await?,
             ..Report::default()
