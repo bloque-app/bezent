@@ -1347,6 +1347,73 @@ async fn req_rf_1_issue_35_a_hold_pages_daily_on_the_core_s_clock_when_the_desti
     assert!(order(&w.admin, id, 2).await.is_none(), "no second payout");
 }
 
+/// REQ-RF-1, REQ-GV-5, REQ-TR-5, review of the fix round of #35: PINS TODAY'S BEHAVIOUR, which is not
+/// desired and is not a ruling. A payout whose inclusion is final yet fails the amount check is a
+/// leg that stands, so a refund or a new attempt is withheld for good (a page a day, no release,
+/// no override), and the review cannot close as `Delivered` (the leg is not what was ordered). There
+/// is no path out inside bezent, and none may be added that moves value or edits a status
+/// (`REQ-GV-5`). What to do with such a transfer is the owner's (amendment 0019, "What waits").
+/// Change this test only when that is ruled.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_issue_35_a_final_inclusion_that_fails_the_amount_check_is_never_released(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, _signed) = cancel_signed_in_review(&w, 75).await;
+    prove_replaced(&w.admin, id, 1, PAST + 6, PAST + 20).await;
+    // The payout is included with an amount other than the one ordered, and goes final.
+    let wrong = observe(
+        &w.admin,
+        ORIGIN,
+        PAST + 25,
+        0,
+        TOKEN,
+        701,
+        None,
+        Some(BENEFICIARY),
+        Some(&payout_reference_of(&w.admin, id).await),
+        true,
+        json!({"event": "Payout"}),
+    )
+    .await;
+    decide(&w.admin, wrong, "final", PAST + 40).await;
+    let refund = resolution(&w, id, "Refunding", ORIGIN, PAST + 20, 0).await;
+    approve_as(&w, 1, refund).await.unwrap();
+    for _ in 0..3 {
+        w.settle(t0()).await;
+    }
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(refunds(&w).await, 0);
+    assert_eq!(blocked_pages(&w, id).await, 1);
+    // The leg is final: nothing closes the review as Delivered, which would need the amount to be right.
+    let delivered = resolution(&w, id, "Delivered", ORIGIN, PAST + 25, 0).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(
+        events(&w, id, "review-evidence-refused")
+            .await
+            .iter()
+            .filter(|e| e["manual_action_id"] == json!(delivered.to_string()))
+            .count(),
+        1
+    );
+    // Days on, the refund is still withheld and the page still comes, once a day; no release.
+    for day in 1..=2 {
+        head(&w.admin, ORIGIN, PAST + 40 + day * DAY).await;
+        w.settle(t0()).await;
+        assert_eq!(blocked_pages(&w, id).await as i64, 1 + day);
+    }
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(refunds(&w).await, 0);
+    assert!(
+        events(&w, id, "review-evidence-refused")
+            .await
+            .iter()
+            .all(|e| e["manual_action_id"] != json!(refund.to_string()))
+    );
+}
+
 /// REQ-RF-1, INV-8, INV-16, REQ-GV-5, issue #35: the same by a resolution into `Delivering` in
 /// review. It is withheld, not refused; pages once and then daily; with no override; it runs when
 /// the inclusion is withdrawn. A final inclusion is the delivery: the review closes as `Delivered`
