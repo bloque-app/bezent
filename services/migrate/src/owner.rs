@@ -107,11 +107,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(some.logins, ["bezent_core_login"]);
-        assert!(read(
-            "empty-login",
-            &format!("logins = [\" \"]\n{VAULT}\n{STORE}")
-        )
-        .is_err());
+        assert!(
+            read(
+                "empty-login",
+                &format!("logins = [\" \"]\n{VAULT}\n{STORE}")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -119,11 +121,13 @@ mod tests {
         assert!(read("ok", &format!("{VAULT}{STORE}")).is_ok());
         assert!(read("novault", STORE).unwrap_err().contains("[vault]"));
         assert!(read("nostore", VAULT).is_err());
-        assert!(read(
-            "http",
-            &format!("{}{STORE}", VAULT.replace("https", "http"))
-        )
-        .is_err());
+        assert!(
+            read(
+                "http",
+                &format!("{}{STORE}", VAULT.replace("https", "http"))
+            )
+            .is_err()
+        );
         assert!(read("extra", &format!("{VAULT}{STORE}[other]\n")).is_err());
     }
 
