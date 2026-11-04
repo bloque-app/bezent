@@ -1834,6 +1834,14 @@ impl Core {
         }))
     }
 
+    /// Whether an inclusion of the payout stands: the transfer's own leg is observed, executed and
+    /// not withdrawn, decided or not (an ambiguous one counts: it is unknown, never absent). The one
+    /// reading of "standing" for both holds, the automatic path in `Delivered` (`after_proof`) and a
+    /// resolution (`resolve`), so the two cannot drift apart.
+    async fn inclusion_stands(&self, conn: &mut PgConnection, t: &Transfer) -> sqlx::Result<bool> {
+        Ok(!matches!(self.destination_leg(conn, t).await?, Leg::None))
+    }
+
     /// `Delivering`: included, proven not executed, or unknown past its deadline.
     async fn delivering(
         &self,
@@ -1874,16 +1882,7 @@ impl Core {
         match store::proof_of(conn, t.id, attempt).await? {
             Some(ProofPoint::Final(proof)) => {
                 return self
-                    .after_proof(
-                        conn,
-                        t,
-                        State::Delivering,
-                        attempt,
-                        &proof,
-                        None,
-                        false,
-                        now,
-                    )
+                    .after_proof(conn, t, State::Delivering, attempt, &proof, None, now)
                     .await;
             }
             Some(ProofPoint::Untimed) => return Ok(Did::default()),
@@ -2385,9 +2384,11 @@ impl Core {
         attempt: i32,
         proof: &Point,
         manual: Option<i64>,
-        standing: bool,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
+        // An inclusion of the payout that stands makes the leg unknown whatever a proof says
+        // (REQ-RF-1, issue #35); read here, from the same reading `resolve` holds by.
+        let standing = self.inclusion_stands(conn, t).await?;
         let retrying = store::attempt_has_intents(conn, t.id, attempt + 1).await?;
         if t.kind == "withdrawal" && !retrying {
             let start = t.source_final_block_time.unwrap_or(proof.block_time);
@@ -2593,16 +2594,7 @@ impl Core {
         // a proof says: no refund follows (REQ-RF-1, issue #35).
         if let Some(ProofPoint::Final(proof)) = store::proof_of(conn, t.id, attempt).await? {
             return self
-                .after_proof(
-                    conn,
-                    t,
-                    State::Delivered,
-                    attempt,
-                    &proof,
-                    None,
-                    leg.is_some(),
-                    now,
-                )
+                .after_proof(conn, t, State::Delivered, attempt, &proof, None, now)
                 .await;
         }
         let deadline = self.deadline(conn, t, included_at).await?;
@@ -2717,7 +2709,7 @@ impl Core {
         // runs when the inclusion is withdrawn, and the review closes as Delivered, by a
         // resolution, when it goes final. Nothing is derived from the observation, only withheld.
         let blocked = matches!(before, State::Delivering | State::Delivered)
-            && !matches!(self.destination_leg(conn, t).await?, Leg::None);
+            && self.inclusion_stands(conn, t).await?;
         let mut withheld = vec!["Refunding"];
         if !self.refuses_second_delivery(conn, t).await? {
             withheld.push("Delivering");
