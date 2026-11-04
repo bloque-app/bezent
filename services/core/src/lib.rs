@@ -17,6 +17,7 @@
 //! - [`late_mint`] (issue #26): a mint of a reference after its proof of non-execution.
 //! - [`reserve`] (`F-004`): the reserve book, the one-minute reserve check and the daily signed
 //!   statement.
+//! - [`observe`] (`F-014`): the observables of `REQ-ST-6`, written once a minute for the alarms.
 //! - [`config`]: the configuration file.
 
 pub mod config;
@@ -24,6 +25,7 @@ pub mod cutoff;
 pub mod engine;
 pub mod health;
 pub mod late_mint;
+pub mod observe;
 pub mod refs;
 pub mod reserve;
 pub mod store;

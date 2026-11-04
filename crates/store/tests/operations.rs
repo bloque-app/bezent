@@ -21,15 +21,18 @@ use common::{
 use sqlx::PgPool;
 use std::collections::BTreeMap;
 
-/// Every metric of the view, as (metric, asset, network, direction) to its value.
-async fn observables(pool: &PgPool) -> BTreeMap<(String, String, String, String), Option<String>> {
-    let rows: Vec<(
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = sqlx::query_as(
+type Key = (String, String, String, String);
+type Row = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// Every metric of the function, as (metric, asset, network, direction) to its value.
+async fn observables(pool: &PgPool) -> BTreeMap<Key, Option<String>> {
+    let rows: Vec<Row> = sqlx::query_as(
         "SELECT metric, asset, network, direction, value::text FROM ops_observables()",
     )
     .fetch_all(pool)
@@ -51,7 +54,7 @@ async fn observables(pool: &PgPool) -> BTreeMap<(String, String, String, String)
 }
 
 fn value(
-    all: &BTreeMap<(String, String, String, String), Option<String>>,
+    all: &BTreeMap<Key, Option<String>>,
     metric: &str,
     asset: &str,
     network: &str,

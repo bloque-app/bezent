@@ -163,6 +163,7 @@ async fn main() -> ExitCode {
     let check_pool = pool.clone();
     let core = bezent_core_service::Core::new(pool, config.settings());
     let mut tick = tokio::time::interval(Duration::from_secs(config.cycle_seconds));
+    let mut observables = bezent_core_service::observe::Emitter::new();
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
@@ -210,6 +211,10 @@ async fn main() -> ExitCode {
                         _ => {}
                     }
                 }
+                // The observables of REQ-ST-6 (AC-H3.1), once a minute, for the alarms.
+                observables
+                    .tick(&check_pool, std::time::Instant::now(), chrono::Utc::now().timestamp_millis())
+                    .await;
                 if let Some(statements) = &statements {
                     // Bounded: a signer or a store that never answers does not freeze the cycle
                     // and the reserve check; a statement it keeps from being published is paged
