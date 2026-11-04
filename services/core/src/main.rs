@@ -211,6 +211,10 @@ async fn main() -> ExitCode {
                         _ => {}
                     }
                 }
+                // Alerts the signer and the endpoints could only write to the log (REQ-IC-4).
+                if let Err(e) = bezent_core_service::signals::surface(&check_pool).await {
+                    tracing::warn!(error = %e, "REQ-IC-4: the log's key-compromise alerts could not be read; tried again next cycle");
+                }
                 // The observables of REQ-ST-6 (AC-H3.1), once a minute, for the alarms.
                 observables
                     .tick(&check_pool, std::time::Instant::now(), chrono::Utc::now().timestamp_millis())

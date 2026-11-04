@@ -84,6 +84,9 @@ async fn ac_i2_1_an_operators_pause_holds_new_work_in_each_scope_and_a_second_op
             ("Source-Final".into(), Some("CND-Paused".into())),
             "scope {asset:?} {network:?} {direction:?}"
         );
+        eprintln!(
+            "NFR-8: pause committed to work held: {seconds:.3} s (scope {asset:?} {network:?} {direction:?})"
+        );
         assert!(seconds < 5.0, "one cycle took {seconds} s");
         lift(&w, pid).await;
         w.settle(t0()).await;

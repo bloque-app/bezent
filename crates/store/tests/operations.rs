@@ -395,6 +395,22 @@ async fn ac_i3_1_the_record_is_append_only_and_only_the_functions_write_it(pool:
     .await;
     assert_refused(&pool, "DELETE FROM admin_actions", "REQ-GV-5").await;
     assert_refused(&pool, "TRUNCATE admin_actions", "REQ-GV-5").await;
+    // Whoever writes a row, the actor is the session's login and the time the store's: a name
+    // given is replaced (here the schema owner, which may insert).
+    exec(
+        &pool,
+        "INSERT INTO admin_actions (kind, subject, actor, justification, recorded_at) \
+           VALUES ('other', 's', 'forged', 'j', '2001-01-01')",
+    )
+    .await;
+    let (actor, recent): (String, bool) = sqlx::query_as(
+        "SELECT actor, recorded_at > now() - interval '1 hour' FROM admin_actions WHERE subject = 's'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_ne!(actor, "forged");
+    assert!(recent);
     // An operator names no actor and writes no row of it: only the functions do.
     for sql in [
         "INSERT INTO admin_actions (kind, subject, justification) VALUES ('other', 's', 'j')",
