@@ -905,6 +905,10 @@ impl Core {
         let since = since
             .or(t.source_final_block_time)
             .unwrap_or(head.block_time);
+        // This page stays on the destination's clock, unlike the hold of an inclusion (`withheld`):
+        // the hold itself is measured there (amendment 0012: the allowance refills on that chain),
+        // and a destination whose head has stopped is a stalled endpoint, which the observables
+        // (`REQ-ST-6`) and the reserve check page on their own.
         let bound = self.settings.payout_window_alert_after;
         // The holds of this attempt already left count too: a provider that flaps in and out of
         // the hold does not start the page over (issue #35).
@@ -2973,7 +2977,8 @@ impl Core {
 
     /// The hold while an inclusion of the payout stands (`REQ-RF-1`, issue #35): `to` (a refund or
     /// a new attempt), by resolution `action` or by the automatic path, changes no state and pages
-    /// a human: once, then once a day while it lasts. It lasts until the endpoint decides the
+    /// a human: once, then once a day while it lasts (a day on the destination's final head or on the
+    /// core's clock, whichever comes first). It lasts until the endpoint decides the
     /// inclusion (`withdrawn` or `final`); there is no override (`REQ-GV-5`). The last page is read
     /// from the event log, so a restart repeats nothing early and forgets nothing.
     async fn withheld(
@@ -2991,8 +2996,14 @@ impl Core {
         let at = store::latest_head(conn, &t.destination_network)
             .await?
             .map_or(now, |h| h.block_time);
-        let last: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT (payload ->> 'at')::timestamptz FROM event_log \
+        // The last page of this hold: the destination's head time it was made at, and the core's
+        // own clock. A day is a day on either: the head's, so a replay of old history does not
+        // page by the calendar, and the wall clock's, so the page does not go quiet for as long as
+        // the destination's endpoint stalls and its head stops (review of the fix round of #35). A
+        // page from before the wall clock was recorded counts from when it was appended.
+        let last: Option<(DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT (payload ->> 'at')::timestamptz, \
+                    COALESCE((payload ->> 'wall')::timestamptz, appended_at) FROM event_log \
              WHERE kind = 'resolution-blocked-by-inclusion' AND transfer_id = $1 \
                AND payload ->> 'hold' = $2 ORDER BY seq DESC LIMIT 1",
         )
@@ -3000,12 +3011,14 @@ impl Core {
         .bind(&hold)
         .fetch_optional(&mut *conn)
         .await?;
-        if last.is_some_and(|l| at < l + Duration::days(1)) {
+        if last.is_some_and(|(head, wall)| {
+            at < head + Duration::days(1) && now < wall + Duration::days(1)
+        }) {
             return Ok(Did::default());
         }
         let detail = json!({"spec": "REQ-RF-1", "bridge_reference": t.bridge_reference,
                             "hold": hold, "manual_action_id": action.map(|a| a.to_string()),
-                            "resolution": to, "at": at.to_rfc3339()});
+                            "resolution": to, "at": at.to_rfc3339(), "wall": now.to_rfc3339()});
         store::event(conn, "resolution-blocked-by-inclusion", Some(t.id), &detail).await?;
         tracing::error!(kind = %"resolution-blocked-by-inclusion", transfer = %t.bridge_reference, %detail,
             "page: a refund or a new attempt waits, because the payout is observed included and not withdrawn");

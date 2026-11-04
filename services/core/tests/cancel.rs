@@ -1313,6 +1313,40 @@ async fn req_rf_1_issue_35_a_new_attempt_is_withheld_beside_an_inclusion_on_the_
     assert_eq!(w.state(id).await.0, "Delivering");
 }
 
+/// REQ-RF-1, INV-16, review of the fix round of #35: the daily page of a hold is not measured on the
+/// destination's head alone. With the head frozen (its endpoint stalled) the hold would otherwise
+/// never page again; the core's own clock counts a day too, from the log, across a restart.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_issue_35_a_hold_pages_daily_on_the_core_s_clock_when_the_destination_head_stalls(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, _signed) = payout_in_flight(&w, 74).await;
+    payout_included(&w, id, 30).await;
+    w.settle(t0()).await;
+    prove_replaced(&w.admin, id, 1, 25, 28).await;
+    w.settle(t0()).await;
+    assert_eq!(blocked_pages(&w, id).await, 1);
+    // The head does not move. Within the day, nothing; a day on, one page; and not again at once.
+    let hours = |h: i64| t0() + Duration::hours(h);
+    w.settle(hours(23)).await;
+    assert_eq!(blocked_pages(&w, id).await, 1);
+    w.settle(hours(25)).await;
+    assert_eq!(blocked_pages(&w, id).await, 2, "a day on the core's clock");
+    w.restarted().await.cycle(hours(26)).await.unwrap();
+    w.settle(hours(40)).await;
+    assert_eq!(
+        blocked_pages(&w, id).await,
+        2,
+        "once a day, across a restart"
+    );
+    w.settle(hours(50)).await;
+    assert_eq!(blocked_pages(&w, id).await, 3);
+    assert_eq!(w.state(id).await.0, "Delivered");
+    assert!(order(&w.admin, id, 2).await.is_none(), "no second payout");
+}
+
 /// REQ-RF-1, INV-8, INV-16, REQ-GV-5, issue #35: the same by a resolution into `Delivering` in
 /// review. It is withheld, not refused; pages once and then daily; with no override; it runs when
 /// the inclusion is withdrawn. A final inclusion is the delivery: the review closes as `Delivered`
