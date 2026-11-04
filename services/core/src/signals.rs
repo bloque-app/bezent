@@ -6,9 +6,9 @@
 //! The signer and the endpoints raise `key-compromise` (an unrecorded signature, `AC-I1.2`) and its
 //! `pause-requested` by appending to the event log, because the store lets them write nothing
 //! else (`F-005` NOTES 5). Nothing wrote a log line for them, so no alarm could match one, and
-//! nothing applies the pause request. Until the pause path exists (an open item of `F-014`, see its
-//! notes), this step makes the first half true: each such alert is logged once as a page,
-//! `kind=key-compromise`, which says plainly that nothing has paused yet and a person must
+//! the store applies the pause itself, in the transaction that records the alert (migration 0095,
+//! issue #77). This step puts the alert in front of a human: each such alert is logged once as a
+//! page, `kind=key-compromise`, which says the pause is applied and what a person still has to do
 //! (`deploy/runbooks/pages/key-compromise.md`).
 //!
 //! The core's own detection of a supply mismatch (`reserve::check`, spec `INV-4`) pages and pauses
@@ -48,7 +48,7 @@ pub async fn surface(pool: &PgPool) -> sqlx::Result<usize> {
         tracing::error!(
             kind = %"key-compromise", alert_seq = seq, detector = %detector,
             "page: a signature bezent did not record was seen, or a key was used where no intent explains it; \
-             nothing has paused yet: pause the bridge now (operator_pause), then follow the key-compromise runbook"
+             the store paused the bridge when it recorded the alert (check pauses_in_force); follow the key-compromise runbook: the chain half first, then rotate"
         );
         let mut conn = pool.acquire().await?;
         store::event(
