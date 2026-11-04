@@ -8,7 +8,7 @@ kind: pages
 covers: [REQ-IC-4, REQ-IC-2, REQ-KY-3, REQ-KY-4, AC-I1.2, INV-4, INV-9, INV-14]
 pages: [key-compromise]
 observables: [pauses_in_force]
-tests: [services/core/tests/signals.rs::req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted, services/core/tests/lifecycle.rs::ac_i1_2_a_signature_not_over_the_recorded_bytes_raises_the_alert_and_moves_nothing, services/core/tests/cancel.rs::ac_i1_2_a_cancel_signature_not_over_its_bytes_raises_the_alert, services/core/tests/running_core.rs::inv_4_a_supply_mismatch_raises_key_compromise_once_and_pauses_until_the_operator_lifts_it]
+tests: [services/core/tests/signals.rs::req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted, crates/store/tests/compromise_pause.rs::ac_i1_2_each_detector_s_alert_pauses_the_bridge, services/core/tests/lifecycle.rs::ac_i1_2_a_signature_not_over_the_recorded_bytes_raises_the_alert_and_moves_nothing, services/core/tests/cancel.rs::ac_i1_2_a_cancel_signature_not_over_its_bytes_raises_the_alert, services/core/tests/running_core.rs::inv_4_a_supply_mismatch_raises_key_compromise_once_and_pauses_until_the_operator_lifts_it]
 exercised: no
 ---
 # Key compromise (a signature bezent did not record)
@@ -29,19 +29,16 @@ on chain per asset and window (`REQ-KY-3`, `AC-I1.1`); that is why this is an in
 - the reserve check, for a supply mismatch (`INV-4`): `page kind=key-compromise asset=<asset> detail=<json>`, which is
   followed by `supply-mismatch-pause`.
 
-**Nothing applies the pause the specification requires, and until it does a person must pause.** `REQ-IC-2`, `REQ-IC-4`,
-`AC-I1.2` require bezent to pause the affected routes itself when it sees a signature it did not record (`REQ-BK-1` requires
-the pause only when the compromise shows as a reserve divergence, and that one holds).
-It does not: the signer and the endpoints raise the alert and a `pause-requested` entry in the log, and no process turns
-that entry into a pause (`features/F-014-operations/NOTES.md`, "Open", where `AC-I1.2` and `REQ-IC-2` are marked FAILING).
-So, from the moment the alert is raised until a person runs `operator_pause`:
+**The pause is already applied.** A `key-compromise` alert pauses the whole bridge in the transaction that records it
+(migration 0095; `deploy/compromise-pause.md` has the reasoning and the recovery). It stops new work only: new requests,
+orders, signing intents and attempts. It does **not** stop a signing intent recorded before the pause (one era on Kreivo,
+no bound on an EVM network until amendment 0022 A1 is ruled), and it **cannot stop a stolen key**, which signs by itself:
+only the on-chain pause and the bounds of `REQ-KY-3` do, and those are a person's act (step 1 below). The exception is a
+supply mismatch (`INV-4`), which pauses that asset's routes.
 
-- **the bridge keeps minting, signing and delivering**, within the bounds the network gives each key (`REQ-KY-3`), and
-- **no page reaches anyone yet**: the alarms are code with their actions disabled and no destination that wakes a
-  person (`deploy/runbooks/alerts.md`, "Does a page reach a human today?"). The line is in a log nobody is watching.
-
-Until both are fixed, someone has to be looking for this line. The one exception is a supply mismatch
-(`supply-mismatch-pause`), where the core pauses the asset by itself.
+**No page reaches anyone yet**: the alarms are code with their actions disabled and no destination that wakes a person
+(`deploy/runbooks/alerts.md`, "Does a page reach a human today?"). The bridge is quiet, but the line is in a log nobody is
+watching, and the chain half is waiting for a person.
 
 ## Confirm
 
@@ -60,8 +57,10 @@ reserve address was involved.
 
 ## Do
 
-1. **Pause.** `SELECT operator_pause(NULL, NULL, NULL, 'key-compromise alert <seq>');` A global pause stops new work only;
-   transfers in flight are still observed and completed (`REQ-GV-1`, `INV-15`). Do it before anything else.
+1. **The chain half.** The off-chain pause is already in force (`pauses_in_force`; the query above). It does not stop a stolen
+   key: pause the on-chain component and, on an origin network, have the guardian disable the delivery module
+   (`deploy/compromise-pause.md`, step 1). Do this before anything else. If no pause row names the alert (an alert written
+   before 0095, or by the schema owner), `SELECT operator_pause(NULL, NULL, NULL, 'key-compromise alert <seq>');`.
 2. Preserve the evidence: the alert, the signature, the coordinate, the intent and the signer's log. Do not restart the
    signer to "see if it clears".
 3. Rotate the key per `REQ-KY-4`: keys are separate per network and role and rotate without stranding transfers in
@@ -84,6 +83,6 @@ reserve address was involved.
 ## Exercise
 
 On the test bed: have the core record an intent, make a signature over other bytes, see the alert and the log entry,
-then follow steps 1 to 6 with two operators. The pause-request consumer is missing, so the pause in step 1 is by hand, and the page is not yet delivered to anyone.
+then follow steps 1 to 6 with two operators. The pause is applied by the store; the chain half in step 1 is by hand, and the page is not yet delivered to anyone.
 
 Status: not exercised (NFR-9). Behaviour proven by the tests listed above, not by a run of this runbook.

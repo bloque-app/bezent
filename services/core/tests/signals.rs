@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! F-014 · `REQ-IC-4`, `REQ-IC-2`: a key-compromise alert the signer or an endpoint wrote to the
 //! event log is put in front of a human, once, as a page an alarm can match. Nothing here pauses
-//! (the pause request has no consumer yet; `features/F-014-operations/NOTES.md`).
+//! (the store applies the pause on the alert's insert, migration 0095, and `compromise_pause.rs` proves it; the
+//! alert here is written as the owner, who is exempt from that trigger).
 
 mod common;
 
@@ -34,7 +35,11 @@ async fn req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted(
     assert_page(&log, "key-compromise", 1);
     assert!(out.contains("ERROR"), "{out}");
     assert!(out.contains("detector=evm-endpoint"), "{out}");
-    assert!(out.contains("nothing has paused yet"), "{out}");
+    assert!(
+        out.contains("the store paused the bridge when it recorded the alert"),
+        "{out}"
+    );
+    assert!(!out.contains("nothing has paused yet"), "{out}");
     assert_eq!(
         w.count("SELECT count(*) FROM event_log WHERE kind = 'signal-surfaced'")
             .await,

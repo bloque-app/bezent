@@ -297,7 +297,7 @@ async fn look(pool: &PgPool, conn: &mut PgConnection, c: &Candidate) -> sqlx::Re
                 alert_seq,
                 pause_seq,
                 reason = why.text(),
-                "AC-I1.2: a reference was minted that bezent did not deliver; key-compromise and a global pause request are in the event log"
+                "AC-I1.2: a reference was minted that bezent did not deliver; key-compromise is in the event log and the bridge is paused"
             );
             settle(conn, c, "alerted").await?;
             return Ok(true);

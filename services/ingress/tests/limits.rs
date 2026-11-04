@@ -144,6 +144,29 @@ async fn ac_g1_2_a_request_outside_the_limits_is_refused_with_a_named_error(pool
     assert_eq!(answer["state"], "Accepted", "{answer}");
 }
 
+/// `AC-I1.2`, `REQ-IC-2`, issue #77: a compromise alert refuses new requests at once, whichever
+/// role raised it. The route table says so. No other service is involved.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_compromise_alert_refuses_new_requests(pool: PgPool) {
+    let ingress = Ingress::new(&pool).await;
+    let signer = role_pool(&pool, bezent_store::SIGNER_ROLE).await;
+    exec(
+        &signer,
+        "INSERT INTO event_log (kind, payload) VALUES ('key-compromise', '{\"dedupe\": \"seen\"}')",
+    )
+    .await;
+    let (_, answer) = ingress
+        .post(
+            "/v0/deposits",
+            ALPHA,
+            &deposit_body("after-the-alert", arrival(&pool, 1, 4_000).await),
+        )
+        .await;
+    assert_refused(&answer, "ERR-RoutePaused");
+    let (_, table) = ingress.get("/v0/routes", ALPHA).await;
+    assert_eq!(table["routes"][0]["paused"], true);
+}
+
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn ac_g1_3_when_bezent_cannot_keep_up_new_requests_are_refused_with_overloaded(pool: PgPool) {
     let ingress = Ingress::new(&pool).await;

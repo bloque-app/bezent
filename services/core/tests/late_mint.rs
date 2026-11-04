@@ -136,14 +136,30 @@ async fn alerts(w: &World) -> i64 {
     .await
 }
 
+/// The global pauses in force that rest on a late mint's alert, each with its record in the log
+/// (issue #77).
 async fn pauses(w: &World) -> i64 {
-    w.count(
-        "SELECT count(*) FROM event_log p WHERE p.kind = 'pause-requested' \
-           AND p.payload ->> 'scope' = 'global' AND EXISTS (SELECT 1 FROM event_log a \
+    let requests = w
+        .count(
+            "SELECT count(*) FROM event_log p WHERE p.kind = 'pause-requested' \
+               AND p.payload ->> 'scope' = 'global' AND EXISTS (SELECT 1 FROM event_log a \
+                 WHERE a.kind = 'key-compromise' AND a.payload ->> 'source' = 'late-mint' \
+                   AND a.seq::text = p.payload ->> 'alert_seq')",
+        )
+        .await;
+    let applied = w
+        .count(
+            "SELECT count(*) FROM pauses p JOIN event_log a ON a.seq = p.alert_seq \
              WHERE a.kind = 'key-compromise' AND a.payload ->> 'source' = 'late-mint' \
-               AND a.seq::text = p.payload ->> 'alert_seq')",
-    )
-    .await
+               AND p.cause = 'REQ-IC-4' AND p.asset IS NULL AND p.network IS NULL \
+               AND p.direction IS NULL",
+        )
+        .await;
+    assert_eq!(
+        applied, requests,
+        "AC-I1.2: a late mint's alert with no pause"
+    );
+    applied
 }
 
 /// Observations of the check still open (not settled).

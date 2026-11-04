@@ -57,8 +57,8 @@ The criteria map's exceptions for `AC-H3.1` and `AC-I3.1` (F-013, PR #75) are re
 | Criterion | Layer (SPEC §9) | State here |
 |---|---|---|
 | `AC-H3.1` | Service, over the store | **partial**: every `REQ-ST-6` item but fee positions is one read, tested; fee positions are not observable (Open 2) |
-| `AC-I1.2` | Custody + service | **FAILING.** The signer and the core detect a signature bezent did not record, refuse it and raise `key-compromise` with a `pause-requested`, and the core now pages it; but **nothing applies `pause-requested`**, so bezent does not pause, which the criterion (pause, rotate, report) and `REQ-IC-4` require. A person must pause, from a page nobody receives yet (`alerts.md`); until then the bridge keeps minting and signing. The criteria map lists it `known unmet` (`e2e/criteria/known_unmet.toml`), because tests verify the detection and the alert. Open 1 |
-| `REQ-IC-2` | (requirement) | **FAILING** for "a signature it did not record" (and a late mint, which raises the same request): the pause is a request nobody applies (Open 1). The reserve-equation divergence, a stall that outlasts the route's budget and an unevaluable reserve are paused by the reserve check (`reserve_check.rs::req_ic_2_nfr_5_m2_*`, `ac_e2_1_*`), and a supply mismatch pauses the asset under `INV-4`. A deeper-than-expected reorganisation and an observation gap are not assessed by this change |
+| `AC-I1.2` | Custody + service | **Pause applied (issue #77, migration 0095); still listed `known unmet`.** The signer and the core detect a signature bezent did not record, refuse it and raise `key-compromise`, and the store pauses the bridge in the same transaction. Unmet: on an EVM network a signing intent recorded before the pause has no bound (amendment 0022 A1), and the on-chain pause is a person's act (A2), from a page nobody receives yet (`alerts.md`). The entry stays in `e2e/criteria/known_unmet.toml` until the spec owner reviews it. Open 1 |
+| `REQ-IC-2` | (requirement) | Met for "a signature it did not record" (and a late mint) by the store's pause on the alert (issue #77), with the bound of amendment 0022 A1 open (Open 1). The reserve-equation divergence, a stall that outlasts the route's budget and an unevaluable reserve are paused by the reserve check (`reserve_check.rs::req_ic_2_nfr_5_m2_*`, `ac_e2_1_*`), and a supply mismatch pauses the asset under `INV-4`. A deeper-than-expected reorganisation and an observation gap are not assessed by this change |
 | `AC-I2.1` | Service + chain | service half passes (global, asset, network, direction and route; in flight continues; a second login lifts); the chain half is `F-006`'s, `contracts/bezent` |
 | `AC-I3.1` | Store | **partial**: passes for the pause, its lifting and the acts recorded with `operator_record`; recording an act done elsewhere is voluntary, and the schema owner edits declarations with no record (Open 3) |
 | `AC-I3.2` | Store | passes |
@@ -89,8 +89,7 @@ channel. `deploy/runbooks/alerts.md` has the table, the three kinds no filter co
 
 ## Open
 
-1. **Nothing applies `pause-requested`; `AC-I1.2` and `REQ-IC-2` are FAILING for it.** A key-compromise alert from the signer or an endpoint appends the alert and a
-   global pause request to the log. The core now pages the alert, but no process turns the request into a pause, so
+1. **Closed by issue #77 except for what amendment 0022 leaves open.** A key-compromise alert now pauses the bridge in the transaction that records it (migration 0095). The text below is what stood before it, kept for the record: no process turned the request into a pause, so
    `REQ-IC-2` and `REQ-IC-4` ("MUST pause") are met by a person, within minutes of the page, not by bezent. Building it
    needs the store to let the core insert a global pause for that cause (the pause guard of migration 0031 admits only an
    asset's routes on a reserve cause) and a test. Not done here: it widens what the core may do to a pause and deserves its

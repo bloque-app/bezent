@@ -20,5 +20,5 @@ missing = "operator_record is voluntary, and the schema owner can edit declarati
 closed_by = "#14 (F-014 notes, Open 3)"
 
 [known_unmet."AC-I1.2"]
-missing = "no automatic pause: nothing applies pause-requested, so bezent does not pause on a key compromise"
+missing = "the pause is applied (migration 0095) but an EVM network's bound is not met: a signing intent recorded before the pause is still signed, with no bound, until amendment 0022 A1 is ruled; the on-chain pause stays a person's act (A2)"
 closed_by = "#77, PR #78"
