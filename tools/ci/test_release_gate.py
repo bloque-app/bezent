@@ -3,6 +3,8 @@
 """Shows that tools/ci/release_gate.py fails closed, and passes only on complete evidence.
 Run: python3 -m unittest discover -s tools/ci -p 'test_*.py'"""
 import copy
+import json
+import re
 import sys
 import tomllib
 import unittest
@@ -12,6 +14,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 import release_gate as rg  # noqa: E402
 
 SHA = "a" * 40
+MERGED = "c" * 40  # the merge commit of the sign-off pull request
+HEADSHA = "d" * 40  # the pull request's final commit
+FIXTURES = Path(__file__).parent / "fixtures/github"
 
 
 def _dump(d, prefix=""):
@@ -46,7 +51,7 @@ def complete_evidence():
         "exit": {"divergence": {"window_hours": 48, "divergences": 0, "evidence": "https://example.test/d", "by": "someone"},
                  "legs": {"unresolved": 0, "evidence": "https://example.test/l", "by": "someone"}},
         "soak": {"hours": 48, "statements_verified": 4, "divergences": 0, "evidence": "https://example.test/s", "by": "someone"},
-        "signoff": {"spec-owner": {"by": "a", "pr": 1, "on": "2026-11-02"}, "maintainer": {"by": "b", "pr": 2, "on": "2026-11-02"}},
+        "signoff": {"spec-owner": {"by": "a", "pr": 1, "on": "2026-11-02"}, "maintainer": {"by": "b", "pr": 1, "on": "2026-11-02"}},
     }
 
 
@@ -126,14 +131,20 @@ class Gate(unittest.TestCase):
         g["signoff"]["required"] = []
         self.assertTrue(any("no required sign-off" in e for e in human(gate=g)))
 
-    # The online half, with a fake of the GitHub API.
-    def api(self, runs, reviews=None, merged=True):
+    # The online half, with a fake of the GitHub API that pages like the real one (100 to a page).
+    def api(self, runs, reviews=None, merged=True, files=("release/evidence.toml",), pr=None):
+        def page(items, path):
+            n = int(re.search(r"[?&]page=(\d+)", path).group(1))
+            return items[(n - 1) * 100:n * 100]
+
         def f(path):
-            if "check-runs" in path:
-                return {"check_runs": runs}
-            if path.endswith("/reviews?per_page=100"):
-                return reviews or []
-            return {"merged": merged}
+            if "/check-runs" in path:
+                return {"check_runs": page(runs, path)}
+            if "/reviews" in path:
+                return page(reviews or [], path)
+            if "/files" in path:
+                return page([{"filename": x} for x in files], path)
+            return {"merged": merged, "merge_commit_sha": MERGED, "head": {"sha": HEADSHA}, **(pr or {})}
         return f
 
     def test_a_missing_check_fails(self):
@@ -148,16 +159,152 @@ class Gate(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("skipped", errors[0])
 
+    def test_a_failure_past_the_first_hundred_check_runs_is_seen(self):
+        runs = [{"name": f"other {i}", "conclusion": "success"} for i in range(150)]
+        runs += [{"name": c["name"], "conclusion": "success"} for c in GATE["check"]]
+        runs.append({"name": GATE["check"][0]["name"], "conclusion": "failure"})  # on page 2 of 3
+        errors = rg.online_checks(GATE, SHA, "o/r", self.api(runs))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("failure", errors[0])
+
     def test_no_required_checks_fails(self):
         self.assertTrue(rg.online_checks({}, SHA, "o/r", self.api([])))
 
+    def test_a_list_too_long_to_read_is_an_error_not_a_partial_read(self):
+        with self.assertRaises(RuntimeError):
+            rg.paged(lambda path: [{}] * 100, "repos/o/r/pulls/1/reviews")
+
+    # Sign-off. `ROLES` is the reviewed list; both roles cite the one pull request that merged the evidence.
+    ROLES = {"role": {"spec-owner": {"members": ["A", "x"]}, "maintainer": {"members": ["b", "y"]}}}
+    APPROVED = [{"user": {"login": "a"}, "state": "APPROVED", "commit_id": HEADSHA, "submitted_at": "2026-11-02T10:00:00Z"},
+                {"user": {"login": "b"}, "state": "APPROVED", "commit_id": HEADSHA, "submitted_at": "2026-11-02T11:00:00Z"}]
+
+    def git(self, ancestors=("release", "head"), evidence_same=True):
+        """A fake `git`: the release is an ancestor of the merge commit, which is an ancestor of HEAD."""
+        def f(*a):
+            if a[0] == "merge-base":
+                _, _, x, y = a
+                ok = (x == SHA and y == MERGED and "release" in ancestors) or (x == MERGED and y == "HEAD" and "head" in ancestors)
+                return (0 if ok else 1), ""
+            if a[0] == "rev-parse":
+                return 0, ("blob1" if a[1].startswith(MERGED) or evidence_same else "blob2")
+            return 1, ""
+        return f
+
+    def signoffs(self, ev=None, roles=None, reviews=None, git=None, **kw):
+        return rg.online_signoffs(GATE, ev or complete_evidence(), "o/r",
+                                  self.api([], self.APPROVED if reviews is None else reviews, **kw),
+                                  self.ROLES if roles is None else roles, SHA, git or self.git())
+
+    def test_a_proper_signoff_passes(self):
+        self.assertEqual(self.signoffs(), [])  # `A` in the list, `a` approving: logins are case-insensitive
+
     def test_signoff_needs_a_merged_pr_and_an_approval_by_the_named_person(self):
+        self.assertEqual(len(self.signoffs(merged=False)), 2)
+        changes = self.APPROVED + [{"user": {"login": "a"}, "state": "CHANGES_REQUESTED", "commit_id": HEADSHA,
+                                    "submitted_at": "2026-11-02T12:00:00Z"}]
+        errors = self.signoffs(reviews=changes)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("no standing approval", errors[0])
+
+    def test_a_comment_does_not_withdraw_an_approval_and_a_dismissal_does(self):
+        # The real repository's reviews are mostly COMMENTED (tools/ci/fixtures/github/reviews.json).
+        comment = {"user": {"login": "a"}, "state": "COMMENTED", "commit_id": HEADSHA, "submitted_at": "2026-11-02T12:00:00Z"}
+        self.assertEqual(self.signoffs(reviews=self.APPROVED + [comment]), [])
+        dismissed = dict(comment, state="DISMISSED")
+        self.assertEqual(len(self.signoffs(reviews=self.APPROVED + [dismissed])), 1)
+
+    def test_a_dismissal_past_the_first_hundred_reviews_is_seen(self):
+        noise = [{"user": {"login": f"u{i}"}, "state": "COMMENTED", "commit_id": HEADSHA} for i in range(120)]
+        dismissed = {"user": {"login": "a"}, "state": "DISMISSED", "commit_id": HEADSHA, "submitted_at": "2026-11-03T00:00:00Z"}
+        self.assertEqual(len(self.signoffs(reviews=self.APPROVED + noise + [dismissed])), 1)
+
+    def test_an_approval_of_an_earlier_commit_does_not_stand(self):
+        old = [dict(r, commit_id="e" * 40) for r in self.APPROVED]
+        errors = self.signoffs(reviews=old)
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all("final commit" in e for e in errors))
+
+    def test_a_review_by_a_deleted_user_is_nobodys(self):
+        self.assertEqual(self.signoffs(reviews=self.APPROVED + [{"user": None, "state": "APPROVED", "commit_id": HEADSHA}]), [])
+
+    def test_the_signer_must_be_in_the_roles_list_and_an_empty_list_fails_closed(self):
         ev = complete_evidence()
-        approved = [{"user": {"login": "a"}, "state": "APPROVED"}, {"user": {"login": "b"}, "state": "APPROVED"}]
-        self.assertEqual(rg.online_signoffs(GATE, ev, "o/r", self.api([], approved)), [])
-        self.assertEqual(len(rg.online_signoffs(GATE, ev, "o/r", self.api([], approved, merged=False))), 2)
-        changes = approved + [{"user": {"login": "a"}, "state": "CHANGES_REQUESTED"}]
-        self.assertEqual(len(rg.online_signoffs(GATE, ev, "o/r", self.api([], changes))), 1)
+        ev["signoff"]["maintainer"]["by"] = "a"  # approved, and in the other role's list only
+        self.assertTrue(any("not in the role's list" in e for e in self.signoffs(ev=ev)))
+        errors = self.signoffs(roles={})
+        self.assertEqual(len([e for e in errors if "lists no member" in e]), 2)
+
+    def test_one_person_cannot_sign_both_roles(self):
+        ev = complete_evidence()
+        ev["signoff"]["maintainer"]["by"] = "A"
+        roles = {"role": {"spec-owner": {"members": ["a"]}, "maintainer": {"members": ["a"]}}}
+        errors = self.signoffs(ev=ev, roles=roles)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("different person", errors[0])
+
+    def test_an_old_pull_request_cannot_sign_a_new_release(self):
+        # merged before the release commit (not a descendant of it): approved by the right people, still refused
+        errors = self.signoffs(git=self.git(ancestors=("head",)))
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all("does not follow the release commit" in e for e in errors))
+        errors = self.signoffs(git=self.git(ancestors=("release",)))
+        self.assertTrue(all("history of the commit checked out" in e for e in errors) and errors)
+
+    def test_a_pull_request_that_does_not_carry_the_evidence_cannot_sign_it(self):
+        errors = self.signoffs(files=("README.md",))
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all("does not change release/evidence.toml" in e for e in errors))
+
+    def test_evidence_changed_after_the_pull_request_merged_is_not_signed_off(self):
+        errors = self.signoffs(git=self.git(evidence_same=False))
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all("not the file being gated" in e for e in errors))
+
+    # The real answers of the GitHub API (tools/ci/fixtures/github, public data of this repository).
+    def fixture(self, name):
+        return json.loads((FIXTURES / name).read_text())
+
+    def test_the_gate_reads_a_real_check_runs_answer(self):
+        real = self.fixture("check-runs.json")
+        self.assertEqual(real["total_count"], len(real["check_runs"]))
+        want = {"rustfmt": "success", "Kreivo test bed": "skipped", "criteria map and release gate self-test": "success"}
+        self.assertEqual({c["name"]: c["conclusion"] for c in real["check_runs"]}, want)
+        gate = {"check": [{"name": n} for n in want]}
+        errors = rg.online_checks(gate, SHA, "o/r", lambda path: real)
+        self.assertEqual(len(errors), 1)  # the skipped one, and only it
+        self.assertIn("Kreivo test bed", errors[0])
+
+    def test_the_gate_reads_a_real_pull_request_and_reviews(self):
+        pr, reviews = self.fixture("pull.json"), self.fixture("reviews.json")
+        self.assertTrue(pr["merged"])
+        self.assertRegex(pr["merge_commit_sha"], r"^[0-9a-f]{40}$")
+        self.assertEqual({r["state"] for r in reviews}, {"COMMENTED"})
+        self.assertEqual(rg.standing_approvers(reviews), {})  # comments approve nothing
+        # The same reviews, one made an approval of the final commit, are a standing approval.
+        approving = [dict(reviews[-1], state="APPROVED", commit_id=pr["head"]["sha"])]
+        self.assertEqual(rg.standing_approvers(reviews + approving), {reviews[-1]["user"]["login"].lower(): pr["head"]["sha"]})
+        files = [f["filename"] for f in self.fixture("pull-files.json")]
+        self.assertTrue(files)
+        self.assertEqual(rg.evidence_pr_errors("pr", pr, files, "0" * 40, lambda *a: (0, "x"))[0].split(": ")[1][:15], "does not change")
+
+    def test_a_flag_or_a_float_is_not_a_zero_count(self):
+        for bad in (False, 0.0, None, "0"):
+            ev = complete_evidence()
+            ev["exit"]["divergence"]["divergences"] = bad
+            self.assertTrue(any("exactly 0" in e for e in human(ev=ev)), bad)
+            ev = complete_evidence()
+            ev["exit"]["legs"]["unresolved"] = bad
+            self.assertTrue(any("exit.legs" in e for e in human(ev=ev)), bad)
+            ev = complete_evidence()
+            ev["soak"]["divergences"] = bad
+            self.assertTrue(any("soak" in e for e in human(ev=ev)), bad)
+        ev = complete_evidence()
+        ev["exit"]["divergence"]["window_hours"] = True
+        self.assertTrue(human(ev=ev))
+        ev = complete_evidence()
+        ev["signoff"]["maintainer"]["pr"] = True
+        self.assertTrue(human(ev=ev))
 
     def test_the_evidence_commit_may_differ_from_the_release_only_by_the_evidence(self):
         def git(diff, ancestor=0):
@@ -175,14 +322,19 @@ class Gate(unittest.TestCase):
         gate_text = (rg.ROOT / "release/gate.toml").read_text().replace(
             "[exit]\n", "[exit]\nsustained_divergence_free_hours = 48\n")
         runs = [{"name": c["name"], "conclusion": "success"} for c in GATE["check"]]
-        approved = [{"user": {"login": "a"}, "state": "APPROVED"}, {"user": {"login": "b"}, "state": "APPROVED"}]
+        approved = self.APPROVED
         with tempfile.TemporaryDirectory() as d:
             gate_file = Path(d) / "gate.toml"
             gate_file.write_text(gate_text)
+            roles_file = Path(d) / "roles.toml"
+            roles_file.write_text('[role.spec-owner]\nmembers = ["a"]\n[role.maintainer]\nmembers = ["b"]\n')
             ev = Path(d) / "evidence.toml"
             ev.write_text(_dump(complete_evidence()))
-            git = lambda *a: (0, "release/evidence.toml") if a[0] == "diff" else (0, "")  # noqa: E731
-            with mock.patch.object(rg, "GATE_PATH", gate_file), mock.patch.object(rg, "mechanical_map", lambda: []):
+            inner = self.git()
+            git = lambda *a: (0, "release/evidence.toml") if a[0] == "diff" else (  # noqa: E731
+                (0, "") if a[:2] == ("merge-base", "--is-ancestor") and a[2] == SHA and a[3] == "HEAD" else inner(*a))
+            with mock.patch.object(rg, "GATE_PATH", gate_file), mock.patch.object(rg, "ROLES_PATH", roles_file), \
+                    mock.patch.object(rg, "mechanical_map", lambda: []):
                 errors, _ = rg.run("", str(ev), True, "o/r", api=self.api(runs, approved), git_fn=git)
                 self.assertEqual(errors, [])
                 runs[0]["conclusion"] = "failure"

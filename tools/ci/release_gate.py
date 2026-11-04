@@ -8,8 +8,9 @@ What it checks, in two kinds.
 Mechanical, here and now:
   1. the criteria map (tools/ci/criteria_map.py): every V0 acceptance criterion has a test at its layer;
   2. with --online: every check named in release/gate.toml succeeded on the release commit (a skipped or missing
-     check is a failure; every check is read at the release commit itself), and each sign-off's pull request was merged with
-     an approving review by the person named.
+     check is a failure; every check is read at the release commit itself), and each sign-off is backed by the pull
+     request that merged this release's release/evidence.toml, approved on its final commit by the person named, who
+     is a member of the role's team (release/roles.toml), the two roles being two different people.
 
 Human, recorded in release/evidence.toml and demanded here, each tied to this release commit:
   3. every runbook exercised on a test network (NFR-9, REQ-IC-6): one per named condition (SPEC section 10) and one
@@ -46,6 +47,9 @@ import criteria_map  # noqa: E402
 ROOT = criteria_map.ROOT
 NETWORKS = {"zombienet", "anvil", "testnet"}
 GATE_PATH = ROOT / "release/gate.toml"
+ROLES_PATH = ROOT / "release/roles.toml"
+EVIDENCE = "release/evidence.toml"
+MAX_PAGES = 50  # of 100: a list longer than 5000 is refused rather than read in part
 
 
 def named_conditions():
@@ -68,6 +72,16 @@ def need(table, key, errors, where, pred=bool, what="set"):
         errors.append(f"{where}: `{key}` is not {what}")
         return None
     return v
+
+
+def is_int(v):
+    """A true integer: `True` is an int to Python and must not pass as a count."""
+    return type(v) is int
+
+
+def is_zero(v):
+    """Exactly the integer 0: `False` and `0.0` equal 0 in Python and are not a count of nothing."""
+    return type(v) is int and v == 0
 
 
 def is_url(v):
@@ -115,19 +129,19 @@ def human(gate, ev, release, conds, incidents):
         errors.append(f"runbook {item}: names nothing in SPEC section 10 or the incident classes (misspelt, or withdrawn)")
 
     window = gate.get("exit", {}).get("sustained_divergence_free_hours")
-    if not isinstance(window, int) or window <= 0:
+    if not is_int(window) or window <= 0:
         errors.append("exit: release/gate.toml [exit].sustained_divergence_free_hours is unset. SPEC section 15 says "
                       "'sustained' and gives no duration; amendment 0021 proposes one and is not ruled")
     div = ev.get("exit", {}).get("divergence", {})
-    if need(div, "window_hours", errors, "exit.divergence", lambda v: isinstance(v, int) and v > 0, "a positive integer"):
-        if isinstance(window, int) and div["window_hours"] < window:
+    if need(div, "window_hours", errors, "exit.divergence", lambda v: is_int(v) and v > 0, "a positive integer"):
+        if is_int(window) and div["window_hours"] < window:
             errors.append(f"exit.divergence: {div['window_hours']} h measured, {window} h required")
-    if div.get("divergences") != 0:
+    if not is_zero(div.get("divergences")):
         errors.append(f"exit.divergence: `divergences` is {div.get('divergences')!r}, must be exactly 0 (zero tolerance)")
     need(div, "evidence", errors, "exit.divergence", is_url, "an https link")
     need(div, "by", errors, "exit.divergence")
     legs = ev.get("exit", {}).get("legs", {})
-    if legs.get("unresolved") != 0:
+    if not is_zero(legs.get("unresolved")):
         errors.append(f"exit.legs: `unresolved` is {legs.get('unresolved')!r}: every final source leg must be "
                       "delivered, refunded or held in a named condition with an owner (must be exactly 0)")
     need(legs, "evidence", errors, "exit.legs", is_url, "an https link")
@@ -135,25 +149,40 @@ def human(gate, ev, release, conds, incidents):
 
     soak, want = ev.get("soak", {}), gate.get("soak", {})
     hours, per_day = want.get("hours"), want.get("statements_per_day")
-    if not isinstance(hours, int) or not isinstance(per_day, int):
+    if not is_int(hours) or not is_int(per_day):
         errors.append("soak: release/gate.toml [soak] needs integer `hours` and `statements_per_day` (DEC-19: 48, 2)")
     else:
-        if not isinstance(soak.get("hours"), int) or soak["hours"] < hours:
+        if not is_int(soak.get("hours")) or soak["hours"] < hours:
             errors.append(f"soak: {soak.get('hours')!r} h on mainnet, {hours} h required (DEC-19)")
-        elif not isinstance(soak.get("statements_verified"), int) or soak["statements_verified"] < per_day * (soak["hours"] // 24):
+        elif not is_int(soak.get("statements_verified")) or soak["statements_verified"] < per_day * (soak["hours"] // 24):
             errors.append(f"soak: {soak.get('statements_verified')!r} verified statements, at least {per_day} a day required")
-        if soak.get("divergences") != 0:
+        if not is_zero(soak.get("divergences")):
             errors.append(f"soak: `divergences` is {soak.get('divergences')!r}; a divergence restarts the clock (DEC-19)")
     need(soak, "evidence", errors, "soak", is_url, "an https link")
     need(soak, "by", errors, "soak")
 
     for role in gate.get("signoff", {}).get("required", []):
         s = ev.get("signoff", {}).get(role, {})
-        for k, pred in (("by", bool), ("pr", lambda v: isinstance(v, int) and v > 0), ("on", is_date)):
+        for k, pred in (("by", bool), ("pr", lambda v: is_int(v) and v > 0), ("on", is_date)):
             need(s, k, errors, f"signoff {role}", pred)
     if not gate.get("signoff", {}).get("required"):
         errors.append("signoff: release/gate.toml lists no required sign-off")
     return errors, lines
+
+
+def paged(api, path, key=None):
+    """Every item of a GitHub list: `api` is asked for page after page of 100 until one is short. A list that
+    would need more than MAX_PAGES pages is an error, never a partial read (a later dismissal, change request
+    or failed check could be on a page not read). `key` names the list inside an object (check-runs)."""
+    items = []
+    sep = "&" if "?" in path else "?"
+    for page in range(1, MAX_PAGES + 1):
+        data = api(f"{path}{sep}per_page=100&page={page}")
+        batch = data[key] if key else data
+        items += batch
+        if len(batch) < 100:
+            return items
+    raise RuntimeError(f"{path}: more than {MAX_PAGES * 100} items; not reading part of a list")
 
 
 def online_checks(gate, release, repo, api):
@@ -165,32 +194,82 @@ def online_checks(gate, release, repo, api):
     reqs = gate.get("check", [])
     if not reqs:
         errors.append("checks: release/gate.toml lists no required check")
+        return errors
+    sha = release
+    runs = paged(api, f"repos/{repo}/commits/{sha}/check-runs?filter=latest", "check_runs")
     for r in reqs:
-        sha = release
-        runs = api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest")["check_runs"]
-        mine = [c for c in runs if c["name"] == r["name"]]
+        mine = [c for c in runs if c.get("name") == r["name"]]
         if not mine:
             errors.append(f"check {r['name']!r}: no run at {sha[:10]} (dispatch its workflow on that commit)")
-        elif any(c["conclusion"] != "success" for c in mine):
-            errors.append(f"check {r['name']!r} at {sha[:10]}: {sorted({str(c['conclusion']) for c in mine})} (only success passes)")
+        elif any(c.get("conclusion") != "success" for c in mine):
+            errors.append(f"check {r['name']!r} at {sha[:10]}: {sorted({str(c.get('conclusion')) for c in mine})} (only success passes)")
     return errors
 
 
-def online_signoffs(gate, ev, repo, api):
+def standing_approvers(reviews):
+    """Logins whose latest decisive review is an approval, with the commit they approved. A comment does not
+    withdraw an approval (GitHub's own rule); a dismissal or a change request does. A review whose author was
+    deleted (`user` is null) is nobody's."""
+    last = {}
+    for r in sorted(reviews, key=lambda r: r.get("submitted_at") or ""):
+        user = (r.get("user") or {}).get("login")
+        if user and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            last[user.lower()] = (r["state"], r.get("commit_id"))
+    return {u: sha for u, (state, sha) in last.items() if state == "APPROVED"}
+
+
+def evidence_pr_errors(where, pr, files, release, git_fn):
+    """The pull request is the one that merged this release's release/evidence.toml, as the gate sees it."""
     errors = []
-    for role in gate.get("signoff", {}).get("required", []):
+    if EVIDENCE not in files:
+        errors.append(f"{where}: does not change {EVIDENCE}; a sign-off rests on the pull request that merged the evidence")
+    merged = pr.get("merge_commit_sha")
+    if not isinstance(merged, str) or not re.fullmatch(r"[0-9a-f]{40}", merged):
+        return errors + [f"{where}: GitHub gives no merge commit"]
+    if merged == release or git_fn("merge-base", "--is-ancestor", release, merged)[0] != 0:
+        errors.append(f"{where}: merged as {merged[:10]}, which does not follow the release commit {release[:10]} "
+                      "(a pull request from before the release cannot sign it off)")
+    if git_fn("merge-base", "--is-ancestor", merged, "HEAD")[0] != 0:
+        errors.append(f"{where}: merged as {merged[:10]}, which is not in the history of the commit checked out")
+    theirs, ours = git_fn("rev-parse", f"{merged}:{EVIDENCE}"), git_fn("rev-parse", f"HEAD:{EVIDENCE}")
+    if theirs[0] != 0 or ours[0] != 0 or theirs[1] != ours[1]:
+        errors.append(f"{where}: {EVIDENCE} at {merged[:10]} is not the file being gated (changed since, or absent)")
+    return errors
+
+
+def online_signoffs(gate, ev, repo, api, roles, release, git_fn):
+    """Each required role: `by` is a member of the role's reviewed list (`roles`, release/roles.toml: the
+    workflow's token cannot read organisation teams), the pull request is the one that merged this release's
+    evidence, it is merged, `by` approved its final commit, and no two roles are one person."""
+    errors, people = [], {}
+    required = gate.get("signoff", {}).get("required", [])
+    for role in required:
         s = (ev or {}).get("signoff", {}).get(role, {})
-        if not (s.get("pr") and s.get("by")):
+        n, by = s.get("pr"), s.get("by")
+        if not (is_int(n) and n > 0 and isinstance(by, str) and by):
             continue  # already an error from human()
-        pr = api(f"repos/{repo}/pulls/{s['pr']}")
-        reviews = api(f"repos/{repo}/pulls/{s['pr']}/reviews?per_page=100")
+        where = f"signoff {role}"
+        members = {m.lower() for m in roles.get("role", {}).get(role, {}).get("members", []) if isinstance(m, str)}
+        if not members:
+            errors.append(f"{where}: release/roles.toml lists no member for the role (fail closed)")
+        elif by.lower() not in members:
+            errors.append(f"{where}: {by} is not in the role's list in release/roles.toml")
+        people.setdefault(by.lower(), []).append(role)
+        pr = api(f"repos/{repo}/pulls/{n}")
         if not pr.get("merged"):
-            errors.append(f"signoff {role}: PR #{s['pr']} is not merged")
-        last = {}
-        for r in reviews:
-            last[r["user"]["login"]] = r["state"]
-        if last.get(s["by"]) != "APPROVED":
-            errors.append(f"signoff {role}: {s['by']} has no standing approval on PR #{s['pr']}")
+            errors.append(f"{where}: PR #{n} is not merged")
+        else:
+            files = [f.get("filename") for f in paged(api, f"repos/{repo}/pulls/{n}/files")]
+            errors += evidence_pr_errors(f"{where}: PR #{n}", pr, files, release, git_fn)
+        approved = standing_approvers(paged(api, f"repos/{repo}/pulls/{n}/reviews"))
+        head = (pr.get("head") or {}).get("sha")
+        if by.lower() not in approved:
+            errors.append(f"{where}: {by} has no standing approval on PR #{n}")
+        elif not head or approved[by.lower()] != head:
+            errors.append(f"{where}: {by}'s approval on PR #{n} is not of its final commit")
+    for person, rs in people.items():
+        if len(rs) > 1:
+            errors.append(f"signoff: {person} signs {' and '.join(rs)}; each role needs a different person")
     return errors
 
 
@@ -208,8 +287,10 @@ def mechanical_map():
 
 
 def gh_api(path):
-    out = subprocess.run(["gh", "api", path], check=True, capture_output=True, text=True).stdout
-    return json.loads(out)
+    r = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"gh api {path.split('?')[0]} failed: {r.stderr.strip()[:300]}")
+    return json.loads(r.stdout)
 
 
 def git(*args):
@@ -251,8 +332,17 @@ def run(release, evidence_path, online, repo, api=gh_api, git_fn=git):
     errors += evidence_follows_release(release, git_fn)
     errors += mechanical_map()
     if online:
-        errors += online_checks(gate, release, repo, api)
-        errors += online_signoffs(gate, ev, repo, api)
+        try:
+            roles = tomllib.loads(ROLES_PATH.read_text())
+        except (OSError, tomllib.TOMLDecodeError) as e:
+            roles = {}
+            errors.append(f"release/roles.toml: {e}")
+        try:
+            errors += online_checks(gate, release, repo, api)
+            errors += online_signoffs(gate, ev, repo, api, roles, release, git_fn)
+        except (subprocess.CalledProcessError, RuntimeError, KeyError, TypeError, ValueError) as e:
+            # An unreadable answer is a failure, never a pass and never a traceback nobody reads.
+            errors.append(f"github: could not read what the gate needs ({type(e).__name__}: {e})")
     else:
         errors.append("checks and sign-off reviews were not verified (run with --online): a gate that skips them fails")
     h_errors, notes = human(gate, ev, release, named_conditions(), incident_classes())

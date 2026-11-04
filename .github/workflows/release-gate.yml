@@ -5,6 +5,8 @@
 # workflow's own token. It fails closed (tools/ci/release_gate.py says what it requires and which parts are human).
 # Dispatch ci, contracts, evm-contracts, e2e-evm and e2e-zombienet on the release commit first; the gate reads them there.
 # The release commit is the code; the commit the workflow runs on adds release/evidence.toml and nothing else.
+# It fails while ZOMBIENET_RUNS_ON is unset (a skipped check is a failure) and can be dispatched only once this file is
+# on the default branch. Who may sign off is release/roles.toml: the token below cannot read organisation teams.
 name: Release gate
 
 on:

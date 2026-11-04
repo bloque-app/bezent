@@ -283,6 +283,12 @@ def check(crit, stories, v0, inv_layers, layers, cfg, found):
             errors.append(f"{ac} ({crit[ac]['story']}) has no test at layer {missing or want}{where} and is not an exception")
         else:
             status = "covered"
+            # A layer can hold tests of different components with different stakes (the EVM vault, the Kreivo
+            # contract): `also_under` lists the path prefixes that must each have a test naming the criterion.
+            for prefix in layers.get(ac, {}).get("also_under", []):
+                if not any(h["file"].startswith(prefix) for h in hits):
+                    status = "NO TEST"
+                    errors.append(f"{ac} ({crit[ac]['story']}) has no test under {prefix} (layers.toml `also_under`)")
         table.append({"ac": ac, "story": crit[ac]["story"], "layers": want, "status": status,
                       "tests": [f"{h['file']}::{h['test']}" for h in hits],
                       "runs_in": sorted({h["runs"] for h in hits}),

@@ -152,7 +152,8 @@ why = "REQ-ST-6: the observables are the service's"
 
 [layer."AC-I1.1"]
 layers = ["chain"]
-why = "REQ-KY-3: the network bounds a key's outflow (the vault's roles and allowance, the contract's bounds)"
+also_under = ["contracts/evm/", "contracts/bezent/"]
+why = "REQ-KY-3: the network bounds a key's outflow. Two keys, two components, so a test under each: the EVM vault's allowance (contracts/evm, the reserve's delivery key) and the Kreivo contract's mint bounds (contracts/bezent, INV-3: the delivery key that mints, the highest value at risk)"
 
 [layer."AC-I1.2"]
 layers = ["custody", "service"]
@@ -160,7 +161,7 @@ why = "REQ-IC-4: the signer's record check and the core's compromise path"
 
 [layer."AC-I2.1"]
 layers = ["service", "chain"]
-why = "REQ-GV-1, INV-15 (service + chain): the core holds new work, the contract refuses new mints and redemptions"
+why = "REQ-GV-1, INV-15 (service + chain): the core holds new work per route, asset, direction or globally and lets work in flight finish; the contract refuses new mints and redemptions and lets a refund finish"
 
 [layer."AC-I2.2"]
 layers = ["chain"]

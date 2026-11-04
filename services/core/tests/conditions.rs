@@ -295,3 +295,244 @@ async fn cnd_withdrawn_an_inclusion_that_stops_matching_the_chain_goes_to_review
         ("Needs-Review".into(), Some("CND-Withdrawn".into()))
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// AC-I2.1, INV-15 (service): a pause per route, per asset, per direction or global stops the new work it
+// covers and nothing else. Each case has one deposit and one withdrawal, both final and ready to be ordered,
+// and a pause in place before the core first looks at them.
+// ---------------------------------------------------------------------------------------------
+
+/// Whether the deposit and the withdrawal are held (`CND-Paused`, no order) or let through (an order), under
+/// the `pauses` row `pause` inserts.
+async fn pause_case(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+    pause: &str,
+    deposit_held: bool,
+    withdrawal_held: bool,
+) {
+    let w = World::new(options, connect).await;
+    exec(&w.admin, &format!("INSERT INTO pauses {pause}")).await;
+    reserve(&w.admin, 1_000_000).await;
+    let deposit = source_final_deposit(&w).await;
+    let r = redemption(&w.admin, 20, &[7; 32], 700).await;
+    decide(&w.admin, r, "final", 22).await;
+    w.settle(t0()).await;
+    let withdrawal: i64 = scalar(
+        &w.admin,
+        "SELECT id FROM transfers WHERE kind = 'withdrawal'",
+    )
+    .await;
+    for (name, id, held) in [
+        ("deposit", deposit, deposit_held),
+        ("withdrawal", withdrawal, withdrawal_held),
+    ] {
+        if held {
+            assert_eq!(
+                w.state(id).await,
+                ("Source-Final".into(), Some("CND-Paused".into())),
+                "{name} under {pause}"
+            );
+            assert!(
+                order(&w.admin, id, 1).await.is_none(),
+                "{name} ordered under {pause}"
+            );
+        } else {
+            assert!(
+                order(&w.admin, id, 1).await.is_some(),
+                "{name} held under {pause}"
+            );
+        }
+    }
+}
+
+/// `AC-I2.1`, `INV-15`: a pause of the deposit route (asset, network, direction) holds deposits only.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_pause_of_the_deposit_route_holds_deposits_only(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let sql = format!("(asset, network, direction) VALUES ('{ASSET}', '{ORIGIN}', 'deposit')");
+    pause_case(options, connect, &sql, true, false).await;
+}
+
+/// `AC-I2.1`, `INV-15`: a pause of the withdrawal route holds withdrawals only.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_pause_of_the_withdrawal_route_holds_withdrawals_only(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let sql = format!("(asset, network, direction) VALUES ('{ASSET}', '{ORIGIN}', 'withdrawal')");
+    pause_case(options, connect, &sql, false, true).await;
+}
+
+/// `AC-I2.1`, `INV-15`: a pause of the deposit direction, on every asset and network, holds deposits only.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_pause_of_the_deposit_direction_holds_deposits_only(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    pause_case(
+        options,
+        connect,
+        "(direction) VALUES ('deposit')",
+        true,
+        false,
+    )
+    .await;
+}
+
+/// `AC-I2.1`, `INV-15`: a pause of an asset holds its deposits and its withdrawals.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_pause_per_asset_holds_both_directions(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    pause_case(
+        options,
+        connect,
+        &format!("(asset) VALUES ('{ASSET}')"),
+        true,
+        true,
+    )
+    .await;
+}
+
+/// `AC-I2.1`, `INV-15`: a pause of a network holds the routes through it, both directions.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_pause_per_network_holds_both_directions(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    pause_case(
+        options,
+        connect,
+        &format!("(network) VALUES ('{ORIGIN}')"),
+        true,
+        true,
+    )
+    .await;
+}
+
+/// `AC-I2.1`, `INV-15`: a global pause holds every new transfer.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_global_pause_holds_both_directions(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    pause_case(options, connect, "(asset) VALUES (NULL)", true, true).await;
+}
+
+/// `AC-I2.1`, `INV-15`: a pause of the withdrawal direction leaves deposits alone.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_pause_of_the_withdrawal_direction_holds_withdrawals_only(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    pause_case(
+        options,
+        connect,
+        "(direction) VALUES ('withdrawal')",
+        false,
+        true,
+    )
+    .await;
+}
+
+/// `AC-I2.1`, `REQ-GV-1`, `INV-15`: under a global pause a withdrawal in flight is still observed and completed,
+/// and a withdrawal whose payout is proven not executed is still refunded, the refund delivered and observed,
+/// while the pause stays in place and a withdrawal that is new waits.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a_global_pause_lets_a_withdrawal_complete_and_a_refund_finish(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let mut ids = Vec::new();
+    for (block, reference) in [(20, [1u8; 32]), (30, [2u8; 32])] {
+        let r = redemption(&w.admin, block, &reference, 700).await;
+        decide(&w.admin, r, "final", block + 2).await;
+        w.cycle(t0()).await;
+        let id: i64 = scalar(
+            &w.admin,
+            &format!(
+                "SELECT id FROM transfers WHERE kind = 'withdrawal' AND on_chain_reference = '\\x{}'",
+                hex::encode(reference)
+            ),
+        )
+        .await;
+        deliver(&w, id, 1, t0()).await;
+        assert_eq!(w.state(id).await.0, "Delivering");
+        ids.push((id, reference));
+    }
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+
+    // The first is paid out and the payout is final: completed, under the pause.
+    let (paid_id, _) = ids[0];
+    let paid = observe(
+        &w.admin,
+        ORIGIN,
+        50,
+        3,
+        TOKEN,
+        700,
+        None,
+        Some(BENEFICIARY),
+        Some(&payout_reference_of(&w.admin, paid_id).await),
+        true,
+        json!({"event": "Payout"}),
+    )
+    .await;
+    decide(&w.admin, paid, "final", 60).await;
+
+    // The second is proven not executed past its deadline: one refund, delivered and observed, under the pause.
+    let (lost_id, reference) = ids[1];
+    prove(&w.admin, lost_id, 1, ORIGIN, 32 + BUDGET + 100).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(paid_id).await, ("Completed".into(), None));
+    assert_eq!(w.state(lost_id).await.0, "Refunding");
+    let refund: i64 = scalar(
+        &w.admin,
+        &format!("SELECT id FROM transfers WHERE refund_of = {lost_id}"),
+    )
+    .await;
+    deliver(&w, refund, 1, t0()).await;
+    assert_eq!(w.state(refund).await.0, "Delivering");
+    let refunded = observe(
+        &w.admin,
+        ISSUING,
+        500,
+        0,
+        ISSUING_ASSET,
+        700,
+        None,
+        Some(REDEEMER),
+        Some(&reference),
+        true,
+        json!({"event": "RefundMinted"}),
+    )
+    .await;
+    decide(&w.admin, refunded, "final", 505).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(refund).await, ("Completed".into(), None));
+    assert_eq!(w.state(lost_id).await.0, "Refunded");
+
+    // The pause is still there and a new withdrawal still waits behind it.
+    assert_eq!(w.count("SELECT count(*) FROM pauses").await, 1);
+    let r = redemption(&w.admin, 70, &[9; 32], 700).await;
+    decide(&w.admin, r, "final", 72).await;
+    w.settle(t0()).await;
+    let fresh: i64 = scalar(
+        &w.admin,
+        &format!(
+            "SELECT id FROM transfers WHERE kind = 'withdrawal' AND on_chain_reference = '\\x{}'",
+            hex::encode([9u8; 32])
+        ),
+    )
+    .await;
+    assert_eq!(
+        w.state(fresh).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+}

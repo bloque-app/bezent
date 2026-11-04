@@ -49,6 +49,17 @@ class CriteriaMap(unittest.TestCase):
         errors = run(found=found)
         self.assertTrue(any("AC-B1.3" in e and "store" in e for e in errors), errors)
 
+    def test_a_key_bound_that_rests_on_one_component_only_fails(self):
+        # AC-I1.1 needs a test under the EVM vault and one under the Kreivo contract (INV-3): the second is the
+        # highest value at risk and a green map on the first alone hid it.
+        found = real()["found"]
+        self.assertTrue(any(h["file"].startswith("contracts/bezent/") for h in found["AC-I1.1"]))
+        found["AC-I1.1"] = [h for h in found["AC-I1.1"] if not h["file"].startswith("contracts/bezent/")]
+        errors = run(found=found)
+        self.assertTrue(any("AC-I1.1" in e and "contracts/bezent/" in e for e in errors), errors)
+        found["AC-I1.1"] = [h for h in real()["found"]["AC-I1.1"] if not h["file"].startswith("contracts/evm/")]
+        self.assertTrue(any("AC-I1.1" in e and "contracts/evm/" in e for e in run(found=found)))
+
     def test_a_stale_exception_fails(self):
         cfg = real()["cfg"]
         cfg["exception"]["AC-G1.2"] = {"reason": "x", "blocked_by": "#1"}
