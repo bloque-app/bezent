@@ -9,6 +9,10 @@
 //! ([`crate::login::check_login`]), so a store whose grants were widened by hand is refused.
 //! `crates/store/README.md` explains it in prose.
 //!
+//! A pause by compromise is deliberately absent: no role holds `pauses(alert_seq)`, nor anything on
+//! `pauses` beyond the core's asset pauses, and the signer and the endpoints hold nothing on it.
+//! The store makes it on the alert's insert (migration 0095), so issue #77 widened nothing here.
+//!
 //! A privilege is one of:
 //! - `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER` on a table or
 //!   view of the schema, named alone when held on the whole relation, and as `table(col,…)` when

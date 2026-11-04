@@ -92,7 +92,7 @@ and no role may DELETE or TRUNCATE anything but the dispatcher's own condition h
 | `unsigned_attempt_cancellations` | core: an attempt ordered and never signed, cancelled under an approved review resolution into `Refunding` (0051) |
 | `book_entries`, `book_postings`, `book_quarantine` | core |
 | `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_statement_objects` (0053: where the statement sink wrote each object, with its ETag and version id) | core |
-| `pauses(asset, cause, evaluation_id, quarantine_id, reading_id)` | core |
+| `pauses(asset, cause, evaluation_id, quarantine_id, reading_id)` | core; no role holds `alert_seq`: a compromise pause is the store's own, on an alert's insert (0095) |
 | `observations`, `observation_outcomes`, `observation_ranges`, `final_heads` | Kreivo endpoint, EVM endpoint: each its own networks only, the Kreivo endpoint the issuing network, the EVM endpoint the EVM origin networks (the guard of 0049 on every chain table, by the session's login and the role it acts as; 0034 and 0035 before it) |
 | `prepared_transactions`, `signed_transactions`, `non_execution_proofs` | Kreivo endpoint, EVM endpoint: each its own networks only, a preparation counting as its order's network and a signed transaction as its intent's (0049) |
 | `reserve_readings` | Kreivo endpoint, EVM endpoint: each its own networks only (0049) |
@@ -160,6 +160,9 @@ The audit of PR #56 added these (0049), for every login but the owner:
 - A transition's id, like a transfer's, is the one the store's sequence drew for the session.
 - A `key-compromise` alert carries the detector and detection key the store stamps on it; a detector
   looks only for its own, so a row another role wrote never suppresses it.
+- A `key-compromise` alert pauses the bridge in the transaction that records it (0095, a definer trigger
+  no role may call): one pause per alert, naming it, global but for the core's `scope` `asset` (`INV-4`,
+  0040). No service inserts, edits or deletes such a pause, and a repeated detection makes none.
 - A bound deposit's destination is on the issuing network and its refund destination on its arrival's
   network; an unassociated arrival's refund pays out on the arrival's network; neither is accepted
   otherwise.

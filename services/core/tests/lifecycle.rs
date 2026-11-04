@@ -705,6 +705,12 @@ async fn ac_i1_2_a_signature_not_over_the_recorded_bytes_raises_the_alert_and_mo
     .unwrap();
     // Raised once, with the pause request, however many cycles see it.
     assert_eq!(alerts, vec!["key-compromise", "pause-requested"]);
+    assert_eq!(
+        w.count("SELECT count(*) FROM pauses WHERE cause = 'REQ-IC-4' AND asset IS NULL")
+            .await,
+        1,
+        "the core's own detection pauses the bridge (issue #77)"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

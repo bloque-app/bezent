@@ -74,8 +74,7 @@ async fn outside_the_signer(
 }
 
 async fn compromises(f: &Fixture) -> i64 {
-    f.count("SELECT count(*) FROM event_log WHERE kind = 'key-compromise'")
-        .await
+    f.compromises().await
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]

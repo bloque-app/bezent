@@ -974,7 +974,7 @@ impl Core {
         if let Some(why) = self.destination_unbindable(conn, t).await? {
             return self.destination_review(conn, t, why).await;
         }
-        if let Some(c) = self.gate(conn, t, now).await? {
+        if let Some(c) = self.gate(conn, t, 1, now).await? {
             return self.hold(conn, t, Some(c)).await;
         }
         // The gate opened: its condition clears by itself (§10), then the delivery starts.
@@ -1048,11 +1048,14 @@ impl Core {
     }
 
     /// The conditions that hold new work before a delivery (`REQ-GV-1`, `REQ-LM-1`, `REQ-OT-5`).
-    /// A refund completes work in flight: no pause or cut-off holds it (F-006 NOTES).
+    /// A refund completes work in flight: no pause or cut-off holds it (F-006 NOTES). `attempt` is
+    /// the attempt it would let through: one the signer has signed is in flight whatever the store
+    /// says of its route since, so a pause does not hold it (`INV-15`, `AC-I2.1`, issue #77).
     async fn gate(
         &self,
         conn: &mut PgConnection,
         t: &Transfer,
+        attempt: i32,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Option<Condition>> {
         let Some((asset, network, direction)) = t.route() else {
@@ -1067,10 +1070,10 @@ impl Core {
         .bind(direction)
         .fetch_one(&mut *conn)
         .await?;
+        let held = paused && !self.attempt_signed(conn, t, attempt).await?;
         // REQ-BE-6: a reversal that took the surplus below its floor pauses new mints of the
         // asset until the attesting party restores the reserve (F-004).
-        if paused
-            || (t.kind == "deposit" && crate::reserve::book::mints_paused(conn, &asset).await?)
+        if held || (t.kind == "deposit" && crate::reserve::book::mints_paused(conn, &asset).await?)
         {
             return Ok(Some(Condition::Paused));
         }
@@ -1098,6 +1101,23 @@ impl Core {
             }
         }
         Ok(None)
+    }
+
+    /// Whether a signature is recorded for attempt `attempt` of `t`.
+    async fn attempt_signed(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        attempt: i32,
+    ) -> sqlx::Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM intents i JOIN signatures s ON s.intent_id = i.id \
+               WHERE i.transfer_id = $1 AND i.attempt = $2)",
+        )
+        .bind(t.id)
+        .bind(attempt)
+        .fetch_one(&mut *conn)
+        .await
     }
 
     /// Whether the asset's reserve on `network` covers the withdrawal: the book's reserve less what
@@ -2362,7 +2382,7 @@ impl Core {
             return self.withheld(conn, t, None, "Delivering", now).await;
         }
         // A new attempt is new work for its route: the gates hold it as they hold the first.
-        if let Some(c) = self.gate(conn, t, now).await? {
+        if let Some(c) = self.gate(conn, t, attempt + 1, now).await? {
             return self.hold(conn, t, Some(c)).await;
         }
         if t.condition().is_some_and(gate_condition) {
@@ -2764,17 +2784,17 @@ impl Core {
                 // A delivery a resolution runs is new work like any other: the pause, cut-off and
                 // reserve gates hold it, in review, until they open (INV-15, REQ-GV-1, REQ-OT-5;
                 // review S5).
-                if let Some(c) = self.gate(conn, t, now).await? {
-                    return self.hold(conn, t, Some(c)).await;
-                }
-                if t.condition().is_some_and(gate_condition) {
-                    return self.hold(conn, t, None).await;
-                }
                 let next = if before == State::SourceFinal {
                     1
                 } else {
                     attempt + 1
                 };
+                if let Some(c) = self.gate(conn, t, next, now).await? {
+                    return self.hold(conn, t, Some(c)).await;
+                }
+                if t.condition().is_some_and(gate_condition) {
+                    return self.hold(conn, t, None).await;
+                }
                 self.deliver(
                     conn,
                     t,

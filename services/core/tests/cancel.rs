@@ -361,6 +361,12 @@ async fn ac_i1_2_a_cancel_signature_not_over_its_bytes_raises_the_alert(
     .await
     .unwrap();
     assert_eq!(alerts, vec!["key-compromise", "pause-requested"]);
+    assert_eq!(
+        w.count("SELECT count(*) FROM pauses WHERE cause = 'REQ-IC-4' AND asset IS NULL")
+            .await,
+        1,
+        "the core's own detection pauses the bridge (issue #77)"
+    );
     assert_eq!(w.state(id).await.0, "Needs-Review");
     assert_eq!(refunds(&w).await, 0);
 }

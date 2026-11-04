@@ -252,11 +252,7 @@ async fn ac_c2_1_a_wrapped_copy_never_proves(pool: PgPoolOptions, connect: PgCon
     assert!(why.contains("carries this reference"), "{why}");
     assert_eq!(proofs(&f).await, 0);
     // bezent did not sign it: the compromise path (S2), not only an anomaly.
-    assert_eq!(
-        f.count("SELECT count(*) FROM event_log WHERE kind = 'key-compromise'")
-            .await,
-        1
-    );
+    assert_eq!(f.compromises().await, 1);
 }
 
 /// PR #39 review S5 (`AC-I1.2`, `REQ-NX-4`): a lane that holds code (an EIP-7702 delegation)
@@ -276,7 +272,6 @@ async fn s5_ac_i1_2_no_cancel_from_a_lane_that_holds_code(
             c.set_code(f.lane.address, code.to_vec());
         }
     };
-    let compromises = "SELECT count(*) FROM event_log WHERE kind = 'key-compromise'";
 
     // Prepared: refused.
     set_code(&delegation);
@@ -285,7 +280,7 @@ async fn s5_ac_i1_2_no_cancel_from_a_lane_that_holds_code(
         panic!("a cancel was prepared from a lane that holds code");
     };
     assert!(why.contains("holds code"), "{why}");
-    assert_eq!(f.count(compromises).await, 1);
+    assert_eq!(f.compromises().await, 1);
     assert_eq!(
         f.count("SELECT count(*) FROM event_log WHERE kind = 'pause-requested'")
             .await,
@@ -305,7 +300,7 @@ async fn s5_ac_i1_2_no_cancel_from_a_lane_that_holds_code(
     };
     assert!(why.contains("holds code"), "{why}");
     assert_eq!(f.count("SELECT count(*) FROM signatures").await, signatures);
-    assert_eq!(f.count(compromises).await, 1, "raised once per lane");
+    assert_eq!(f.compromises().await, 1, "raised once per lane");
 }
 
 /// PR #39 review S2 (`AC-I1.2`, `INV-8`): the delivery key consumes the payout's nonce with the
@@ -342,11 +337,7 @@ async fn s2_ac_i1_2_a_lane_transaction_carrying_the_reference_raises_compromise_
     }
     // A second look raises nothing new.
     let _ = outcome(&f, signed).await;
-    assert_eq!(
-        f.count("SELECT count(*) FROM event_log WHERE kind = 'key-compromise'")
-            .await,
-        1
-    );
+    assert_eq!(f.compromises().await, 1);
 }
 
 /// PR #39 review S1 (`INV-8`, `INV-14`): anyone can call the emitter. A bare `Reference` of the
@@ -438,11 +429,7 @@ async fn req_nx_3_a_consumer_bezent_did_not_sign_proves_nothing_and_raises_compr
     };
     assert!(why.contains("no recorded intent signed"), "{why}");
     assert_eq!(proofs(&f).await, 0);
-    assert_eq!(
-        f.count("SELECT count(*) FROM event_log WHERE kind = 'key-compromise'")
-            .await,
-        1
-    );
+    assert_eq!(f.compromises().await, 1);
     assert_eq!(
         f.count("SELECT count(*) FROM event_log WHERE kind = 'pause-requested'")
             .await,

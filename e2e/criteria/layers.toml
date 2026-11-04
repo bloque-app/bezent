@@ -156,8 +156,8 @@ also_under = ["contracts/evm/", "contracts/bezent/"]
 why = "REQ-KY-3: the network bounds a key's outflow. Two keys, two components, so a test under each: the EVM vault's allowance (contracts/evm, the reserve's delivery key) and the Kreivo contract's mint bounds (contracts/bezent, INV-3: the delivery key that mints, the highest value at risk)"
 
 [layer."AC-I1.2"]
-layers = ["custody", "service"]
-why = "REQ-IC-4: the signer's record check and the core's compromise path"
+layers = ["store", "custody", "service"]
+why = "REQ-IC-4: the signer's record check, the core's compromise path, and the pause the store applies in the alert's own transaction (issue #77)"
 
 [layer."AC-I2.1"]
 layers = ["service", "chain"]

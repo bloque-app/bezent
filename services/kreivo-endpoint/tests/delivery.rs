@@ -15,7 +15,9 @@ mod common;
 
 use bezent_core_service::{Core, Settings};
 use bezent_kreivo_endpoint::kreivo;
+use bezent_kreivo_endpoint::signal::{self, Seen};
 use bezent_kreivo_endpoint::submit::{Prepared, Submitted, signing_intent_payload};
+use bezent_signer::compromise::ObservedSignature;
 use chrono::{DateTime, Duration, Utc};
 use common::*;
 use serde_json::{Value, json};
@@ -263,4 +265,180 @@ async fn dec_3_order_to_submission_end_to_end(pool: PgPoolOptions, connect: PgCo
     // The chain includes it at the lane's nonce.
     f.chain.advance(1);
     assert_eq!(f.chain.nonce(&f.lane.account), 1);
+}
+
+/// The bridge's compromise pauses: global, each resting on its alert (migration 0095).
+const COMPROMISE_PAUSES: &str = "SELECT count(*) FROM pauses WHERE cause = 'REQ-IC-4' \
+     AND asset IS NULL AND network IS NULL AND direction IS NULL AND alert_seq IS NOT NULL";
+
+/// What the endpoint's prover does on a signature that answers no recorded intent, on its own
+/// login: nothing but this and the store is running.
+async fn detect(f: &Fixture, position_index: i64) -> Seen {
+    signal::check_signature(
+        &f.endpoint,
+        &ObservedSignature {
+            network: NETWORK.into(),
+            public_key: f.lane.public_key.clone(),
+            signature: vec![0x5a; 64],
+            block_number: 500,
+            block_hash: vec![0xcc; 32],
+            position_index,
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// `AC-I1.2`, `REQ-IC-4`, `REQ-IC-2`, issue #77: end to end from a detection to signing stopped,
+/// each step by the process that owns it, each on its own role. The prover sees a signature bezent
+/// did not record; the pause is in force when that write commits, with no person involved; the
+/// core records no signing intent for the order it already holds, so the endpoint has nothing to
+/// ask the signer for and the signer signs nothing, on any later cycle. The pause is lifted (by
+/// the owner here: the two-login path is `CTR-OPS`), and the same order runs to its submission.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_detection_stops_signing_end_to_end(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect.clone()).await;
+    let core = core(&f, &connect).await;
+    let now: DateTime<Utc> = "2026-10-13T01:00:00Z".parse().unwrap();
+    let id = deposit(&f).await;
+    let s = f.submitter();
+    cycle(&core, now).await;
+    cycle(&core, now).await;
+    let (order, _) = intent_with(&f, id, "order").await.expect("the order");
+    assert!(matches!(
+        s.prepare(order).await.unwrap(),
+        Prepared::Ready { .. }
+    ));
+
+    assert_eq!(detect(&f, 3).await, Seen::Compromise);
+    assert_eq!(f.count(COMPROMISE_PAUSES).await, 1, "no pause applied");
+
+    for _ in 0..3 {
+        cycle(&core, now).await;
+    }
+    assert_eq!(
+        state(&f, id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    assert!(
+        intent_with(&f, id, "prepared").await.is_none(),
+        "a signing intent was recorded under the pause"
+    );
+    let finalized = f.chain.finalized_ref();
+    assert_eq!(
+        s.intents_to_sign(&finalized).await.unwrap(),
+        Vec::<i64>::new()
+    );
+    assert_eq!(f.signatures().await, 0);
+    assert!(f.chain.submitted().is_empty());
+
+    // A service cannot lift it, the one that raised it included.
+    let lifted = sqlx::raw_sql("DELETE FROM pauses")
+        .execute(&f.endpoint)
+        .await;
+    assert!(lifted.is_err(), "the endpoint lifted a pause");
+    assert_eq!(f.count(COMPROMISE_PAUSES).await, 1);
+
+    // Seeing the same signature again changes nothing while paused, and nothing once lifted.
+    assert_eq!(detect(&f, 3).await, Seen::Compromise);
+    assert_eq!(f.count(COMPROMISE_PAUSES).await, 1);
+    exec(&f.admin, "DELETE FROM pauses").await;
+    assert_eq!(detect(&f, 3).await, Seen::Compromise);
+    assert_eq!(f.count(COMPROMISE_PAUSES).await, 0, "a repeat paused again");
+
+    // The held order resumes by itself.
+    cycle(&core, now).await;
+    assert_eq!(state(&f, id).await, ("Source-Final".into(), None));
+    cycle(&core, now).await;
+    let (signing, _) = intent_with(&f, id, "prepared")
+        .await
+        .expect("the signing intent");
+    assert_eq!(s.intents_to_sign(&finalized).await.unwrap(), vec![signing]);
+    assert!(matches!(
+        s.sign_and_submit(signing).await.unwrap(),
+        Submitted::Submitted { .. }
+    ));
+    cycle(&core, now).await;
+    assert_eq!(state(&f, id).await, ("Delivering".into(), None));
+
+    // A new detection after the lift pauses again.
+    assert_eq!(detect(&f, 4).await, Seen::Compromise);
+    assert_eq!(f.count(COMPROMISE_PAUSES).await, 1);
+}
+
+/// `AC-I1.2`, issue #77: the core is down when the endpoint detects. The pause does not wait for
+/// it: it is in force on the endpoint's commit, and the core's first cycle back holds new work and
+/// records nothing to sign.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_the_core_down_at_detection_the_pause_holds_when_it_returns(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect.clone()).await;
+    let id = deposit(&f).await;
+    // No core exists yet in this test: only the endpoint and the store are running.
+    assert_eq!(detect(&f, 3).await, Seen::Compromise);
+    assert_eq!(f.count(COMPROMISE_PAUSES).await, 1, "no pause applied");
+
+    let now: DateTime<Utc> = "2026-10-13T01:00:00Z".parse().unwrap();
+    let core = core(&f, &connect).await;
+    for _ in 0..3 {
+        cycle(&core, now).await;
+    }
+    assert_eq!(
+        state(&f, id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    assert_eq!(
+        f.count("SELECT count(*) FROM intents").await,
+        0,
+        "the core ordered new work under the pause"
+    );
+}
+
+/// `AC-I2.1`, `INV-15`, issue #77: an attempt signed before a detection is in flight, not new work.
+/// The pause reaches it between the signature and the core's next step: the core still moves it to
+/// `Delivering`, where before it held it in `Source-Final` as `CND-Paused` while the transaction was
+/// on its way, so the transfer was reported as waiting for a delivery already made. A compromised
+/// key's transaction bezent already signed is not unsigned by a pause; only the on-chain pause
+/// refuses it.
+///
+/// A signing intent recorded before the pause and not yet signed is signed here too: `SPEC.md`
+/// does not say whether that is new work (amendment 0022, proposed). Change this test with it.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_an_attempt_signed_before_the_pause_is_in_flight_and_moves_on(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect.clone()).await;
+    let core = core(&f, &connect).await;
+    let now: DateTime<Utc> = "2026-10-13T01:00:00Z".parse().unwrap();
+    let id = deposit(&f).await;
+    let s = f.submitter();
+    cycle(&core, now).await;
+    cycle(&core, now).await;
+    let (order, _) = intent_with(&f, id, "order").await.expect("the order");
+    assert!(matches!(
+        s.prepare(order).await.unwrap(),
+        Prepared::Ready { .. }
+    ));
+    cycle(&core, now).await;
+    let (signing, _) = intent_with(&f, id, "prepared")
+        .await
+        .expect("the signing intent");
+
+    assert_eq!(detect(&f, 3).await, Seen::Compromise);
+    assert_eq!(f.count(COMPROMISE_PAUSES).await, 1, "no pause applied");
+
+    assert!(matches!(
+        s.sign_and_submit(signing).await.unwrap(),
+        Submitted::Submitted { .. }
+    ));
+    assert_eq!(f.signatures().await, 1);
+    cycle(&core, now).await;
+    assert_eq!(state(&f, id).await, ("Delivering".into(), None));
+    assert_eq!(f.count(COMPROMISE_PAUSES).await, 1, "the pause stands");
 }
