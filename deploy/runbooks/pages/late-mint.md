@@ -23,7 +23,7 @@ the code of `services/core/src/late_mint.rs` (PR #72, merged).
 
 | Page | Meaning |
 |---|---|
-| `late-mint-prover-silent` | A mint waits on an attempt the endpoint's prover does not decide though its era is over (the prover is stuck, down or out of range), or a key is compromised, or the attempt is one this build cannot read (a `delivery-anomaly` with `recorded_undecodable` or `bytes_unreadable`: it may have minted, and the transfer is in `Needs-Review`). Never a pause by itself. Once, then once a day while the mint is still held with the prover still silent. |
+| `late-mint-prover-silent` | A mint waits on an attempt the endpoint's prover does not decide though its era is over (the prover is stuck, down or out of range), or a key is compromised, or the attempt is one this build cannot read (a `delivery-anomaly` with `recorded_undecodable` or `bytes_unreadable`: it may have minted, and the transfer is in `Needs-Review`). The page's `meaning` and each attempt's `record` (`none`, `recorded-undecodable`, `bytes-unreadable`) say which. A `recorded_undecodable` anomaly holds only the mint in the block it records as its `coordinate`; a mint in any other block is not that extrinsic's and is judged like any other. Never a pause by itself. Once, then once a day while the mint is still held with the prover still silent. |
 | `late-mint-check-failed` | The check for one mint failed repeatedly. Once per observation. |
 | `late-mint-watch-failed` | The core cannot list the mints to check, cycle after cycle: no late mint would be seen. |
 
@@ -43,7 +43,10 @@ public chain data, and the endpoint's health for the prover (`deploy/health.md`)
 
 ## Do
 
-1. `late-mint-prover-silent`: find out whether the prover is stuck (restart cannot mend a poisoned row: read its log) or
+1. `late-mint-prover-silent`: read each attempt's `record` in the payload. For `recorded-undecodable` and
+   `bytes-unreadable` the prover is not stuck: it wrote an anomaly and cannot read the attempt, and a restart changes
+   nothing. Read the chain at the mint's block (public data) to see which extrinsic minted the reference; the transfer
+   stays in `Needs-Review` and nothing is refunded. For `none`: find out whether the prover is stuck (restart cannot mend a poisoned row: read its log) or
    the key is compromised. If you cannot tell within the hour, pause (`operator_pause`) and follow
    `pages/key-compromise.md`. The row stays open and the alert still raises if the prover later decides against the mint.
 2. `late-mint-check-failed` and `late-mint-watch-failed`: the check is blind. Fix the store, the grant or the row it
