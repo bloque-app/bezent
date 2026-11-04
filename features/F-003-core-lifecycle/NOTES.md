@@ -225,6 +225,24 @@ it.
     transfer to review, never to a refund (`REQ-RF-1`). The check for an earlier page and the insert are atomic:
     every step runs in a transaction holding the transfer's row lock (`lock_transfer`, `FOR UPDATE`), so two cycles
     never step one transfer at once.
+    (d) **A refund waits while an inclusion of the payout stands** (`REQ-RF-1`, `INV-16`, `INV-8`). The specification
+    says a refund is never made on an unknown. A payout observed included and not withdrawn, final or not, beside a
+    final proof that the attempt did not execute, makes the leg unknown, whatever the proof says: the two cannot both
+    hold on one chain, and the core does not choose between them. So a resolution into `Refunding` is *withheld* while
+    such an inclusion stands: no state changes, the resolution is not marked refused (it runs by itself once the
+    inclusion is withdrawn, and a later resolution is not held up behind it), and the core records
+    `resolution-blocked-by-inclusion` once per resolution. When the inclusion goes final the review closes as
+    `Delivered` by the existing path. This derives no disposition from a non-final observation (`INV-16`); it only
+    withholds one. The leg is the transfer's own (its reference, destination network and event, `destination_leg`),
+    so another transfer's inclusion blocks nothing; the reference is shared by every attempt (`REQ-EO-6`) and an
+    observation carries no attempt, so the leg cannot be told apart per attempt, and an earlier attempt's included
+    payout is the delivery. Two other paths were read. In `Delivered`, the automatic path read a final proof against an
+    inclusion not yet decided and could make the refund mint; it no longer does while the inclusion stands.
+    `Delivering` already ignored a proof when a leg was observed. **Not changed, for the owner:** a resolution into a
+    *new attempt* from `Delivering` or `Delivered`, and the automatic new attempt in `Delivered`, are still allowed
+    beside a standing inclusion (existing tests in `services/core/tests/review.rs` rely on it); the same reading of
+    `REQ-RF-1` would withhold them too, but a second payout under the same reference is refused by the contract.
+`Delivering` already ignored the proof when a leg was observed.
 27. **A payout signed after its deadline** (point 2 of the issue): **amendment 0019, proposed, not built.** The
     specification does not say whether the clock starts when the attempt becomes signable or whether a late signature
     gets a grace period; the choice changes what the completion budget (`NFR-2`) means.

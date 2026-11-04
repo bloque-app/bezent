@@ -1822,7 +1822,16 @@ impl Core {
         match store::proof_of(conn, t.id, attempt).await? {
             Some(ProofPoint::Final(proof)) => {
                 return self
-                    .after_proof(conn, t, State::Delivering, attempt, &proof, None, now)
+                    .after_proof(
+                        conn,
+                        t,
+                        State::Delivering,
+                        attempt,
+                        &proof,
+                        None,
+                        false,
+                        now,
+                    )
                     .await;
             }
             Some(ProofPoint::Untimed) => return Ok(Did::default()),
@@ -2324,6 +2333,7 @@ impl Core {
         attempt: i32,
         proof: &Point,
         manual: Option<i64>,
+        standing: bool,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
         let retrying = store::attempt_has_intents(conn, t.id, attempt + 1).await?;
@@ -2331,6 +2341,10 @@ impl Core {
             let start = t.source_final_block_time.unwrap_or(proof.block_time);
             let deadline = self.deadline(conn, t, start).await?;
             if proof.block_time > deadline {
+                // An inclusion of the payout stands: the leg is unknown, no refund (REQ-RF-1).
+                if standing {
+                    return Ok(Did::default());
+                }
                 return self.refund(conn, t, from, proof, manual).await;
             }
         }
@@ -2518,9 +2532,20 @@ impl Core {
             .await?;
             return Ok(Did::moved());
         }
+        // An inclusion that stands (not decided, so not withdrawn) makes the leg unknown whatever
+        // a proof says: no refund follows (REQ-RF-1, issue #35).
         if let Some(ProofPoint::Final(proof)) = store::proof_of(conn, t.id, attempt).await? {
             return self
-                .after_proof(conn, t, State::Delivered, attempt, &proof, None, now)
+                .after_proof(
+                    conn,
+                    t,
+                    State::Delivered,
+                    attempt,
+                    &proof,
+                    None,
+                    leg.is_some(),
+                    now,
+                )
                 .await;
         }
         let deadline = self.deadline(conn, t, included_at).await?;
@@ -2628,11 +2653,38 @@ impl Core {
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
         type Action = (i64, String, String, i64, Vec<u8>, DateTime<Utc>, bool);
+        // REQ-RF-1, INV-16 (issue #35): while an inclusion of the payout stands, final or not and
+        // not withdrawn, the leg is unknown whatever a final proof says, so no refund follows.
+        // Such a resolution is withheld, not refused (a later one is not
+        // held up behind it): it runs when the inclusion is withdrawn, and the review closes as
+        // Delivered when it goes final. Nothing is derived from the observation, only withheld.
+        let blocked = matches!(before, State::Delivering | State::Delivered)
+            && !matches!(self.destination_leg(conn, t).await?, Leg::None);
+        if blocked {
+            let waiting: Vec<(i64, String)> = sqlx::query_as(
+                "SELECT a.id, a.to_state::text FROM manual_actions a \
+                 WHERE a.transfer_id = $1 AND a.kind = 'review-resolution' AND a.recorded_at >= $2 \
+                   AND a.to_state = 'Refunding' \
+                   AND EXISTS (SELECT 1 FROM manual_approvals p WHERE p.action_id = a.id) \
+                   AND NOT EXISTS (SELECT 1 FROM transitions x WHERE x.manual_action_id = a.id) \
+                   AND NOT EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'review-evidence-refused' \
+                                   AND e.payload ->> 'manual_action_id' = a.id::text) \
+                 ORDER BY a.id",
+            )
+            .bind(t.id)
+            .bind(entered_at)
+            .fetch_all(&mut *conn)
+            .await?;
+            for (action, to) in waiting {
+                self.inclusion_page(conn, t, action, &to).await?;
+            }
+        }
         let action: Option<Action> = sqlx::query_as(
             "SELECT a.id, a.to_state::text, a.network, a.block_number, a.block_hash, a.block_time, \
                     EXISTS (SELECT 1 FROM manual_approvals p WHERE p.action_id = a.id) \
              FROM manual_actions a \
              WHERE a.transfer_id = $1 AND a.kind = 'review-resolution' AND a.recorded_at >= $2 \
+               AND NOT ($3 AND a.to_state = 'Refunding') \
                AND NOT EXISTS (SELECT 1 FROM transitions x WHERE x.manual_action_id = a.id) \
                AND NOT EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'review-evidence-refused' \
                                AND e.payload ->> 'manual_action_id' = a.id::text) \
@@ -2640,6 +2692,7 @@ impl Core {
         )
         .bind(t.id)
         .bind(entered_at)
+        .bind(blocked)
         .fetch_optional(&mut *conn)
         .await?;
         let Some((action, to, network, number, hash, time, approved)) = action else {
@@ -2839,6 +2892,35 @@ impl Core {
             }
             _ => false,
         })
+    }
+
+    /// Pages a human, once per resolution, that a resolution into `to` waits because an inclusion
+    /// of the payout stands (`REQ-RF-1`, issue #35). It changes no state.
+    async fn inclusion_page(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        action: i64,
+        to: &str,
+    ) -> sqlx::Result<()> {
+        let action = action.to_string();
+        if store::has_event(
+            conn,
+            "resolution-blocked-by-inclusion",
+            Some(t.id),
+            "manual_action_id",
+            &action,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        let detail = json!({"spec": "REQ-RF-1", "bridge_reference": t.bridge_reference,
+                            "manual_action_id": action, "resolution": to});
+        store::event(conn, "resolution-blocked-by-inclusion", Some(t.id), &detail).await?;
+        tracing::error!(kind = "resolution-blocked-by-inclusion", transfer = %t.bridge_reference, %detail,
+            "page: a resolution that refunds waits, because the payout is observed included and not withdrawn");
+        Ok(())
     }
 
     /// Records, once, that a resolution's evidence was refused; the transfer stays in review.

@@ -1078,13 +1078,12 @@ async fn req_rv_2_inv_16_issue_35_a_second_inclusion_blocks_not_executed_and_the
     assert_eq!(w.state(id).await.0, "Needs-Review");
     assert_eq!(refunds(&w).await, 0);
 
-    // Final, the second inclusion is the evidence, and only Delivered closes the review.
+    // The inclusion goes final: the withheld refund still waits, and the review closes as
+    // Delivered by the existing path.
     decide(&w.admin, again, "final", PAST + 40).await;
     w.settle(t0()).await;
     w.settle(t0()).await;
-    let evidence = events(&w, id, "review-evidence").await;
-    assert_eq!(evidence.len(), 1);
-    assert_eq!(evidence[0]["kind"], json!("included"));
+    assert_eq!(w.state(id).await.0, "Needs-Review");
     assert_eq!(refunds(&w).await, 0);
     resolution(&w, id, "Delivered", ORIGIN, PAST + 25, 0).await;
     w.settle(t0()).await;
@@ -1176,4 +1175,71 @@ async fn cnd_payout_window_issue_35_taking_the_hold_again_after_the_page_pages_n
     w.settle(t0()).await;
     w.settle(t0()).await;
     assert_eq!(window_pages(&w, id).await.len(), 2, "daily while it lasts");
+}
+
+/// Pages of kind `resolution-blocked-by-inclusion` for transfer `id`.
+async fn blocked_pages(w: &World, id: i64) -> usize {
+    events(w, id, "resolution-blocked-by-inclusion").await.len()
+}
+
+/// REQ-RF-1, INV-16, issue #35: a refund resolution withheld by a standing inclusion is not
+/// refused. It pages once (durably, one event per resolution, however many cycles), changes
+/// nothing, and runs when the inclusion is withdrawn. An inclusion of another transfer's payout
+/// blocks nothing.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_issue_35_a_withheld_refund_pages_once_and_runs_when_the_inclusion_is_withdrawn(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, _signed) = cancel_signed_in_review(&w, 69).await;
+    // Another transfer's payout is included, not final: it is not this transfer's leg.
+    let other = withdrawal(&w, 40, [70; 32], 700).await;
+    deliver(&w, other, 1, t0()).await;
+    payout_included(&w, other, PAST + 8).await;
+
+    prove_replaced(&w.admin, id, 1, PAST + 6, PAST + 20).await;
+    let again = payout_included(&w, id, PAST + 25).await;
+    w.settle(t0()).await;
+    let refund = resolution(&w, id, "Refunding", ORIGIN, PAST + 20, 0).await;
+    approve_as(&w, 1, refund).await.unwrap();
+    for _ in 0..3 {
+        w.settle(t0()).await;
+    }
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(refunds(&w).await, 0);
+    assert_eq!(blocked_pages(&w, id).await, 1, "paged once, not per cycle");
+    assert!(
+        events(&w, id, "review-evidence-refused").await.is_empty(),
+        "withheld, not refused"
+    );
+
+    // The inclusion is withdrawn: the same resolution passes.
+    decide(&w.admin, again, "withdrawn", PAST + 30).await;
+    w.settle(t0()).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Refunding");
+    assert_eq!(refunds(&w).await, 1);
+    assert_eq!(blocked_pages(&w, id).await, 1);
+}
+
+/// REQ-RF-1, issue #35: in `Delivered`, a payout observed included and not decided, beside a
+/// final proof that it did not execute, is unknown: no refund and no new attempt follow on their
+/// own (a withdrawal past its deadline would otherwise make the refund mint).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_issue_35_a_delivered_payout_with_a_standing_inclusion_is_not_refunded_on_a_proof(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, _signed) = payout_in_flight(&w, 71).await;
+    payout_included(&w, id, 30).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivered");
+    prove_replaced(&w.admin, id, 1, PAST + 6, PAST + 20).await;
+    w.settle(t0()).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivered");
+    assert_eq!(refunds(&w).await, 0);
+    assert_eq!(later_attempts(&w, id).await, 0);
 }
