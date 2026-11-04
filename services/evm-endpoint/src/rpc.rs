@@ -11,9 +11,11 @@
 pub mod mock;
 
 use std::fmt;
+use std::time::Duration;
 
 use alloy::primitives::{Address, B256, Bytes, U256};
-use alloy::rpc::client::{ClientBuilder, RpcClient};
+use alloy::rpc::client::RpcClient;
+use alloy::transports::http::reqwest;
 use alloy::transports::{RpcError as TransportRpcError, TransportErrorKind};
 use serde_json::{Value, json};
 
@@ -229,6 +231,13 @@ pub trait Rpc {
     async fn send_raw(&self, bytes: &[u8]) -> Result<B256, RpcError>;
 }
 
+/// How long one request to a provider may take, from the send to the end of the answer. alloy's
+/// client sets no timeout of its own (it builds a plain `reqwest::Client`, which sets none), so
+/// without this a provider that accepts the connection and never answers would stall the call
+/// for good: the follower's head, the reserve path. A request that exceeds it fails as the
+/// provider's own error, which is unknown, never a disposition (`REQ-NX-3`).
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// A provider over HTTP, through alloy's JSON-RPC client.
 pub struct Http {
     name: String,
@@ -245,10 +254,20 @@ impl fmt::Debug for Http {
 impl Http {
     /// A provider named `name` at `url`.
     pub fn new(name: &str, url: &str) -> Result<Self, String> {
+        Self::with_timeout(name, url, REQUEST_TIMEOUT)
+    }
+
+    /// A provider named `name` at `url`, each of whose requests ends within `timeout`.
+    pub fn with_timeout(name: &str, url: &str, timeout: Duration) -> Result<Self, String> {
         let url = url::Url::parse(url).map_err(|e| format!("provider {name}: a bad URL: {e}"))?;
+        // The error text of a failed build may name the URL, which may carry a key: not printed.
+        let http = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|_| format!("provider {name}: the HTTP client could not be built"))?;
         Ok(Self {
             name: name.to_owned(),
-            client: ClientBuilder::default().http(url),
+            client: RpcClient::new_http_with_client(http, url),
         })
     }
 
