@@ -1,6 +1,6 @@
 -- Copyright (c) 2026 Pagos Cube LLC
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Reverts 0060_attested_backend, in tests only.
+-- Reverts 0105_attested_backend, in tests only.
 
 DROP TRIGGER intents_guard_attested ON intents;
 DROP FUNCTION intents_guard_attested();

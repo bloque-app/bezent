@@ -319,6 +319,18 @@ async fn ac_i1_2_unrecorded_signature_starts_the_compromise_path(
     else {
         panic!("not a compromise: {verdict:?}");
     };
+    let pause: Option<i64> = sqlx::query_scalar(
+        "SELECT alert_seq FROM pauses WHERE cause = 'REQ-IC-4' AND asset IS NULL \
+           AND network IS NULL AND direction IS NULL",
+    )
+    .fetch_optional(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        pause,
+        Some(alert_seq),
+        "AC-I1.2: the alert paused the bridge"
+    );
     let rows: Vec<(i64, String, String)> =
         sqlx::query_as("SELECT seq, kind, payload::text FROM event_log ORDER BY seq")
             .fetch_all(&f.admin)
@@ -973,15 +985,29 @@ async fn sf_b_req_ky_4_an_evm_key_signs_for_one_network_and_its_chain_id_only(
 // ---------------------------------------------------------------------------------------------
 // The audit of PR #56, must-fix 2 (REQ-AR-3, INV-9, issue #23).
 
-/// The key-compromise alerts the signer raised, with their detection keys.
+/// The key-compromise alerts the signer raised, with their detection keys, each having paused the
+/// bridge (`AC-I1.2`, issue #77).
 async fn signer_alerts(f: &Fixture) -> Vec<String> {
-    sqlx::query_scalar(
+    let alerts: Vec<String> = sqlx::query_scalar(
         "SELECT payload ->> 'detection_key' FROM event_log \
          WHERE kind = 'key-compromise' AND payload ->> 'detector' = 'signer' ORDER BY seq",
     )
     .fetch_all(&f.admin)
     .await
-    .unwrap()
+    .unwrap();
+    let paused: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pauses p JOIN event_log e ON e.seq = p.alert_seq \
+         WHERE e.payload ->> 'detector' = 'signer' AND p.cause = 'REQ-IC-4' AND p.asset IS NULL",
+    )
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        paused,
+        alerts.len() as i64,
+        "AC-I1.2: an alert with no pause"
+    );
+    alerts
 }
 
 /// Must-fix 2 (`REQ-AR-3`, `INV-9`, issue #23): the signer checked the bytes only against the

@@ -9,6 +9,10 @@
 //! ([`crate::login::check_login`]), so a store whose grants were widened by hand is refused.
 //! `crates/store/README.md` explains it in prose.
 //!
+//! A pause by compromise is deliberately absent: no role holds `pauses(alert_seq)`, nor anything on
+//! `pauses` beyond the core's asset pauses, and the signer and the endpoints hold nothing on it.
+//! The store makes it on the alert's insert (migration 0095), so issue #77 widened nothing here.
+//!
 //! A privilege is one of:
 //! - `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER` on a table or
 //!   view of the schema, named alone when held on the whole relation, and as `table(col,…)` when
@@ -70,6 +74,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "intake",
             "intake_answers",
             "intents",
+            "late_mint_checks",
             "ledger_accounts",
             "ledger_accounts_listed",
             "manual_actions",
@@ -124,7 +129,10 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
     (
         crate::CORE_ROLE,
         "UPDATE",
-        &["transfers(on_chain_reference)"],
+        &[
+            "late_mint_checks(checked_at,failures,settled_at,verdict,held_cycles)",
+            "transfers(on_chain_reference)",
+        ],
     ),
     (
         crate::CORE_ROLE,
@@ -133,12 +141,13 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "attempt_proof(bigint,integer)",
             "attempts_unproven(bigint)",
             "bezent_applied_migrations()",
-            // A report becomes an observation only through it (0060): no write on the chain tables.
+            // A report becomes an observation only through it (0105): no write on the chain tables.
             "bezent_record_attested_observation(bigint)",
             "attested_arrival_reversed(text,bigint,bytea)",
             "bezent_writer_holds(text,oid)",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
+            "ops_observables()",
             "pause_reading_is_supply_mismatch(text,bigint)",
             "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
         ],
@@ -304,12 +313,15 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         crate::OPERATOR_ROLE,
         "SELECT",
         &[
+            "admin_actions",
             "attested_reports",
             "book_quarantine",
+            "event_log",
             "ledger_accounts",
             "ledger_accounts_listed",
             "manual_actions",
             "manual_approvals",
+            "pauses",
             "reserve_evaluations",
             "reserve_readings",
             "reserve_statement_abandoned",
@@ -317,6 +329,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "reserve_statements",
             "reviews",
             "surplus_funding_addresses",
+            "transfer_status",
             "unassociated_arrivals",
         ],
     ),
@@ -336,6 +349,11 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "bezent_applied_migrations()",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
+            "operator_approve_unpause(bigint,text)",
+            "ops_observables()",
+            "operator_pause(text,text,text,text)",
+            "operator_record(text,text,jsonb,text)",
+            "operator_request_unpause(bigint,text)",
             "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
         ],
     ),

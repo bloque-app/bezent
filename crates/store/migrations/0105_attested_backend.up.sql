@@ -1,7 +1,8 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- F-011 T-011-02: an attested backend's reports (SPEC §4.4(b), REQ-BE-4, REQ-BE-5, REQ-PN-2,
--- REQ-RQ-4; PLAN DEC-14). Additive. Numbered 0060 so the M-2 work, in progress, keeps the numbers
--- from 0055 (F-011 NOTES 12).
+-- REQ-RQ-4; PLAN DEC-14). Additive. Numbered 0105 (0106 and 0107 follow): a store that
+-- has applied 0095 refuses a lower pending version (bezent-migrate), so these come after the highest
+-- version on `develop`, and 0100 to 0104 are another open PR's (F-011 NOTES 12).
 --
 --   * attesting_parties, attesting_keys: declarations. Each attested network has one attesting
 --     party, the requester that speaks for it, and the keys it signs its reports with. The attesting

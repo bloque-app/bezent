@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use alloy::primitives::{Address, B256, U256, keccak256};
 use alloy::rpc::client::{ClientBuilder, RpcClient};
+use alloy::sol;
 use alloy::sol_types::SolCall;
 use bezent_evm_endpoint::evm::{self, Contracts};
 use bezent_evm_endpoint::network::{self, Declarations, Identity, Token};
@@ -142,6 +143,27 @@ const OWNERS: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8,0x3C44CdDdB6a90
 const CONVERSION_MEMBER: &str = "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc";
 // Foundry's account 7: the vault's guardian (veto and pause), none of the deployer, the owners or the roles.
 const GUARDIAN: &str = "0x14dC79964da2C08b23698B3D3cc7Ca32193d9955";
+// Foundry's account 8 is the vault's conversion member (Swaps' key, REQ-CV-7). Uniswap v3's SwapRouter02
+// on Polygon, and the fee tier of the declared USDT0/USDC pool (contracts/evm/config/polygon.json).
+const ROUTER: &str = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";
+const POOL_FEE: u32 = 100;
+
+sol! {
+    /// ERC-20 `approve`.
+    function approve(address spender, uint256 amount) external returns (bool);
+    struct ExactInputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        uint24 fee;
+        address recipient;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+        uint160 sqrtPriceLimitX96;
+    }
+    /// SwapRouter02's exact-input single swap.
+    function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut);
+}
+
 const DEPOSITOR: &str = "0x976EA74026E726554dB657fA54763abd0C3a0aa9";
 fn upstream(net: &Net) -> Option<String> {
     let url = std::env::var(net.url_env).ok().filter(|u| !u.is_empty());
@@ -297,7 +319,12 @@ impl Anvil {
     /// assumed: each candidate slot of a Solidity mapping is written with a sentinel and the token
     /// asked (USDC and EURC keep it at 9, BTCB elsewhere).
     async fn fund_token(&self, holder: Address, amount: u128) {
-        for slot in 0u64..=20 {
+        self.fund_token_of(self.net.token(), holder, amount).await;
+    }
+
+    /// The same for any token: the convertible, for the conversion scenario.
+    async fn fund_token_of(&self, token: Address, holder: Address, amount: u128) {
+        for slot in 0u64..=60 {
             let key = keccak256(
                 [
                     holder.into_word().as_slice(),
@@ -307,27 +334,28 @@ impl Anvil {
             );
             self.rpc(
                 "anvil_setStorageAt",
-                json!([self.net.token(), key, B256::from(U256::from(amount))]),
+                json!([token, key, B256::from(U256::from(amount))]),
             )
             .await;
-            if self.token_balance(holder).await == U256::from(amount) {
+            if self.balance_of(token, holder).await == U256::from(amount) {
                 return;
             }
-            self.rpc(
-                "anvil_setStorageAt",
-                json!([self.net.token(), key, B256::ZERO]),
-            )
-            .await;
+            self.rpc("anvil_setStorageAt", json!([token, key, B256::ZERO]))
+                .await;
         }
-        panic!("no balance slot of {} found for {holder}", self.net.token);
+        panic!("no balance slot of {token} found for {holder}");
     }
 
     async fn token_balance(&self, holder: Address) -> U256 {
+        self.balance_of(self.net.token(), holder).await
+    }
+
+    async fn balance_of(&self, token: Address, holder: Address) -> U256 {
         let data = evm::balanceOfCall { owner: holder }.abi_encode();
         let out = self
             .rpc(
                 "eth_call",
-                json!([{"to": self.net.token(), "data": format!("0x{}", hex::encode(data))}, "latest"]),
+                json!([{"to": token, "data": format!("0x{}", hex::encode(data))}, "latest"]),
             )
             .await;
         U256::from_str_radix(out.as_str().unwrap().trim_start_matches("0x"), 16).unwrap()
@@ -920,4 +948,155 @@ mod base {
 mod bsc {
     use super::*;
     fork_tests!(BSC);
+}
+
+/// `AC-A5.1`, `AC-A5.2`, `REQ-CV-2`, `REQ-CV-4`, `REQ-CV-7`: on the Polygon fork, a convertible arrives at the
+/// vault and Swaps' conversion member converts it through the declared pool under its role. The
+/// endpoint records the arrival as a convertible arrival (never an arrival), and the swap as an input
+/// and an output at their coordinates, the output carrying both amounts; the output is what the vault
+/// received, whatever the price (`REQ-CV-5`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn fork_ac_a5_1_ac_a5_2_req_cv_2_a_real_swap_is_observed_with_both_amounts(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let Some(upstream) = upstream(&POLYGON) else {
+        return;
+    };
+    let w = World::new(&POLYGON, &upstream, pool, connect).await;
+    let usdt0 = common::usdt0();
+    let depositor: Address = DEPOSITOR.parse().unwrap();
+    let member: Address = CONVERSION_MEMBER.parse().unwrap();
+    let router: Address = ROUTER.parse().unwrap();
+    let amount_in: u128 = 1_000_000_000;
+
+    // 1 000 USDT0 arrive at the vault from a depositor.
+    w.anvil.fund_token_of(usdt0, depositor, amount_in).await;
+    let transfer = evm::transferCall {
+        to: w.vault.safe,
+        amount: U256::from(amount_in),
+    }
+    .abi_encode();
+    let arrival = w
+        .anvil
+        .send(
+            json!({"from": depositor, "to": usdt0, "data": format!("0x{}", hex::encode(transfer))}),
+        )
+        .await;
+
+    // Swaps' key converts it through the vault's conversion role: approve the router, then the swap.
+    let through_role = |to: Address, data: Vec<u8>| {
+        let call = evm::execTransactionWithRoleCall {
+            to,
+            value: U256::ZERO,
+            data: data.into(),
+            operation: 0,
+            roleKey: evm::role_key("bezent.conversion").unwrap(),
+            shouldRevert: true,
+        }
+        .abi_encode();
+        json!({"from": member, "to": w.vault.roles, "data": format!("0x{}", hex::encode(call)),
+               "gas": "0x7a120"})
+    };
+    let usdc_before = w.anvil.token_balance(w.vault.safe).await;
+    w.anvil
+        .send(through_role(
+            usdt0,
+            approveCall {
+                spender: router,
+                amount: U256::from(amount_in),
+            }
+            .abi_encode(),
+        ))
+        .await;
+    let swap = w
+        .anvil
+        .send(through_role(
+            router,
+            exactInputSingleCall {
+                params: ExactInputSingleParams {
+                    tokenIn: usdt0,
+                    tokenOut: POLYGON.token(),
+                    fee: alloy::primitives::aliases::U24::from(POOL_FEE),
+                    recipient: w.vault.safe,
+                    amountIn: U256::from(amount_in),
+                    amountOutMinimum: U256::ZERO,
+                    sqrtPriceLimitX96: alloy::primitives::aliases::U160::ZERO,
+                },
+            }
+            .abi_encode(),
+        ))
+        .await;
+    let delivered = w.anvil.token_balance(w.vault.safe).await - usdc_before;
+    assert!(delivered > U256::ZERO, "the swap delivered nothing");
+    w.anvil.finalize().await;
+    w.follow().await;
+    w.follow().await;
+
+    // The arrival is a convertible arrival: never an arrival, so nothing can mint against it (REQ-CV-1).
+    let (kind, amount, tx): (String, String, String) = sqlx::query_as(
+        "SELECT kind, amount::text, detail ->> 'tx_hash' FROM observations \
+         WHERE detail ->> 'event' = 'ConvertibleArrival'",
+    )
+    .fetch_one(&w.admin)
+    .await
+    .unwrap();
+    assert_eq!(kind, "convertible_arrival");
+    assert_eq!(amount, amount_in.to_string());
+    assert_eq!(tx.parse::<B256>().unwrap(), arrival);
+    assert_eq!(
+        w.count("SELECT count(*) FROM observations WHERE kind = 'arrival'")
+            .await,
+        0
+    );
+
+    // The swap: the input leaves the vault for the declared pool; the output lands in the vault, from
+    // the pool, in the same transaction, in the amount the vault received (REQ-CV-2, REQ-CV-5).
+    let (input_kind, input_amount, input_to, input_tx): (String, String, String, String) =
+        sqlx::query_as(
+            "SELECT kind, amount::text, recipient, detail ->> 'tx_hash' FROM observations \
+             WHERE detail ->> 'event' = 'ConversionInput'",
+        )
+        .fetch_one(&w.admin)
+        .await
+        .unwrap();
+    assert_eq!(input_kind, "conversion_input");
+    assert_eq!(input_amount, amount_in.to_string());
+    assert_eq!(
+        input_to.to_lowercase(),
+        common::pool_address().to_string().to_lowercase()
+    );
+    assert_eq!(input_tx.parse::<B256>().unwrap(), swap);
+
+    type Output = (String, String, String, String, String, Value);
+    let (kind, amount, sender, recipient, tx, detail): Output = sqlx::query_as(
+        "SELECT kind, amount::text, sender, recipient, detail ->> 'tx_hash', detail -> 'conversion' \
+         FROM observations WHERE detail ->> 'event' = 'Conversion'",
+    )
+    .fetch_one(&w.admin)
+    .await
+    .unwrap();
+    assert_eq!(kind, "conversion_output");
+    assert_eq!(
+        amount,
+        delivered.to_string(),
+        "the output is what the vault received"
+    );
+    assert_eq!(
+        sender.to_lowercase(),
+        common::pool_address().to_string().to_lowercase()
+    );
+    assert_eq!(recipient, format!("{:#x}", w.vault.safe));
+    assert_eq!(tx.parse::<B256>().unwrap(), swap);
+    // Both amounts, in the output's own record.
+    assert_eq!(detail["amount_in"], amount_in.to_string());
+    let lower = |v: &Value| v.as_str().unwrap().to_lowercase();
+    assert_eq!(lower(&detail["token_in"]), usdt0.to_string().to_lowercase());
+    assert_eq!(
+        lower(&detail["pool"]),
+        common::pool_address().to_string().to_lowercase()
+    );
+    // A stable pair at a 0.01 % tier: within one per cent of par, so this is a real swap's output.
+    assert!(delivered > U256::from(amount_in) * U256::from(99) / U256::from(100));
+    assert!(delivered < U256::from(amount_in) * U256::from(101) / U256::from(100));
 }

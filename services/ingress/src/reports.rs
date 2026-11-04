@@ -517,7 +517,7 @@ async fn decide(conn: &mut PgConnection, d: &Document) -> Result<Decision, ApiEr
         // REQ-BE-6: of a payment reported final, named by its report; never more than it. A reversal
         // that was restored is no longer reversed, so it does not count against the arrival: a
         // second real chargeback after a restoration is as good as the first. "Restored" is the
-        // store's rule (`attested_arrival_reversed`, 0062): the restoration has been taken in as an
+        // store's rule (`attested_arrival_reversed`, 0107): the restoration has been taken in as an
         // observation, not merely accepted at the surface.
         Kind::Reversal => {
             let reverses = d.reverses.as_deref().unwrap_or("");

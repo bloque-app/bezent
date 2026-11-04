@@ -61,7 +61,7 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    tracing_subscriber::fmt().with_target(false).init();
+    bezent_logging::init();
     // An earlier run's liveness file never passes for this run's (issue #61): removed before any
     // start-up check or connection, so a file left by a run that is being replaced is gone first.
     let heartbeat = bezent_core_service::health::heartbeat(&config);
@@ -164,6 +164,7 @@ async fn main() -> ExitCode {
     let check_pool = pool.clone();
     let core = bezent_core_service::Core::new(pool, config.settings());
     let mut tick = tokio::time::interval(Duration::from_secs(config.cycle_seconds));
+    let mut observables = bezent_core_service::observe::Emitter::new();
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
@@ -211,6 +212,14 @@ async fn main() -> ExitCode {
                         _ => {}
                     }
                 }
+                // Alerts the signer and the endpoints could only write to the log (REQ-IC-4).
+                if let Err(e) = bezent_core_service::signals::surface(&check_pool).await {
+                    tracing::warn!(error = %e, "REQ-IC-4: the log's key-compromise alerts could not be read; tried again next cycle");
+                }
+                // The observables of REQ-ST-6 (AC-H3.1), once a minute, for the alarms.
+                observables
+                    .tick(&check_pool, std::time::Instant::now(), chrono::Utc::now().timestamp_millis())
+                    .await;
                 if let Some(statements) = &statements {
                     // Bounded: a signer or a store that never answers does not freeze the cycle
                     // and the reserve check; a statement it keeps from being published is paged

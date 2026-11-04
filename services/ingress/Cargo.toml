@@ -17,6 +17,7 @@ name = "bezent-ingress"
 path = "src/main.rs"
 
 [dependencies]
+bezent-logging = { path = "../../crates/logging" }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
 bezent-core.workspace = true
 bezent-health = { path = "../../crates/health" }
@@ -41,7 +42,6 @@ sqlx = { workspace = true, features = ["json", "chrono"] }
 tokio = { workspace = true, features = ["io-util", "net", "signal", "sync", "time"] }
 toml = "0.8"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
 url = "2"
 utoipa = { version = "5", features = ["chrono"] }
 

@@ -14,8 +14,11 @@
 //! - [`store`]: what the core reads, and the transition it appends (`REQ-TR-6`).
 //! - [`refs`]: the references the core derives (`REQ-ID-3`, `REQ-IN-4`, `REQ-RF-3`).
 //! - [`cutoff`]: route cut-offs (`CND-CutOff`, amendment 0010 A2).
+//! - [`late_mint`] (issue #26): a mint of a reference after its proof of non-execution.
 //! - [`reserve`] (`F-004`): the reserve book, the one-minute reserve check and the daily signed
 //!   statement.
+//! - [`signals`] (`F-014`): a key-compromise alert raised by the signer or an endpoint, put in front of a human.
+//! - [`observe`] (`F-014`): the observables of `REQ-ST-6`, written once a minute for the alarms.
 //! - [`attested`] (`F-011`): an attesting party's reports become observations.
 //! - [`config`]: the configuration file.
 
@@ -24,8 +27,11 @@ pub mod config;
 pub mod cutoff;
 pub mod engine;
 pub mod health;
+pub mod late_mint;
+pub mod observe;
 pub mod refs;
 pub mod reserve;
+pub mod signals;
 pub mod store;
 
 pub use config::Config;

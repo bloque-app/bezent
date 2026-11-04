@@ -45,9 +45,9 @@ pending, on a draft PR, with `SPEC.md` and `PLAN.md` untouched. So:
 
 - **Delivery (0016 A1).** A delivery attempt enters `Delivering` when the instructions are accepted, or for the refund of an
   unassociated arrival. A `payout` report completes it. A `payout-not-executed` report is the proof: a new attempt within
-  the budget, the refund mint past it. Migration `0061`, `Core::hand_over`.
+  the budget, the refund mint past it. Migration `0106`, `Core::hand_over`.
 - **Reversed arrivals (0016 A3).** One reversed and not restored binds nothing, and holds a deposit on it unminted. Migration
-  `0062`, the core's gate, the ingress's `reversed`.
+  `0107`, the core's gate, the ingress's `reversed`.
 - **Snapshot limits (question 4).** One hour and ten minutes, as configuration.
 
 `NOTES.md` says how to take each back out.

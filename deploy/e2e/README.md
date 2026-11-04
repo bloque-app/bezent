@@ -40,6 +40,17 @@ services:
       --health-retries 30
 ```
 
+Each published image also carries a signed build attestation (keyless, through GitHub's OIDC, stored in the
+registry), made by the `publish` job of `images.yml`. To check that an image at a digest was built by this
+repository's workflow, and from which commit:
+
+```sh
+gh attestation verify oci://ghcr.io/bloque-app/bezent-sidecar@sha256:<digest> --repo bloque-app/bezent \
+  --signer-workflow bloque-app/bezent/.github/workflows/images.yml --format json | jq '.[0].verificationResult.signature.certificate.sourceRepositoryDigest'
+```
+
+It exits non-zero when there is no valid attestation. Images published before the attestation was added have none.
+
 The packages are public, so no credentials are needed. To bump the pin, take the digest from the summary of
 bezent's "Images" run on `main` and change it with the commit that needs it.
 

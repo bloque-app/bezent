@@ -60,6 +60,8 @@ const TABLES: &[&str] = &[
     "webhook_condition_holds",
     "webhook_deliveries",
     "unsigned_attempt_cancellations",
+    "late_mint_checks",
+    "admin_actions",
     "attesting_parties",
     "attesting_keys",
     "attested_reports",
@@ -128,8 +130,8 @@ async fn nfr_7_migrations_apply_on_an_empty_database_and_revert(pool: PgPool) {
 }
 
 /// F-011 (S7): the attested backend's three migrations revert one step at a time and apply again.
-/// 0061 changes functions 0060 made, so reverting it alone must leave 0060's, and 0060 must revert
-/// whole with 0061 gone.
+/// 0106 changes functions 0105 made, so reverting it alone must leave 0105's, and 0105 must revert
+/// whole with 0106 gone.
 #[sqlx::test(migrations = false)]
 async fn nfr_7_the_attested_migrations_revert_stepwise_and_apply_again(pool: PgPool) {
     REVERSIBLE_MIGRATOR
@@ -137,7 +139,7 @@ async fn nfr_7_the_attested_migrations_revert_stepwise_and_apply_again(pool: PgP
         .await
         .expect("migrations apply on an empty database");
     let objects = bezent_objects(&pool).await;
-    for target in [61, 60, 59] {
+    for target in [106, 105, 104] {
         REVERSIBLE_MIGRATOR
             .undo(&pool, target)
             .await
@@ -185,7 +187,7 @@ async fn nfr_7_the_attested_migrations_revert_with_the_rows_they_made(pool: PgPo
     .execute(&pool)
     .await
     .expect("rows the attested migrations made");
-    for target in [61, 60, 59] {
+    for target in [106, 105, 104] {
         REVERSIBLE_MIGRATOR
             .undo(&pool, target)
             .await

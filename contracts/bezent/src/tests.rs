@@ -533,6 +533,7 @@ fn req_id_4_a_strangers_redemption_cannot_block_a_deposits_mint() {
     );
 }
 
+/// `AC-I1.1`, `INV-3` on Kreivo: the delivery key, the only key that mints, cannot mint more than the bound of one transfer.
 #[test]
 fn inv_3_mint_refuses_above_the_per_transfer_maximum() {
     let mut contract = setup();
@@ -544,6 +545,7 @@ fn inv_3_mint_refuses_above_the_per_transfer_maximum() {
     mint(&mut contract, holder(), BOUNDS.per_transfer_max, r(0x10)).expect("at the maximum");
 }
 
+/// `AC-I1.1`, `INV-3` on Kreivo: the delivery key cannot mint more than the window bound, however it splits it.
 #[test]
 fn inv_3_mint_refuses_above_the_mint_window() {
     let mut contract = setup();
@@ -631,6 +633,7 @@ impl Rng {
 /// `window_blocks` blocks against the bound, by brute force over the mints let through. Also
 /// checks the window is conservative only by a bucket: a refused mint would have exceeded the bound
 /// over the window stretched by one bucket's length.
+/// `AC-I1.1`, `INV-3` on Kreivo: over random sequences, no window ever holds more than the bound.
 #[test]
 fn inv_3_mints_in_any_window_never_exceed_the_bound_over_random_sequences() {
     const AMOUNT: Balance = 100_000;
@@ -864,6 +867,7 @@ fn inv_3_mints_in_any_window_never_exceed_the_bound_when_the_window_changes_leng
     }
 }
 
+/// `AC-I1.1`, `INV-3` on Kreivo: the delivery key cannot mint the asset's supply past its ceiling.
 #[test]
 fn inv_3_mint_refuses_above_the_supply_ceiling() {
     let mut contract = setup();
@@ -881,6 +885,76 @@ fn inv_3_mint_refuses_above_the_supply_ceiling() {
     );
     mint(&mut contract, holder(), 10_000, r(0x11)).expect("up to the ceiling");
     assert_eq!(contract.supply(BUSDC), 60_000);
+}
+
+/// `AC-I1.1`, `INV-3` on Kreivo, the highest value at risk: the delivery key is the only account that can
+/// mint, and a thief holding it can mint no more than the contract's bounds allow. Played greedily, minting
+/// the most it can at every block for twenty windows, the key never has more than the window bound in any
+/// window nor more than the ceiling in all, and the supply ends exactly at the ceiling. It cannot loosen
+/// the bounds, lengthen the window, replace the roles, make itself the governance or pause the bridge.
+#[test]
+fn ac_i1_1_inv_3_a_stolen_delivery_key_mints_no_more_than_the_bounds_and_cannot_move_them() {
+    let mut contract = setup();
+    let mut minted: Vec<(BlockNumber, Balance)> = Vec::new();
+    let mut n: u32 = 0;
+    for block in START..START + 20 * BOUNDS.window_blocks {
+        at_block(block);
+        loop {
+            n += 1;
+            let mut reference = [0u8; 32];
+            reference[..4].copy_from_slice(&n.to_be_bytes());
+            match mint(&mut contract, holder(), BOUNDS.per_transfer_max, reference) {
+                Ok(()) => minted.push((block, BOUNDS.per_transfer_max)),
+                Err(Error::AboveWindow | Error::AboveCeiling) => break,
+                Err(other) => panic!("block {block}: {other:?}"),
+            }
+        }
+        let held: Balance = minted
+            .iter()
+            .filter(|(b, _)| *b + BOUNDS.window_blocks > block)
+            .map(|(_, a)| *a)
+            .sum();
+        assert!(
+            held <= BOUNDS.window_amount,
+            "block {block}: {held} in a window"
+        );
+        assert!(
+            contract.minted_in_window(BUSDC) >= held,
+            "block {block}: the contract counts less than was minted"
+        );
+        assert!(contract.supply(BUSDC) <= BOUNDS.supply_ceiling);
+    }
+    assert!(minted.len() > 2, "the key mints something");
+    let total: Balance = minted.iter().map(|(_, a)| *a).sum();
+    assert_eq!(total, BOUNDS.supply_ceiling);
+    assert_eq!(contract.supply(BUSDC), BOUNDS.supply_ceiling);
+    assert_eq!(mock::issuance(BUSDC), BOUNDS.supply_ceiling);
+    at_block(START + 30 * BOUNDS.window_blocks);
+    assert_refused(
+        &mut contract,
+        |c| mint(c, holder(), 1, r(0xEE)),
+        Error::AboveCeiling,
+    );
+
+    // The key cannot move the bounds, the roles or the pauses it is held by.
+    caller(delivery());
+    assert_eq!(
+        contract.lower_bounds(BUSDC, raised()),
+        Err(Error::Unauthorised)
+    );
+    assert_eq!(
+        contract.schedule_raise(BUSDC, config(raised())),
+        Err(Error::Unauthorised)
+    );
+    assert_eq!(contract.schedule_raise_delay(1), Err(Error::Unauthorised));
+    assert_eq!(contract.set_roles(roles()), Err(Error::Unauthorised));
+    assert_eq!(
+        contract.schedule_governance(delivery()),
+        Err(Error::Unauthorised)
+    );
+    assert_eq!(contract.pause(PauseScope::All), Err(Error::Unauthorised));
+    assert_eq!(contract.bounds(BUSDC), Some(BOUNDS));
+    assert_eq!(contract.roles(), roles());
 }
 
 /// The review's S4 scenario: an asset that already has supply on chain when the community takes
@@ -1435,6 +1509,7 @@ fn redeemed() -> Bezent {
     contract
 }
 
+/// `AC-B1.3`, `INV-8` on the chain: the refund mint of a redemption is made once, to the redeemer.
 #[test]
 fn inv_8_refund_mint_mints_once_to_the_redeemer_tied_to_the_redemption() {
     let mut contract = redeemed();
@@ -1451,6 +1526,7 @@ fn inv_8_refund_mint_mints_once_to_the_redeemer_tied_to_the_redemption() {
     );
 }
 
+/// `AC-B1.3`, `INV-8` on the chain: a second refund mint for one redemption is refused, in a later window too.
 #[test]
 fn inv_8_a_second_refund_mint_is_refused() {
     let mut contract = redeemed();
@@ -1523,6 +1599,7 @@ fn req_rf_4_refund_mint_refuses_when_the_mint_window_would_be_exceeded() {
         .expect("in the next window");
 }
 
+/// `AC-I1.1`, `INV-3` on Kreivo: a refund mint, which the delivery key also makes, counts against the same window.
 #[test]
 fn req_rf_4_refund_mint_counts_against_the_mint_window() {
     let mut contract = redeemed();
@@ -1580,6 +1657,7 @@ fn req_hn_9_refund_mint_refuses_any_caller_but_the_delivery_role() {
     }
 }
 
+/// `AC-I2.1`, `INV-15` on the chain: a global pause leaves a refund mint in flight alone.
 #[test]
 fn req_gv_1_a_pause_does_not_stop_a_refund_mint_in_flight() {
     let mut contract = redeemed();
@@ -1589,6 +1667,45 @@ fn req_gv_1_a_pause_does_not_stop_a_refund_mint_in_flight() {
     contract
         .refund_mint(holder(), r(0x20))
         .expect("completes the withdrawal in flight");
+}
+
+/// `AC-I2.1`, `INV-15` on the chain: under every scope of pause a refund mint in flight still completes (the
+/// withdrawal it ends is work in flight), while a new mint is stopped wherever the scope covers it.
+#[test]
+fn ac_i2_1_inv_15_a_refund_in_flight_completes_under_every_pause_scope() {
+    let scopes = [
+        (PauseScope::All, true),
+        (PauseScope::Direction(Direction::Mint), true),
+        (PauseScope::Direction(Direction::Redeem), false),
+        (PauseScope::Asset(BUSDC), true),
+        (PauseScope::AssetDirection(BUSDC, Direction::Mint), true),
+        (PauseScope::AssetDirection(BUSDC, Direction::Redeem), false),
+    ];
+    for (scope, stops_a_new_mint) in scopes {
+        let mut contract = redeemed();
+        caller(pauser());
+        contract.pause(scope).unwrap();
+        let new_mint = mint(&mut contract, stranger(), 10, r(0x71));
+        assert_eq!(
+            new_mint,
+            if stops_a_new_mint {
+                Err(Error::Paused)
+            } else {
+                Ok(())
+            },
+            "{scope:?}"
+        );
+        caller(delivery());
+        contract
+            .refund_mint(holder(), r(0x20))
+            .unwrap_or_else(|e| panic!("{scope:?} stopped a refund in flight: {e:?}"));
+        assert!(
+            contract.redemption(holder(), r(0x20)).unwrap().refunded,
+            "{scope:?}"
+        );
+        assert_eq!(mock::balance(BUSDC, holder()), 1_010, "{scope:?}");
+        assert!(contract.paused(scope), "the refund did not lift the pause");
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1948,6 +2065,67 @@ fn req_gv_3_block_counts_are_pinned_to_kreivos_2_07_second_blocks() {
         ..BOUNDS
     };
     assert!(day.is_valid());
+}
+
+/// `INV-3` at the size operators actually configure: a 24 h window of `BLOCKS_PER_DAY` blocks
+/// (bloque-app/bezent#38). The block-count test above only shows such bounds are valid; this one
+/// mints across the window. The ceiling is reached by two mints in different buckets (blocks `S`
+/// and `S + 5 000`, a bucket being 4 174 blocks), then: one more unit is refused until the
+/// window ending at the block after the first mint's last has left it; at `S + W - 1` the first
+/// mint is still counted; at `S + W` exactly it is free again, while the second is still counted.
+#[test]
+fn inv_3_a_24_hour_window_enforces_its_ceiling_and_resets_at_the_boundary() {
+    const W: BlockNumber = BLOCKS_PER_DAY;
+    const FIRST: BlockNumber = 1_000;
+    const SECOND: BlockNumber = FIRST + 5_000;
+    assert!(SECOND - FIRST >= bucket_blocks(W), "two buckets, not one");
+    let bounds = Bounds {
+        window_blocks: W,
+        per_transfer_max: BOUNDS.window_amount,
+        ..BOUNDS
+    };
+    let mut contract = setup_with(bounds);
+    let half = bounds.window_amount / 2;
+
+    at_block(FIRST);
+    mint(&mut contract, holder(), half, r(0x10)).unwrap();
+    at_block(SECOND);
+    mint(&mut contract, holder(), half, r(0x11)).unwrap();
+    assert_eq!(contract.minted_in_window(BUSDC), bounds.window_amount);
+
+    // The ceiling holds while the whole day is inside the window, to its last block.
+    for block in [SECOND, FIRST + W - 1] {
+        at_block(block);
+        assert_eq!(contract.minted_in_window(BUSDC), bounds.window_amount);
+        assert_refused(
+            &mut contract,
+            |c| mint(c, holder(), 1, r(0x12)),
+            Error::AboveWindow,
+        );
+    }
+
+    // At the boundary the first mint, and only it, has left: its share is free again, no more.
+    at_block(FIRST + W);
+    assert_eq!(contract.minted_in_window(BUSDC), half);
+    assert_refused(
+        &mut contract,
+        |c| mint(c, holder(), half + 1, r(0x12)),
+        Error::AboveWindow,
+    );
+    mint(&mut contract, holder(), half, r(0x12)).expect("the first mint left the window");
+    assert_eq!(contract.minted_in_window(BUSDC), bounds.window_amount);
+    assert_refused(
+        &mut contract,
+        |c| mint(c, holder(), 1, r(0x13)),
+        Error::AboveWindow,
+    );
+
+    // The second mint leaves at its own boundary, and so does what was minted at the first.
+    at_block(SECOND + W - 1);
+    assert_eq!(contract.minted_in_window(BUSDC), bounds.window_amount);
+    at_block(SECOND + W);
+    assert_eq!(contract.minted_in_window(BUSDC), half);
+    mint(&mut contract, holder(), half, r(0x13)).expect("the second mint left the window");
 }
 
 /// Review 2's S6 scenario: a raise delay of `BlockNumber::MAX - 10` made every later schedule

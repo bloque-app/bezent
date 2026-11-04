@@ -1,6 +1,6 @@
 -- Copyright (c) 2026 Pagos Cube LLC
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Reverts 0061_attested_delivery, in tests only.
+-- Reverts 0106_attested_delivery, in tests only.
 
 DO $migration$
 DECLARE
@@ -74,7 +74,7 @@ ALTER TABLE attested_reports DROP CONSTRAINT attested_reports_kind_check;
 ALTER TABLE attested_reports ADD CONSTRAINT attested_reports_kind_check
     CHECK (kind IN ('arrival', 'payout', 'positions', 'reversal', 'restoration')) NOT VALID;
 
--- The record function as 0060 made it: 0061's four edits, undone in the opposite order.
+-- The record function as 0105 made it: 0106's four edits, undone in the opposite order.
 DO $migration$
 DECLARE
     src TEXT := pg_get_functiondef('bezent_record_attested_observation(bigint)'::regprocedure);

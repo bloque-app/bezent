@@ -62,8 +62,10 @@ Each choice below is a reading of the spec and the plan, not a ruling. What need
 11. **The commitment was read from the wrong key.** `decide_extras` read `detail ->> 'commitment'`, while the Kreivo
     endpoint records `detail.payout.commitment` (`observe.rs`, `payout_json`). The ingress tests passed because their
     fixture wrote the top-level key. Fixed, and the fixture now writes what the endpoint writes.
-12. **Migration 0060.** The M-2 work runs at the same time and may add migrations from 0055. Numbers have gaps already, so
-    neither renumbers.
+12. **Migrations 0105 to 0107.** Written as 0060 to 0062 while the M-2 work ran at the same time. `develop` has since added
+    0075 to 0095, and a store past 0095 refuses a lower pending version (`bezent-migrate`: "a higher version is already
+    applied"; `sqlx` alone would apply it, out of order). So they are 0105 to 0107, after `develop`'s highest; 0100 to 0104
+    are another open PR's. Each replaced function was taken from `develop`'s latest definition (see 15).
 13. **A report is no transfer.** It is recorded in `intake` for its idempotency (`REQ-ID-1`), with no row in
     `intake_answers` unless refused, so `/v0/transfers/by-request` answers `not-found` for one: the report surface answers
     for it. In a requester's `/v0/log`, a refused report appears as a refusal, as any other request's; a recorded one does
@@ -71,7 +73,7 @@ Each choice below is a reading of the spec and the plan, not a ruling. What need
     `attested-report-recorded` is in the event log for operators.
 14. **Test stores.** `environment::TEST_NETWORKS` gains `fiat-local`, the sidecar's attested test backend, declared only with
     `BEZENT_SIDECAR_ATTESTING`. Any other attested network counts as production (`REQ-KY-6`), the safe side.
-15. **Changing a long function by replacing its text.** `0061` changes `transitions_apply_lifecycle`,
+15. **Changing a long function by replacing its text.** `0106` changes `transitions_apply_lifecycle`,
     `transfers_guard_writer` and the record function with `replace()` over `pg_get_functiondef`, and stops if the text is not
     found. The migration then shows only what changes, and a contrary ruling takes it out whole. Copying 300 lines to change
     three would hide that.
@@ -83,8 +85,8 @@ PR does, on the instruction to complete `M-3` on the recommendations, in a draft
 
 | Assumption | Where | To reverse |
 |---|---|---|
-| 0016 A1: `Delivering` also means handed to the party; a report of non-execution is the proof | Migration `0061`; `Core::hand_over`, and the two lines in `deliver` and `source_final`; `Kind::PayoutNotExecuted` and `decide_not_executed` | Drop `0061`, make `deliver` return before an attested destination, remove the kind. Fiat withdrawals hold at `Source-Final` with their payout in the book. The tests that change: completion, refund, retry, refund of an unassociated arrival |
-| 0016 A3: an arrival reversed and not restored binds nothing, and holds a deposit | Migration `0062`; `reversed` in the ingress, the first lines of `Core::gate`. One held deposit reads to the webhook dispatcher as `CND-Paused` held on the route (0016 A3, trade-off) | Drop `0062` and those calls. Such an arrival stays mintable, charged to surplus |
+| 0016 A1: `Delivering` also means handed to the party; a report of non-execution is the proof | Migration `0106`; `Core::hand_over`, and the two lines in `deliver` and `source_final`; `Kind::PayoutNotExecuted` and `decide_not_executed` | Drop `0106`, make `deliver` return before an attested destination, remove the kind. Fiat withdrawals hold at `Source-Final` with their payout in the book. The tests that change: completion, refund, retry, refund of an unassociated arrival |
+| 0016 A3: an arrival reversed and not restored binds nothing, and holds a deposit | Migration `0107`; `reversed` in the ingress, the first lines of `Core::gate`. One held deposit reads to the webhook dispatcher as `CND-Paused` held on the route (0016 A3, trade-off) | Drop `0107` and those calls. Such an arrival stays mintable, charged to surplus |
 | Question 4: one hour, ten minutes | `attested_snapshot_*`, two lines of configuration | Change the values, no release of the store |
 | A withdrawal with no instructions waits at `Source-Final` and pages once past the budget; it does not go to review | `hand_over`, `page_unrelayed` | See the questions |
 

@@ -66,7 +66,7 @@ pub async fn check_signature(
                 index = observed.position_index,
                 alert_seq,
                 pause_seq,
-                "AC-I1.2: the delivery key signed a transaction bezent did not record; key-compromise and a global pause request are in the event log"
+                "AC-I1.2: the delivery key signed a transaction bezent did not record; key-compromise is in the event log and the bridge is paused"
             );
             Seen::Compromise
         }
@@ -90,7 +90,7 @@ pub async fn raise_once(pool: &PgPool, dedupe: &str, mut alert: Value) -> Result
     alert["spec"] = json!("AC-I1.2, REQ-IC-4");
     alert["actions"] = json!(["pause", "rotate", "report"]);
     let (alert_seq, pause_seq) = compromise::raise(pool, &alert).await?;
-    tracing::error!(dedupe, alert_seq, pause_seq, %alert, "AC-I1.2: the delivery key was used where bezent recorded nothing; key-compromise and a global pause request are in the event log");
+    tracing::error!(dedupe, alert_seq, pause_seq, %alert, "AC-I1.2: the delivery key was used where bezent recorded nothing; key-compromise is in the event log and the bridge is paused");
     Ok(())
 }
 

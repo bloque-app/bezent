@@ -716,6 +716,12 @@ async fn inv_4_a_supply_mismatch_raises_key_compromise_once_and_pauses_until_the
     );
     assert_eq!(w.count(alerts).await, 1);
     assert_eq!(w.count(paused).await, 1);
+    // The alert names its asset, so the bridge is not paused with it (issue #77; INV-4).
+    assert_eq!(
+        w.count("SELECT count(*) FROM pauses WHERE cause = 'REQ-IC-4'")
+            .await,
+        0
+    );
     let kinds = pager.kinds();
     assert!(kinds.contains(&"key-compromise".to_owned()), "{kinds:?}");
     assert!(

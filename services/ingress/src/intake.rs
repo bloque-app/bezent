@@ -335,7 +335,7 @@ async fn source(
 /// Whether the attested arrival at `c` was reversed and not restored. WORKING ASSUMPTION, amendment
 /// 0016 A3, proposed and not ruled: such an arrival binds nothing (`ERR-SourceConsumed`), since
 /// minting against a payment known reversed spends surplus for nothing. The store refuses the
-/// binding too (0062).
+/// binding too (0107).
 async fn reversed(conn: &mut PgConnection, c: &Coordinate) -> Result<bool, ApiError> {
     Ok(
         sqlx::query_scalar("SELECT attested_arrival_reversed($1, $2, $3)")

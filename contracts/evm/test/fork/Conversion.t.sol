@@ -222,7 +222,7 @@ abstract contract ConversionTest is ConversionFork {
         assertViolation(ok, ret, PARAMETER_NOT_ALLOWED);
     }
 
-    /// REQ-CV-7 (c): the input is bounded per window, and refills per period.
+    /// AC-I1.1, REQ-CV-7 (c): the conversion key's input is bounded per window, and refills per period.
     function test_REQ_CV_7_boundedPerWindow() public {
         DeployVault.Convertible memory c = cfg.convertibles[0];
         (bool ok, bytes memory ret) = approve(convertible, cfg.router, type(uint256).max);

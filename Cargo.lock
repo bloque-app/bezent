@@ -1768,6 +1768,7 @@ dependencies = [
  "bezent-core",
  "bezent-health",
  "bezent-ingress",
+ "bezent-logging",
  "bezent-signer",
  "bezent-store",
  "bezent-vault",
@@ -1797,6 +1798,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "bezent-health",
+ "bezent-logging",
  "bezent-signer",
  "bezent-store",
  "bezent-vault",
@@ -1809,7 +1811,6 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
- "tracing-subscriber",
  "url",
 ]
 
@@ -1824,6 +1825,7 @@ dependencies = [
  "axum",
  "bezent-core",
  "bezent-health",
+ "bezent-logging",
  "bezent-store",
  "bezent-vault",
  "blake2",
@@ -1845,7 +1847,6 @@ dependencies = [
  "toml 0.8.23",
  "tower",
  "tracing",
- "tracing-subscriber",
  "url",
  "utoipa",
 ]
@@ -1856,6 +1857,7 @@ version = "0.1.0"
 dependencies = [
  "bezent-core-service",
  "bezent-health",
+ "bezent-logging",
  "bezent-signer",
  "bezent-store",
  "bezent-vault",
@@ -1876,6 +1878,13 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
+name = "bezent-logging"
+version = "0.1.0"
+dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
@@ -1902,6 +1911,7 @@ dependencies = [
  "bezent-core-service",
  "bezent-evm-endpoint",
  "bezent-ingress",
+ "bezent-logging",
  "bezent-signer",
  "bezent-store",
  "chrono",
@@ -1915,7 +1925,6 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

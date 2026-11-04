@@ -17,6 +17,7 @@ name = "bezent-core"
 path = "src/main.rs"
 
 [dependencies]
+bezent-logging = { path = "../../crates/logging" }
 bezent-core.workspace = true
 bezent-health = { path = "../../crates/health" }
 bezent-store = { path = "../../crates/store" }
@@ -47,17 +48,20 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
 
 [dev-dependencies]
+# The ingress's router, for the seam between a deposit request and the mint (tests/conversions.rs,
+# as the kreivo-endpoint's tests take the core for the two-step delivery): the request goes in
+# through the real ingress, on its own login, and the core mints from what the store then holds.
+# Also the attesting party of F-011, which drives the real request surface (RISK-8; tests/attested.rs).
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+bezent-ingress = { path = "../ingress" }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
 # The S3 sink's wire test: the real SDK client against a canned HTTP client (issue #58).
 aws-smithy-http-client = { version = "1", default-features = false, features = ["test-util"] }
-# F-011: the attesting party drives the real request surface (RISK-8).
-axum = { version = "0.8", default-features = false }
-bezent-ingress = { path = "../ingress" }
 http = "1"
-http-body-util = "0.1"
 # The test payout key's EVM address, for the cancels the tests prepare as the EVM endpoint would
 # (issue #41; the signer reads a cancel's bytes).
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
-tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

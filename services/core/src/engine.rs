@@ -97,6 +97,11 @@ impl Default for Settings {
     }
 }
 
+/// How many refused preparations of one attempt, none of them naming a condition, page a human
+/// (once per attempt; issue #35). The retry delay is a minute by default, so this is minutes of a
+/// refusal that does not go away, a long way before the attempt's deadline.
+const REFUSAL_PAGE_AFTER: usize = 10;
+
 /// What one cycle did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Report {
@@ -115,6 +120,8 @@ pub struct Report {
 pub struct Core {
     pool: PgPool,
     settings: Settings,
+    /// The late-mint check's count of failed cycles (issue #26).
+    late_mint: std::sync::Arc<crate::late_mint::Watcher>,
 }
 
 /// What a step did to a transfer.
@@ -264,7 +271,11 @@ impl Core {
     /// The core over `pool`, which connects as the core's login (a member of `bezent_core`
     /// only, #46).
     pub fn new(pool: PgPool, settings: Settings) -> Self {
-        Self { pool, settings }
+        Self {
+            pool,
+            settings,
+            late_mint: Default::default(),
+        }
     }
 
     /// The store pool.
@@ -286,6 +297,8 @@ impl Core {
         if let Err(e) = crate::reserve::book::post_pending(&self.pool).await {
             tracing::warn!(error = %e, "REQ-BK-7: pending movements not posted; the cycle goes on");
         }
+        // Issue #26 (AC-I1.2, INV-8): a mint of a reference after its proof raises the alert.
+        self.late_mint.cycle(&self.pool).await;
         let mut report = Report {
             withdrawals: self.withdrawals_from_redemptions().await?,
             ..Report::default()
@@ -692,6 +705,26 @@ impl Core {
         Ok(start + budget.map_or(self.settings.default_deadline, Duration::seconds))
     }
 
+    /// [`Core::deadline`] for an attempt whose clock started at `start`, with the time the transfer
+    /// was held in `CND-PayoutWindow` since then left out, and the clock restarted where the first
+    /// hold was taken (amendment 0012; review M-1). Every hold counts, so a provider that flaps in
+    /// and out of the hold restarts nothing (issue #35). The holds are those recorded after the
+    /// last transition of the attempt before `attempt` (see [`store::held_under_window`]).
+    async fn deadline_held(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        attempt: i32,
+        start: DateTime<Utc>,
+    ) -> sqlx::Result<DateTime<Utc>> {
+        Ok(
+            match store::held_under_window(conn, t.id, attempt - 1, Some(start)).await? {
+                Some((first, held)) => self.deadline(conn, t, first.max(start)).await? + held,
+                None => self.deadline(conn, t, start).await?,
+            },
+        )
+    }
+
     /// The latest final head on `network`, if it is past `deadline` (`REQ-OB-5`: decided at a final
     /// block). A move on a deadline rests on that head and records it (`REQ-TR-2`, review S7).
     async fn past(
@@ -897,30 +930,42 @@ impl Core {
             .or(t.source_final_block_time)
             .unwrap_or(head.block_time);
         let bound = self.settings.payout_window_alert_after;
-        if head.block_time <= since + bound {
+        // The holds of this attempt already left count too: a provider that flaps in and out of
+        // the hold does not start the page over (issue #35).
+        let after = store::current_attempt(conn, t.id).await?;
+        let before = store::held_under_window(conn, t.id, after, None)
+            .await?
+            .map_or(Duration::zero(), |(_, held)| held);
+        if head.block_time <= since + bound - before.min(bound) {
             return Ok(());
         }
+        // One page when the attempt's total crosses the bound, then once a day while the same
+        // hold lasts. Taking the hold again later is no new crossing: the total only grows, so
+        // the reminder is counted from that hold's start (issue #35).
+        let attempt = (after + 1).to_string();
         let hold = hold.to_string();
-        let paged_today: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM event_log WHERE kind = 'payout-window-alert' \
-               AND transfer_id = $1 AND payload ->> 'hold' = $2 \
-               AND (payload ->> 'head_time')::timestamptz > $3 - interval '1 day')",
+        let last: Option<(String, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT payload ->> 'hold', (payload ->> 'head_time')::timestamptz FROM event_log \
+             WHERE kind = 'payout-window-alert' AND transfer_id = $1 AND payload ->> 'attempt' = $2 \
+             ORDER BY seq DESC LIMIT 1",
         )
         .bind(t.id)
-        .bind(&hold)
-        .bind(head.block_time)
-        .fetch_one(&mut *conn)
+        .bind(&attempt)
+        .fetch_optional(&mut *conn)
         .await?;
-        if paged_today {
+        if let Some((paged_hold, at)) = last
+            && head.block_time < (if paged_hold == hold { at } else { since }) + Duration::days(1)
+        {
             return Ok(());
         }
         let detail = json!({"spec": "CND-PayoutWindow", "bridge_reference": t.bridge_reference,
-                            "hold": hold, "held_since": since.to_rfc3339(),
+                            "hold": hold, "attempt": attempt, "held_since": since.to_rfc3339(),
+                            "held_before_seconds": before.num_seconds(),
                             "network": head.network, "head_block": head.block_number,
                             "head_time": head.block_time.to_rfc3339(),
                             "bound_seconds": bound.num_seconds()});
         store::event(conn, "payout-window-alert", Some(t.id), &detail).await?;
-        tracing::error!(kind = "payout-window-alert", transfer = %t.bridge_reference, %detail,
+        tracing::error!(kind = %"payout-window-alert", transfer = %t.bridge_reference, %detail,
             "page: CND-PayoutWindow held past its bound; is the payout above the allowance's maximum, or the refill off?");
         Ok(())
     }
@@ -981,7 +1026,7 @@ impl Core {
         if let Some(why) = self.destination_unbindable(conn, t).await? {
             return self.destination_review(conn, t, why).await;
         }
-        if let Some(c) = self.gate(conn, t, now).await? {
+        if let Some(c) = self.gate(conn, t, 1, now).await? {
             return self.hold(conn, t, Some(c)).await;
         }
         // The gate opened: its condition clears by itself (§10), then the delivery starts.
@@ -1055,11 +1100,14 @@ impl Core {
     }
 
     /// The conditions that hold new work before a delivery (`REQ-GV-1`, `REQ-LM-1`, `REQ-OT-5`).
-    /// A refund completes work in flight: no pause or cut-off holds it (F-006 NOTES).
+    /// A refund completes work in flight: no pause or cut-off holds it (F-006 NOTES). `attempt` is
+    /// the attempt it would let through: one the signer has signed is in flight whatever the store
+    /// says of its route since, so a pause does not hold it (`INV-15`, `AC-I2.1`, issue #77).
     async fn gate(
         &self,
         conn: &mut PgConnection,
         t: &Transfer,
+        attempt: i32,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Option<Condition>> {
         // WORKING ASSUMPTION, amendment 0016 A3, proposed and not ruled: an arrival reversed and not
@@ -1081,19 +1129,11 @@ impl Core {
         let Some((asset, network, direction)) = t.route() else {
             return Ok(None);
         };
-        let paused: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pauses WHERE (asset IS NULL OR asset = $1) \
-               AND (network IS NULL OR network = $2) AND (direction IS NULL OR direction = $3))",
-        )
-        .bind(&asset)
-        .bind(&network)
-        .bind(direction)
-        .fetch_one(&mut *conn)
-        .await?;
+        let paused = Self::route_paused(conn, &asset, &network, direction).await?;
+        let held = paused && !self.attempt_signed(conn, t, attempt).await?;
         // REQ-BE-6: a reversal that took the surplus below its floor pauses new mints of the
         // asset until the attesting party restores the reserve (F-004).
-        if paused
-            || (t.kind == "deposit" && crate::reserve::book::mints_paused(conn, &asset).await?)
+        if held || (t.kind == "deposit" && crate::reserve::book::mints_paused(conn, &asset).await?)
         {
             return Ok(Some(Condition::Paused));
         }
@@ -1121,6 +1161,42 @@ impl Core {
             }
         }
         Ok(None)
+    }
+
+    /// Whether a pause covers the route (`REQ-GV-1`): a row that is silent on a dimension matches
+    /// every value of it.
+    async fn route_paused(
+        conn: &mut PgConnection,
+        asset: &str,
+        network: &str,
+        direction: &str,
+    ) -> sqlx::Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pauses WHERE (asset IS NULL OR asset = $1) \
+               AND (network IS NULL OR network = $2) AND (direction IS NULL OR direction = $3))",
+        )
+        .bind(asset)
+        .bind(network)
+        .bind(direction)
+        .fetch_one(&mut *conn)
+        .await
+    }
+
+    /// Whether a signature is recorded for attempt `attempt` of `t`.
+    async fn attempt_signed(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        attempt: i32,
+    ) -> sqlx::Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM intents i JOIN signatures s ON s.intent_id = i.id \
+               WHERE i.transfer_id = $1 AND i.attempt = $2)",
+        )
+        .bind(t.id)
+        .bind(attempt)
+        .fetch_one(&mut *conn)
+        .await
     }
 
     /// Whether the asset's reserve on `network` covers the withdrawal: the book's reserve less what
@@ -1565,9 +1641,22 @@ impl Core {
                 // has its deadline (issue #25).
                 return self.unprepared_deadline(conn, t, held, from, attempt).await;
             }
+            if from != State::NeedsReview {
+                self.refusal_page(conn, t, purpose, attempt, allowance.as_ref())
+                    .await?;
+            }
             let mut did = self.hold(conn, t, held).await?;
             // A failed dry run is not prepared again: a new order, after a while (F-007 NOTES 5).
-            if retry_due {
+            // Not under a pause that only the signed attempt got past: its in-flight exception
+            // (`gate`) is for what was signed, and a new order is new work (`INV-15`, issue #77).
+            let in_flight_under_pause = self.attempt_signed(conn, t, attempt).await?
+                && match t.route() {
+                    Some((asset, network, direction)) => {
+                        Self::route_paused(conn, &asset, &network, direction).await?
+                    }
+                    None => false,
+                };
+            if retry_due && !in_flight_under_pause {
                 self.record_intent(conn, t, purpose, &reference, scope, attempt, &order)
                     .await?;
                 did.intents += 1;
@@ -2040,7 +2129,16 @@ impl Core {
         match store::proof_of(conn, t.id, attempt).await? {
             Some(ProofPoint::Final(proof)) => {
                 return self
-                    .after_proof(conn, t, State::Delivering, attempt, &proof, None, now)
+                    .after_proof(
+                        conn,
+                        t,
+                        State::Delivering,
+                        attempt,
+                        &proof,
+                        None,
+                        false,
+                        now,
+                    )
                     .await;
             }
             Some(ProofPoint::Untimed) => return Ok(Did::default()),
@@ -2065,17 +2163,10 @@ impl Core {
         forcible: bool,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
-        // The later of the attempt's own point and the last time the transfer left
-        // CND-PayoutWindow: time held waiting for the allowance never counts (review M-1). Every
-        // such point is on the destination network, whose clock only moves forward.
+        // The attempt's own point; time held waiting for the allowance never counts (review M-1),
+        // summed over every hold, so a flapping refusal restarts nothing (issue #35).
         let started: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT max(x.block_time) FROM ( \
-                 SELECT block_time, attempt, condition, \
-                        lag(condition) OVER (ORDER BY id) AS before \
-                 FROM transitions WHERE transfer_id = $1) x \
-             WHERE x.attempt = $2 \
-                OR (x.before = 'CND-PayoutWindow' \
-                    AND x.condition IS DISTINCT FROM 'CND-PayoutWindow')",
+            "SELECT max(block_time) FROM transitions WHERE transfer_id = $1 AND attempt = $2",
         )
         .bind(t.id)
         .bind(attempt)
@@ -2087,7 +2178,7 @@ impl Core {
         if let Some(handed) = self.handed_over_at(conn, t, attempt).await? {
             started = started.max(handed);
         }
-        let deadline = self.deadline(conn, t, started).await?;
+        let deadline = self.deadline_held(conn, t, attempt, started).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
         };
@@ -2100,6 +2191,55 @@ impl Core {
         Ok(did)
     }
 
+    /// Pages a human, once per attempt, when [`REFUSAL_PAGE_AFTER`] preparations of `attempt` were
+    /// refused and none of the refusals named a condition: the providers do not agree on why, or
+    /// the reason is one nobody resumes from (issue #35). It changes nothing: the attempt goes to
+    /// review at its deadline (`REQ-RV-1`, `REQ-EO-3`), and is never refunded or retried as a new
+    /// transaction on this account.
+    async fn refusal_page(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        purpose: &str,
+        attempt: i32,
+        allowance: Option<&[u8; 32]>,
+    ) -> sqlx::Result<()> {
+        let runs: Vec<Value> = sqlx::query_scalar(
+            "SELECT p.dry_run FROM prepared_transactions p JOIN intents o ON o.id = p.order_intent_id \
+             WHERE o.transfer_id = $1 AND o.attempt = $2 AND o.purpose = $3 \
+               AND p.network = o.network AND NOT p.dry_run_passed",
+        )
+        .bind(t.id)
+        .bind(attempt)
+        .bind(purpose)
+        .fetch_all(&mut *conn)
+        .await?;
+        let unnamed = runs
+            .iter()
+            .filter(|r| dry_run_condition(r, allowance).is_none())
+            .count();
+        let attempt = attempt.to_string();
+        if unnamed < REFUSAL_PAGE_AFTER
+            || store::has_event(
+                conn,
+                "payout-refusal-alert",
+                Some(t.id),
+                "attempt",
+                &attempt,
+            )
+            .await?
+        {
+            return Ok(());
+        }
+        let detail = json!({"spec": "REQ-RV-1", "bridge_reference": t.bridge_reference,
+                            "attempt": attempt, "refusals": unnamed,
+                            "network": t.destination_network});
+        store::event(conn, "payout-refusal-alert", Some(t.id), &detail).await?;
+        tracing::error!(kind = %"payout-refusal-alert", transfer = %t.bridge_reference, %detail,
+            "page: the payout's preparation is refused again and again with no named condition; it goes to review at its deadline");
+        Ok(())
+    }
+
     /// An attempt whose preparation never passes has a deadline like any other leg (issue #25;
     /// `REQ-RV-1`, `REQ-EO-3`, F-003 review note N7): the last dry run of its orders was refused,
     /// nothing is signed for it, no named condition explains the wait, and the route's deadline is
@@ -2109,8 +2249,8 @@ impl Core {
     /// own (`REQ-RF-1`).
     ///
     /// The clock is the attempt's: the source leg's finality for the first attempt, the previous
-    /// attempt's proof of non-execution for a later one, restarted where the transfer last left
-    /// `CND-PayoutWindow` (amendment 0012). Time under the other conditions counts, since only a
+    /// attempt's proof of non-execution for a later one, with the time held in `CND-PayoutWindow`
+    /// left out (amendment 0012). Time under the other conditions counts, since only a
     /// refusal that names nothing is measured: `CND-FeeShort`, `CND-MintWindow` and the gates
     /// resume by themselves (§10), and `CND-DestinationRefused` has its own deadline.
     ///
@@ -2141,17 +2281,7 @@ impl Core {
         let Some(start) = start else {
             return Ok(Did::default());
         };
-        let released: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT max(x.block_time) FROM ( \
-                 SELECT block_time, condition, lag(condition) OVER (ORDER BY id) AS before \
-                 FROM transitions WHERE transfer_id = $1) x \
-             WHERE x.before = 'CND-PayoutWindow' AND x.condition IS DISTINCT FROM 'CND-PayoutWindow'",
-        )
-        .bind(t.id)
-        .fetch_one(&mut *conn)
-        .await?;
-        let start = released.map_or(start, |r| r.max(start));
-        let deadline = self.deadline(conn, t, start).await?;
+        let deadline = self.deadline_held(conn, t, attempt, start).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
         };
@@ -2262,7 +2392,10 @@ impl Core {
                 // leg's own coordinate, and the review resolves as Delivered (REQ-RV-2), never as
                 // a refund. Attached once, on a review that ordered a cancel, for a leg that moved
                 // what was ordered (a mismatch is no delivery).
+                // Only a final inclusion is evidence (INV-16): one that is not final may still be
+                // reorganised away, and the attached evidence cannot be withdrawn (issue #35).
                 if !cancelling.is_empty()
+                    && o.outcome.as_deref() == Some("final")
                     && self.leg_mismatch(conn, t, &o).await?.is_none()
                     && !store::has_event(conn, "review-evidence", Some(t.id), "review", &review)
                         .await?
@@ -2512,6 +2645,7 @@ impl Core {
         attempt: i32,
         proof: &Point,
         manual: Option<i64>,
+        standing: bool,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
         let attested = self.attested_destination(conn, t).await?;
@@ -2537,11 +2671,20 @@ impl Core {
             }
             let deadline = self.deadline(conn, t, start).await?;
             if proof.block_time > deadline {
+                // An inclusion of the payout stands: the leg is unknown, no refund (REQ-RF-1).
+                if standing {
+                    return self.withheld(conn, t, None, "Refunding", now).await;
+                }
                 return self.refund(conn, t, from, proof, manual).await;
             }
         }
+        // The same for a new attempt where the chain does not refuse a second delivery of one
+        // reference (an origin network): it could pay twice (REQ-RF-1, INV-8, INV-16).
+        if standing && !self.refuses_second_delivery(conn, t).await? {
+            return self.withheld(conn, t, None, "Delivering", now).await;
+        }
         // A new attempt is new work for its route: the gates hold it as they hold the first.
-        if let Some(c) = self.gate(conn, t, now).await? {
+        if let Some(c) = self.gate(conn, t, attempt + 1, now).await? {
             return self.hold(conn, t, Some(c)).await;
         }
         if t.condition().is_some_and(gate_condition) {
@@ -2724,9 +2867,20 @@ impl Core {
             .await?;
             return Ok(Did::moved());
         }
+        // An inclusion that stands (not decided, so not withdrawn) makes the leg unknown whatever
+        // a proof says: no refund follows (REQ-RF-1, issue #35).
         if let Some(ProofPoint::Final(proof)) = store::proof_of(conn, t.id, attempt).await? {
             return self
-                .after_proof(conn, t, State::Delivered, attempt, &proof, None, now)
+                .after_proof(
+                    conn,
+                    t,
+                    State::Delivered,
+                    attempt,
+                    &proof,
+                    None,
+                    leg.is_some(),
+                    now,
+                )
                 .await;
         }
         let deadline = self.deadline(conn, t, included_at).await?;
@@ -2834,11 +2988,44 @@ impl Core {
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
         type Action = (i64, String, String, i64, Vec<u8>, DateTime<Utc>, bool);
+        // REQ-RF-1, INV-16 (issue #35): while an inclusion of the payout stands, final or not and
+        // not withdrawn, the leg is unknown whatever a final proof says, so no refund follows, and
+        // no new attempt where the chain does not refuse a second delivery of one reference.
+        // Such a resolution is withheld, not refused (a later one is not held up behind it): it
+        // runs when the inclusion is withdrawn, and the review closes as Delivered, by a
+        // resolution, when it goes final. Nothing is derived from the observation, only withheld.
+        let blocked = matches!(before, State::Delivering | State::Delivered)
+            && !matches!(self.destination_leg(conn, t).await?, Leg::None);
+        let mut withheld = vec!["Refunding"];
+        if !self.refuses_second_delivery(conn, t).await? {
+            withheld.push("Delivering");
+        }
+        if blocked {
+            let waiting: Vec<(i64, String)> = sqlx::query_as(
+                "SELECT a.id, a.to_state::text FROM manual_actions a \
+                 WHERE a.transfer_id = $1 AND a.kind = 'review-resolution' AND a.recorded_at >= $2 \
+                   AND a.to_state::text = ANY($3) \
+                   AND EXISTS (SELECT 1 FROM manual_approvals p WHERE p.action_id = a.id) \
+                   AND NOT EXISTS (SELECT 1 FROM transitions x WHERE x.manual_action_id = a.id) \
+                   AND NOT EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'review-evidence-refused' \
+                                   AND e.payload ->> 'manual_action_id' = a.id::text) \
+                 ORDER BY a.id",
+            )
+            .bind(t.id)
+            .bind(entered_at)
+            .bind(&withheld)
+            .fetch_all(&mut *conn)
+            .await?;
+            for (action, to) in waiting {
+                self.withheld(conn, t, Some(action), &to, now).await?;
+            }
+        }
         let action: Option<Action> = sqlx::query_as(
             "SELECT a.id, a.to_state::text, a.network, a.block_number, a.block_hash, a.block_time, \
                     EXISTS (SELECT 1 FROM manual_approvals p WHERE p.action_id = a.id) \
              FROM manual_actions a \
              WHERE a.transfer_id = $1 AND a.kind = 'review-resolution' AND a.recorded_at >= $2 \
+               AND NOT ($3 AND a.to_state::text = ANY($4)) \
                AND NOT EXISTS (SELECT 1 FROM transitions x WHERE x.manual_action_id = a.id) \
                AND NOT EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'review-evidence-refused' \
                                AND e.payload ->> 'manual_action_id' = a.id::text) \
@@ -2846,6 +3033,8 @@ impl Core {
         )
         .bind(t.id)
         .bind(entered_at)
+        .bind(blocked)
+        .bind(&withheld)
         .fetch_optional(&mut *conn)
         .await?;
         let Some((action, to, network, number, hash, time, approved)) = action else {
@@ -2897,17 +3086,17 @@ impl Core {
                 // A delivery a resolution runs is new work like any other: the pause, cut-off and
                 // reserve gates hold it, in review, until they open (INV-15, REQ-GV-1, REQ-OT-5;
                 // review S5).
-                if let Some(c) = self.gate(conn, t, now).await? {
-                    return self.hold(conn, t, Some(c)).await;
-                }
-                if t.condition().is_some_and(gate_condition) {
-                    return self.hold(conn, t, None).await;
-                }
                 let next = if before == State::SourceFinal {
                     1
                 } else {
                     attempt + 1
                 };
+                if let Some(c) = self.gate(conn, t, next, now).await? {
+                    return self.hold(conn, t, Some(c)).await;
+                }
+                if t.condition().is_some_and(gate_condition) {
+                    return self.hold(conn, t, None).await;
+                }
                 self.deliver(
                     conn,
                     t,
@@ -3045,6 +3234,64 @@ impl Core {
             }
             _ => false,
         })
+    }
+
+    /// Whether the contract at `t`'s destination refuses a second delivery under one reference:
+    /// the issuing network's `mint` does (`ReferenceUsed`, `INV-2`; the reference is shared by
+    /// every attempt, `REQ-EO-6`). An origin network's emitter and unwrapper do not track
+    /// references, so a second payout beside a real inclusion would pay twice.
+    async fn refuses_second_delivery(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+    ) -> sqlx::Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM networks WHERE network = $1 AND role = 'issuing')",
+        )
+        .bind(&t.destination_network)
+        .fetch_one(conn)
+        .await
+    }
+
+    /// The hold while an inclusion of the payout stands (`REQ-RF-1`, issue #35): `to` (a refund or
+    /// a new attempt), by resolution `action` or by the automatic path, changes no state and pages
+    /// a human: once, then once a day while it lasts. It lasts until the endpoint decides the
+    /// inclusion (`withdrawn` or `final`); there is no override (`REQ-GV-5`). The last page is read
+    /// from the event log, so a restart repeats nothing early and forgets nothing.
+    async fn withheld(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        action: Option<i64>,
+        to: &str,
+        now: DateTime<Utc>,
+    ) -> sqlx::Result<Did> {
+        let hold = match action {
+            Some(a) => a.to_string(),
+            None => format!("{to}-attempt-{}", store::current_attempt(conn, t.id).await?),
+        };
+        let at = store::latest_head(conn, &t.destination_network)
+            .await?
+            .map_or(now, |h| h.block_time);
+        let last: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT (payload ->> 'at')::timestamptz FROM event_log \
+             WHERE kind = 'resolution-blocked-by-inclusion' AND transfer_id = $1 \
+               AND payload ->> 'hold' = $2 ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(t.id)
+        .bind(&hold)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if last.is_some_and(|l| at < l + Duration::days(1)) {
+            return Ok(Did::default());
+        }
+        let detail = json!({"spec": "REQ-RF-1", "bridge_reference": t.bridge_reference,
+                            "hold": hold, "manual_action_id": action.map(|a| a.to_string()),
+                            "resolution": to, "at": at.to_rfc3339()});
+        store::event(conn, "resolution-blocked-by-inclusion", Some(t.id), &detail).await?;
+        tracing::error!(kind = %"resolution-blocked-by-inclusion", transfer = %t.bridge_reference, %detail,
+            "page: a refund or a new attempt waits, because the payout is observed included and not withdrawn");
+        Ok(Did::default())
     }
 
     /// Records, once, that a resolution's evidence was refused; the transfer stays in review.

@@ -389,4 +389,21 @@ impl Fixture {
             .await
             .unwrap()
     }
+
+    /// The `key-compromise` alerts recorded, having checked each paused the bridge (`AC-I1.2`,
+    /// issue #77): a route that raises an alert with no pause fails here.
+    pub async fn compromises(&self) -> i64 {
+        let alerts = self
+            .count("SELECT count(*) FROM event_log WHERE kind = 'key-compromise'")
+            .await;
+        let paused = self
+            .count(
+                "SELECT count(*) FROM pauses p JOIN event_log e ON e.seq = p.alert_seq \
+                 WHERE e.kind = 'key-compromise' AND p.cause = 'REQ-IC-4' AND p.asset IS NULL \
+                   AND p.network IS NULL AND p.direction IS NULL",
+            )
+            .await;
+        assert_eq!(paused, alerts, "AC-I1.2: an alert with no pause");
+        alerts
+    }
 }

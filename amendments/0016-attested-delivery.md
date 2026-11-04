@@ -70,7 +70,7 @@ apply, except the one marked "Proposed".
   chargeback after a restoration is taken. A restoration binds again what a reversal held only once the core has recorded
   it, after it checked the signature, and not when it is taken in: a row nobody verified must not release a hold. The
   ingress and the store apply the same rule: a reversal is restored once its restoration is an observation (the store's
-  `attested_arrival_reversed`, 0062). Until then the reversal still counts against the arrival, and a second full
+  `attested_arrival_reversed`, 0107). Until then the reversal still counts against the arrival, and a second full
   reversal of it that would fit once the restoration is taken in is not final (`503` `not-final`, nothing recorded, the
   identifier not spent): send it again. One that would not fit even then is `ERR-SourceMismatch`. What a deposit gets in that gap (`ERR-SourceConsumed`) is an open ruling.
 - **The attested network's head and clock.** An attested network has a final head of its own, which is the latest report
