@@ -223,14 +223,37 @@ pub struct ReserveCheck<R, P> {
     pool: PgPool,
     readings: R,
     pager: P,
+    snapshots: AttestedSnapshots,
     /// Assets whose evaluation failed and could not even be recorded, since when, and whether the
     /// stall was paged: the store cannot hold the episode, so the check does (review SF1).
     unrecorded: Mutex<HashMap<String, (DateTime<Utc>, bool)>>,
 }
 
+/// How old an attesting party's last `positions` report may be (F-011 NOTES 7). WORKING ASSUMPTION,
+/// the owner's question 4, recommended and not ruled: one hour, one snapshot every ten minutes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttestedSnapshots {
+    /// Past this, the backend's head counts as stopped: a difference, so the asset's routes pause
+    /// and a human is paged (`REQ-BK-1`, `REQ-IC-2`).
+    pub max_age: Duration,
+    /// How often the party is expected to send one: past this, an alert and nothing else.
+    pub interval: Duration,
+}
+
+impl Default for AttestedSnapshots {
+    fn default() -> Self {
+        Self {
+            max_age: Duration::hours(1),
+            interval: Duration::minutes(10),
+        }
+    }
+}
+
 /// What a re-derivation found, for the evaluation's record and the statement.
 #[derive(Default)]
 struct Derived {
+    /// Attested backends whose last snapshot is past its expected interval, for the alerts.
+    overdue: Vec<String>,
     terms: Terms,
     reserve: Vec<Value>,
     supply: Value,
@@ -257,8 +280,16 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
             pool,
             readings,
             pager,
+            snapshots: AttestedSnapshots::default(),
             unrecorded: Mutex::default(),
         }
+    }
+
+    /// The check with these limits on an attesting party's snapshots.
+    #[must_use]
+    pub fn with_attested_snapshots(mut self, snapshots: AttestedSnapshots) -> Self {
+        self.snapshots = snapshots;
+        self
     }
 
     /// The readings it makes.
@@ -531,7 +562,14 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         let alerts = if reason.is_some() {
             Vec::new()
         } else {
-            self.alerts(&mut conn, asset, &book_terms, now).await?
+            let mut alerts = self.alerts(&mut conn, asset, &book_terms, now).await?;
+            alerts.extend(
+                derived
+                    .overdue
+                    .iter()
+                    .map(|n| format!("attested-snapshot-overdue:{n}")),
+            );
+            alerts
         };
         drop(conn);
 
@@ -800,7 +838,12 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                 // snapshot rolled forward by the reports after what it reflects: cut at the
                 // snapshot instead, and a mint of a later arrival, resting on the issuing network,
                 // would read as a divergence (F-011 NOTES 6).
-                if let Some((f, lag)) = attested_point(conn, &p.network, &snapshot, now).await? {
+                if let Some((f, lag)) =
+                    attested_point(conn, &p.network, &snapshot, self.snapshots.max_age, now).await?
+                {
+                    if now - snapshot.reported_at > self.snapshots.interval {
+                        d.overdue.push(p.network.clone());
+                    }
                     let Ok(moved) =
                         reported_since(conn, &p.network, token, snapshot.through, f.block_number)
                             .await?
@@ -1105,11 +1148,12 @@ async fn final_point(
 
 /// The final point of an attested backend: its latest recorded report (`None` before its first).
 /// Its head is as old as the last snapshot: reports are the backend's only clock, and a snapshot past
-/// the network's bound leaves the check nothing current to compare (`REQ-BK-1`, F-011 NOTES 7).
+/// `max_age` leaves the check nothing current to compare (`REQ-BK-1`, F-011 NOTES 7).
 async fn attested_point(
     conn: &mut PgConnection,
     network: &str,
     snapshot: &readings::AttestedSnapshot,
+    max_age: Duration,
     now: DateTime<Utc>,
 ) -> sqlx::Result<Option<(FinalPoint, Lag)>> {
     let head: Option<(i64, Vec<u8>)> = sqlx::query_as(
@@ -1122,13 +1166,6 @@ async fn attested_point(
     let Some((block_number, block_hash)) = head else {
         return Ok(None);
     };
-    let bound_seconds: i64 = sqlx::query_scalar(
-        "SELECT reserve_point_lag_seconds::bigint FROM networks WHERE network = $1",
-    )
-    .bind(network)
-    .fetch_optional(&mut *conn)
-    .await?
-    .unwrap_or(60);
     Ok(Some((
         FinalPoint {
             network: network.to_owned(),
@@ -1140,7 +1177,7 @@ async fn attested_point(
             blocks: 0,
             seconds: 0,
             head_age_seconds: (now - snapshot.reported_at).num_seconds().max(0),
-            bound_seconds,
+            bound_seconds: max_age.num_seconds(),
         },
     )))
 }

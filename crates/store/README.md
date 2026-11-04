@@ -119,8 +119,8 @@ Who may **call** what (EXECUTE; the functions that run as the owner are marked *
 
 | Role | Calls |
 |---|---|
-| core | `attempt_proof` *definer*, `attempts_unproven` *definer*, `bezent_record_attested_observation` *definer*, `pause_reading_is_supply_mismatch` *definer*, `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
-| ingress | `source_bindable`, `funding_arrival`, `bezent_writer_holds` |
+| core | `attempt_proof` *definer*, `attempts_unproven` *definer*, `bezent_record_attested_observation` *definer*, `attested_arrival_reversed`, `pause_reading_is_supply_mismatch` *definer*, `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
+| ingress | `source_bindable`, `funding_arrival`, `bezent_writer_holds`, `attested_arrival_reversed` |
 | Kreivo endpoint, EVM endpoint | `bezent_writer_holds`, `bezent_endpoint_writer`, `bezent_evm_endpoint_writer`, `bezent_row_network`, `observation_kind_on_network`, `observation_kind_for_event`, `observation_writer_covers` (the guards' helpers, which run as the inserting login) |
 | signer | `attempt_gate_open` *definer*, `statement_place_refusal` *definer* |
 | operators | `source_bindable`, `funding_arrival`, `one_business_day_after` |

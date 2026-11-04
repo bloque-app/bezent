@@ -27,6 +27,12 @@ pub fn report_digest(document: &[u8]) -> [u8; 32] {
     Blake2b::<U32>::digest(report_message(document)).into()
 }
 
+/// The commitment of relayed payout instructions: BLAKE2b-256 of their bytes (`REQ-RQ-9`, PLAN
+/// `DEC-14`).
+pub fn instructions_commitment(instructions: &[u8]) -> [u8; 32] {
+    Blake2b::<U32>::digest(instructions).into()
+}
+
 /// A withdrawal's destination on an attested backend: its commitment, marked, never an address
 /// (`REQ-RQ-9`). It names where the instructions are bound, and nothing is delivered to it.
 pub fn commitment_destination(commitment: &str) -> String {

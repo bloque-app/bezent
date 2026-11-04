@@ -943,17 +943,19 @@ impl Core {
         t: &Transfer,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
-        // A fiat withdrawal the party reported paid (F-011 NOTES 10): the gates are before a payout,
+        // A fiat payout the party already reported (F-011 NOTES 10): the gates are before a payout,
         // and this one is done. The reserve the check below would read has already lost this
-        // withdrawal's own amount, so it would raise a `CND-ReserveShort` nothing ever clears
-        // (`REQ-OT-5`). Any gate condition it still holds clears.
+        // transfer's own amount, so it would raise a `CND-ReserveShort` nothing ever clears
+        // (`REQ-OT-5`). Any gate condition it still holds clears, and it goes on to its leg.
         if self.attested_destination(conn, t).await?
             && matches!(self.destination_leg(conn, t).await?, Leg::One(_))
         {
             if t.condition().is_some_and(gate_condition) {
                 return self.hold(conn, t, None).await;
             }
-            return Ok(Did::default());
+            return self
+                .deliver(conn, t, State::SourceFinal, 1, None, None)
+                .await;
         }
         if let Some(c) = t.condition().filter(|c| c.blocks_delivery()) {
             let start = t.source_final_block_time.unwrap_or(now);
@@ -1056,6 +1058,22 @@ impl Core {
         t: &Transfer,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Option<Condition>> {
+        // WORKING ASSUMPTION, amendment 0016 A3, proposed and not ruled: an arrival reversed and not
+        // restored mints nothing and refunds nothing while it stands; it clears by the restoration.
+        if t.refund_of.is_none()
+            && t.kind != "withdrawal"
+            && let Some(source) = t.source()
+        {
+            let reversed: bool = sqlx::query_scalar("SELECT attested_arrival_reversed($1, $2, $3)")
+                .bind(&source.network)
+                .bind(source.block_number)
+                .bind(&source.block_hash)
+                .fetch_one(&mut *conn)
+                .await?;
+            if reversed {
+                return Ok(Some(Condition::Paused));
+            }
+        }
         let Some((asset, network, direction)) = t.route() else {
             return Ok(None);
         };
@@ -1462,16 +1480,14 @@ impl Core {
             tracing::error!(transfer = %t.bridge_reference, "INV-6, INV-7, INV-16: the source leg is not final as observed; nothing is delivered");
             return Ok(Did::default());
         }
-        // REQ-RQ-9, DEC-14: bezent signs nothing on an attested backend. `Delivering` is "a destination
-        // transaction is signed and recorded" (§5.4), so the transfer holds at `Source-Final`
-        // until the owner rules on amendment 0016 (F-011 NOTES 10).
-        if self.attested_destination(conn, t).await? {
-            return Ok(Did::default());
-        }
         let Some((reference, scope)) = self.delivery_reference(conn, t).await? else {
             tracing::error!(transfer = %t.bridge_reference, "no destination reference; nothing is delivered (REQ-OT-2)");
             return Ok(Did::default());
         };
+        // REQ-RQ-9, DEC-14: bezent signs nothing on an attested backend (F-011 NOTES 10).
+        if self.attested_destination(conn, t).await? {
+            return self.hand_over(conn, t, from, attempt, point, manual).await;
+        }
         let scope = scope.as_deref();
         let (purpose, _) = purpose(t);
         let Some((order, amount)) = self.order(conn, t).await? else {
@@ -1624,6 +1640,84 @@ impl Core {
         }
         if !ready {
             return Ok(did);
+        }
+        store::append(
+            conn,
+            t.id,
+            &Move {
+                from,
+                to: State::Delivering,
+                condition: None,
+                point,
+                attempt: Some(attempt),
+                manual_action: manual,
+            },
+        )
+        .await?;
+        Ok(Did::moved())
+    }
+
+    /// Delivery attempt `attempt` on an attested backend: handed to the attesting party, with nothing
+    /// ordered or signed. WORKING ASSUMPTION, amendment 0016 A1, proposed and not ruled: `Delivering`
+    /// also means the relayed instructions were accepted (§5.4; F-011 NOTES 10).
+    ///
+    /// A withdrawal waits for its instructions, and they are checked here again against the
+    /// commitment its redemption carried, whatever the ingress recorded (`REQ-RQ-9`): a row that
+    /// misses it pages once and hands nothing over. The refund of an unassociated arrival names its
+    /// destination in its request, so it has nothing to wait for. The store holds the same rule
+    /// (`bezent_attested_hand_over_open`).
+    async fn hand_over(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        from: State,
+        attempt: i32,
+        point: Option<&Point>,
+        manual: Option<i64>,
+    ) -> sqlx::Result<Did> {
+        if t.kind == "withdrawal" {
+            let relayed: Option<(Vec<u8>, Option<String>)> = sqlx::query_as(
+                "SELECT r.instructions, \
+                        (SELECT o.detail -> 'payout' ->> 'commitment' FROM observations o \
+                         WHERE o.network = t.source_network \
+                           AND o.block_number = t.source_block_number \
+                           AND o.block_hash = t.source_block_hash \
+                           AND o.position_kind = t.source_position_kind \
+                           AND o.position_index = t.source_position_index) \
+                 FROM relayed_instructions r JOIN transfers t ON t.id = r.transfer_id \
+                 WHERE r.transfer_id = $1",
+            )
+            .bind(t.id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let Some((instructions, commitment)) = relayed else {
+                return Ok(Did::default());
+            };
+            let digest = hex0x(&bezent_core::attested::instructions_commitment(
+                &instructions,
+            ));
+            if commitment.as_deref() != Some(digest.as_str()) {
+                if !store::has_event(
+                    conn,
+                    "attested-instructions-refused",
+                    Some(t.id),
+                    "bridge_reference",
+                    &t.bridge_reference,
+                )
+                .await?
+                {
+                    store::event(
+                        conn,
+                        "attested-instructions-refused",
+                        Some(t.id),
+                        &json!({"spec": "REQ-RQ-9", "bridge_reference": t.bridge_reference}),
+                    )
+                    .await?;
+                    tracing::error!(kind = "attested-instructions-refused", transfer = %t.bridge_reference,
+                        "page: relayed instructions on record do not hash to the redemption's commitment; nothing is handed over");
+                }
+                return Ok(Did::default());
+            }
         }
         store::append(
             conn,

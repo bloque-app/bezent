@@ -332,6 +332,21 @@ async fn source(
     })
 }
 
+/// Whether the attested arrival at `c` was reversed and not restored. WORKING ASSUMPTION, amendment
+/// 0016 A3, proposed and not ruled: such an arrival binds nothing (`ERR-SourceConsumed`), since
+/// minting against a payment known reversed spends surplus for nothing. The store refuses the
+/// binding too (0062).
+async fn reversed(conn: &mut PgConnection, c: &Coordinate) -> Result<bool, ApiError> {
+    Ok(
+        sqlx::query_scalar("SELECT attested_arrival_reversed($1, $2, $3)")
+            .bind(c.network.as_str())
+            .bind(block_number(c)?)
+            .bind(c.block_hash.as_bytes())
+            .fetch_one(conn)
+            .await?,
+    )
+}
+
 /// Whether the arrival at `c` is from an address the operator declared it funds `asset`'s
 /// reserve from, at or after the declaration's block: a surplus contribution, which no deposit
 /// binds (`REQ-BK-5`, `REQ-IN-3`, `INV-1`; review MF1). The store's `funding_arrival()` rule,
@@ -675,6 +690,9 @@ async fn decide_deposit(
         Source::NotFinal => return Ok(Outcome::NotFinal),
         Source::None => return Ok(Outcome::Refused(SOURCE_NOT_FOUND)),
     };
+    if reversed(conn, c).await? {
+        return Ok(Outcome::Refused(SOURCE_CONSUMED));
+    }
     let Some(asset) = admitted_asset(conn, network, &arrival.token).await? else {
         return Ok(Outcome::Refused(UNKNOWN_ROUTE));
     };
@@ -821,6 +839,9 @@ async fn decide_refund(
         Source::NotFinal => return Ok(Outcome::NotFinal),
         Source::None => return Ok(Outcome::Refused(SOURCE_NOT_FOUND)),
     };
+    if reversed(conn, c).await? {
+        return Ok(Outcome::Refused(SOURCE_CONSUMED));
+    }
     let at_reserve: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM reserves WHERE network = $1 AND address = $2)",
     )

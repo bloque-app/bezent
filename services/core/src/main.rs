@@ -159,7 +159,8 @@ async fn main() -> ExitCode {
     };
     // The reserve check reads what the endpoints recorded at final heads; it pages through the
     // service's log (issue #42; NFR-5, REQ-BK-8, REQ-IC-2).
-    let check = ReserveCheck::new(pool.clone(), Recorded::new(pool.clone()), LogPager);
+    let check = ReserveCheck::new(pool.clone(), Recorded::new(pool.clone()), LogPager)
+        .with_attested_snapshots(config.attested_snapshots());
     let check_pool = pool.clone();
     let core = bezent_core_service::Core::new(pool, config.settings());
     let mut tick = tokio::time::interval(Duration::from_secs(config.cycle_seconds));

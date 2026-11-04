@@ -67,6 +67,14 @@ pub struct Config {
     /// default.
     #[serde(default = "default_payout_window_alert_seconds")]
     pub payout_window_alert_seconds: i64,
+    /// Seconds an attesting party's last `positions` report may be old before its asset's routes
+    /// pause and a human is paged (F-011). One hour by default.
+    #[serde(default = "default_attested_snapshot_max_age_seconds")]
+    pub attested_snapshot_max_age_seconds: i64,
+    /// Seconds between the `positions` reports the party is expected to send: past this an alert,
+    /// and nothing else (F-011). Ten minutes by default; at most the maximum age.
+    #[serde(default = "default_attested_snapshot_interval_seconds")]
+    pub attested_snapshot_interval_seconds: i64,
     /// The deployment's environment: `test` or `production`. Left out, it is production: only an
     /// explicit `test` allows the test-only settings below (PR #50 review M2), and only on a store
     /// whose every network is a test network: the core confirms it against the store at start and
@@ -313,6 +321,12 @@ fn default_deadline_seconds() -> i64 {
 fn default_payout_window_alert_seconds() -> i64 {
     2 * 86_400
 }
+fn default_attested_snapshot_max_age_seconds() -> i64 {
+    3_600
+}
+fn default_attested_snapshot_interval_seconds() -> i64 {
+    600
+}
 
 impl Config {
     /// Reads the configuration from a TOML file.
@@ -437,6 +451,14 @@ impl Config {
                 path.display()
             ));
         }
+        if config.attested_snapshot_interval_seconds <= 0
+            || config.attested_snapshot_max_age_seconds < config.attested_snapshot_interval_seconds
+        {
+            return Err(format!(
+                "invalid configuration {}: attested_snapshot_interval_seconds must be positive, and attested_snapshot_max_age_seconds at least it",
+                path.display()
+            ));
+        }
         Ok(config)
     }
 
@@ -543,6 +565,14 @@ impl Config {
             payout_window_alert_after: chrono::Duration::seconds(self.payout_window_alert_seconds),
         }
     }
+
+    /// The reserve check's limits on an attesting party's snapshots.
+    pub fn attested_snapshots(&self) -> crate::reserve::check::AttestedSnapshots {
+        crate::reserve::check::AttestedSnapshots {
+            max_age: chrono::Duration::seconds(self.attested_snapshot_max_age_seconds),
+            interval: chrono::Duration::seconds(self.attested_snapshot_interval_seconds),
+        }
+    }
 }
 
 impl fmt::Debug for Config {
@@ -561,6 +591,14 @@ impl fmt::Debug for Config {
             .field(
                 "payout_window_alert_seconds",
                 &self.payout_window_alert_seconds,
+            )
+            .field(
+                "attested_snapshot_max_age_seconds",
+                &self.attested_snapshot_max_age_seconds,
+            )
+            .field(
+                "attested_snapshot_interval_seconds",
+                &self.attested_snapshot_interval_seconds,
             )
             .field("environment", &self.environment)
             .field("statement", &self.statement)

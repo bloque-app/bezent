@@ -87,6 +87,9 @@ struct Line {
 enum Kind {
     Arrival,
     Payout,
+    /// WORKING ASSUMPTION, amendment 0016 A1: the party's report is the proof of non-execution.
+    #[serde(rename = "payout-not-executed")]
+    PayoutNotExecuted,
     Positions,
     Reversal,
     Restoration,
@@ -117,6 +120,8 @@ struct Document {
     funder: Option<String>,
     #[serde(default)]
     bridge_reference: Option<String>,
+    #[serde(default)]
+    attempt: Option<i32>,
     #[serde(default)]
     positions: Option<Vec<Line>>,
     #[serde(default)]
@@ -194,8 +199,16 @@ impl Document {
         given(
             self.bridge_reference.is_some(),
             "bridge_reference",
-            self.kind == Kind::Payout,
+            matches!(self.kind, Kind::Payout | Kind::PayoutNotExecuted),
         )?;
+        given(
+            self.attempt.is_some(),
+            "attempt",
+            self.kind == Kind::PayoutNotExecuted,
+        )?;
+        if self.attempt.is_some_and(|a| a < 1) {
+            return malformed("attempt counts from 1");
+        }
         given(
             self.positions.is_some(),
             "positions",
@@ -274,59 +287,143 @@ enum Decision {
     Refuse(&'static str),
 }
 
-/// A `payout`: of a withdrawal of this asset on this backend, whose instructions were accepted and
-/// whose redemption is final (`REQ-RQ-9`, `REQ-OT-2`, `REQ-OT-3`), for its amount (`REQ-TR-5`),
-/// once.
+/// The transfer a payout report names: a withdrawal, or the refund of an unassociated arrival.
+#[derive(sqlx::FromRow)]
+struct Payable {
+    amount: String,
+    state: String,
+    /// Its source is final (`REQ-OT-3`), and it has the reference its leg will carry.
+    ready: bool,
+    /// Its instructions were accepted, or it names its destination in its request (`REQ-RQ-9`).
+    instructed: bool,
+    /// The attempt it is at, zero before its first.
+    attempt: i32,
+}
+
+async fn payable(
+    conn: &mut PgConnection,
+    d: &Document,
+    bridge_reference: &str,
+) -> Result<Option<Payable>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT t.amount::text AS amount, t.state::text AS state, \
+                t.source_final_network IS NOT NULL \
+                  AND COALESCE(t.destination_reference, t.on_chain_reference) IS NOT NULL AS ready, \
+                t.kind = 'refund' \
+                  OR EXISTS (SELECT 1 FROM relayed_instructions r WHERE r.transfer_id = t.id) \
+                  AS instructed, \
+                COALESCE((SELECT max(x.attempt) FROM transitions x WHERE x.transfer_id = t.id), 0) \
+                  AS attempt \
+         FROM transfers t \
+         WHERE t.bridge_reference = $1 \
+           AND (t.kind = 'withdrawal' OR (t.kind = 'refund' AND t.refund_of IS NULL)) \
+           AND t.destination_network = $2 AND t.asset = $3",
+    )
+    .bind(bridge_reference)
+    .bind(&d.network)
+    .bind(&d.asset)
+    .fetch_optional(conn)
+    .await
+}
+
+/// Whether the party already reported this transfer paid.
+async fn paid(
+    conn: &mut PgConnection,
+    network: &str,
+    bridge_reference: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM attested_reports \
+           WHERE network = $1 AND kind = 'payout' AND body ->> 'bridge_reference' = $2)",
+    )
+    .bind(network)
+    .bind(bridge_reference)
+    .fetch_one(conn)
+    .await
+}
+
+/// Whether the party already reported attempt `attempt` of this transfer not executed.
+async fn not_executed(
+    conn: &mut PgConnection,
+    network: &str,
+    bridge_reference: &str,
+    attempt: i32,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM attested_reports \
+           WHERE network = $1 AND kind = 'payout-not-executed' \
+             AND body ->> 'bridge_reference' = $2 AND body ->> 'attempt' = $3::text)",
+    )
+    .bind(network)
+    .bind(bridge_reference)
+    .bind(attempt)
+    .fetch_one(conn)
+    .await
+}
+
+/// A `payout`: of a transfer of this asset on this backend, whose instructions were accepted and
+/// whose source is final (`REQ-RQ-9`, `REQ-OT-2`, `REQ-OT-3`), for its amount (`REQ-TR-5`), once.
+/// Never of one already refunding, nor of an attempt the party reported not executed (`INV-8`): a
+/// double payment is refused here, before it is a divergence.
 async fn decide_payout(
     conn: &mut PgConnection,
     d: &Document,
     bridge_reference: &str,
     amount: &str,
 ) -> Result<Decision, ApiError> {
-    #[derive(sqlx::FromRow)]
-    struct Withdrawal {
-        amount: String,
-        source_final: bool,
-        instructed: bool,
-    }
-    let w: Option<Withdrawal> = sqlx::query_as(
-        "SELECT t.amount::text AS amount, t.source_final_network IS NOT NULL AS source_final, \
-                EXISTS (SELECT 1 FROM relayed_instructions r WHERE r.transfer_id = t.id) \
-                  AS instructed \
-         FROM transfers t \
-         WHERE t.bridge_reference = $1 AND t.kind = 'withdrawal' \
-           AND t.destination_network = $2 AND t.asset = $3",
-    )
-    .bind(bridge_reference)
-    .bind(&d.network)
-    .bind(&d.asset)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some(w) = w else {
+    let Some(w) = payable(conn, d, bridge_reference)
+        .await?
+        .filter(|w| w.instructed)
+    else {
         return Ok(Decision::Refuse(SOURCE_NOT_FOUND));
     };
-    if !w.instructed {
-        return Ok(Decision::Refuse(SOURCE_NOT_FOUND));
-    }
-    if !w.source_final {
+    if !w.ready {
         return Err(ApiError::NotFinal);
     }
     if w.amount != amount {
         return Ok(Decision::Refuse(SOURCE_MISMATCH));
     }
-    let paid: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM attested_reports \
-           WHERE network = $1 AND kind = 'payout' AND body ->> 'bridge_reference' = $2)",
-    )
-    .bind(&d.network)
-    .bind(bridge_reference)
-    .fetch_one(conn)
-    .await?;
-    Ok(if paid {
-        Decision::Refuse(SOURCE_CONSUMED)
-    } else {
-        Decision::Take
-    })
+    let open = matches!(
+        w.state.as_str(),
+        "Source-Final" | "Delivering" | "Delivered" | "Needs-Review"
+    );
+    if !open
+        || paid(conn, &d.network, bridge_reference).await?
+        || not_executed(conn, &d.network, bridge_reference, w.attempt).await?
+    {
+        return Ok(Decision::Refuse(SOURCE_CONSUMED));
+    }
+    Ok(Decision::Take)
+}
+
+/// A `payout-not-executed`: of the attempt the transfer is at, handed over and not reported paid,
+/// once (`REQ-BE-5`; amendment 0016 A1, a working assumption). A payout reported paid stays paid: a
+/// later failure of it is a reversal's to report, never this.
+async fn decide_not_executed(
+    conn: &mut PgConnection,
+    d: &Document,
+    bridge_reference: &str,
+) -> Result<Decision, ApiError> {
+    let Some(w) = payable(conn, d, bridge_reference)
+        .await?
+        .filter(|w| w.instructed)
+    else {
+        return Ok(Decision::Refuse(SOURCE_NOT_FOUND));
+    };
+    match w.state.as_str() {
+        "Delivering" | "Needs-Review" => {}
+        "Accepted" | "Source-Final" => return Err(ApiError::NotFinal),
+        _ => return Ok(Decision::Refuse(SOURCE_CONSUMED)),
+    }
+    if d.attempt != Some(w.attempt) {
+        return Ok(Decision::Refuse(SOURCE_MISMATCH));
+    }
+    if paid(conn, &d.network, bridge_reference).await?
+        || not_executed(conn, &d.network, bridge_reference, w.attempt).await?
+    {
+        return Ok(Decision::Refuse(SOURCE_CONSUMED));
+    }
+    Ok(Decision::Take)
 }
 
 /// A report fits what it names: the asset and token on this backend, and any earlier report or
@@ -352,6 +449,9 @@ async fn decide(conn: &mut PgConnection, d: &Document) -> Result<Decision, ApiEr
         Kind::Arrival => Ok(Decision::Take),
         Kind::Payout => {
             decide_payout(conn, d, d.bridge_reference.as_deref().unwrap_or(""), amount).await
+        }
+        Kind::PayoutNotExecuted => {
+            decide_not_executed(conn, d, d.bridge_reference.as_deref().unwrap_or("")).await
         }
         Kind::Positions => {
             if let Some(through) = &d.through {
