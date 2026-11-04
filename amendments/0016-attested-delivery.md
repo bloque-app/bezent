@@ -62,13 +62,17 @@ apply, except the one marked "Proposed".
   was withdrawn (amendment 0007). **Proposed, not built:** it goes to `Needs-Review` at the route's deadline, measured from
   its source leg's finality, with an owner. **Built:** one page (`attested-withdrawal-unrelayed`) once it has waited the
   route's budget on the issuing network's clock, and nothing else: its state does not change, and a relay after the page
-  hands it over as usual. Going to review is the question, not the page.
+  hands it over as usual. Going to review is the question, not the page. The same holds for a withdrawal whose
+  instructions are relayed but whose attested network has no final head to hand it over at (a fresh backend whose party
+  has reported nothing): one page of its own (`attested-withdrawal-awaiting-head`), once, after the same budget on the
+  issuing network's clock, with the state unchanged, and the first head hands it over.
 - **Reversals once restored.** The sum of reversals that bounds a new one counts only those not restored, so a second real
   chargeback after a restoration is taken. A restoration binds again what a reversal held only once the core has recorded
   it, after it checked the signature, and not when it is taken in: a row nobody verified must not release a hold. The
   ingress and the store apply the same rule: a reversal is restored once its restoration is an observation (the store's
   `attested_arrival_reversed`, 0062). Until then the reversal still counts against the arrival, and a second full
-  reversal of it is `ERR-SourceMismatch`. What a deposit gets in that gap (`ERR-SourceConsumed`) is an open ruling.
+  reversal of it that would fit once the restoration is taken in is not final (`503` `not-final`, nothing recorded, the
+  identifier not spent): send it again. One that would not fit even then is `ERR-SourceMismatch`. What a deposit gets in that gap (`ERR-SourceConsumed`) is an open ruling.
 - **The attested network's head and clock.** An attested network has a final head of its own, which is the latest report
   recorded, at the time the store took it in. Its deadline clock is that head, so a party that stops reporting stops the
   clock: a handed-over payout then never reaches its deadline, and only the snapshot bound pauses the asset and pages. The

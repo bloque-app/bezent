@@ -1699,7 +1699,13 @@ impl Core {
                 // route's budget (F-011 NOTES 10). Its state is not changed: whether it goes to
                 // review is unruled (amendment 0016, "A withdrawal nobody relays for").
                 if from == State::SourceFinal {
-                    self.page_unrelayed(conn, t).await?;
+                    self.page_held(
+                        conn,
+                        t,
+                        "attested-withdrawal-unrelayed",
+                        "a redemption on an attested backend is final and nobody has relayed its instructions; its value is destroyed and nothing moves it",
+                    )
+                    .await?;
                 }
                 return Ok(Did::default());
             };
@@ -1736,6 +1742,19 @@ impl Core {
         // hand-over time can never be proven not executed or refunded (`after_proof`), so it is
         // not handed over until the attested network has a head.
         let Some(head) = store::latest_head(conn, &t.destination_network).await? else {
+            // The instructions are relayed and the value is destroyed, and the wait for the party's
+            // first report is the other silence: one page after the route's budget, on the issuing
+            // network's clock (this wait has no clock of its own), state unchanged, so the first
+            // head still hands it over (amendment 0016, "A withdrawal nobody relays for").
+            if t.kind == "withdrawal" && from == State::SourceFinal {
+                self.page_held(
+                    conn,
+                    t,
+                    "attested-withdrawal-awaiting-head",
+                    "a redemption on an attested backend is final, its instructions are relayed and its value is destroyed, but the attested network has no final head, so nothing can be handed over",
+                )
+                .await?;
+            }
             return Ok(Did::default());
         };
         store::append(
@@ -1787,12 +1806,20 @@ impl Core {
         Ok(at.and_then(|a| DateTime::parse_from_rfc3339(&a).ok().map(|d| d.to_utc())))
     }
 
-    /// A withdrawal on an attested backend that nobody has relayed instructions for, and that has
-    /// sat at `Source-Final` past the route's budget: one page, once, with its state unchanged
-    /// (F-011 NOTES 10; amendment 0016). The value is already destroyed. The clock is the source
+    /// A withdrawal on an attested backend held at `Source-Final` past the route's budget, either
+    /// because nobody has relayed instructions for it (`attested-withdrawal-unrelayed`) or because
+    /// the attested network has no final head to hand it over at
+    /// (`attested-withdrawal-awaiting-head`): one page of that `kind`, once, with its state
+    /// unchanged (F-011 NOTES 10; amendment 0016). The value is already destroyed. The clock is the source
     /// network's own, the one `source_final_block_time` was read on: the attested network's head
     /// stops when the party is silent, and a silent party is the case to page for.
-    async fn page_unrelayed(&self, conn: &mut PgConnection, t: &Transfer) -> sqlx::Result<()> {
+    async fn page_held(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        kind: &str,
+        message: &str,
+    ) -> sqlx::Result<()> {
         let (Some(start), Some(source)) = (t.source_final_block_time, t.source_network.as_deref())
         else {
             return Ok(());
@@ -1803,7 +1830,7 @@ impl Core {
         };
         if store::has_event(
             conn,
-            "attested-withdrawal-unrelayed",
+            kind,
             Some(t.id),
             "bridge_reference",
             &t.bridge_reference,
@@ -1816,9 +1843,8 @@ impl Core {
                             "held_since": start.to_rfc3339(), "deadline": deadline.to_rfc3339(),
                             "network": head.network, "head_block": head.block_number,
                             "head_time": head.block_time.to_rfc3339()});
-        store::event(conn, "attested-withdrawal-unrelayed", Some(t.id), &detail).await?;
-        tracing::error!(kind = "attested-withdrawal-unrelayed", transfer = %t.bridge_reference, %detail,
-            "page: a redemption on an attested backend is final and nobody has relayed its instructions; its value is destroyed and nothing moves it");
+        store::event(conn, kind, Some(t.id), &detail).await?;
+        tracing::error!(kind, transfer = %t.bridge_reference, %detail, "page: {message}");
         Ok(())
     }
 

@@ -525,27 +525,44 @@ async fn decide(conn: &mut PgConnection, d: &Document) -> Result<Decision, ApiEr
             else {
                 return Ok(Decision::Refuse(SOURCE_NOT_FOUND));
             };
-            let before: Option<String> = sqlx::query_scalar(
-                "SELECT sum((v.body ->> 'amount')::numeric)::text FROM attested_reports v \
+            // The reversals that stand: in total by the store's rule (a restoration taken in), and
+            // if every restoration recorded so far were taken in. The two differ only in the
+            // restoration's gap.
+            let (standing, restored): (Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT \
+                   sum((v.body ->> 'amount')::numeric) FILTER (WHERE NOT EXISTS ( \
+                     SELECT 1 FROM attested_reports r \
+                       JOIN observations o ON o.network = r.network \
+                                          AND o.block_number = r.seq \
+                                          AND o.block_hash = r.digest \
+                      WHERE r.network = v.network AND r.kind = 'restoration' \
+                        AND r.body ->> 'restores' = v.report_id))::text, \
+                   sum((v.body ->> 'amount')::numeric) FILTER (WHERE NOT EXISTS ( \
+                     SELECT 1 FROM attested_reports r \
+                      WHERE r.network = v.network AND r.kind = 'restoration' \
+                        AND r.body ->> 'restores' = v.report_id))::text \
+                 FROM attested_reports v \
                  WHERE v.network = $1 AND v.asset = $2 AND v.kind = 'reversal' \
-                   AND v.body ->> 'reverses' = $3 \
-                   AND NOT EXISTS (SELECT 1 FROM attested_reports r \
-                                   JOIN observations o ON o.network = r.network \
-                                                      AND o.block_number = r.seq \
-                                                      AND o.block_hash = r.digest \
-                                   WHERE r.network = v.network AND r.kind = 'restoration' \
-                                     AND r.body ->> 'restores' = v.report_id)",
+                   AND v.body ->> 'reverses' = $3",
             )
             .bind(&d.network)
             .bind(&d.asset)
             .bind(reverses)
-            .fetch_one(conn)
+            .fetch_one(&mut *conn)
             .await?;
-            let before: u128 = before.and_then(|b| b.parse().ok()).unwrap_or(0);
-            Ok(match before.checked_add(reported) {
-                Some(total) if total <= arrival => Decision::Take,
-                _ => Decision::Refuse(SOURCE_MISMATCH),
-            })
+            let sum = |s: Option<String>| s.and_then(|b| b.parse::<u128>().ok()).unwrap_or(0);
+            let fits =
+                |before: u128| matches!(before.checked_add(reported), Some(t) if t <= arrival);
+            if fits(sum(standing)) {
+                Ok(Decision::Take)
+            } else if fits(sum(restored)) {
+                // A restoration is recorded and the core has not taken it in yet. The reversal fits
+                // once it has, so a refusal now would be stored against the identifier and replayed
+                // to the party's resend. Nothing is recorded; send it again (REQ-ID-1).
+                Err(ApiError::NotFinal)
+            } else {
+                Ok(Decision::Refuse(SOURCE_MISMATCH))
+            }
         }
         // REQ-BE-6: the reserve a reversal took, in full, once. Only the party that reported it
         // reports here: a backend has one.

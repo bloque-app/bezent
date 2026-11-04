@@ -69,7 +69,9 @@ cannot evaluate and fails closed (the backend's routes pause and a human is page
 - `reverses` is the `report_id` of an `arrival` of the same asset; the reversals of one arrival that stand may not exceed
   it. One that was restored no longer stands, so a second real chargeback after a restoration is reported as a new
   reversal. A reversal counts as restored once bezent has taken its restoration in as an observation, which follows the
-  `201` of the restoration by a cycle: a second reversal sent before then is `ERR-SourceMismatch`; send it again after.
+  `201` of the restoration by a cycle: a second reversal sent before then that would fit once it is in is answered `503` `not-final`, with nothing recorded and its
+  `report_id` not spent: send it again, under the same `report_id`, after. (One that would not fit even then is
+  `ERR-SourceMismatch`, recorded as any refusal is.)
 - `restores` is the `report_id` of a `reversal`, and `amount` must equal it. Only the party that reported it restores it.
 - `through` is the `report_id` of the last report the balances reflect; `null` when none. **A snapshot must be computed
   from Swaps' own record of what it reported, not read from the bank.** A payment the bank shows and Swaps has not
@@ -105,7 +107,9 @@ for finality on the issuing network before relaying. Extras are written once (`R
 write is its instructions: a request with an expiry and no instructions is `ERR-Malformed`, with nothing recorded, so send
 the instructions with the expiry, or only the instructions. Relay for every redemption: one nobody relays for waits at
 `Source-Final` with its value destroyed, and bezent pages a human once it has waited the route's completion budget
-(`attested-withdrawal-unrelayed`). Its state does not change.
+(`attested-withdrawal-unrelayed`). Its state does not change. A relayed one waits for the attested network's first report,
+which is the head the hand-over is timed at; if that has not come within the same budget, bezent pages once
+(`attested-withdrawal-awaiting-head`), and the first report still hands it over.
 
 **After the relay.** The next core cycle hands the withdrawal over: `Delivering`, attempt 1, with nothing ordered or signed.
 Report the outcome (working assumption, `amendments/0016-attested-delivery.md`, A1, proposed and not ruled):

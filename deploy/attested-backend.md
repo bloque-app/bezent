@@ -41,9 +41,31 @@ whether it should go to review at the route's deadline is not ruled (`amendments
    refuses an expiry without instructions, so only a request taken in before that can be in this state.
 2. Once the instructions are accepted, the next cycle hands the withdrawal over, and its deadline runs from then.
    The hand-over also needs a final head on the attested network, which any report gives; on a fresh backend with no
-   report at all it waits for the first. A sum of reported amounts that overflows the book (2^127 - 1) makes the reserve
-   check fail closed, which pauses the asset: it is not repaired through the services (`attested_reports` is append-only).
+   report at all it waits for the first; if it has waited the route's completion budget (on the issuing network's clock) it
+   pages once, `attested-withdrawal-awaiting-head` (next runbook).
+   A sum that overflows the book (2^127 - 1) makes the reserve check fail closed with "attested amount out of range
+   (INV-11)" in its log and pauses the asset. It is repaired by the party, not by editing rows (`attested_reports` is
+   append-only): a newer snapshot supersedes the older one, so an overflowing sum of snapshot positions, or of the reports
+   after it, goes away with a snapshot whose `through` covers those reports and whose positions sum within range. Until one
+   is recorded the check keeps failing closed; lifting the pause afterwards is the operator's, as for any divergence.
+   Read it from the log, not from a single report: each position and report is bounded when it is taken in, and only their
+   sum overflows.
 3. If they cannot be had, it is a case for the owner. There is no administrative way to move it (`REQ-GV-5`).
+
+## Runbook: a relayed redemption with no head to hand it over at
+
+**You see:** the page `attested-withdrawal-awaiting-head`, with `bridge_reference`, `held_since` and `deadline`, in the
+service's log and in `event_log`. Once, for that withdrawal, however many cycles pass or restarts happen.
+
+**What it means:** the redemption is final, its value is destroyed and its instructions are relayed and match, but the
+attested network has no final head, because the party has not reported anything yet (a fresh backend, or a lost report).
+The hand-over needs the head for its clock, so nothing is handed over. The page comes after the route's completion budget,
+measured on the issuing network's clock, since the attested network's own clock is the one that is stopped. The withdrawal
+stays at `Source-Final`; nothing times it out or refunds it.
+
+1. Ask the party why it has reported nothing. Any recorded report is a head: the next cycle after it hands the withdrawal
+   over, with no further page.
+2. If it cannot report, it is a case for the owner. There is no administrative way to move it (`REQ-GV-5`).
 
 ## Runbook: a report the core refused
 

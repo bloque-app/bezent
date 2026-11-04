@@ -322,12 +322,9 @@ async fn req_be_6_a_reversal_and_a_restoration_name_what_they_answer(pool: PgPoo
         (restoration("s-3", "300", "v-3"), None),
         (restoration("s-4", "300", "v-3"), Some("ERR-SourceConsumed")),
         // Finding 3: "restored" is the store's rule, the restoration taken in as an observation by
-        // the core, which these tests have not got. Until then v-3 still counts, so 200 + 300
-        // is too much. (The taken-in side, a second chargeback accepted after the core ran, is
-        // `req_be_6_a_reversal_is_restored_only_once_its_restoration_is_taken_in`.)
+        // the core, which these tests have not got. Until then v-3 still counts. One that cannot
+        // fit even with v-3 restored is a refusal for good.
         (reversal("v-7", "301", "a-1"), Some("ERR-SourceMismatch")),
-        (reversal("v-8", "300", "a-1"), Some("ERR-SourceMismatch")),
-        (reversal("v-9", "1", "a-1"), Some("ERR-SourceMismatch")),
     ];
     for (d, error) in cases {
         let (status, answer) = ingress.post(REPORTS, ALPHA, &signed(&d)).await;
@@ -336,6 +333,26 @@ async fn req_be_6_a_reversal_and_a_restoration_name_what_they_answer(pool: PgPoo
             Some(e) => assert_eq!(answer["error"], e, "{d}: {answer}"),
             None => assert_eq!(answer["state"], "Recorded", "{d}: {answer}"),
         }
+    }
+    // In the restoration's gap, a reversal that fits once v-3 is taken in is not final: the
+    // retryable answer, with nothing recorded, so the reference is not spent (the taken-in side is
+    // `req_be_6_a_reversal_is_restored_only_once_its_restoration_is_taken_in`).
+    for (id, amount) in [("v-8", "300"), ("v-9", "1")] {
+        let before = (
+            count(&pool, "intake").await,
+            count(&pool, "attested_reports").await,
+        );
+        let d = reversal(id, amount, "a-1");
+        let (status, answer) = ingress.post(REPORTS, ALPHA, &signed(&d)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{d}: {answer}");
+        assert_eq!(answer["error"], "not-final", "{d}: {answer}");
+        assert_eq!(
+            before,
+            (
+                count(&pool, "intake").await,
+                count(&pool, "attested_reports").await
+            )
+        );
     }
 }
 

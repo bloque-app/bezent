@@ -1684,6 +1684,67 @@ async fn req_rq_9_a_redemption_nobody_relays_for_pages_once_and_a_later_relay_pr
     assert_eq!(pages().await, 1);
 }
 
+/// A relayed withdrawal on an attested network that has no final head cannot be handed over; the
+/// value is already destroyed. Once it has waited the route's budget on the issuing network's
+/// clock it pages, once, across cycles, with its state unchanged; the first head hands it over.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rq_9_a_relayed_withdrawal_with_no_head_pages_once_and_the_first_head_proceeds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    let _bridge = relayed(&f).await;
+    exec(
+        &f.w.admin,
+        &format!(
+            "ALTER TABLE final_heads DISABLE TRIGGER USER; \
+             DELETE FROM final_heads WHERE network = '{RAIL}'; \
+             ALTER TABLE final_heads ENABLE TRIGGER USER; \
+             UPDATE routes SET completion_budget_seconds = 3600 \
+             WHERE asset = 'COPM' AND direction = 'withdrawal'"
+        ),
+    )
+    .await;
+    let id: i64 = scalar(
+        &f.w.admin,
+        "SELECT id FROM transfers WHERE kind = 'withdrawal'",
+    )
+    .await;
+    let pages = || async {
+        let sql = format!(
+            "SELECT count(*) FROM event_log WHERE kind = 'attested-withdrawal-awaiting-head' \
+             AND transfer_id = {id}"
+        );
+        f.w.count(&sql).await
+    };
+
+    // Within the budget: waiting, and quiet.
+    f.w.cycle(now()).await;
+    assert_eq!(f.w.state(id).await.0, "Source-Final");
+    assert_eq!(pages().await, 0);
+
+    // Past it, on the issuing network's clock: one page however many cycles go by, no move.
+    head(&f.w.admin, ISSUING, 200 + 3_600 + 60).await;
+    for _ in 0..3 {
+        f.w.cycle(now()).await;
+    }
+    assert_eq!(f.w.state(id).await, ("Source-Final".into(), None));
+    assert_eq!(pages().await, 1);
+
+    // The first head: it is handed over, and the page stands at one.
+    f.reported(
+        "tick-1",
+        "positions",
+        json!({"positions": [], "through": "fund-1"}),
+    )
+    .await;
+    for _ in 0..3 {
+        f.w.cycle(now()).await;
+        assert_eq!(f.w.state(id).await, ("Delivering".into(), None));
+    }
+    assert_eq!(pages().await, 1);
+}
+
 /// S1: a relay that comes after the route's budget measured from the source leg starts the attempt
 /// at the hand-over. It is not reviewed on the next cycle, and the party's first report of
 /// non-execution is a new attempt, not the refund mint.
@@ -1889,11 +1950,14 @@ async fn req_be_6_a_reversal_is_restored_only_once_its_restoration_is_taken_in(
         json!({"amount": "5000", "position": "acct-1", "restores": "rev-1"}),
     )
     .await;
-    let (_, again) = f.report("rev-2", "reversal", reversal("2")).await;
-    assert_eq!(again["error"], "ERR-SourceMismatch", "{again}");
-    // Taken in: the first reversal no longer stands, and the second is as good as the first.
+    // A second full reversal in the gap is not final, and nothing of it is stored.
+    let (status, again) = f.report("rev-2", "reversal", reversal("2")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{again}");
+    assert_eq!(again["error"], "not-final", "{again}");
+    // Taken in: the first reversal no longer stands, and the same request sent again, under the
+    // same identifier, is as good as the first.
     f.w.settle(now()).await;
-    let (status, answer) = f.report("rev-3", "reversal", reversal("3")).await;
+    let (status, answer) = f.report("rev-2", "reversal", reversal("2")).await;
     assert_eq!(status, StatusCode::CREATED, "{answer}");
     assert_eq!(answer["state"], "Recorded", "{answer}");
 }
