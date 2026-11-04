@@ -122,6 +122,14 @@ the network's row is the reminder. There is **no floor and no page for any fee p
 floor is configuration (`DEC-18`), and which service holds it, and whether bezent pages on it or the alarm does, is not
 decided. A fee position that is already short shows as `fee_short_transfers` (`CND-FeeShort`).
 
+A fee position that cannot be read or written never stops the head or the reserve readings. A read that fails or exceeds
+five seconds is recorded as unknown. A write the store refuses (a table not yet migrated, a grant or guard that drifted) is
+logged at ERROR level as "the delivery account's fee position could not be recorded", with the network, the block and the
+store's error, and has **no `kind=` field and is not a page**. No row is written for that head, so the latest row stops
+moving: `fee_position_amount` keeps the last recorded value (or stays NULL, unknown, if none was ever recorded) and
+`fee_position_age_seconds` grows without bound (NULL if none was ever recorded). The growing age is the signal; the alarm on it
+(the table above, `fee_position_age_seconds`) is what makes a repeated write failure visible.
+
 ## What infrastructure must add
 
 Stated as needs; this repository changes none of it.

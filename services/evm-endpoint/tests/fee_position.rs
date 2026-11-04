@@ -213,3 +213,135 @@ async fn req_nx_3_a_balance_above_the_stores_domain_is_unknown_not_clipped(
             .is_some_and(|u| u.contains("above the store"))
     );
 }
+
+async fn reserve_count(f: &Fixture) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM reserve_readings WHERE network = $1")
+        .bind(NETWORK)
+        .fetch_one(&f.admin)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_st_6_a_fee_position_that_cannot_be_written_does_not_stop_the_head_or_the_reserve(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect, 5).await;
+    // An endpoint rolled out before the grant (or the table) exists: its INSERT is refused.
+    sqlx::query("REVOKE INSERT ON fee_position_readings FROM bezent_evm_endpoint")
+        .execute(&f.admin)
+        .await
+        .unwrap();
+
+    f.follower()
+        .step()
+        .await
+        .expect("a fee position that cannot be written is not the step's failure");
+    assert!(head_count(&f).await >= 1, "the head is recorded");
+    assert!(
+        reserve_count(&f).await > 0,
+        "the reserve readings are recorded"
+    );
+    assert!(fee_rows(&f).await.is_empty());
+    // The follower advanced: the next head is taken up, again without error.
+    f.advance(1);
+    f.follower().step().await.unwrap();
+    assert!(head_count(&f).await >= 2);
+
+    // Nothing was ever written, so the observable stays unknown with no age, which the alarm on a
+    // missing value and on a growing age both read.
+    assert_eq!(observed(&f, "fee_position_amount").await, Some(None));
+    assert_eq!(observed(&f, "fee_position_age_seconds").await, Some(None));
+
+    // Once it can be written again, the next head's reading is recorded.
+    sqlx::query("GRANT INSERT ON fee_position_readings TO bezent_evm_endpoint")
+        .execute(&f.admin)
+        .await
+        .unwrap();
+    f.advance(1);
+    f.follower().step().await.unwrap();
+    assert_eq!(fee_rows(&f).await.len(), 1);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_st_6_a_hanging_balance_read_is_unknown_and_the_step_finishes(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let chain = bezent_evm_endpoint::rpc::mock::MockChain::new(common::CHAIN_ID, 5);
+    let other = chain.fork();
+    let f = Fixture::with_chains(pool, connect, chain, other).await;
+    f.chain_b.hang_balance(true);
+
+    // The step finishes, bounded by the read's timeout plus slack, not by the provider.
+    let bound = fee::READ_TIMEOUT + std::time::Duration::from_secs(20);
+    tokio::time::timeout(bound, f.follower().step())
+        .await
+        .expect("the step does not wait on a provider that never answers a balance")
+        .unwrap();
+
+    let got = fee_rows(&f).await;
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].3.is_none());
+    assert!(
+        got[0]
+            .4
+            .as_deref()
+            .is_some_and(|u| u.contains("unavailable")),
+        "{got:?}"
+    );
+    assert_eq!(observed(&f, "fee_position_amount").await, Some(None));
+    assert!(head_count(&f).await >= 1);
+    assert!(reserve_count(&f).await > 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_st_6_the_fee_position_is_read_at_the_heads_block_from_both_providers(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let chain = bezent_evm_endpoint::rpc::mock::MockChain::new(common::CHAIN_ID, 5);
+    let other = chain.fork();
+    let f = Fixture::with_chains(pool, connect, chain, other).await;
+    let before = (
+        f.chain.balance_reads().len(),
+        f.chain_b.balance_reads().len(),
+    );
+    f.follower().step().await.unwrap();
+
+    let head: i64 =
+        sqlx::query_scalar("SELECT max(block_number) FROM final_heads WHERE network = $1")
+            .bind(NETWORK)
+            .fetch_one(&f.admin)
+            .await
+            .unwrap();
+    let at = bezent_evm_endpoint::rpc::At::Number(head as u64);
+    // The reserve readings ask balances too; the fee read is the lane's, and every balance read
+    // of the step is pinned to the head, never to "latest" or "finalized".
+    for reads in [f.chain.balance_reads(), f.chain_b.balance_reads()] {
+        assert!(reads.len() > before.0.min(before.1), "{reads:?}");
+        assert!(reads.iter().all(|a| *a == at), "{reads:?} against {at:?}");
+    }
+}
+
+#[tokio::test]
+async fn req_st_6_a_provider_that_never_answers_is_unknown_within_the_bound() {
+    use bezent_evm_endpoint::pair::Pair;
+    use bezent_evm_endpoint::rpc::mock::{MockChain, MockRpc};
+    let chain = MockChain::new(common::CHAIN_ID, 5);
+    chain.hang_balance(true);
+    let other = MockChain::new(common::CHAIN_ID, 5);
+    let pair = Pair {
+        a: MockRpc::new("a", &chain),
+        b: MockRpc::new("b", &other),
+    };
+    let holder = alloy::primitives::Address::repeat_byte(7);
+    let r = fee::read_within(&pair, holder, 4, std::time::Duration::from_millis(50)).await;
+    assert!(r.amount.is_none());
+    assert!(
+        r.unknown_reason
+            .as_deref()
+            .is_some_and(|u| u.contains("unavailable"))
+    );
+}

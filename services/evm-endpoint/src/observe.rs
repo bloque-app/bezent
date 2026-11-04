@@ -373,7 +373,25 @@ impl<R: Rpc> Follower<'_, R> {
             }
             store::record_readings(&mut tx, self.network, &head, &readings).await?;
             if let Some(f) = &fee {
-                store::record_fee_position(&mut tx, self.network, &head, f).await?;
+                // A fee position is not the head: if it cannot be written (a table not yet
+                // migrated, a grant or a guard that drifted), a savepoint takes back only it, and
+                // the head and the readings commit. Only a failure of the savepoint itself, the
+                // connection, is the step's.
+                let mut sp = sqlx::Acquire::begin(&mut *tx).await?;
+                match store::record_fee_position(&mut sp, self.network, &head, f).await {
+                    Ok(()) => sp.commit().await?,
+                    Err(e) => {
+                        sp.rollback().await?;
+                        tracing::error!(
+                            network = self.network,
+                            block = head.number,
+                            error = %e,
+                            "REQ-ST-6: the delivery account's fee position could not be recorded; \
+                             the head and the reserve readings are recorded without it, and \
+                             fee_position_age_seconds grows until it can be"
+                        );
+                    }
+                }
             }
             tx.commit().await?;
             if let Some(f) = fee.as_ref().filter(|f| f.amount.is_none()) {
