@@ -849,6 +849,87 @@ async fn the_grants_check_fails_the_run_unless_told_to_report(pool: PgPool) {
     assert_eq!(run(&args, &env).status.code(), Some(0));
 }
 
+/// REQ-KY-1 (the owner from a `--config` file) and issue #64: the logins a `--config` file lists
+/// under `logins` count as `--login`s, because a Fargate task's command line is fixed. The same
+/// store is clean with the file that lists a member of a store role, and refused (exit 5) as a stray
+/// with the file that does not.
+#[sqlx::test]
+async fn req_ky_1_the_logins_in_the_config_file_are_not_strays(pool: PgPool) {
+    let _attrs = ROLE_ATTRS.read().await;
+    let _roles = SERVER_ROLES.lock().await;
+    apply(&pool, &MIGRATOR).await.unwrap();
+    sqlx::raw_sql(
+        "DO $$ BEGIN \
+           IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'migrate_test_config_login') THEN \
+             CREATE ROLE migrate_test_config_login LOGIN; \
+           END IF; END $$; \
+         GRANT bezent_core TO migrate_test_config_login",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Every other login on the server is named on the command line; only this one is not.
+    let others: Vec<String> = logins(&pool)
+        .await
+        .into_iter()
+        .filter(|l| l != "migrate_test_config_login")
+        .collect();
+    let options = pool.connect_options();
+    let owner = options.get_username().to_owned();
+    let password = std::env::var("DATABASE_URL")
+        .ok()
+        .and_then(|u| {
+            let (_, rest) = u.split_once("://")?;
+            let (userinfo, _) = rest.split_once('@')?;
+            userinfo.split_once(':').map(|(_, p)| p.to_owned())
+        })
+        .unwrap_or_else(|| "unused".to_owned());
+    let dir = std::env::temp_dir().join(format!("bezent-migrate-config-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("login"), &owner).unwrap();
+    std::fs::write(dir.join("password"), &password).unwrap();
+    let table = format!(
+        "[store]\nhost = \"{}\"\nport = {}\ndatabase = \"{}\"\nsslmode = \"disable\"\n\
+         login = {{ file = \"login\" }}\npassword = {{ file = \"password\" }}\n",
+        options.get_host(),
+        options.get_port(),
+        options.get_database().unwrap(),
+    );
+    let listed = dir.join("listed.toml");
+    let unlisted = dir.join("unlisted.toml");
+    std::fs::write(
+        &listed,
+        format!("logins = [\"migrate_test_config_login\"]\n{table}"),
+    )
+    .unwrap();
+    std::fs::write(&unlisted, &table).unwrap();
+    let run_with = |config: &std::path::Path| {
+        let mut args = vec!["--config", config.to_str().unwrap()];
+        for l in &others {
+            args.push("--login");
+            args.push(l);
+        }
+        args.push("--check");
+        run(&args, &[])
+    };
+    let with_listed = run_with(&listed);
+    let without = run_with(&unlisted);
+    sqlx::raw_sql("DROP OWNED BY migrate_test_config_login; DROP ROLE migrate_test_config_login")
+        .execute(&pool)
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(with_listed.status.code(), Some(0), "{}", text(&with_listed));
+    assert!(text(&with_listed).contains("grants: as the release means them"));
+    assert_eq!(without.status.code(), Some(5), "{}", text(&without));
+    assert!(
+        text(&without).contains("migrate_test_config_login"),
+        "{}",
+        text(&without)
+    );
+    assert!(!text(&without).contains(&password));
+}
+
 #[sqlx::test]
 async fn the_command_line_reads_the_url_from_a_file(pool: PgPool) {
     let _roles = SERVER_ROLES.lock().await;

@@ -49,6 +49,7 @@ const USAGE: &str = "usage: bezent-migrate (--config <path> | --url-file <path> 
                            the process environment)
   --check                  change nothing; exit 3 if migrations are pending, 4 if the history diverges
   --login <name>           a service or operator login of this deployment (not a stray); repeatable
+                           (a --config file can list them as `logins`)
   --grants <mode>          enforce (default), report or skip the catalogue-wide grants check
   --lock-timeout <seconds> fail instead of waiting longer than this for a lock (default 300; 0 = wait)
 Each migration commits on its own: a failure at version N leaves the versions before N applied, exits 1
@@ -229,7 +230,13 @@ async fn run(args: Args) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
     let mut conn = pool.acquire().await.map_err(|e| format!("store: {e}"))?;
-    let findings = bezent_migrate::catalogue_findings(&mut conn, &args.logins).await?;
+    let mut logins = args.logins.clone();
+    if let Some(path) = &args.config {
+        logins.extend(
+            bezent_migrate::owner::OwnerConfig::from_file(std::path::Path::new(path))?.logins,
+        );
+    }
+    let findings = bezent_migrate::catalogue_findings(&mut conn, &logins).await?;
     if findings.is_empty() {
         println!("grants: as the release means them");
         return Ok(ExitCode::SUCCESS);

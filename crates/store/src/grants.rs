@@ -269,6 +269,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "admitted_tokens",
             "event_log(seq)",
             "intents",
+            "networks(network)",
             "prepared_transactions",
             "signatures",
             "signed_transactions(id,intent_id)",
