@@ -70,7 +70,10 @@
 //! `late-mint-check-failed` page is), naming the reference, the attempt and the signed transaction:
 //! the prover is not deciding and a mint waits on it. It is never a pause and never the alert: it
 //! asks an operator to look, and the operator learns either that the prover is stuck or that a key
-//! may be compromised. The row stays open: if the prover later decides against the mint, the alert
+//! may be compromised. While the row is still held with the prover still silent, the page repeats
+//! once a day ([`HELD_REPAGE_EVERY`]; review of the fix round of #77: an unbounded hold had no
+//! further escalation). The last page is read from the event log, so a restart repeats nothing
+//! early and forgets nothing; the repeat is a page too, never a pause and never the alert. The row stays open: if the prover later decides against the mint, the alert
 //! still raises (once); if for the mint, the row settles.
 //!
 //! **`max_walk`.** When the nonce is consumed, the prover finds the consuming block by walking back
@@ -113,6 +116,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::{PgConnection, PgPool};
 
@@ -130,6 +134,10 @@ pub const PAGE_AFTER_FAILURES: i32 = 3;
 /// over old history an undecided mint can page before the prover has had its turn. Otherwise the
 /// prover is down or stuck, or it cannot decide (`max_walk`), or a key is compromised.
 pub const HELD_PAGE_AFTER_CYCLES: i32 = 60;
+
+/// How long after a `late-mint-prover-silent` page the next one is made, while the same mint is
+/// still held with the prover still silent.
+pub const HELD_REPAGE_EVERY: chrono::Duration = chrono::Duration::days(1);
 
 /// How many open rows one cycle looks at.
 const BATCH: i64 = 1_000;
@@ -190,7 +198,7 @@ fn dedupe(c: &Candidate) -> String {
 /// pause request for each that was a late mint. Returns how many alerts it raised. `pool` connects
 /// as the core's login. Safe to repeat: an observation raises at most one. One mint that cannot be
 /// looked at never stops the others.
-pub async fn watch(pool: &PgPool) -> sqlx::Result<usize> {
+pub async fn watch(pool: &PgPool, now: DateTime<Utc>) -> sqlx::Result<usize> {
     let mut conn = pool.acquire().await?;
     let candidates: Vec<Candidate> = sqlx::query_as(
         "SELECT o.id AS observation_id, o.network, o.block_number, o.block_hash, o.position_index, \
@@ -208,7 +216,7 @@ pub async fn watch(pool: &PgPool) -> sqlx::Result<usize> {
     .await?;
     let mut raised = 0;
     for c in candidates {
-        match look(pool, &mut conn, &c).await {
+        match look(pool, &mut conn, &c, now).await {
             Ok(true) => raised += 1,
             Ok(false) => {}
             Err(e) => failed(&mut conn, &c, &e).await,
@@ -229,15 +237,15 @@ pub struct Watcher {
 impl Watcher {
     /// [`watch`], and the count of its failures: a failure warns, and pages once when it has
     /// happened [`PAGE_AFTER_FAILURES`] cycles in a row. Never fails the cycle.
-    pub async fn cycle(&self, pool: &PgPool) {
-        let Err(e) = watch(pool).await else {
+    pub async fn cycle(&self, pool: &PgPool, now: DateTime<Utc>) {
+        let Err(e) = watch(pool, now).await else {
             self.failed.store(0, Ordering::Relaxed);
             self.paged.store(false, Ordering::Relaxed);
             return;
         };
         let failures = self.failed.fetch_add(1, Ordering::Relaxed) + 1;
         tracing::warn!(error = %e, failures, "AC-I1.2: late mints not checked; the cycle goes on");
-        if failures < PAGE_AFTER_FAILURES || self.paged.swap(true, Ordering::Relaxed) {
+        if failures < PAGE_AFTER_FAILURES || self.paged.load(Ordering::Relaxed) {
             return;
         }
         let detail = json!({
@@ -245,9 +253,17 @@ impl Watcher {
             "failures": failures,
             "error": e.to_string(),
         });
-        // Best effort: the store is probably what failed. The log line is the page either way.
-        if let Ok(mut conn) = pool.acquire().await {
-            let _ = store::event(&mut conn, "late-mint-watch-failed", None, &detail).await;
+        // Best effort: the store is probably what failed. The log line is the page either way, but
+        // the streak counts as paged only when the event is in the log: a failed insert leaves it
+        // to the next cycle, so the page is never a log line alone for good.
+        let recorded = match pool.acquire().await {
+            Ok(mut conn) => store::event(&mut conn, "late-mint-watch-failed", None, &detail)
+                .await
+                .is_ok(),
+            Err(_) => false,
+        };
+        if recorded {
+            self.paged.store(true, Ordering::Relaxed);
         }
         tracing::error!(kind = %"late-mint-watch-failed", %detail,
             "page: the core cannot list the mints to check against their proofs, cycle after cycle; no late mint would be seen");
@@ -255,7 +271,12 @@ impl Watcher {
 }
 
 /// Looks at one candidate, and settles it or leaves it open. Returns whether it raised the alert.
-async fn look(pool: &PgPool, conn: &mut PgConnection, c: &Candidate) -> sqlx::Result<bool> {
+async fn look(
+    pool: &PgPool,
+    conn: &mut PgConnection,
+    c: &Candidate,
+    now: DateTime<Utc>,
+) -> sqlx::Result<bool> {
     if compromise::raised(
         &mut *conn,
         compromise::DETECTOR_CORE,
@@ -269,7 +290,7 @@ async fn look(pool: &PgPool, conn: &mut PgConnection, c: &Candidate) -> sqlx::Re
     match late(conn, c).await? {
         Look::NotLate => settle(conn, c, "not-late").await?,
         Look::Explained => settle(conn, c, "explained").await?,
-        Look::Held(wait) => hold(conn, c, &wait).await?,
+        Look::Held(wait) => hold(conn, c, &wait, now).await?,
         Look::Late(why) => {
             let alert = json!({
                 "spec": "AC-I1.2, REQ-IC-4, INV-8",
@@ -321,8 +342,14 @@ async fn settle(conn: &mut PgConnection, c: &Candidate, verdict: &str) -> sqlx::
 
 /// The candidate was looked at and stays open, waiting on the prover. A cycle that finds an
 /// attempt with no record from the prover though its era is over counts, and the count reaching
-/// [`HELD_PAGE_AFTER_CYCLES`] pages once. It never raises the alert and never pauses.
-async fn hold(conn: &mut PgConnection, c: &Candidate, wait: &Wait) -> sqlx::Result<()> {
+/// [`HELD_PAGE_AFTER_CYCLES`] pages, and a cycle that still finds the prover silent pages again once a
+/// day ([`HELD_REPAGE_EVERY`]). It never raises the alert and never pauses.
+async fn hold(
+    conn: &mut PgConnection,
+    c: &Candidate,
+    wait: &Wait,
+    now: DateTime<Utc>,
+) -> sqlx::Result<()> {
     let cycles: i32 = sqlx::query_scalar(
         "UPDATE late_mint_checks SET checked_at = now(), failures = 0, \
              held_cycles = held_cycles + $2 WHERE observation_id = $1 RETURNING held_cycles",
@@ -332,9 +359,20 @@ async fn hold(conn: &mut PgConnection, c: &Candidate, wait: &Wait) -> sqlx::Resu
     .fetch_one(&mut *conn)
     .await?;
     let id = c.observation_id.to_string();
-    if cycles < HELD_PAGE_AFTER_CYCLES
-        || store::has_event(conn, "late-mint-prover-silent", None, "observation", &id).await?
-    {
+    if cycles < HELD_PAGE_AFTER_CYCLES {
+        return Ok(());
+    }
+    // The last page of this mint, from the log (a page before this change has no `at`: its
+    // append time stands). Quiet within the day; a cycle that no longer finds the prover silent
+    // (an era still open) has nothing to repeat.
+    let last: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT max(COALESCE((payload ->> 'at')::timestamptz, appended_at)) FROM event_log \
+         WHERE kind = 'late-mint-prover-silent' AND transfer_id IS NULL AND payload ->> 'observation' = $1",
+    )
+    .bind(&id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if last.is_some_and(|l| !wait.over || now < l + HELD_REPAGE_EVERY) {
         return Ok(());
     }
     let detail = json!({
@@ -345,6 +383,8 @@ async fn hold(conn: &mut PgConnection, c: &Candidate, wait: &Wait) -> sqlx::Resu
         "on_chain_reference": hex0x(&c.reference),
         "event": c.event,
         "held_cycles": cycles,
+        "repeat": last.is_some(),
+        "at": now.to_rfc3339(),
         "final_head": wait.head,
         "attempts": wait.attempts,
         "meaning": "the prover has recorded nothing for these attempts of the reference (no proof, inclusion or anomaly) though their eras are over, and a mint of the reference waits on it: the prover is down or stuck, an inclusion older than its max_walk is never recorded, or a key is compromised; nothing is raised or paused",

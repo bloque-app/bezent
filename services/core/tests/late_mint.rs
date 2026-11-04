@@ -840,6 +840,51 @@ async fn ac_i1_2_a_prover_that_never_decides_pages_once_without_a_pause_and_the_
     assert_page(&log, "late-mint-prover-silent", 1);
 }
 
+/// Review of the fix round of #77: an unbounded hold had a single page and nothing after it. While
+/// the mint is still held with the prover still silent the page repeats once a day, from the log
+/// (so a restart neither repeats early nor forgets), and it is never a pause and never the alert.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_prover_that_stays_silent_is_paged_again_each_day_across_restarts_and_never_pauses(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    set_era(&w, id, 2, 90, 150).await;
+    mint_final_at(&w.admin, 105, &reference, 152).await;
+    let pauses_before = all_pauses(&w).await;
+    for _ in 0..HELD_PAGE_AFTER_CYCLES {
+        w.cycle(now()).await;
+    }
+    assert_eq!(silent_pages(&w).await, 1, "the first page, at the bound");
+    let day = chrono::Duration::days(1);
+    w.cycle(now() + day - chrono::Duration::minutes(1)).await;
+    assert_eq!(silent_pages(&w).await, 1, "quiet within the day");
+    w.restarted()
+        .await
+        .cycle(now() + day - chrono::Duration::minutes(1))
+        .await
+        .unwrap();
+    assert_eq!(silent_pages(&w).await, 1, "a restart repeats nothing early");
+    w.cycle(now() + day).await;
+    assert_eq!(silent_pages(&w).await, 2, "a day on, the page repeats");
+    w.cycle(now() + day).await;
+    w.restarted().await.cycle(now() + day).await.unwrap();
+    assert_eq!(silent_pages(&w).await, 2, "once a day, restart or not");
+    w.restarted().await.cycle(now() + day * 2).await.unwrap();
+    assert_eq!(silent_pages(&w).await, 3, "and the day after");
+    assert_eq!(
+        (
+            alerts(&w).await,
+            all_pauses(&w).await,
+            open_checks(&w).await
+        ),
+        (0, pauses_before, 1),
+        "a page is not a pause, and the row stays open"
+    );
+}
+
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn ac_i1_2_an_attempt_within_its_era_never_pages_however_long_it_waits(
     options: PgPoolOptions,
@@ -912,6 +957,38 @@ async fn ac_i1_2_real_signing_rows_always_name_their_era_and_one_without_waits_o
     assert_eq!((alerts(&w).await, open_checks(&w).await), (0, 1));
     assert_eq!(silent_pages(&w).await, 1);
     assert_eq!(held_cycles(&w, m).await, HELD_PAGE_AFTER_CYCLES);
+}
+
+/// Review of the fix round of #77: the streak counted as paged before the event was inserted, so a
+/// failed insert left a log line and no page in the log, for good. It is paged when the event is in the log.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_page_that_could_not_be_recorded_is_tried_again_not_counted_as_made(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (_, reference) = proven_deposit(&w, 100).await;
+    mint_at(&w.admin, 105, &reference).await;
+    exec(
+        &w.admin,
+        "REVOKE SELECT ON late_mint_checks FROM bezent_core",
+    )
+    .await;
+    for _ in 0..PAGE_AFTER_FAILURES - 1 {
+        w.cycle(now()).await;
+    }
+    // The streak reaches its bound while the core cannot write the log.
+    exec(&w.admin, "REVOKE INSERT ON event_log FROM bezent_core").await;
+    let _ = w.core.cycle(now()).await;
+    assert_eq!(watch_pages(&w).await, 0, "the insert could not be made");
+    let _ = w.core.cycle(now()).await;
+    assert_eq!(watch_pages(&w).await, 0);
+    // The log is writable again: the next cycle makes the page that was not made, and then no more.
+    exec(&w.admin, "GRANT INSERT ON event_log TO bezent_core").await;
+    let _ = w.core.cycle(now()).await;
+    assert_eq!(watch_pages(&w).await, 1, "the page that was missed is made");
+    let _ = w.core.cycle(now()).await;
+    assert_eq!(watch_pages(&w).await, 1, "once");
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]

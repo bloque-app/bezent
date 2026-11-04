@@ -289,7 +289,7 @@ impl Core {
             tracing::warn!(error = %e, "REQ-BK-7: pending movements not posted; the cycle goes on");
         }
         // Issue #26 (AC-I1.2, INV-8): a mint of a reference after its proof raises the alert.
-        self.late_mint.cycle(&self.pool).await;
+        self.late_mint.cycle(&self.pool, now).await;
         let mut report = Report {
             withdrawals: self.withdrawals_from_redemptions().await?,
             ..Report::default()
