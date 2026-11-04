@@ -14,3 +14,15 @@
 /docs/oss/              @bloque-app/bezent-spec-owner
 /REUSE.toml             @bloque-app/bezent-maintainers
 /LICENSES/              @bloque-app/bezent-spec-owner
+
+# The criteria map and the release gate: what V0 must show before it carries value.
+/e2e/criteria/          @bloque-app/bezent-spec-owner
+/release/               @bloque-app/bezent-spec-owner
+
+# The gate itself: code that decides whether V0 may carry value must not be changeable by the release it judges
+# (it runs the tagged commit's own copy). Its CI job is part of the ci.yml file, which the maintainers own; the
+# job's name is what branch protection should require (release/README.md, "Settings that make the gate bind").
+# CODEOWNERS is the spec owner's too: otherwise a maintainer alone could remove these lines.
+/tools/ci/              @bloque-app/bezent-spec-owner
+/.github/CODEOWNERS     @bloque-app/bezent-spec-owner
+/.github/workflows/release-gate.yml  @bloque-app/bezent-spec-owner

@@ -1,0 +1,5 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The human evidence the release gate demands (see release/README.md). Empty on purpose: until the entries exist,
+# the gate fails. A release commit and the entries are added together, in a reviewed pull request.

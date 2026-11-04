@@ -1,0 +1,19 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# F-013: who may sign off a release, by GitHub login. The release gate (tools/ci/release_gate.py) accepts a
+# sign-off only from a login listed here for the role, and never the same person for both roles.
+#
+# Why a file and not the teams: the gate runs with the workflow's own GITHUB_TOKEN, which has no organisation
+# scope, so it cannot read the membership of @bloque-app/bezent-spec-owner or @bloque-app/bezent-maintainers (a
+# workflow's `permissions:` offers no organisation-members scope). A token that could would be
+# a secret the gate does not hold. This list is the reviewed copy of those two teams, kept equal to them by hand:
+# /release/ is the spec owner's in CODEOWNERS, so a change here is a pull request the spec owner approves.
+#
+# EMPTY ON PURPOSE until the spec owner fills it in a reviewed pull request: an empty role fails the gate.
+
+[role.spec-owner]
+members = []
+
+[role.maintainer]
+members = []

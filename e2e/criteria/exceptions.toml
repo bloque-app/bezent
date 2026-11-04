@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# F-013: V0 criteria that have no test at their layer yet, each with the reason and what unblocks it.
+# `tools/ci/criteria_map.py` fails if a criterion has neither a test nor an entry here, and fails if an entry
+# stays after its criterion gets a test (the entry is removed in the pull request that adds the test). A test
+# that only names a criterion is never the way out: a test named for a criterion MUST verify it.
+# Reviewed by the spec owner (CODEOWNERS).
+
+[exception."AC-H3.1"]
+reason = "REQ-ST-6's observables (oldest non-final transfer per route, unknown legs, observation lag, open gaps, fee positions, undelivered notifications) are built by F-014 Operations; none exists yet"
+blocked_by = "#14"
+
+[exception."AC-I3.1"]
+reason = "Verified for manual actions (a review resolution, a release of an unassociated arrival: actor and justification, append-only, tests req_gv_5_* in crates/store/tests/lifecycle_graph.rs); not for a pause, an unpause or a changed bound, which the store records with neither actor nor justification until the operator surface (CTR-OPS) exists"
+blocked_by = "#14"
+
+# A V0 story that SPEC section 6 gives no acceptance criterion. Listed so that a new one cannot appear silently.
+[story_without_criteria."US-H2"]
+reason = "SPEC gives the story no AC-*, only REQ-ST-1 (find a transfer's transactions on each network without bezent's database); this map does not measure REQ-ST-1's tests"
