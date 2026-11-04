@@ -101,7 +101,7 @@ and no role may DELETE or TRUNCATE anything but the dispatcher's own condition h
 | `webhook_secrets`, `webhook_transfer_urls`, `webhook_condition_urls` | ingress |
 | `webhook_deliveries`, `webhook_condition_holds` (and DELETE), `webhook_cursor(after)` UPDATE, `webhook_deliveries(state, attempts, next_attempt_at, leased_until, last_status, last_error, finished_at)` UPDATE | webhook dispatcher |
 | `manual_actions(kind, transfer_id, to_state, network, block_number, block_hash, block_time, justification)`, `manual_approvals(action_id, justification)`, `ledger_accounts(network, address, kind, reason)` | operators |
-| `networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `endpoint_scopes`, `attesting_parties`, `attesting_keys` | nobody: the migration owner's declarations |
+| `networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `endpoint_scopes`, `evm_endpoint_networks`, `attesting_parties`, `attesting_keys` | nobody: the migration owner's declarations |
 
 Who **reads** what (SELECT):
 
@@ -109,7 +109,7 @@ Who **reads** what (SELECT):
 |---|---|
 | core | every record but `requester_credentials`, `requesters`, `requester_grants` and the webhooks' tables |
 | ingress | the declarations (`networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `pauses`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `ledger_accounts_listed`, `attesting_parties`, `attesting_keys`), the requests (`intake`, `intake_answers`, `relayed_instructions`, `attested_reports`), `transfers`, `transitions`, `attempt_milestones`, `observations`, `observation_outcomes`, `event_log`, `event_log_head`, and the views `transfer_status`, `event_log_position`, `book_balances`; of the webhooks' tables, `webhook_deliveries` and the unsealed columns of the secrets and URLs. **No** intent, signature, signed bytes, proof, reading, book entry or posting, or reserve record (the `book_balances` view gives it the balances only) |
-| Kreivo endpoint, EVM endpoint | `networks`, `assets`, `admitted_tokens`, `reserves`, `endpoint_scopes`, `intents`, `signatures`, their own records (`observations`, `observation_outcomes`, `observation_ranges`, `observation_gaps`, `observation_watermarks`, `final_heads`, `prepared_transactions`, `signed_transactions`, `non_execution_proofs`, `reserve_readings`) and `event_log`; the Kreivo endpoint also `observation_walk_anchors` (0052: blocks of a long history walk, so it resumes). **No** transfer, request or book |
+| Kreivo endpoint, EVM endpoint | (the EVM endpoint also `evm_endpoint_networks`, which logins record which EVM network, migration 0056) `networks`, `assets`, `admitted_tokens`, `reserves`, `endpoint_scopes`, `intents`, `signatures`, their own records (`observations`, `observation_outcomes`, `observation_ranges`, `observation_gaps`, `observation_watermarks`, `final_heads`, `prepared_transactions`, `signed_transactions`, `non_execution_proofs`, `reserve_readings`) and `event_log`; the Kreivo endpoint also `observation_walk_anchors` (0052: blocks of a long history walk, so it resumes). **No** transfer, request or book |
 | webhook dispatcher | `event_log`, `event_log_head`, `transfers`, `intake`, `intake_answers`, `requester_grants`, and the webhooks' tables, sealed columns included |
 | signer | `intents` (the signing intent and the core's order), `prepared_transactions`, `signatures`, and since 0049 `admitted_tokens` and `signed_transactions(id, intent_id)` (to compare the bytes it decodes with the core's order: the token an asset is paid in, a cancel's target) and `event_log(seq)` (the position of an alert it appends); nothing else |
 | operators | `attested_reports`, `manual_actions`, `manual_approvals`, `reviews`, `unassociated_arrivals`, `ledger_accounts`, `ledger_accounts_listed`, `book_quarantine`, `surplus_funding_addresses`, `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_statement_objects`, `reserve_readings` |
@@ -279,6 +279,19 @@ stop working as soon as it runs. As the migration owner, on the release's store:
    It sets no `statement_timeout`: a long migration is not an error.
 3. **Bring every login to its role alone**: run the block below once per service login, with the
    login's name and its role. It is safe on a login made for an earlier release, and on a new one.
+   **An EVM endpoint login also needs its network** (migration 0056, `DEC-8`). Each EVM endpoint instance
+   records one network, and the store refuses every record of an EVM network its login is not mapped to
+   (`BZ001`). As the migration owner, insert one row per login and network, **before starting that instance**:
+
+   ```sql
+   -- deploy: one row per EVM endpoint login and the one network it runs
+   INSERT INTO evm_endpoint_networks (login, network) VALUES ('bezent_evm_base_prod', 'base');
+   ```
+
+   The EVM endpoint refuses to start if its login has no row for its own network, naming both. A login that
+   already held `bezent_evm_endpoint` when 0056 ran was mapped to **every** EVM origin network declared at that
+   moment; delete the surplus rows (`DELETE FROM evm_endpoint_networks WHERE login = '…' AND network <> '…'`) so
+   each login keeps only its own. Other services read nothing of this table.
 4. **Make each operator's login** (one per person, below) and bring it to `bezent_operator` the same way.
 5. **Check** every login (the query at the end) and **start** the services. Each runs its own check
    before it serves and refuses to start, saying why, if anything is left.

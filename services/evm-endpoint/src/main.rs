@@ -141,6 +141,10 @@ async fn run(config: Config) -> Result<(), String> {
     bezent_store::login::check_login(&pool, bezent_store::EVM_ENDPOINT_ROLE)
         .await
         .map_err(|e| format!("refusing to start: {e}"))?;
+    // And it is this instance's network the login is mapped to (migration 0056, DEC-8).
+    network::check_mapping(&pool, &config.network)
+        .await
+        .map_err(|e| format!("refusing to start: {e}"))?;
     let declarations = network::declarations(&pool, &config.network, checked.vault).await?;
     let lane = Lane {
         key: config.lane.key.clone(),

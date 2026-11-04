@@ -114,6 +114,62 @@ async fn ac_i4_1_the_store_must_declare_the_configured_vault(
     assert!(e.contains("not declared as an EVM origin network"), "{e}");
 }
 
+/// DEC-8, migration 0056: an instance whose login has no `evm_endpoint_networks` row for its own
+/// network would pass `check_login` and then fail every write with `BZ001`; it is refused at
+/// start-up instead, naming the login and the network. A row for another network does not help.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn dec_8_a_login_not_mapped_to_its_network_refuses_to_start(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let admin = pool.connect_with(connect.clone()).await.unwrap();
+    common::declare(&admin).await;
+    // The mapped login (declare maps `evm_endpoint_tests_<role>` to the network) starts.
+    let mapped = common::role_pool(&connect, bezent_store::EVM_ENDPOINT_ROLE).await;
+    network::check_mapping(&mapped, NETWORK).await.unwrap();
+    bezent_store::login::check_login(&mapped, bezent_store::EVM_ENDPOINT_ROLE)
+        .await
+        .unwrap();
+
+    // It is not mapped to a network it does not run.
+    let e = network::check_mapping(&mapped, "elsewhere")
+        .await
+        .unwrap_err();
+    assert!(
+        e.contains("evm_endpoint_tests_bezent_evm_endpoint") && e.contains("elsewhere"),
+        "{e}"
+    );
+
+    // A login created after the migration, holding the role, with no row: passes check_login.
+    bezent_store::login::ensure_login(
+        &admin,
+        "evm_endpoint_tests_unmapped",
+        bezent_store::EVM_ENDPOINT_ROLE,
+        "00ff00ff",
+    )
+    .await
+    .unwrap();
+    let options = (*admin.connect_options())
+        .clone()
+        .username("evm_endpoint_tests_unmapped")
+        .password("00ff00ff");
+    let unmapped = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    bezent_store::login::check_login(&unmapped, bezent_store::EVM_ENDPOINT_ROLE)
+        .await
+        .unwrap();
+    let e = network::check_mapping(&unmapped, NETWORK)
+        .await
+        .unwrap_err();
+    assert!(
+        e.contains("evm_endpoint_tests_unmapped") && e.contains(NETWORK) && e.contains("DEC-8"),
+        "{e}"
+    );
+}
+
 /// The delivery key's address in these checks.
 fn lane() -> Address {
     Address::repeat_byte(0x44)

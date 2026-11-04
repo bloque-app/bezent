@@ -240,7 +240,7 @@ jobs:
         if: failure()
         run: cat "$RUNNER_TEMP/vault.log"
 
-  # F-009: the EVM endpoint against an anvil fork of Polygon at the block e2e/evm/forks.env pins,
+  # F-009: the EVM endpoint against an anvil fork of Polygon, Base and BNB Chain at the block e2e/evm/forks.env pins,
   # with F-008's vault deployed by its own script and Foundry's test keys (services/evm-endpoint/
   # tests/fork.rs). anvil reads the pinned state from the upstream archive RPC; nothing is sent to
   # a real network.
@@ -251,6 +251,10 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       BEZENT_EVM_FORK_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.drpc.org' }}
+      # Base and BNB Chain (M-2): the same secret names e2e-evm.yml reads, the same keyless public
+      # fallbacks. Without them fork.rs skips that network and passes.
+      BEZENT_EVM_FORK_URL_BASE: ${{ secrets.BASE_RPC_URL || 'https://mainnet.base.org' }}
+      BEZENT_EVM_FORK_URL_BSC: ${{ secrets.BSC_RPC_URL || 'https://bsc-mainnet.public.blastapi.io' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -273,7 +277,7 @@ jobs:
         with:
           path: ~/.foundry/cache/rpc
           key: evm-endpoint-fork-${{ hashFiles('e2e/evm/forks.env', 'services/evm-endpoint/tests/fork.rs') }}
-      - name: "T-009-01 to T-009-06 on the Polygon fork"
+      - name: "T-009-01 to T-009-06 on the Polygon, Base and BNB Chain forks"
         run: cargo test -p bezent-evm-endpoint --test fork --locked -- --test-threads=1
 
   # Licensing (docs/oss/LICENSING.md): every tracked file carries its licence (an SPDX header where

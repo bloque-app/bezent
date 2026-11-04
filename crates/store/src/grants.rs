@@ -226,7 +226,8 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         KREIVO_ENDPOINT_INSERT,
     ),
     (crate::KREIVO_ENDPOINT_ROLE, "EXECUTE", ENDPOINT_EXECUTE),
-    (crate::EVM_ENDPOINT_ROLE, "SELECT", ENDPOINT_SELECT),
+    // Its own login-to-network mapping (migration 0056): read only, to be told why it was refused.
+    (crate::EVM_ENDPOINT_ROLE, "SELECT", EVM_ENDPOINT_SELECT),
     (crate::EVM_ENDPOINT_ROLE, "INSERT", ENDPOINT_INSERT),
     (crate::EVM_ENDPOINT_ROLE, "EXECUTE", ENDPOINT_EXECUTE),
     // The webhook dispatcher (migration 0044): the sealed secrets and URLs, the cursor, the holds
@@ -340,11 +341,14 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
-const ENDPOINT_SELECT: &[&str] = &[
+/// What the EVM endpoint reads: the endpoints' common tables and its login-to-network mapping
+/// (migration 0056).
+const EVM_ENDPOINT_SELECT: &[&str] = &[
     "admitted_tokens",
     "assets",
     "endpoint_scopes",
     "event_log",
+    "evm_endpoint_networks",
     "final_heads",
     "intents",
     "networks",
@@ -373,7 +377,7 @@ const ENDPOINT_INSERT: &[&str] = &[
     "signed_transactions",
 ];
 
-/// [`ENDPOINT_SELECT`] and the Kreivo endpoint's walk anchors.
+/// What the Kreivo endpoint reads: the endpoints' common tables and its walk anchors.
 const KREIVO_ENDPOINT_SELECT: &[&str] = &[
     "admitted_tokens",
     "assets",

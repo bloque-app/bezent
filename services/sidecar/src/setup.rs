@@ -106,7 +106,9 @@ pub async fn seed(owner: &PgPool, requesters: &[(String, String, String)]) -> Re
              window_seconds, capacity, cutoffs, completion_budget_seconds) VALUES \
            ('{ASSET}', '{ORIGIN}', 'deposit', 100, 1000000000, 10000000000, 86400, 100, '[]', 3600), \
            ('{ASSET}', '{ORIGIN}', 'withdrawal', 100, 1000000000, 10000000000, 86400, 100, '[]', 3600) \
-           ON CONFLICT DO NOTHING;"
+           ON CONFLICT DO NOTHING; \
+         INSERT INTO evm_endpoint_networks (login, network) VALUES \
+           ('{LOGIN_DRIVER_EVM}', '{ORIGIN}') ON CONFLICT DO NOTHING;"
     ))
     .execute(&mut *tx)
     .await
