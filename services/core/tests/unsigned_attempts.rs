@@ -270,10 +270,12 @@ async fn req_rv_1_a_later_attempt_the_endpoint_never_prepares_goes_to_review_fro
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_eo_3_an_endpoint_that_returns_before_the_deadline_delivers_as_usual(
+async fn req_eo_3_an_endpoint_absent_for_cycles_that_returns_just_before_the_deadline_delivers(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
+    // The deadline is read on every cycle the endpoint is absent; one head short of it, the
+    // endpoint prepares and the delivery proceeds to a signed transaction, with no review.
     let w = World::new(options, connect).await;
     reserve(&w.admin, 1_000_000).await;
     let id = withdrawal(&w, 20, [9; 32]).await;
@@ -281,11 +283,76 @@ async fn req_eo_3_an_endpoint_that_returns_before_the_deadline_delivers_as_usual
     head(&w.admin, ORIGIN, 22 + BUDGET - 10).await;
     w.settle(t0()).await;
     assert_eq!(w.state(id).await.0, "Source-Final");
-    // The endpoint comes back with time to spare: the delivery proceeds as usual, to a signed
-    // transaction, and nothing goes to review.
     deliver(&w, id, 1, t0()).await;
     assert_eq!(w.state(id).await.0, "Delivering");
     assert_eq!(w.count("SELECT count(*) FROM signed_transactions").await, 1);
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_eo_3_an_order_written_after_the_attempts_deadline_gives_the_endpoint_a_full_budget(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // Issue #48, review must-fix: the source leg was final long ago (a long hold or wait for a
+    // declaration came first), so the attempt's own clock is past the deadline when the order is
+    // finally written. The endpoint has not yet had one cycle: the transfer is not in review.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let reference = [10; 32];
+    let r = redemption(&w.admin, 20, &reference, 700).await;
+    decide(&w.admin, r, "final", 22).await;
+    let late = 22 + 5 * BUDGET;
+    head(&w.admin, ORIGIN, late).await;
+    for _ in 0..3 {
+        w.cycle(t0()).await;
+    }
+    let id: i64 = scalar(
+        &w.admin,
+        &format!(
+            "SELECT id FROM transfers WHERE kind = 'withdrawal' AND on_chain_reference = '\\x{}'",
+            hex::encode(reference)
+        ),
+    )
+    .await;
+    assert!(order(&w.admin, id, 1).await.is_some(), "an order");
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    // Still inside the budget from the order: nothing, however long the source leg was final.
+    head(&w.admin, ORIGIN, late + BUDGET - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    // The endpoint comes back, prepares and the delivery proceeds.
+    deliver(&w, id, 1, t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_eo_3_an_order_written_after_the_deadline_still_has_one_when_the_endpoint_stays_absent(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let reference = [11; 32];
+    let r = redemption(&w.admin, 20, &reference, 700).await;
+    decide(&w.admin, r, "final", 22).await;
+    let late = 22 + 5 * BUDGET;
+    head(&w.admin, ORIGIN, late).await;
+    for _ in 0..3 {
+        w.cycle(t0()).await;
+    }
+    let id: i64 = scalar(
+        &w.admin,
+        &format!(
+            "SELECT id FROM transfers WHERE kind = 'withdrawal' AND on_chain_reference = '\\x{}'",
+            hex::encode(reference)
+        ),
+    )
+    .await;
+    head(&w.admin, ORIGIN, late + BUDGET + 10).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
 }
 
 /// Operator `by` records, as their own login, a resolution of transfer `id` into `to` resting on
@@ -402,4 +469,52 @@ async fn inv_8_a_signed_attempt_that_is_not_proven_still_blocks_the_refund(
         ))
         .await;
     assert_eq!(refused, 1);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_9_a_preparation_arriving_after_the_review_is_not_used_by_the_resolution_delivery(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // Attempt 2 was ordered, the endpoint was absent, and the transfer went to review. The
+    // endpoint then writes a passing preparation for that old order. The operator's resolution
+    // into a delivery runs on attempt 2 again: it must not sign over bytes prepared before the
+    // evidence the operator ruled on.
+    let w = World::new(options, connect).await;
+    let id = second_attempt_never_prepared(&w, [12; 32]).await;
+    head(&w.admin, ORIGIN, 100 + BUDGET + 10).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    let (old, _) = order(&w.admin, id, 2).await.unwrap();
+    let stale = prepare(&w.admin, old, None).await;
+
+    let action = resolution(&w, id, "Delivering", ORIGIN, 100, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    w.settle(t0()).await;
+    // No signing intent over the late row; a new order waits for its own preparation.
+    let over_stale: i64 = w
+        .count(&format!(
+            "SELECT count(*) FROM intents WHERE transfer_id = {id} AND payload ->> 'prepared' = '{stale}'"
+        ))
+        .await;
+    assert_eq!(over_stale, 0, "a signing intent over a stale preparation");
+    let (fresh, _) = order(&w.admin, id, 2).await.unwrap();
+    assert!(fresh > old, "a new order for the resolution");
+    // Its own preparation is used as usual.
+    prepare(&w.admin, fresh, None).await;
+    w.settle(t0()).await;
+    let (s, _) = signing_intent(&w.admin, id, 2)
+        .await
+        .expect("a signing intent");
+    sign(&w, s).await;
+    w.settle(t0()).await;
+    // The resolution's delivery ran on the fresh order (the head is past this attempt's own
+    // deadline, so the signed attempt may be back in review by now).
+    let ran: i64 = w
+        .count(&format!(
+            "SELECT count(*) FROM transitions WHERE transfer_id = {id} \
+               AND to_state = 'Delivering' AND attempt = 2 AND manual_action_id = {action}"
+        ))
+        .await;
+    assert_eq!(ran, 1);
 }

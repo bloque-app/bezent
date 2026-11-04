@@ -166,10 +166,12 @@ Still open from the verification: F3 (an attempt ordered but never signed blocks
     waits for the allowance (no review, amendment 0012) and `CND-DestinationRefused` has its own deadline. Time spent
     under a gate counts, since §10 gives it no restart. It is never a refund or a retry on its own (`REQ-RF-1`).
     An attempt whose preparation never happens at all (the endpoint is down, so no preparation row, refused or not,
-    exists) has the same deadline on the same clock (issue #48): `deliver` asks `unprepared_deadline` where it finds
-    an order and no preparation. It is read only on the endpoint path; a backend with no endpoint has no such path.
-    **Ruled:** the §5.4 rows gain this occasion by
-    amendment 0013 (SPEC v0.5.3, pull request #47).
+    exists) has the same deadline (issue #48), counted from the later of the attempt's clock and the moment the
+    order was written, on the destination's clock: `deliver` asks `unprepared_deadline` where it finds an order and no
+    preparation. It is read only on the endpoint path; a backend with no endpoint has no such path. **Not ruled:** the
+    never-prepared occasion is amendment 0020, proposed; pull request #71 waits for the ruling.
+    **Ruled:** the §5.4 rows gain the refused-preparation occasion by amendment 0013 (SPEC v0.5.3, pull request #47).
+    A resolution's delivery orders anew and never signs over a preparation of an earlier order (`INV-9`).
 25. **An attempt ordered and never signed is cancelled by the refund that needs it gone** (issue #25, the
     verification's F3; `INV-8`, `REQ-RF-1`, `REQ-GV-5`, `REQ-RV-2`; migration `0051`). Attempt n+1, ordered after
     attempt n was proven not executed and then never signed, has an intent and nothing to prove, so

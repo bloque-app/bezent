@@ -1430,13 +1430,19 @@ impl Core {
         // 1. The order.
         let latest_order: Option<i64> = sqlx::query_scalar(
             "SELECT id FROM intents WHERE transfer_id = $1 AND attempt = $2 AND purpose = $3 \
-               AND payload ? 'order' ORDER BY id DESC LIMIT 1",
+               AND payload ? 'order' \
+               AND ($4::bigint IS NULL OR recorded_at >= \
+                    (SELECT recorded_at FROM manual_actions WHERE id = $4)) \
+             ORDER BY id DESC LIMIT 1",
         )
         .bind(t.id)
         .bind(attempt)
         .bind(purpose)
+        .bind(manual)
         .fetch_optional(&mut *conn)
         .await?;
+        // A resolution's delivery orders anew: an order, and any preparation, from before the
+        // evidence the operator ruled on is not used (INV-9).
         let Some(order_id) = latest_order else {
             self.record_intent(conn, t, purpose, &reference, scope, attempt, &order)
                 .await?;
@@ -1478,12 +1484,20 @@ impl Core {
         else {
             // Ordered, and the endpoint has prepared nothing (it is down): the same deadline as a
             // refused preparation (issue #48). Only this endpoint path reads it.
-            return self.unprepared_deadline(conn, t, None, from, attempt).await;
+            return self
+                .unprepared_deadline(conn, t, None, from, attempt, Some(order_id))
+                .await;
         };
         if prepared_network != order_network || order_network != t.destination_network {
             tracing::error!(transfer = %t.bridge_reference, prepared = prepared_id, %prepared_network, %order_network,
                 "INV-9: a preparation on another network than its order's; no signing intent is recorded");
             return Ok(Did::default());
+        }
+        if passed && prepared_order != order_id {
+            // A passing row of an earlier order (it arrived late) is never signed over.
+            return self
+                .unprepared_deadline(conn, t, None, from, attempt, Some(order_id))
+                .await;
         }
         if !passed {
             // A refusal that is not the allowance's does not keep a payout window hold (S-2).
@@ -1493,7 +1507,9 @@ impl Core {
             if prepared_order != order_id {
                 // A new order waits for its preparation; a refusal that keeps coming back still
                 // has its deadline (issue #25).
-                return self.unprepared_deadline(conn, t, held, from, attempt).await;
+                return self
+                    .unprepared_deadline(conn, t, held, from, attempt, None)
+                    .await;
             }
             let mut did = self.hold(conn, t, held).await?;
             // A failed dry run is not prepared again: a new order, after a while (F-007 NOTES 5).
@@ -1504,7 +1520,7 @@ impl Core {
             }
             if !did.moved {
                 let due = self
-                    .unprepared_deadline(conn, t, held, from, attempt)
+                    .unprepared_deadline(conn, t, held, from, attempt, None)
                     .await?;
                 did.moved |= due.moved;
             }
@@ -1853,8 +1869,8 @@ impl Core {
     /// resume by themselves (§10), and `CND-DestinationRefused` has its own deadline.
     ///
     /// A preparation that never happens (the endpoint is down, so no row exists) has the same
-    /// deadline (issue #48); the order is already recorded then, and the clock is the attempt's,
-    /// not the order's. Only the endpoint path in [`Core::deliver`] asks.
+    /// deadline (issue #48), counted from the later of the attempt's clock and the order's (`ordered`).
+    /// Only the endpoint path in [`Core::deliver`] asks.
     ///
     /// Not for a delivery a review resolution runs: the transfer is in review already.
     async fn unprepared_deadline(
@@ -1864,6 +1880,7 @@ impl Core {
         held: Option<Condition>,
         from: State,
         attempt: i32,
+        ordered: Option<i64>,
     ) -> sqlx::Result<Did> {
         if from == State::NeedsReview || held.is_some() || t.condition().is_some() {
             return Ok(Did::default());
@@ -1888,7 +1905,20 @@ impl Core {
         .bind(t.id)
         .fetch_one(&mut *conn)
         .await?;
-        let start = released.map_or(start, |r| r.max(start));
+        let mut start = released.map_or(start, |r| r.max(start));
+        if let Some(order) = ordered {
+            // The endpoint is given the route's time from when the order was written, on the
+            // destination's clock: the latest final head the core had seen then.
+            let at: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT max(h.block_time) FROM final_heads h JOIN intents o ON o.id = $1 \
+                 WHERE h.network = $2 AND h.seen_at <= o.recorded_at",
+            )
+            .bind(order)
+            .bind(&t.destination_network)
+            .fetch_one(&mut *conn)
+            .await?;
+            start = at.map_or(start, |a| a.max(start));
+        }
         let deadline = self.deadline(conn, t, start).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
