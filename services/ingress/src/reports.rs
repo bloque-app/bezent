@@ -141,10 +141,14 @@ fn minor_units(field: &str, text: &str, at_least: u128) -> Result<u128, ApiError
     let canonical = !text.is_empty()
         && text.bytes().all(|b| b.is_ascii_digit())
         && (text == "0" || !text.starts_with('0'));
+    // The store holds up to `u128::MAX`, and the book is signed: an amount above `i128::MAX`
+    // would be recorded and then be one the reserve check cannot add (INV-11), stalling the
+    // backend's check until someone repaired an append-only table. Refused here instead.
     match text.parse::<u128>() {
-        Ok(n) if canonical && n >= at_least => Ok(n),
+        Ok(n) if canonical && n >= at_least && i128::try_from(n).is_ok() => Ok(n),
         _ => malformed(format!(
-            "{field} is a decimal string of exact minor units, at least {at_least} (INV-11)"
+            "{field} is a decimal string of exact minor units, from {at_least} to {} (INV-11)",
+            i128::MAX
         )),
     }
 }
@@ -472,7 +476,9 @@ async fn decide(conn: &mut PgConnection, d: &Document) -> Result<Decision, ApiEr
             }
             Ok(Decision::Take)
         }
-        // REQ-BE-6: of a payment reported final, named by its report; never more than it.
+        // REQ-BE-6: of a payment reported final, named by its report; never more than it. A reversal
+        // that was restored is no longer reversed, so it does not count against the arrival: a
+        // second real chargeback after a restoration is as good as the first.
         Kind::Reversal => {
             let reverses = d.reverses.as_deref().unwrap_or("");
             let Some(arrival) = earlier(conn, &d.network, &d.asset, "arrival", reverses).await?
@@ -480,9 +486,12 @@ async fn decide(conn: &mut PgConnection, d: &Document) -> Result<Decision, ApiEr
                 return Ok(Decision::Refuse(SOURCE_NOT_FOUND));
             };
             let before: Option<String> = sqlx::query_scalar(
-                "SELECT sum((body ->> 'amount')::numeric)::text FROM attested_reports \
-                 WHERE network = $1 AND asset = $2 AND kind = 'reversal' \
-                   AND body ->> 'reverses' = $3",
+                "SELECT sum((v.body ->> 'amount')::numeric)::text FROM attested_reports v \
+                 WHERE v.network = $1 AND v.asset = $2 AND v.kind = 'reversal' \
+                   AND v.body ->> 'reverses' = $3 \
+                   AND NOT EXISTS (SELECT 1 FROM attested_reports r \
+                                   WHERE r.network = v.network AND r.kind = 'restoration' \
+                                     AND r.body ->> 'restores' = v.report_id)",
             )
             .bind(&d.network)
             .bind(&d.asset)

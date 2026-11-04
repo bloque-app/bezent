@@ -1006,6 +1006,19 @@ async fn decide_extras(
         if !w.attesting {
             return Err(ApiError::NotAuthorised);
         }
+        // Extras are written once (REQ-RQ-4), and an attested redemption's one write is the
+        // instructions its commitment stands for (REQ-RQ-9). An expiry alone would spend the
+        // only write, and the instructions after it would be a different body for the same
+        // redemption (`ERR-ReferenceConflict`) while the withdrawal waits for them. Nothing is
+        // recorded, so the request reference is not spent (`ERR-Malformed`: lacks a field its
+        // kind requires).
+        if request.instructions.is_none() {
+            return Err(ApiError::Malformed(
+                "an attested backend's extras carry the instructions, with or without an expiry \
+                 (REQ-RQ-4, REQ-RQ-9)"
+                    .into(),
+            ));
+        }
     }
     // Never to a finished withdrawal.
     if w.terminal {

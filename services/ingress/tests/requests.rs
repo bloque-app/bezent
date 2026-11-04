@@ -919,17 +919,18 @@ async fn req_rq_4_extras_of_an_attested_backend_need_the_attesting_grant(pool: P
         "INSERT INTO requester_grants (requester, grant_kind) VALUES ('beta', 'withdrawal')",
     )
     .await;
-    withdrawal(
-        &pool,
-        1,
-        ATTESTED,
-        "b1",
-        Some(&format!("0x{}", "11".repeat(32))),
-    )
-    .await;
+    let instructions = b"\x04bank-account-and-reference";
+    let commitment = {
+        use blake2::Digest;
+        hex::encode(blake2::Blake2b::<blake2::digest::consts::U32>::digest(
+            instructions,
+        ))
+    };
+    withdrawal(&pool, 1, ATTESTED, "b1", Some(&format!("0x{commitment}"))).await;
     let extras = json!({
         "request_reference": "x-1",
         "redemption_reference": "0xb1",
+        "instructions": format!("0x{}", hex::encode(instructions)),
         "expires_at": "2026-12-01T00:00:00Z",
     });
     let (status, answer) = ingress.post("/v0/withdrawals/extras", BETA, &extras).await;
@@ -937,9 +938,28 @@ async fn req_rq_4_extras_of_an_attested_backend_need_the_attesting_grant(pool: P
     assert_eq!(answer["error"], "ERR-NotAuthorised");
     assert_eq!(count(&pool, "intake").await, 0);
 
+    // REQ-RQ-4, REQ-RQ-9: extras are written once, and an attested redemption's write is its
+    // instructions. An expiry alone would spend it, and the instructions after it would be
+    // ERR-ReferenceConflict, with the withdrawal waiting for them. Refused, with
+    // nothing recorded: the reference is not spent either.
+    let expiry_only = json!({
+        "request_reference": "x-0",
+        "redemption_reference": "0xb1",
+        "expires_at": "2026-12-01T00:00:00Z",
+    });
+    let (status, answer) = ingress
+        .post("/v0/withdrawals/extras", ALPHA, &expiry_only)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(answer["error"], "ERR-Malformed");
+    assert_eq!(count(&pool, "intake").await, 0);
+
     let (status, answer) = ingress.post("/v0/withdrawals/extras", ALPHA, &extras).await;
     assert_eq!(status, StatusCode::CREATED, "{answer}");
     assert!(answer.get("error").is_none(), "{answer}");
+    assert_eq!(count(&pool, "relayed_instructions").await, 1);
+    let (_, status) = ingress.get("/v0/transfers/by-bridge/bz-w-b1", ALPHA).await;
+    assert_eq!(status["expires_at"], "2026-12-01T00:00:00Z");
 }
 
 /// `ERR-Malformed` (§10): a request that does not parse, or lacks a field its kind requires.

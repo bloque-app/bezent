@@ -126,3 +126,30 @@ async fn nfr_7_migrations_apply_on_an_empty_database_and_revert(pool: PgPool) {
         .expect("the service migrator agrees with the reversible one");
     assert_eq!(bezent_objects(&pool).await, objects);
 }
+
+/// F-011 (S7): the attested backend's three migrations revert one step at a time and apply again.
+/// 0061 changes functions 0060 made, so reverting it alone must leave 0060's, and 0060 must revert
+/// whole with 0061 gone.
+#[sqlx::test(migrations = false)]
+async fn nfr_7_the_attested_migrations_revert_stepwise_and_apply_again(pool: PgPool) {
+    REVERSIBLE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("migrations apply on an empty database");
+    let objects = bezent_objects(&pool).await;
+    for target in [61, 60, 59] {
+        REVERSIBLE_MIGRATOR
+            .undo(&pool, target)
+            .await
+            .unwrap_or_else(|e| panic!("revert to {target}: {e}"));
+        REVERSIBLE_MIGRATOR
+            .run(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("apply again after {target}: {e}"));
+        assert_eq!(
+            bezent_objects(&pool).await,
+            objects,
+            "up, down to {target}, up"
+        );
+    }
+}

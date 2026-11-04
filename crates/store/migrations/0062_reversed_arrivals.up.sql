@@ -5,8 +5,10 @@
 -- removes this file and the core's and the ingress's one call each.
 
 -- Whether a reversal of the arrival report at this coordinate stands unrestored. False at any other
--- coordinate, on any backend. It reads the report rows, recorded or not: a reversal taken in counts
--- at once. Runs as its caller: the ingress and the core read the reports.
+-- coordinate, on any backend. A reversal counts as soon as it is taken in, recorded or not: a row that
+-- is not verified can only hold. A restoration counts only once the core has recorded it as an
+-- observation, which is after it checked its signature: a row that is not verified must not release
+-- what a reversal holds. Runs as its caller: the ingress and the core read the reports.
 CREATE FUNCTION attested_arrival_reversed(p_network TEXT, p_block BIGINT, p_hash BYTEA)
     RETURNS BOOLEAN
     LANGUAGE sql
@@ -20,6 +22,9 @@ CREATE FUNCTION attested_arrival_reversed(p_network TEXT, p_block BIGINT, p_hash
         WHERE a.network = p_network AND a.seq = p_block AND a.digest = p_hash
           AND a.kind = 'arrival'
           AND NOT EXISTS (SELECT 1 FROM attested_reports r
+                          JOIN observations o ON o.network = r.network
+                                             AND o.block_number = r.seq
+                                             AND o.block_hash = r.digest
                           WHERE r.network = v.network AND r.kind = 'restoration'
                             AND r.body ->> 'restores' = v.report_id))
 $$;

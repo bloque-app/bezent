@@ -209,6 +209,14 @@ async fn err_malformed_a_report_that_does_not_fit_its_kind(pool: PgPool) {
         arrival_report("m-6", "05"),
         arrival_report("m-7", "0"),
         arrival_report("m-8", "1.5"),
+        // INV-11: the store holds up to u128::MAX, and the book cannot hold more than i128::MAX.
+        arrival_report("m-12", &(i128::MAX as u128 + 1).to_string()),
+        arrival_report("m-13", &u128::MAX.to_string()),
+        document(
+            "m-14",
+            "positions",
+            json!({"positions": [{"position": "a", "amount": u128::MAX.to_string()}]}),
+        ),
         document("m-9", "reversal", json!({"amount": "5", "position": "a"})),
         document(
             "m-10",
@@ -230,6 +238,21 @@ async fn err_malformed_a_report_that_does_not_fit_its_kind(pool: PgPool) {
     let (status, _) = ingress.post(REPORTS, ALPHA, &envelope).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(count(&pool, "intake").await, 0);
+}
+
+/// `INV-11`: the largest amount the book can hold is taken, one more is `ERR-Malformed`.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_11_an_amount_up_to_what_the_book_holds_is_taken(pool: PgPool) {
+    let ingress = world(&pool).await;
+    let (status, answer) = ingress
+        .post(
+            REPORTS,
+            ALPHA,
+            &signed(&arrival_report("big-1", &i128::MAX.to_string())),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["state"], "Recorded", "{answer}");
 }
 
 /// §10: a report that fits the surface and not what it names is recorded as refused, with its named
@@ -298,6 +321,11 @@ async fn req_be_6_a_reversal_and_a_restoration_name_what_they_answer(pool: PgPoo
         (restoration("s-2", "299", "v-3"), Some("ERR-SourceMismatch")),
         (restoration("s-3", "300", "v-3"), None),
         (restoration("s-4", "300", "v-3"), Some("ERR-SourceConsumed")),
+        // S2: a restored reversal no longer counts against the arrival. 200 stands, so another
+        // 300 is a second real chargeback and 301 is too much.
+        (reversal("v-7", "301", "a-1"), Some("ERR-SourceMismatch")),
+        (reversal("v-8", "300", "a-1"), None),
+        (reversal("v-9", "1", "a-1"), Some("ERR-SourceMismatch")),
     ];
     for (d, error) in cases {
         let (status, answer) = ingress.post(REPORTS, ALPHA, &signed(&d)).await;

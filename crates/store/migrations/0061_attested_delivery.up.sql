@@ -9,7 +9,8 @@
 --     in place of "signed and recorded": a withdrawal whose instructions were accepted, or the refund
 --     of an unassociated arrival, which names its destination in its request.
 --   * attempt_proof() also reads a recorded report of non-execution, so `Refunding` and attempt n+1
---     rest on it as on any proof, at its own final point.
+--     rest on it as on any proof, at its own final point, unless a payout was reported for the
+--     transfer: then it proves nothing (INV-8).
 --   * attempts_unproven() also counts the attempts a transfer entered, which on an attested backend
 --     have no intent: no refund of one without its proof, whoever writes it (INV-8).
 --
@@ -154,6 +155,12 @@ CREATE OR REPLACE FUNCTION attempt_proof(
                         AND o.block_hash = r.digest
      WHERE t.id = p_transfer AND r.kind = 'payout-not-executed'
        AND r.body ->> 'attempt' = p_attempt::text
+       -- A payout reported for the transfer, recorded or not, voids the proof (INV-8): the two
+       -- reports can be taken in side by side, and a refund mint beside a payout is the loss.
+       -- The ingress refuses the second one; this is the store's own rule, whoever writes.
+       AND NOT EXISTS (SELECT 1 FROM attested_reports p
+                       WHERE p.network = r.network AND p.kind = 'payout'
+                         AND p.body ->> 'bridge_reference' = r.body ->> 'bridge_reference')
      ORDER BY r.seq
      LIMIT 1)
     LIMIT 1

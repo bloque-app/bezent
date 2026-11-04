@@ -288,6 +288,26 @@ fn now() -> chrono::DateTime<chrono::Utc> {
     t0() + Duration::minutes(5)
 }
 
+/// A budget of one second on COPM's routes selected by `filter` (an `AND` clause, or none). The
+/// store holds a route's budget above its network's lag bound, and the party's clock is the
+/// store's, so a deadline that is really past needs both out of the way: the check is switched off
+/// for the test, which only wants the deadline.
+async fn tight(f: &Fiat, filter: &str) {
+    exec(
+        &f.w.admin,
+        &format!(
+            "ALTER TABLE routes DISABLE TRIGGER routes_budget_covers_lag_bound; \
+             UPDATE routes SET completion_budget_seconds = 1 WHERE asset = 'COPM' {filter}"
+        ),
+    )
+    .await;
+}
+
+/// Lets the party's clock (the store's) get past a one-second budget.
+async fn elapse() {
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+}
+
 /// `AC`-level: `F-011` done-when, the M-3 exit criterion: "a reversal is exercised end to end".
 ///
 /// An arrival is reported, a deposit binds it, it is minted. A reversal is reported: the reserve
@@ -903,11 +923,10 @@ async fn req_ot_6_a_fiat_payout_reported_not_executed_ends_in_one_refund_mint(
 ) {
     let f = Fiat::new(options, connect).await;
     let (id, bridge) = handed_over(&f).await;
-    exec(
-        &f.w.admin,
-        "UPDATE routes SET completion_budget_seconds = 3600 WHERE asset = 'COPM'",
-    )
-    .await;
+    // The attempt's clock is the hand-over's, on the attested network's clock, which is the store's
+    // (S1): a budget of a second, and a second gone by, before the party reports.
+    tight(&f, "AND direction = 'withdrawal'").await;
+    elapse().await;
 
     // An attempt that is not the one it is at is refused.
     let (_, wrong) = f
@@ -1044,9 +1063,13 @@ async fn req_rf_1_a_fiat_payout_unreported_past_its_deadline_goes_to_review_and_
 ) {
     let f = Fiat::new(options, connect).await;
     let (id, bridge) = handed_over(&f).await;
-    exec(
-        &f.w.admin,
-        "UPDATE routes SET completion_budget_seconds = 3600 WHERE asset = 'COPM'",
+    tight(&f, "AND direction = 'withdrawal'").await;
+    elapse().await;
+    // The attested network's head moves with its reports: this one carries it past the deadline.
+    f.reported(
+        "tick-1",
+        "positions",
+        json!({"positions": [], "through": "fund-1"}),
     )
     .await;
     f.w.settle(now()).await;
@@ -1282,7 +1305,17 @@ async fn req_be_6_an_arrival_reversed_before_its_mint_binds_nothing_and_holds_it
         )
         .await;
     }
-    let (status, answer) = f.post("/v0/deposits", &deposit("dep-2")).await;
+    // A restoration counts once the core has recorded it, which is after it checked the signature:
+    // a row that nobody verified must not release what a reversal holds (S6).
+    let (_, answer) = f.post("/v0/deposits", &deposit("dep-2")).await;
+    assert_eq!(answer["error"], "ERR-SourceConsumed", "{answer}");
+    f.w.settle(now()).await;
+    assert_eq!(
+        f.w.state(held).await.1,
+        None,
+        "recorded, the restoration releases the held deposit"
+    );
+    let (status, answer) = f.post("/v0/deposits", &deposit("dep-3")).await;
     assert_eq!(status, StatusCode::CREATED, "{answer}");
     assert_eq!(answer["state"], "Accepted", "{answer}");
     f.w.cycle(now()).await;
@@ -1491,4 +1524,338 @@ async fn req_be_4_the_statement_says_the_reserve_is_attested_and_names_the_party
     );
     assert_eq!(doc["terms"]["reserve"][0]["attested_by"], PARTY);
     assert_eq!(doc["terms"]["reserve"][0]["report"], "snap-0");
+}
+
+/// F-011 NOTES 10, review M1: a redemption nobody relays for waits at `Source-Final`; once it has
+/// waited the route's budget it pages, once, and its state does not change. A later relay hands it
+/// over, and the late hand-over does not send it to review on the next cycle (S1).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rq_9_a_redemption_nobody_relays_for_pages_once_and_a_later_relay_proceeds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    f.funded(1_000).await;
+    let first = f.deposited("pay-1", 700).await;
+    f.w.cycle(now()).await;
+    f.minted(first, 100, 700).await;
+    let (instructions, commitment) = committed();
+    attested_redemption(&f.w.admin, 200, [9; 32], &commitment).await;
+    f.w.settle(now()).await;
+    let id: i64 = scalar(
+        &f.w.admin,
+        "SELECT id FROM transfers WHERE kind = 'withdrawal'",
+    )
+    .await;
+    exec(
+        &f.w.admin,
+        "UPDATE routes SET completion_budget_seconds = 3600 \
+         WHERE asset = 'COPM' AND direction = 'withdrawal'",
+    )
+    .await;
+    let pages = || async {
+        let sql = format!(
+            "SELECT count(*) FROM event_log WHERE kind = 'attested-withdrawal-unrelayed' \
+             AND transfer_id = {id}"
+        );
+        f.w.count(&sql).await
+    };
+
+    // Within the budget: waiting, and quiet.
+    f.w.settle(now()).await;
+    assert_eq!(f.w.state(id).await.0, "Source-Final");
+    assert_eq!(pages().await, 0);
+
+    // Past it, on the source network's clock: one page however many cycles go by, no move.
+    head(&f.w.admin, ISSUING, 200 + 3_600 + 60).await;
+    for _ in 0..3 {
+        f.w.cycle(now()).await;
+    }
+    assert_eq!(f.w.state(id).await, ("Source-Final".into(), None));
+    assert_eq!(pages().await, 1);
+
+    // Then the relay: it proceeds, and stays handed over.
+    let (status, answer) = f
+        .post(
+            "/v0/withdrawals/extras",
+            &json!({"request_reference": "x-1",
+                    "redemption_reference": format!("0x{}", hex::encode([9u8; 32])),
+                    "instructions": format!("0x{}", hex::encode(instructions))}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    for _ in 0..3 {
+        f.w.cycle(now()).await;
+        assert_eq!(f.w.state(id).await, ("Delivering".into(), None));
+    }
+    assert_eq!(pages().await, 1);
+}
+
+/// S1: a relay that comes after the route's budget measured from the source leg starts the attempt
+/// at the hand-over. It is not reviewed on the next cycle, and the party's first report of
+/// non-execution is a new attempt, not the refund mint.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_5_a_late_relay_starts_the_attempts_clock_at_the_hand_over(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    // The source leg is final at the issuing network's t0 + 202 s and the party's clock is the
+    // store's, long after: the relay is late by any budget.
+    exec(
+        &f.w.admin,
+        "UPDATE routes SET completion_budget_seconds = 3600 \
+         WHERE asset = 'COPM' AND direction = 'withdrawal'",
+    )
+    .await;
+    let (id, bridge) = handed_over(&f).await;
+    for _ in 0..3 {
+        f.w.cycle(now()).await;
+        assert_eq!(f.w.state(id).await, ("Delivering".into(), None));
+    }
+    f.reported(
+        "no-1",
+        "payout-not-executed",
+        json!({"bridge_reference": bridge, "attempt": 1}),
+    )
+    .await;
+    f.w.cycle(now()).await;
+    assert_eq!(f.w.state(id).await, ("Delivering".into(), None));
+    let attempts: Vec<i32> = sqlx::query_scalar(
+        "SELECT attempt FROM transitions WHERE transfer_id = $1 AND attempt IS NOT NULL \
+         ORDER BY id",
+    )
+    .bind(id)
+    .fetch_all(&f.w.admin)
+    .await
+    .unwrap();
+    assert_eq!(attempts, [1, 2], "a new attempt, not the refund mint");
+    assert_eq!(
+        f.w.count(&format!(
+            "SELECT count(*) FROM transfers WHERE refund_of = {id}"
+        ))
+        .await,
+        0
+    );
+}
+
+/// S1: an operator's release out of review long after the evidence it rests on. The new attempt's
+/// clock is the hand-over's, not the evidence's: it is not sent back to review on the next cycle.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_2_a_late_release_starts_the_attempts_clock_at_the_hand_over(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    let (id, bridge) = handed_over(&f).await;
+    tight(&f, "AND direction = 'withdrawal'").await;
+    elapse().await;
+    f.reported(
+        "tick-1",
+        "positions",
+        json!({"positions": [], "through": "fund-1"}),
+    )
+    .await;
+    f.w.settle(now()).await;
+    assert_eq!(f.w.state(id).await.0, "Needs-Review");
+    // The party's report of non-execution is the evidence the release rests on.
+    f.reported(
+        "no-1",
+        "payout-not-executed",
+        json!({"bridge_reference": bridge, "attempt": 1}),
+    )
+    .await;
+    f.w.settle(now()).await;
+    assert_eq!(f.w.state(id).await.0, "Needs-Review");
+    let (block, hash, time): (i64, Vec<u8>, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        "SELECT block_number, block_hash, block_time FROM final_heads \
+         WHERE network = $1 ORDER BY block_number DESC LIMIT 1",
+    )
+    .bind(RAIL)
+    .fetch_one(&f.w.admin)
+    .await
+    .unwrap();
+    let action: i64 = sqlx::query_scalar(
+        "INSERT INTO manual_actions (kind, transfer_id, to_state, network, block_number, \
+             block_hash, block_time, justification) \
+         VALUES ('review-resolution', $1, 'Delivering', $2, $3, $4, $5, 'retry the payout') \
+         RETURNING id",
+    )
+    .bind(id)
+    .bind(RAIL)
+    .bind(block)
+    .bind(&hash)
+    .bind(time)
+    .fetch_one(&f.w.ops[0])
+    .await
+    .unwrap();
+    // The operator takes its time and the party goes on reporting.
+    elapse().await;
+    f.reported(
+        "tick-2",
+        "positions",
+        json!({"positions": [], "through": "fund-1"}),
+    )
+    .await;
+    approve_as(&f.w, 1, action).await.unwrap();
+    for _ in 0..3 {
+        f.w.cycle(now()).await;
+        assert_eq!(
+            f.w.state(id).await,
+            ("Delivering".into(), None),
+            "released a second and more after its evidence"
+        );
+    }
+    f.reported(
+        "out-2",
+        "payout",
+        json!({"amount": "700", "position": "acct-1", "bridge_reference": bridge}),
+    )
+    .await;
+    f.w.settle(now()).await;
+    assert_eq!(f.w.state(id).await, ("Completed".into(), None));
+}
+
+/// S2: a reversal, its restoration, then a second real chargeback of the same arrival: taken, with
+/// the book and the reserve agreeing at each step.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_be_6_a_second_reversal_after_a_restoration_is_taken_and_the_book_agrees(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    f.funded(1_000).await;
+    let first = f.deposited("pay-1", 5_000).await;
+    f.w.cycle(now()).await;
+    f.minted(first, 100, 5_000).await;
+    f.holds().await;
+
+    let reversal = |id: &str| json!({"amount": "800", "position": "acct-1", "reverses": "pay-1", "ids": {"cb": id}});
+    f.reported("rev-1", "reversal", reversal("1")).await;
+    f.w.settle(now()).await;
+    let e = f.holds().await;
+    assert_eq!((e.chain.reserve[RAIL], e.book.surplus), (5_200, 200));
+
+    f.reported(
+        "rest-1",
+        "restoration",
+        json!({"amount": "800", "position": "acct-1", "restores": "rev-1"}),
+    )
+    .await;
+    f.w.settle(now()).await;
+    let e = f.holds().await;
+    assert_eq!((e.chain.reserve[RAIL], e.book.surplus), (6_000, 1_000));
+
+    // The reversal that was restored no longer counts against the arrival.
+    let (status, answer) = f.report("rev-2", "reversal", reversal("2")).await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["state"], "Recorded", "{answer}");
+    f.w.settle(now()).await;
+    let e = f.holds().await;
+    assert_eq!((e.chain.reserve[RAIL], e.book.surplus), (5_200, 200));
+    // And the arrival holds new deposits again while it stands.
+    let (_, wrong) = f
+        .report(
+            "rest-0",
+            "restoration",
+            json!({"amount": "800", "position": "acct-1", "restores": "rev-1"}),
+        )
+        .await;
+    assert_eq!(wrong["error"], "ERR-SourceConsumed", "{wrong}");
+    f.reported(
+        "rest-2",
+        "restoration",
+        json!({"amount": "800", "position": "acct-1", "restores": "rev-2"}),
+    )
+    .await;
+    f.w.settle(now()).await;
+    let e = f.holds().await;
+    assert_eq!((e.chain.reserve[RAIL], e.book.surplus), (6_000, 1_000));
+}
+
+/// S4: a payout reported for a transfer voids a report of its non-execution in the store, whichever
+/// was recorded first and whether or not the core has recorded the payout: no proof for a refund.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_8_a_payout_report_voids_the_proof_of_non_execution_in_the_store(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    let (id, bridge) = handed_over(&f).await;
+    f.reported(
+        "no-1",
+        "payout-not-executed",
+        json!({"bridge_reference": bridge, "attempt": 1}),
+    )
+    .await;
+    f.w.cycle(now()).await;
+    let proven = || async {
+        let sql =
+            format!("SELECT count(*) FROM attempt_proof({id}, 1) p WHERE p.network IS NOT NULL");
+        f.w.count(&sql).await
+    };
+    assert_eq!(
+        proven().await,
+        1,
+        "recorded, the report proves non-execution"
+    );
+
+    // The race the ingress cannot see: a payout row beside it, however it got there.
+    let body = json!({"version": 1, "report_id": "out-late", "network": RAIL, "kind": "payout",
+                      "asset": COPM, "token": COP, "amount": "700", "position": "acct-1",
+                      "bridge_reference": bridge});
+    let bytes = body.to_string().into_bytes();
+    let public = SigningKey::from_bytes(&KEY_SEED).verifying_key().to_bytes();
+    let intake: i64 = sqlx::query_scalar(
+        "INSERT INTO intake (request_reference, requester, kind, body, body_digest) \
+         VALUES ('out-late', $1, 'report', '{}', '\\x02') RETURNING id",
+    )
+    .bind(REQUESTER)
+    .fetch_one(&f.w.admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO attested_reports (network, seq, intake_id, requester, party, report_id, \
+             kind, asset, body, signed_bytes, signature, public_key, digest) \
+         VALUES ($1, 1, $2, $3, $4, 'out-late', 'payout', $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(RAIL)
+    .bind(intake)
+    .bind(REQUESTER)
+    .bind(PARTY)
+    .bind(COPM)
+    .bind(&body)
+    .bind(&bytes)
+    .bind(&[7u8; 64][..])
+    .bind(&public[..])
+    .bind(&bezent_core::attested::report_digest(&bytes)[..])
+    .execute(&f.w.admin)
+    .await
+    .unwrap();
+    assert_eq!(proven().await, 0, "a payout reported voids the proof");
+    let unproven: Vec<i32> = scalar(&f.w.admin, &format!("SELECT attempts_unproven({id})")).await;
+    assert!(unproven.contains(&1), "{unproven:?}");
+}
+
+/// S3: an attested network declared with an address format other than `opaque` is named, so the
+/// core refuses to start on it.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_be_2_an_attested_network_must_be_declared_opaque(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fiat::new(options, connect).await;
+    let none = bezent_store::environment::misdeclared_attested_networks(&f.w.admin)
+        .await
+        .unwrap();
+    assert!(none.is_empty(), "{none:?}");
+    exec(
+        &f.w.admin,
+        &format!("UPDATE networks SET address_format = 'evm' WHERE network = '{RAIL}'"),
+    )
+    .await;
+    let found = bezent_store::environment::misdeclared_attested_networks(&f.w.admin)
+        .await
+        .unwrap();
+    assert_eq!(found, [RAIL]);
 }

@@ -252,7 +252,18 @@ async fn confirm_environment(
     let production = bezent_store::environment::production_networks(pool)
         .await
         .map_err(|e| format!("store: {e}"))?;
-    config.confirm_environment(&production)
+    config.confirm_environment(&production)?;
+    // An attested network is declared `opaque` (F-011, S3; deploy/attested-backend.md).
+    let misdeclared = bezent_store::environment::misdeclared_attested_networks(pool)
+        .await
+        .map_err(|e| format!("store: {e}"))?;
+    if misdeclared.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "an attested backend has no addresses, and its network must be declared with address_format = 'opaque': {} (REQ-BE-2)",
+        misdeclared.join(", ")
+    ))
 }
 
 /// Resolves on SIGINT or, on Unix, SIGTERM.

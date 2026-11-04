@@ -854,7 +854,10 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                     else {
                         return Ok(Err("attested amount out of range (INV-11)".into()));
                     };
-                    total += moved;
+                    let Some(sum) = total.checked_add(moved) else {
+                        return Ok(Err("attested amount out of range (INV-11)".into()));
+                    };
+                    total = sum;
                     if moved != 0 {
                         d.reserve.push(json!({
                             "network": p.network, "token": token, "amount": text(moved),
@@ -875,7 +878,10 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                     else {
                         return Ok(Err("attested amount out of range (INV-11)".into()));
                     };
-                    total += amount;
+                    let Some(sum) = total.checked_add(amount) else {
+                        return Ok(Err("attested amount out of range (INV-11)".into()));
+                    };
+                    total = sum;
                     d.reserve.push(json!({
                         "network": p.network, "position": q.position, "token": token,
                         "amount": text(amount), "network_amount": q.amount,

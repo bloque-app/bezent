@@ -11,6 +11,8 @@ DROP TABLE attesting_keys;
 DROP TABLE attesting_parties;
 DROP FUNCTION attesting_parties_guard();
 
+-- Reports the intake took in stay (it is append-only): the narrower check is added NOT VALID, so it
+-- binds new rows and leaves those alone. The observations the reports made stay too.
 ALTER TABLE intake DROP CONSTRAINT intake_kind_check;
 ALTER TABLE intake ADD CONSTRAINT intake_kind_check
-    CHECK (kind IN ('deposit', 'withdrawal', 'refund'));
+    CHECK (kind IN ('deposit', 'withdrawal', 'refund')) NOT VALID;

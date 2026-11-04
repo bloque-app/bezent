@@ -187,6 +187,10 @@ fn gate_condition(c: Condition) -> bool {
     )
 }
 
+/// The event that records when an attempt was handed to an attesting party, and by which head
+/// (`Core::hand_over`): the attempt's clock on an attested backend.
+const HANDED_OVER: &str = "attested-handed-over";
+
 /// The Roles modifier's `Status.AllowanceExceeded` (Zodiac Roles v2): the status of its
 /// `ConditionViolation(uint8 status, bytes32 info)` when a call is over an allowance, whose key is
 /// `info`.
@@ -1691,6 +1695,12 @@ impl Core {
             .fetch_optional(&mut *conn)
             .await?;
             let Some((instructions, commitment)) = relayed else {
+                // Nobody relays for it: it waits, and a page says so once it has waited the
+                // route's budget (F-011 NOTES 10). Its state is not changed: whether it goes to
+                // review is unruled (amendment 0016, "A withdrawal nobody relays for").
+                if from == State::SourceFinal {
+                    self.page_unrelayed(conn, t).await?;
+                }
                 return Ok(Did::default());
             };
             let digest = hex0x(&bezent_core::attested::instructions_commitment(
@@ -1732,7 +1742,81 @@ impl Core {
             },
         )
         .await?;
+        // The attempt's clock starts here, at the attested network's final head (F-011 NOTES 10):
+        // not at the source leg's finality, which a late relay or a late release has long passed,
+        // and not at the point the transition rests on, which a review resolution takes from its
+        // evidence. Without a head there is no clock to record and the old one stands.
+        if let Some(head) = store::latest_head(conn, &t.destination_network).await? {
+            store::event(
+                conn,
+                HANDED_OVER,
+                Some(t.id),
+                &json!({"spec": "REQ-RF-5, F-011 NOTES 10", "bridge_reference": t.bridge_reference,
+                        "attempt": attempt, "network": head.network,
+                        "head_block": head.block_number,
+                        "head_time": head.block_time.to_rfc3339()}),
+            )
+            .await?;
+        }
         Ok(Did::moved())
+    }
+
+    /// When attempt `attempt` of `t` was handed to the attesting party, by the attested network's
+    /// clock (the head it was handed over at); `None` for a transfer never handed over, or one
+    /// with no head then.
+    async fn handed_over_at(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        attempt: i32,
+    ) -> sqlx::Result<Option<DateTime<Utc>>> {
+        let at: Option<String> = sqlx::query_scalar(
+            "SELECT payload ->> 'head_time' FROM event_log \
+             WHERE kind = $1 AND transfer_id = $2 AND (payload ->> 'attempt')::int = $3 \
+             ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(HANDED_OVER)
+        .bind(t.id)
+        .bind(attempt)
+        .fetch_optional(&mut *conn)
+        .await?
+        .flatten();
+        Ok(at.and_then(|a| DateTime::parse_from_rfc3339(&a).ok().map(|d| d.to_utc())))
+    }
+
+    /// A withdrawal on an attested backend that nobody has relayed instructions for, and that has
+    /// sat at `Source-Final` past the route's budget: one page, once, with its state unchanged
+    /// (F-011 NOTES 10; amendment 0016). The value is already destroyed. The clock is the source
+    /// network's own, the one `source_final_block_time` was read on: the attested network's head
+    /// stops when the party is silent, and a silent party is the case to page for.
+    async fn page_unrelayed(&self, conn: &mut PgConnection, t: &Transfer) -> sqlx::Result<()> {
+        let (Some(start), Some(source)) = (t.source_final_block_time, t.source_network.as_deref())
+        else {
+            return Ok(());
+        };
+        let deadline = self.deadline(conn, t, start).await?;
+        let Some(head) = self.past(conn, source, deadline).await? else {
+            return Ok(());
+        };
+        if store::has_event(
+            conn,
+            "attested-withdrawal-unrelayed",
+            Some(t.id),
+            "bridge_reference",
+            &t.bridge_reference,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        let detail = json!({"spec": "REQ-RQ-9, REQ-RV-1", "bridge_reference": t.bridge_reference,
+                            "held_since": start.to_rfc3339(), "deadline": deadline.to_rfc3339(),
+                            "network": head.network, "head_block": head.block_number,
+                            "head_time": head.block_time.to_rfc3339()});
+        store::event(conn, "attested-withdrawal-unrelayed", Some(t.id), &detail).await?;
+        tracing::error!(kind = "attested-withdrawal-unrelayed", transfer = %t.bridge_reference, %detail,
+            "page: a redemption on an attested backend is final and nobody has relayed its instructions; its value is destroyed and nothing moves it");
+        Ok(())
     }
 
     /// Whether a recorded signature is exactly the named key's over its intent's recorded bytes.
@@ -1968,7 +2052,12 @@ impl Core {
         .bind(attempt)
         .fetch_one(&mut *conn)
         .await?;
-        let started = started.or(t.source_final_block_time).unwrap_or(now);
+        let mut started = started.or(t.source_final_block_time).unwrap_or(now);
+        // On an attested backend the attempt starts when it was handed over, whatever it took to
+        // get there (F-011 NOTES 10).
+        if let Some(handed) = self.handed_over_at(conn, t, attempt).await? {
+            started = started.max(handed);
+        }
         let deadline = self.deadline(conn, t, started).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
@@ -2398,7 +2487,13 @@ impl Core {
     ) -> sqlx::Result<Did> {
         let retrying = store::attempt_has_intents(conn, t.id, attempt + 1).await?;
         if t.kind == "withdrawal" && !retrying {
-            let start = t.source_final_block_time.unwrap_or(proof.block_time);
+            let mut start = t.source_final_block_time.unwrap_or(proof.block_time);
+            // On an attested backend the withdrawal's clock runs from its first hand-over, not
+            // from its source leg: a late relay must not turn the first report of non-execution
+            // into a refund (F-011 NOTES 10).
+            if let Some(handed) = self.handed_over_at(conn, t, 1).await? {
+                start = handed;
+            }
             let deadline = self.deadline(conn, t, start).await?;
             if proof.block_time > deadline {
                 return self.refund(conn, t, from, proof, manual).await;
