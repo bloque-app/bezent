@@ -230,14 +230,15 @@ pub async fn final_point(
 }
 
 /// The holds `transfer` has had in `CND-PayoutWindow` and left since its attempt's clock started:
-/// those recorded after the last transition of delivery attempt `after` or an earlier one (0 for
-/// none), chosen by the order they were recorded in and never by comparing clocks, since a hold
-/// rests on the destination's head and the attempt's point may rest on the source's. Returns when
-/// the first was taken (`start`, the attempt's point, for a hold taken before any final head was
-/// recorded) and how long they lasted together. A hold still open counts nothing here. A
-/// deadline leaves the time held out and starts when the first hold was taken (review M-1: the clock restarts when
-/// the hold is left); summing keeps a provider that flaps in and out of the hold from restarting
-/// it each time (issue #35).
+/// those recorded after the entry transition of delivery attempt `after` (0 for none; the entry
+/// transition is the one carrying the attempt, with the highest `id` among attempts up to `after`;
+/// the clock of attempt n passes n-1). They are chosen by `id`, the order they were recorded in,
+/// and never by comparing clocks, since a hold rests on the destination's head and the attempt's
+/// point may rest on the source's. Returns when the first was taken (`start`, the attempt's
+/// point, for a hold taken before any final head was recorded) and how long they lasted together.
+/// A hold still open counts nothing here. A deadline leaves the time held out and starts when the
+/// first hold was taken (review M-1: the clock restarts when the hold is left); summing keeps a
+/// provider that flaps in and out of the hold from restarting it each time (issue #35).
 pub async fn held_under_window(
     conn: &mut PgConnection,
     transfer: i64,

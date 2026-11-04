@@ -240,17 +240,18 @@ async fn m2_inv_8_review_cannot_refund_while_a_later_attempt_is_signed(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
-    // The reviewer's first entry: in Delivered, attempt 1's proof lands, attempt 2 is ordered,
-    // prepared and signed; then attempt 1's inclusion is withdrawn and the transfer goes to review;
-    // a resolution to Refunding resting on attempt 1's proof is refused, by the core and the store.
+    // The reviewer's first entry: attempt 1's proof lands, attempt 2 is ordered, prepared and
+    // signed; the transfer then goes to review; a resolution to Refunding resting on attempt 1's
+    // proof is refused, by the core and by the store.
+    // Issue #35: the setup no longer has attempt 1's payout observed included (not decided) beside
+    // its final proof of non-execution. On an origin network nothing refuses a second payout
+    // under one reference, so attempt 2 beside a standing inclusion could pay twice, and the core
+    // now withholds it. The transfer reaches review by the other real path: attempt 2 signed and
+    // unknown at its deadline (REQ-RV-1). Every assertion below is unchanged.
     let w = World::new(options, connect).await;
     reserve(&w.admin, 1_000_000).await;
     let id = withdrawal_by(&w, 20, REDEEMER, [13; 32], BENEFICIARY).await;
     deliver(&w, id, 1, t0()).await;
-    let r = payout_reference_of(&w.admin, id).await;
-    let paid = payout(&w, 50, 3, BENEFICIARY, &r).await;
-    w.cycle(t0()).await;
-    assert_eq!(w.state(id).await.0, "Delivered");
     prove(&w.admin, id, 1, ORIGIN, 100).await;
     w.cycle(t0()).await;
     let (o2, _) = order(&w.admin, id, 2).await.expect("attempt 2 ordered");
@@ -260,12 +261,12 @@ async fn m2_inv_8_review_cannot_refund_while_a_later_attempt_is_signed(
         .await
         .expect("attempt 2's signing intent");
     sign(&w, s2).await;
-    decide(&w.admin, paid, "withdrawn", 110).await;
     w.cycle(t0()).await;
-    assert_eq!(
-        w.state(id).await,
-        ("Needs-Review".into(), Some("CND-Withdrawn".into()))
-    );
+    assert_eq!(w.state(id).await.0, "Delivering");
+    // Attempt 2 is neither included nor proven by its deadline (counted from attempt 1's proof).
+    head(&w.admin, ORIGIN, 100 + BUDGET + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
 
     let action: i64 = sqlx::query_scalar(
         "INSERT INTO manual_actions (kind, transfer_id, to_state, network, block_number, \

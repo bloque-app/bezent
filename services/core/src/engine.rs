@@ -2343,10 +2343,15 @@ impl Core {
             if proof.block_time > deadline {
                 // An inclusion of the payout stands: the leg is unknown, no refund (REQ-RF-1).
                 if standing {
-                    return Ok(Did::default());
+                    return self.withheld(conn, t, None, "Refunding", now).await;
                 }
                 return self.refund(conn, t, from, proof, manual).await;
             }
+        }
+        // The same for a new attempt where the chain does not refuse a second delivery of one
+        // reference (an origin network): it could pay twice (REQ-RF-1, INV-8, INV-16).
+        if standing && !self.refuses_second_delivery(conn, t).await? {
+            return self.withheld(conn, t, None, "Delivering", now).await;
         }
         // A new attempt is new work for its route: the gates hold it as they hold the first.
         if let Some(c) = self.gate(conn, t, now).await? {
@@ -2654,17 +2659,22 @@ impl Core {
     ) -> sqlx::Result<Did> {
         type Action = (i64, String, String, i64, Vec<u8>, DateTime<Utc>, bool);
         // REQ-RF-1, INV-16 (issue #35): while an inclusion of the payout stands, final or not and
-        // not withdrawn, the leg is unknown whatever a final proof says, so no refund follows.
-        // Such a resolution is withheld, not refused (a later one is not
-        // held up behind it): it runs when the inclusion is withdrawn, and the review closes as
-        // Delivered when it goes final. Nothing is derived from the observation, only withheld.
+        // not withdrawn, the leg is unknown whatever a final proof says, so no refund follows, and
+        // no new attempt where the chain does not refuse a second delivery of one reference.
+        // Such a resolution is withheld, not refused (a later one is not held up behind it): it
+        // runs when the inclusion is withdrawn, and the review closes as Delivered, by a
+        // resolution, when it goes final. Nothing is derived from the observation, only withheld.
         let blocked = matches!(before, State::Delivering | State::Delivered)
             && !matches!(self.destination_leg(conn, t).await?, Leg::None);
+        let mut withheld = vec!["Refunding"];
+        if !self.refuses_second_delivery(conn, t).await? {
+            withheld.push("Delivering");
+        }
         if blocked {
             let waiting: Vec<(i64, String)> = sqlx::query_as(
                 "SELECT a.id, a.to_state::text FROM manual_actions a \
                  WHERE a.transfer_id = $1 AND a.kind = 'review-resolution' AND a.recorded_at >= $2 \
-                   AND a.to_state = 'Refunding' \
+                   AND a.to_state::text = ANY($3) \
                    AND EXISTS (SELECT 1 FROM manual_approvals p WHERE p.action_id = a.id) \
                    AND NOT EXISTS (SELECT 1 FROM transitions x WHERE x.manual_action_id = a.id) \
                    AND NOT EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'review-evidence-refused' \
@@ -2673,10 +2683,11 @@ impl Core {
             )
             .bind(t.id)
             .bind(entered_at)
+            .bind(&withheld)
             .fetch_all(&mut *conn)
             .await?;
             for (action, to) in waiting {
-                self.inclusion_page(conn, t, action, &to).await?;
+                self.withheld(conn, t, Some(action), &to, now).await?;
             }
         }
         let action: Option<Action> = sqlx::query_as(
@@ -2684,7 +2695,7 @@ impl Core {
                     EXISTS (SELECT 1 FROM manual_approvals p WHERE p.action_id = a.id) \
              FROM manual_actions a \
              WHERE a.transfer_id = $1 AND a.kind = 'review-resolution' AND a.recorded_at >= $2 \
-               AND NOT ($3 AND a.to_state = 'Refunding') \
+               AND NOT ($3 AND a.to_state::text = ANY($4)) \
                AND NOT EXISTS (SELECT 1 FROM transitions x WHERE x.manual_action_id = a.id) \
                AND NOT EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'review-evidence-refused' \
                                AND e.payload ->> 'manual_action_id' = a.id::text) \
@@ -2693,6 +2704,7 @@ impl Core {
         .bind(t.id)
         .bind(entered_at)
         .bind(blocked)
+        .bind(&withheld)
         .fetch_optional(&mut *conn)
         .await?;
         let Some((action, to, network, number, hash, time, approved)) = action else {
@@ -2894,33 +2906,62 @@ impl Core {
         })
     }
 
-    /// Pages a human, once per resolution, that a resolution into `to` waits because an inclusion
-    /// of the payout stands (`REQ-RF-1`, issue #35). It changes no state.
-    async fn inclusion_page(
+    /// Whether the contract at `t`'s destination refuses a second delivery under one reference:
+    /// the issuing network's `mint` does (`ReferenceUsed`, `INV-2`; the reference is shared by
+    /// every attempt, `REQ-EO-6`). An origin network's emitter and unwrapper do not track
+    /// references, so a second payout beside a real inclusion would pay twice.
+    async fn refuses_second_delivery(
         &self,
         conn: &mut PgConnection,
         t: &Transfer,
-        action: i64,
-        to: &str,
-    ) -> sqlx::Result<()> {
-        let action = action.to_string();
-        if store::has_event(
-            conn,
-            "resolution-blocked-by-inclusion",
-            Some(t.id),
-            "manual_action_id",
-            &action,
+    ) -> sqlx::Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM networks WHERE network = $1 AND role = 'issuing')",
         )
-        .await?
-        {
-            return Ok(());
+        .bind(&t.destination_network)
+        .fetch_one(conn)
+        .await
+    }
+
+    /// The hold while an inclusion of the payout stands (`REQ-RF-1`, issue #35): `to` (a refund or
+    /// a new attempt), by resolution `action` or by the automatic path, changes no state and pages
+    /// a human: once, then once a day while it lasts. It lasts until the endpoint decides the
+    /// inclusion (`withdrawn` or `final`); there is no override (`REQ-GV-5`). The last page is read
+    /// from the event log, so a restart repeats nothing early and forgets nothing.
+    async fn withheld(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        action: Option<i64>,
+        to: &str,
+        now: DateTime<Utc>,
+    ) -> sqlx::Result<Did> {
+        let hold = match action {
+            Some(a) => a.to_string(),
+            None => format!("{to}-attempt-{}", store::current_attempt(conn, t.id).await?),
+        };
+        let at = store::latest_head(conn, &t.destination_network)
+            .await?
+            .map_or(now, |h| h.block_time);
+        let last: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT (payload ->> 'at')::timestamptz FROM event_log \
+             WHERE kind = 'resolution-blocked-by-inclusion' AND transfer_id = $1 \
+               AND payload ->> 'hold' = $2 ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(t.id)
+        .bind(&hold)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if last.is_some_and(|l| at < l + Duration::days(1)) {
+            return Ok(Did::default());
         }
         let detail = json!({"spec": "REQ-RF-1", "bridge_reference": t.bridge_reference,
-                            "manual_action_id": action, "resolution": to});
+                            "hold": hold, "manual_action_id": action.map(|a| a.to_string()),
+                            "resolution": to, "at": at.to_rfc3339()});
         store::event(conn, "resolution-blocked-by-inclusion", Some(t.id), &detail).await?;
         tracing::error!(kind = "resolution-blocked-by-inclusion", transfer = %t.bridge_reference, %detail,
-            "page: a resolution that refunds waits, because the payout is observed included and not withdrawn");
-        Ok(())
+            "page: a refund or a new attempt waits, because the payout is observed included and not withdrawn");
+        Ok(Did::default())
     }
 
     /// Records, once, that a resolution's evidence was refused; the transfer stays in review.
