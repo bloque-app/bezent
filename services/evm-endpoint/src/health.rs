@@ -25,7 +25,7 @@ use crate::config::Config;
 pub const DEFAULT_CONFIG: &str = "/etc/bezent/evm-endpoint.toml";
 
 /// What one pass may take beyond its poll interval: a catch-up, a slow provider or history source
-/// (their own timeouts are 30 s by default), the signer and the proofs.
+/// (each request to one ends within [`crate::rpc::REQUEST_TIMEOUT`], 30 s), the signer and the proofs.
 pub const PASS_ALLOWANCE: Duration = Duration::from_secs(120);
 
 /// The endpoint's liveness file.
