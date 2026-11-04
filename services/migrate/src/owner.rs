@@ -117,6 +117,16 @@ mod tests {
     }
 
     #[test]
+    fn logins_after_the_first_table_are_refused() {
+        // After `[vault]` the key belongs to that table, which has no such field.
+        let after_vault = format!("{VAULT}logins = [\"bezent_core_login\"]\n{STORE}");
+        assert!(read("logins-in-vault", &after_vault).is_err());
+        // The same after `[store]`.
+        let after_store = format!("{VAULT}{STORE}logins = [\"bezent_core_login\"]\n");
+        assert!(read("logins-in-store", &after_store).is_err());
+    }
+
+    #[test]
     fn req_ky_1_the_owner_can_come_from_vault_and_needs_the_table_for_it() {
         assert!(read("ok", &format!("{VAULT}{STORE}")).is_ok());
         assert!(read("novault", STORE).unwrap_err().contains("[vault]"));
