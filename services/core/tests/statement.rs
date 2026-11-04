@@ -211,6 +211,36 @@ async fn req_pr_1_req_be_3_req_bk_9_the_statement_verifies_and_names_everything_
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// `AC-A5.3` (`REQ-CV-4`): a statement itemises the unconverted holdings per token and network, and
+/// they are outside the reserve equation: the reserve term is the origin token's alone.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a5_3_req_cv_4_a_statement_itemises_unconverted_holdings_outside_the_reserve_equation(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    stated_world(&w).await;
+    let dir = store_dir();
+    let (statements, public) = publisher(&w, &dir);
+    let published = statements.publish_due(t0()).await.unwrap();
+    let bytes = read(statements.store(), &published[0].name).await;
+    let signature = read(statements.store(), &published[0].signature_name).await;
+    let doc = verify(&bytes, &signature, &public).unwrap();
+
+    let items = doc["unconverted_holdings"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["token"], "usdt0");
+    assert_eq!(items[0]["amount"], "4200");
+    assert_eq!(items[0]["network"], ORIGIN);
+    // The reserve is the funding (1 000 000), the minted deposit (5 000) and the arrival not yet
+    // minted (300): the 4 200 of the convertible is in none of the equation's terms.
+    assert_eq!(doc["terms"]["reserve"][0]["amount"], "1005300");
+    assert_eq!(doc["terms"]["supply"]["amount"], "4300");
+    assert_eq!(doc["terms"]["owed_mint"]["amount"], "300");
+    assert_eq!(doc["terms"]["surplus"]["amount"], "1000000");
+    std::fs::remove_dir_all(dir).ok();
+}
+
 fn parse_coordinate(key: &str) -> Coordinate {
     let parts: Vec<&str> = key.split(':').collect();
     Coordinate {
