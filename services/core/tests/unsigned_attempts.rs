@@ -192,6 +192,102 @@ async fn req_rv_1_a_later_attempt_whose_preparation_never_passes_goes_to_review_
     );
 }
 
+/// Attempt `attempt` is ordered and the endpoint is absent: the core cycles, nothing is prepared,
+/// no preparation row exists, refused or not.
+async fn endpoint_absent(w: &World, id: i64, attempt: i32) {
+    for _ in 0..3 {
+        w.cycle(t0()).await;
+    }
+    assert!(order(&w.admin, id, attempt).await.is_some(), "an order");
+    assert_eq!(
+        w.count("SELECT count(*) FROM prepared_transactions").await,
+        // Attempt 1's own preparation, when attempt 2 is the one left unprepared.
+        i64::from(attempt - 1)
+    );
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_req_eo_3_a_first_attempt_the_endpoint_never_prepares_goes_to_review_at_its_deadline(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // Issue #48. The endpoint is down: no preparation row exists.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [7; 32]).await;
+    endpoint_absent(&w, id, 1).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+
+    head(&w.admin, ORIGIN, 22 + BUDGET - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    // Past the deadline, at a final block: review from the state it is in.
+    head(&w.admin, ORIGIN, 22 + BUDGET + 10).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    let before: String = scalar(
+        &w.admin,
+        &format!("SELECT state_before_review::text FROM reviews WHERE transfer_id = {id}"),
+    )
+    .await;
+    assert_eq!(before, "Source-Final");
+    // Never a refund (REQ-RF-1) or a retry (REQ-RV-1) on its own.
+    let intents = w.count("SELECT count(*) FROM intents").await;
+    w.settle(t0() + Duration::days(30)).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, intents);
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_a_later_attempt_the_endpoint_never_prepares_goes_to_review_from_delivering(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [8; 32]).await;
+    deliver(&w, id, 1, t0()).await;
+    prove(&w.admin, id, 1, ORIGIN, 100).await;
+    endpoint_absent(&w, id, 2).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    // The attempt's clock starts at the proof it rests on (block 100).
+    head(&w.admin, ORIGIN, 100 + BUDGET - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    head(&w.admin, ORIGIN, 100 + BUDGET + 10).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_eo_3_an_endpoint_that_returns_before_the_deadline_delivers_as_usual(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [9; 32]).await;
+    endpoint_absent(&w, id, 1).await;
+    head(&w.admin, ORIGIN, 22 + BUDGET - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    // The endpoint comes back with time to spare: the delivery proceeds as usual, to a signed
+    // transaction, and nothing goes to review.
+    deliver(&w, id, 1, t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    assert_eq!(w.count("SELECT count(*) FROM signed_transactions").await, 1);
+}
+
 /// Operator `by` records, as their own login, a resolution of transfer `id` into `to` resting on
 /// the final head (`network`, `block`).
 async fn resolution(w: &World, id: i64, to: &str, network: &str, block: i64, by: usize) -> i64 {

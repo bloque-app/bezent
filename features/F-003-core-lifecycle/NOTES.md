@@ -165,10 +165,10 @@ Still open from the verification: F3 (an attempt ordered but never signed blocks
     names nothing is measured: `CND-FeeShort`, `CND-MintWindow` and the gates resume by themselves, `CND-PayoutWindow`
     waits for the allowance (no review, amendment 0012) and `CND-DestinationRefused` has its own deadline. Time spent
     under a gate counts, since §10 gives it no restart. It is never a refund or a retry on its own (`REQ-RF-1`).
-    **Not covered:** an attempt whose preparation never happens at all (the endpoint is down, so no preparation, refused
-    or not, is ever written) waits for the endpoint and has no deadline edge; only a refused preparation is measured
-    (`unprepared_deadline` returns when there is no preparation row). `REQ-EO-3` still requires such a leg to be
-    held with an owner eventually, so it is a follow-up: issue #48. **Ruled:** the §5.4 rows gain this occasion by
+    An attempt whose preparation never happens at all (the endpoint is down, so no preparation row, refused or not,
+    exists) has the same deadline on the same clock (issue #48): `deliver` asks `unprepared_deadline` where it finds
+    an order and no preparation. It is read only on the endpoint path; a backend with no endpoint has no such path.
+    **Ruled:** the §5.4 rows gain this occasion by
     amendment 0013 (SPEC v0.5.3, pull request #47).
 25. **An attempt ordered and never signed is cancelled by the refund that needs it gone** (issue #25, the
     verification's F3; `INV-8`, `REQ-RF-1`, `REQ-GV-5`, `REQ-RV-2`; migration `0051`). Attempt n+1, ordered after

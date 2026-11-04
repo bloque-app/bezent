@@ -1476,7 +1476,9 @@ impl Core {
             order_network,
         )) = prepared
         else {
-            return Ok(Did::default());
+            // Ordered, and the endpoint has prepared nothing (it is down): the same deadline as a
+            // refused preparation (issue #48). Only this endpoint path reads it.
+            return self.unprepared_deadline(conn, t, None, from, attempt).await;
         };
         if prepared_network != order_network || order_network != t.destination_network {
             tracing::error!(transfer = %t.bridge_reference, prepared = prepared_id, %prepared_network, %order_network,
@@ -1850,9 +1852,9 @@ impl Core {
     /// refusal that names nothing is measured: `CND-FeeShort`, `CND-MintWindow` and the gates
     /// resume by themselves (§10), and `CND-DestinationRefused` has its own deadline.
     ///
-    /// Only a refused preparation is measured. An attempt whose preparation never happens (the
-    /// endpoint is down, so no preparation row exists) does not reach here and waits for the
-    /// endpoint: issue #48.
+    /// A preparation that never happens (the endpoint is down, so no row exists) has the same
+    /// deadline (issue #48); the order is already recorded then, and the clock is the attempt's,
+    /// not the order's. Only the endpoint path in [`Core::deliver`] asks.
     ///
     /// Not for a delivery a review resolution runs: the transfer is in review already.
     async fn unprepared_deadline(
