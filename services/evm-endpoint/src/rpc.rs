@@ -241,6 +241,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// A provider over HTTP, through alloy's JSON-RPC client.
 pub struct Http {
     name: String,
+    timeout: Duration,
     client: RpcClient,
 }
 
@@ -267,8 +268,14 @@ impl Http {
             .map_err(|_| format!("provider {name}: the HTTP client could not be built"))?;
         Ok(Self {
             name: name.to_owned(),
+            timeout,
             client: RpcClient::new_http_with_client(http, url),
         })
+    }
+
+    /// The bound on each of its requests.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
 
     async fn request(&self, method: &'static str, params: Value) -> Result<Value, CallError> {
@@ -322,6 +329,9 @@ fn transport_text(e: &TransportRpcError<TransportErrorKind>) -> String {
     match e {
         TransportRpcError::Transport(kind) => match kind {
             TransportErrorKind::HttpError(h) => format!("HTTP {}", h.status),
+            TransportErrorKind::Custom(source) if is_timeout(source.as_ref()) => {
+                "the request timed out".into()
+            }
             _ => "transport error".into(),
         },
         TransportRpcError::NullResp => "a null answer".into(),
@@ -330,6 +340,21 @@ fn transport_text(e: &TransportRpcError<TransportErrorKind>) -> String {
         }
         other => other.to_string(),
     }
+}
+
+/// Whether `source` (or one it wraps) is reqwest's timeout: a hang reads differently in a log
+/// from a reset or a refusal. Only the kind is looked at; its text, which names the URL, is not.
+fn is_timeout(source: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(source);
+    while let Some(e) = current {
+        if e.downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+        {
+            return true;
+        }
+        current = e.source();
+    }
+    false
 }
 
 /// Parses a `0x` quantity.
