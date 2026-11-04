@@ -681,6 +681,60 @@ abstract contract GovernanceTest is GovernanceBase {
         assertTrue(ok, "resumed");
     }
 
+    /// AC-I2.2, REQ-GV-2: re-enabling the vault's delivery module (the unpause) and raising a delivery bound
+    /// each need more than one approver: one owner alone cannot even queue either, and the owners at the
+    /// threshold (more than one by construction) can, to run only after the cooldown. This is the EVM vault's
+    /// governance; the issuing network's contract takes the same property from the community account that
+    /// holds its governance role (F-006 NOTES, item 9), which this test does not reach.
+    function test_AC_I2_2_unpausingAndRaisingABoundNeedMoreThanOneApprover() public {
+        assertGt(safe.getThreshold(), 1, "the vault's owners act at a threshold above one");
+
+        // Paused: the delivery module is off the Safe, and nothing is delivered.
+        assertTrue(
+            ownersExec(
+                d.safe,
+                abi.encodeCall(ISafe.disableModule, (prevOf(d.roles), d.roles)),
+                Enum.Operation.Call,
+                2
+            )
+        );
+        (bool ok,) = deliver(BENEFICIARY, 1, keccak256("ac-i2-2 paused"));
+        assertFalse(ok, "paused");
+
+        // The unpause and the raise, each queued by one owner alone: refused, nothing queued.
+        bytes memory enable = abi.encodeCall(ISafe.enableModule, (d.roles));
+        bytes memory raise = raised();
+        bytes memory viaDelay =
+            abi.encodeCall(IDelay.execTransactionFromModule, (d.safe, 0, enable, Enum.Operation.Call));
+        assertFalse(
+            ownersExec(d.delay, viaDelay, Enum.Operation.Call, 1), "one owner cannot queue the unpause"
+        );
+        viaDelay = abi.encodeCall(IDelay.execTransactionFromModule, (d.roles, 0, raise, Enum.Operation.Call));
+        assertFalse(ownersExec(d.delay, viaDelay, Enum.Operation.Call, 1), "one owner cannot queue the raise");
+        assertEq(delayMod.queueNonce(), 0, "nothing was queued by one owner");
+
+        // Directly, one owner cannot do either, and the owners at the threshold are refused by the guard
+        // (the change must be delayed), so the queue is the only way and it takes the threshold.
+        assertFalse(ownersExec(d.safe, enable, Enum.Operation.Call, 1), "one owner cannot enable the module");
+        assertFalse(
+            ownersExec(d.roles, raise, Enum.Operation.Call, 1), "one owner cannot raise the allowance"
+        );
+        assertGuardRefuses(d.safe, enable, "VaultGuard: Safe change must be delayed");
+        assertGuardRefuses(d.roles, raise, "VaultGuard: allowance cap raised");
+
+        // The owners at the threshold queue both; neither runs before the cooldown; after it, both do.
+        mustQueue(d.safe, enable);
+        mustQueue(d.roles, raise);
+        (ok,) = runQueued(d.safe, enable);
+        assertFalse(ok, "not before the cooldown");
+        vm.warp(block.timestamp + cooldown);
+        mustRun(d.safe, enable);
+        mustRun(d.roles, raise);
+        (ok,) = deliver(BENEFICIARY, 1, keccak256("ac-i2-2 resumed"));
+        assertTrue(ok, "unpaused by the owners at the threshold");
+        assertEq(allowanceBalance(), cfg.deliveryBalance * 2 - 1, "the raised bound, less the delivery");
+    }
+
     /// REQ-GV-3: the owners can veto a queued change (skip it) at once, with no cooldown.
     function test_REQ_GV_3_ownersCanVetoAQueuedChange() public {
         bytes memory change = raised();
