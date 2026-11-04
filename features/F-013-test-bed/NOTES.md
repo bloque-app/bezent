@@ -76,3 +76,36 @@ follower, supplies, submitter and prover, with two operator logins. It lives und
   run from a laptop. Until then the Kreivo side of these scenarios is a model.
 - **Not covered:** the long run of `T-013-08` (zero divergence sustained, every final leg delivered, refunded or held with an
   owner) and the 48-hour soak need a runner for a long run (issue #33).
+
+## Remaining test gaps: `AC-I2.2`, `INV-12`, `INV-14` (2026-11-04)
+
+What each needed, what was added, and what is still not shown. The map (`tools/ci/criteria_map.py`) measures acceptance
+criteria only: an `INV-*` test is not counted by it, so the two invariants below are for the reviewer.
+
+- **`AC-I2.2` (several approvers).** The Kreivo contract enforces that only its governance account unpauses or raises a
+  bound. That the account needs more than one approver is a property of the community that holds it (F-006 NOTES, item 9),
+  and the bed's governance is one test key (`//Dave`); showing it needs a real community origin with a vote, on zombienet,
+  which does not run on a pull request and cannot be run from a laptop. It is not tested and not claimed: it is a `known_unmet` entry (`e2e/criteria/known_unmet.toml`), closed by issue #89. What was added:
+  the same property for the EVM vault, where it is the Safe's own: `test_AC_I2_2_unpausingAndRaisingABoundNeedMoreThanOneApprover`
+  (`contracts/evm/test/fork/Governance.t.sol`, three networks) shows one owner cannot queue the re-enabling of the delivery
+  module or an allowance raise, the guard refuses both made directly, and the owners at the threshold of two queue both and run
+  them only after the cooldown. The refusals of one owner are asserted by their reason, the Safe's `GS020` (signatures too short), so a failure for another cause does not pass. Checked by mutation: with the Safe's threshold set to one in the test, it fails.
+- **`INV-14` (custody + chain).** The chain layer already had `test_INV_14_*` (the unwrapper, the delivery on the fork); the
+  service layer has its observation tests. Custody had no test naming it: `inv_14_the_signer_signs_a_transfer_only_with_its_reference_and_nothing_else_leaves`
+  (`services/signer/tests/guards.rs`) feeds the signer eight payouts that move reserve value without the paired reference, or with
+  more than it (transfer alone, reference first, second entry to another contract, a second transfer, a third entry, a direct
+  role call, a call on the token, native value), for an order and a preparation that are valid; it refuses every one with the alert
+  and signs none, then signs the canonical payout. Checked by mutation: decoding without re-encoding (`decode_evm_payout`), and
+  dropping the `value != 0` check in `signer.rs`, each make it fail. The conversion arm of the invariant (`REQ-CV-7`) and
+  the recorded surplus withdrawal are not signed by this key and are not exercised here.
+- **`INV-12` (service).** There was no test: `S6` of the full-chain suite (`s6_inv_12_...`) fills the two free request references a
+  requester gives (a deposit's, a withdrawal extras') with account-reference-like text, runs both flows to completion, then
+  searches every byte written to the fork (each signed transaction since the pinned block, its input, its logs) and to the Kreivo
+  model (each extrinsic, and each event's raw topics and data), raw and as hexadecimal text. It first shows each half sees a value
+  known to be in it (the payout's reference and the beneficiary in the fork's calldata, the beneficiary in its logs, the mint's
+  reference in the Kreivo extrinsics and in the Kreivo events). Also checked by mutation: a marker put in a Kreivo event's data only
+  (in the harness) fails it. Checked by mutation: deriving the mint's on-chain reference from the request reference
+  (`engine.rs`, `Engine::reference`) fails it. Not searched: UTF-16 and base64 forms, a part of a reference (a partial leak), and Polygon storage. Limits: it shows nothing about an input the bed never sends, and "personal data" is
+  not a thing a test can recognise: it covers the data a requester can put in free form. The SPEC gives no input field the type
+  "account reference" (the redemption's instructions of an attested backend are held off chain, only their commitment is written,
+  `REQ-RQ-9`; no attested backend runs on the bed).

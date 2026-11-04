@@ -92,8 +92,8 @@ jobs:
           start=$(date +%s)
           cargo test -p bezent-e2e-full-chain --features fork --locked -- --test-threads=1 2>&1 | tee full-chain.log
           took=$(( $(date +%s) - start ))
-          # Five scenarios and one pin check ran; none was filtered, ignored or skipped.
-          grep -q 'test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' full-chain.log
+          # Six scenarios and one pin check ran; none was filtered, ignored or skipped.
+          grep -q 'test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' full-chain.log
           {
             echo "### Full-chain suite"
             echo
@@ -108,6 +108,7 @@ jobs:
             echo
             echo "- S4 shows that an arrival in a block the fork then abandons, before it is final, is never recorded: the services run over it while it exists (a follower reading \`latest\` records it and fails the scenario), then it is reorganised away. It does not show a reorganisation of a block already final."
             echo "- S5 shows that, under a compromise pause, the core orders, records and signs no new work (the signer's count of signatures does not move). It does not show that the signer itself refuses: work recorded before the pause is still signed (AC-I1.2, known unmet, issue #77)."
+            echo "- S6 shows that two request references filled with account-reference-like text (a deposit's and a withdrawal extras') are in the store and in no byte written to the fork (each signed transaction, its input, its logs' topics and data) or to the Kreivo model (each extrinsic, each event's raw topics and data), raw or as hexadecimal text (INV-12). Each of those four is first shown to see a value known to be in it. It does not search UTF-16 or base64 forms, or a part of a reference, or Polygon storage, and does not show that no other input can reach a network."
             echo "- The reserve check runs on the model's clock, so staleness handling is not covered."
             echo
             grep -E '^test ' full-chain.log | sed 's/^/- /'
