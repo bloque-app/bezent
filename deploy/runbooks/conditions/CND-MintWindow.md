@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: CND-MintWindow
 kind: condition
@@ -7,10 +11,6 @@ observables: [nonfinal_transfers, oldest_nonfinal_transfer_age_seconds]
 tests: [services/core/tests/conditions.rs::cnd_mint_window_holds_until_the_window_rolls_over]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # CND-MintWindow
 
 ## What it is

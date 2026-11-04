@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: CND-CutOff
 kind: condition
@@ -7,10 +11,6 @@ observables: [nonfinal_transfers, oldest_nonfinal_transfer_age_seconds]
 tests: [services/core/tests/conditions.rs::cnd_cutoff_a_step_past_the_route_cut_off_holds_until_it_reopens, services/ingress/tests/requests.rs::req_lm_1_cnd_cutoff_no_request_is_refused_for_a_cut_off, crates/store/tests/lifecycle_graph.rs::cnd_cutoff_is_a_named_condition, services/core/src/cutoff.rs::cnd_cutoff_route_is_closed_only_inside_a_declared_window]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # CND-CutOff
 
 ## What it is

@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: late-mint
 kind: pages
@@ -8,10 +12,6 @@ observables: [pauses_in_force]
 tests: []
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # Late-mint pages (open PR #72; not on this base)
 
 ## What it is

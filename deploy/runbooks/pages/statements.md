@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: statements
 kind: pages
@@ -7,10 +11,6 @@ observables: [reserve_equation_age_seconds]
 tests: [services/core/tests/statement.rs]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # Statement pages
 
 ## What it is

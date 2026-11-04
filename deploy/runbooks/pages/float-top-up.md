@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: float-top-up
 kind: procedure
@@ -7,10 +11,6 @@ observables: [fee_short_transfers]
 tests: [services/core/tests/conditions.rs::cnd_fee_short_holds_until_the_fee_position_can_pay]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # Top-up of a delivery account's fee float
 
 ## What it is

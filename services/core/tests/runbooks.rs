@@ -57,9 +57,15 @@ fn list(value: &str) -> Vec<String> {
 /// The front matter: `key: value`, `key: [a, b]` or `key:` followed by `  - item` lines.
 fn parse(path: &Path) -> Runbook {
     let text = read(path);
-    let rest = text
-        .strip_prefix("---\n")
-        .unwrap_or_else(|| panic!("{}: front matter must be the first line", path.display()));
+    // The licence header comes first (the licensing check reads the top of the file); the front
+    // matter follows it.
+    let text = match text.strip_prefix("<!--") {
+        Some(after) => after.split_once("-->\n").map_or(text.as_str(), |(_, rest)| rest).to_owned(),
+        None => text,
+    };
+    let rest = text.strip_prefix("---\n").unwrap_or_else(|| {
+        panic!("{}: front matter must follow the licence header", path.display())
+    });
     let (head, body) = rest
         .split_once("\n---\n")
         .unwrap_or_else(|| panic!("{}: front matter is not closed", path.display()));

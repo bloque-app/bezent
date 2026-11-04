@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: CND-DestinationRefused
 kind: condition
@@ -7,10 +11,6 @@ observables: [reviews_open, reviews_oldest_age_seconds, nonfinal_transfers, olde
 tests: [services/core/tests/conditions.rs::cnd_destination_refused_mints_nothing_and_resumes_when_the_mint_applies, services/core/tests/conditions.rs::cnd_destination_refused_past_its_deadline_goes_to_review, services/core/src/engine.rs::req_in_9_a_mint_the_issuing_network_refuses_holds_cnd_destination_refused, services/core/tests/review.rs::req_rv_2_a_review_ends_by_evidence_bezent_verifies_then_the_ordinary_step_runs, services/core/tests/review.rs::req_gv_5_a_resolution_that_moves_value_waits_for_its_second_approver]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # CND-DestinationRefused
 
 ## What it is

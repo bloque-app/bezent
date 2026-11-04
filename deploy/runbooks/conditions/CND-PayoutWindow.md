@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: CND-PayoutWindow
 kind: condition
@@ -7,10 +11,6 @@ observables: [nonfinal_transfers, oldest_nonfinal_transfer_age_seconds, reserve_
 tests: [services/core/tests/cancel.rs::cnd_payout_window_m1_a_spent_allowance_holds_the_withdrawal_never_review_never_refund, services/core/tests/cancel.rs::cnd_payout_window_m1_the_deadline_restarts_at_the_release, services/core/tests/cancel.rs::cnd_payout_window_s2_only_a_refusal_both_providers_agree_on_holds_the_window, services/core/tests/cancel.rs::cnd_payout_window_s3_a_hold_past_its_bound_pages_once_then_daily, services/core/tests/unsigned_attempts.rs::cnd_payout_window_a_spent_allowance_is_never_reviewed_and_its_clock_restarts_when_it_refills]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # CND-PayoutWindow
 
 ## What it is

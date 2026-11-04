@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: CND-AwaitingConversion
 kind: condition
@@ -7,10 +11,6 @@ observables: [reviews_open, reviews_oldest_age_seconds, unassociated_arrivals, u
 tests: [services/core/tests/conditions.rs::cnd_awaiting_conversion_mints_nothing_and_goes_to_review_past_its_deadline, services/core/tests/conversions.rs::req_cv_1_the_store_refuses_a_transfer_naming_a_convertible_arrival, services/core/tests/conversions.rs::ac_a5_1_ac_a5_2_req_cv_1_req_cv_2_req_cv_5_inv_6_the_ingress_binds_the_output_and_the_core_mints_it]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # CND-AwaitingConversion
 
 ## What it is

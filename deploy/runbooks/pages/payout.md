@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: payout
 kind: pages
@@ -7,10 +11,6 @@ observables: [oldest_nonfinal_transfer_age_seconds, nonfinal_transfers, reviews_
 tests: [services/core/tests/cancel.rs::req_rv_1_issue_35_a_repeated_refusal_pages_once_and_reaches_review_at_the_deadline, services/core/tests/cancel.rs::cnd_payout_window_s3_a_hold_past_its_bound_pages_once_then_daily]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # Payout pages
 
 ## What it is

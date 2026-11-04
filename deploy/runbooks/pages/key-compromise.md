@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: key-compromise
 kind: pages
@@ -7,10 +11,6 @@ observables: [pauses_in_force]
 tests: [services/core/tests/signals.rs::req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted, services/core/tests/lifecycle.rs::ac_i1_2_a_signature_not_over_the_recorded_bytes_raises_the_alert_and_moves_nothing, services/core/tests/cancel.rs::ac_i1_2_a_cancel_signature_not_over_its_bytes_raises_the_alert, services/core/tests/running_core.rs::inv_4_a_supply_mismatch_raises_key_compromise_once_and_pauses_until_the_operator_lifts_it]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # Key compromise (a signature bezent did not record)
 
 ## What it is

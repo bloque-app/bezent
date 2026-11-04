@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: CND-Unassociated
 kind: condition
@@ -7,10 +11,6 @@ observables: [unassociated_arrivals, unassociated_arrivals_oldest_age_seconds]
 tests: [services/core/tests/lifecycle.rs::ac_a4_1_an_arrival_that_cannot_become_a_deposit_is_unassociated_with_an_owner, services/core/tests/lifecycle.rs::ac_a4_2_an_unassociated_arrival_is_never_minted_and_leaves_only_by_a_two_person_release, services/core/tests/conversions.rs::req_cv_1_the_store_refuses_a_transfer_naming_a_convertible_arrival]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # CND-Unassociated
 
 ## What it is

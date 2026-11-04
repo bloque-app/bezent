@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: CND-Withdrawn
 kind: condition
@@ -7,10 +11,6 @@ observables: [reviews_open, reviews_oldest_age_seconds, open_gaps, nonfinal_tran
 tests: [services/core/tests/conditions.rs::cnd_withdrawn_an_inclusion_that_stops_matching_the_chain_goes_to_review, services/core/tests/lifecycle.rs::ac_a2_3_an_observation_withdrawn_before_finality_is_withdrawn_and_mints_nothing]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # CND-Withdrawn
 
 ## What it is

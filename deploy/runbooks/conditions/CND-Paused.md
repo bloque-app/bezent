@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: CND-Paused
 kind: condition
@@ -7,10 +11,6 @@ observables: [pauses_in_force, nonfinal_transfers, oldest_nonfinal_transfer_age_
 tests: [services/core/tests/conditions.rs::cnd_paused_new_work_waits_and_resumes_when_the_route_reopens, services/core/tests/conditions.rs::cnd_paused_work_in_flight_continues, services/core/tests/operations.rs::ac_i2_1_an_operators_pause_holds_new_work_in_each_scope_and_a_second_operator_lifts_it, services/core/tests/operations.rs::ac_i2_1_a_pause_does_not_fail_or_refund_work_in_flight]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # CND-Paused
 
 ## What it is

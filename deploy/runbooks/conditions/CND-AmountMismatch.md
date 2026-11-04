@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: CND-AmountMismatch
 kind: condition
@@ -7,10 +11,6 @@ observables: [reviews_open, reviews_oldest_age_seconds]
 tests: [services/core/tests/lifecycle.rs::req_tr_5_a_delivery_of_another_amount_goes_to_review_reporting_both, services/core/tests/review.rs::req_rv_2_a_review_ends_by_evidence_bezent_verifies_then_the_ordinary_step_runs, services/core/tests/review.rs::req_gv_5_a_resolution_that_moves_value_waits_for_its_second_approver]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # CND-AmountMismatch
 
 ## What it is

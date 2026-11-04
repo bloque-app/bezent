@@ -33,7 +33,7 @@ The same rules bind every runbook (`REQ-GV-5`, guardrails 2 to 6 in `CLAUDE.md`)
 
 ## Format
 
-Each file begins with front matter that `services/core/tests/runbooks.rs` reads, and has these sections, in this order:
+Each file begins with the licence comment, then front matter that `services/core/tests/runbooks.rs` reads, and has these sections, in this order:
 `What it is`, `Pages`, `Confirm`, `Do`, `Never`, `Exercise`.
 
 ```

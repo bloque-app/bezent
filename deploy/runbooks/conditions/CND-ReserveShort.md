@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: CND-ReserveShort
 kind: condition
@@ -7,10 +11,6 @@ observables: [nonfinal_transfers, oldest_nonfinal_transfer_age_seconds, reserve_
 tests: [services/core/tests/conditions.rs::cnd_reserve_short_ac_b3_1_holds_and_raises_one_condition_per_asset_and_network, services/core/tests/conditions.rs::cnd_reserve_short_ac_b3_2_resumes_with_no_one_acting_when_reserve_recovers]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # CND-ReserveShort
 
 ## What it is

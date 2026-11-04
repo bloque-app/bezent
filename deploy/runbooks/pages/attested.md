@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: attested
 kind: pages
@@ -8,10 +12,6 @@ observables: [oldest_nonfinal_transfer_age_seconds, nonfinal_transfers]
 tests: []
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # Attested-backend pages (open PR #66; not on this base)
 
 ## What it is

@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: platform
 kind: pages
@@ -7,10 +11,6 @@ observables: [observer_lag_seconds, open_gaps, undelivered_notifications, undeli
 tests: [services/kreivo-endpoint/tests/network.rs, services/evm-endpoint/tests/network.rs, services/core/tests/health.rs]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # Platform alarms (not log pages)
 
 ## What it is

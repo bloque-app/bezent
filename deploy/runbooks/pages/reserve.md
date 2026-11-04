@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: CC-BY-4.0
+-->
 ---
 id: reserve
 kind: pages
@@ -7,10 +11,6 @@ observables: [reserve_equation_outcome, reserve_equation_age_seconds, reserve_am
 tests: [services/core/tests/reserve_check.rs::req_ic_2_nfr_5_m2_an_evaluation_that_cannot_be_made_beyond_the_bound_pauses, services/core/tests/reserve_check.rs::inv_1_req_ic_2_m1_an_observation_the_book_cannot_post_is_quarantined_paged_and_paused, crates/store/tests/reserve_check.rs::req_bk_1_req_ic_2_the_core_pauses_only_an_assets_routes_on_that_assets_divergence, services/core/tests/reserve_check.rs::ac_e2_1_a_divergence_pauses_the_assets_routes_keeps_observing_and_pages_a_human, services/core/tests/operations.rs::ac_i2_1_an_operators_pause_holds_new_work_in_each_scope_and_a_second_operator_lifts_it]
 exercised: no
 ---
-<!--
-Copyright (c) 2026 Pagos Cube LLC
-SPDX-License-Identifier: CC-BY-4.0
--->
 # Reserve pages
 
 ## What it is
