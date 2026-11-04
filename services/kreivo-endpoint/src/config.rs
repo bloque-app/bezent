@@ -166,6 +166,11 @@ pub struct Config {
     /// How long one request to a history source may take, in milliseconds.
     #[serde(default = "default_archive_timeout_ms")]
     pub archive_timeout_ms: u64,
+    /// How long a submitted transaction's watch may hear nothing, in milliseconds, before it is
+    /// dropped and the transaction may be submitted again (issue #84): 120 000 by default, about
+    /// twenty blocks. Silence is not an outcome; nothing is concluded from it.
+    #[serde(default = "default_watch_silence_ms")]
+    pub watch_silence_ms: u64,
     /// The most bytes one answer of a history source may be (issue #49): a longer one is a failed
     /// request. 16 MiB by default; a block's events are far smaller.
     #[serde(default = "default_archive_max_response_bytes")]
@@ -236,6 +241,9 @@ fn default_light_client_depth() -> u64 {
 }
 fn default_archive_timeout_ms() -> u64 {
     30_000
+}
+fn default_watch_silence_ms() -> u64 {
+    120_000
 }
 fn default_archive_max_response_bytes() -> u32 {
     16 * 1024 * 1024
@@ -323,6 +331,9 @@ impl Config {
         }
         if !(1..256).contains(&self.light_client_depth) || self.archive_timeout_ms == 0 {
             return Err("light_client_depth must be 1 to 255, archive_timeout_ms positive".into());
+        }
+        if self.watch_silence_ms == 0 {
+            return Err("watch_silence_ms must be positive".into());
         }
         if self.archive_max_response_bytes < 1024 {
             return Err("archive_max_response_bytes must be at least 1024".into());
@@ -586,6 +597,17 @@ mod tests {
                 .unwrap_err()
                 .contains("archive_max_response_bytes")
         );
+    }
+
+    #[test]
+    fn issue_84_the_watch_silence_defaults_to_two_minutes_and_is_positive() {
+        let mut c = sample();
+        assert_eq!(
+            c.watch_silence_ms,
+            u64::try_from(crate::chain::watch::WATCH_SILENCE.as_millis()).unwrap()
+        );
+        c.watch_silence_ms = 0;
+        assert!(c.check().unwrap_err().contains("watch_silence_ms"));
     }
 
     const VAULT: &str = "\n[vault]\naddress = \"https://vault.example:8200\"\nmount = \"bezent\"\nrole = \"bezent-kreivo-endpoint-iam\"\nsts_region = \"us-east-2\"\nserver_id = \"vault.example\"\n";

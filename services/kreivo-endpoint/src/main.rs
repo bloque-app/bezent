@@ -173,6 +173,7 @@ mod run {
             config.light_client_depth,
             Duration::from_millis(config.archive_timeout_ms),
             config.archive_max_response_bytes,
+            Duration::from_millis(config.watch_silence_ms),
             // The light client's first sync can outlast any start period: it beats while the warp
             // sync advances, and goes stale when it stands still (issue #61).
             {
