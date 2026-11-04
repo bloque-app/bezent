@@ -47,6 +47,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
 
 [dev-dependencies]
+# The ingress's router, for the seam between a deposit request and the mint (tests/conversions.rs,
+# as the kreivo-endpoint's tests take the core for the two-step delivery): the request goes in
+# through the real ingress, on its own login, and the core mints from what the store then holds.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+bezent-ingress = { path = "../ingress" }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
 # The S3 sink's wire test: the real SDK client against a canned HTTP client (issue #58).
 aws-smithy-http-client = { version = "1", default-features = false, features = ["test-util"] }
 http = "1"
