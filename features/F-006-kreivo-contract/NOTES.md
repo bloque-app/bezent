@@ -74,9 +74,11 @@ yet, so no migration is needed.
   the bound; a mint may be refused up to one bucket (a tenth of the window) late. Refund mints count. The proof is
   on `types::Window`. An amendment to make the window fixed was the alternative; it is not needed.
 - **Sizing a window (issue #38).** `window_blocks` is a block count, and `BLOCKS_PER_DAY` is 24 h divided by
-  `BLOCK_TIME_MS` rounded **down** (41,739 blocks, 270 ms short of 24 h at 2.07 s). Operators who need a window of
-  at least a given duration size it with `div_ceil`: `duration_ms.div_ceil(BLOCK_TIME_MS)` (41,740 for 24 h), never
-  with integer division. The test `inv_3_a_24_hour_window_enforces_its_ceiling_and_resets_at_the_boundary` mints
+  `BLOCK_TIME_MS` rounded **down** (41,739 blocks, 270 ms short of 24 h at the declared 2.07 s). Real blocks have run
+  slower: the 2.073 s behind `DEC-6`, and 2.08 s measured on 2026-11-04, make that window about 24.1 h, longer than
+  24 h, which is the safe direction for a ceiling. Operators who need a window of at least a given duration at the
+  declared block time size it with `div_ceil`: `duration_ms.div_ceil(BLOCK_TIME_MS)` (41,740 for 24 h), never with
+  integer division. The test `inv_3_a_24_hour_window_enforces_its_ceiling_and_resets_at_the_boundary` mints
   across a window of `BLOCKS_PER_DAY` blocks: the ceiling holds through the window's last block and the first mint
   is free again at block `t + window_blocks`.
 - **S1: the raise delay is never zero** (`REQ-GV-3` needs a delay), at instantiation and on change.
