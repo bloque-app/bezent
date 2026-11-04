@@ -85,6 +85,22 @@ def is_zero(v):
     return type(v) is int and v == 0
 
 
+def is_name(v):
+    """A login: a non-blank string. `1` and `true` are truthy and name nobody."""
+    return isinstance(v, str) and bool(v.strip())
+
+
+def sub(table, key, errors, where):
+    """`table[key]` when it is a table. Absent is an empty table (the checks below name what is owed); present but
+    not a table (a list, a string, a number) is an error and also an empty table, so a wrong type never skips a check
+    and never raises a traceback."""
+    v = table.get(key, {}) if isinstance(table, dict) else {}
+    if not isinstance(v, dict):
+        errors.append(f"{where}: `{key}` must be a table, found {type(v).__name__}")
+        return {}
+    return v
+
+
 def is_url(v):
     return isinstance(v, str) and v.startswith("https://")
 
@@ -111,7 +127,7 @@ def human(gate, ev, release, conds, incidents):
     if ev.get("release_commit") != release:
         errors.append(f"evidence: release_commit is {ev.get('release_commit')!r}, the release is {release!r} "
                       "(evidence of another commit proves nothing about this one)")
-    rb = ev.get("runbook", {})
+    rb = sub(ev, "runbook", errors, "evidence")
     for item in conds + incidents:
         e, where = rb.get(item), f"runbook {item}"
         if not isinstance(e, dict):
@@ -129,11 +145,12 @@ def human(gate, ev, release, conds, incidents):
     for item in sorted(set(rb) - set(conds) - set(incidents)):
         errors.append(f"runbook {item}: names nothing in SPEC section 10 or the incident classes (misspelt, or withdrawn)")
 
-    window = gate.get("exit", {}).get("sustained_divergence_free_hours")
+    window = sub(gate, "exit", errors, "release/gate.toml").get("sustained_divergence_free_hours")
     if not is_int(window) or window <= 0:
         errors.append("exit: release/gate.toml [exit].sustained_divergence_free_hours is unset. SPEC section 15 says "
                       "'sustained' and gives no duration; amendment 0021 proposes one and is not ruled")
-    div = ev.get("exit", {}).get("divergence", {})
+    ex = sub(ev, "exit", errors, "evidence")
+    div = sub(ex, "divergence", errors, "exit")
     if need(div, "window_hours", errors, "exit.divergence", lambda v: is_int(v) and v > 0, "a positive integer"):
         if is_int(window) and div["window_hours"] < window:
             errors.append(f"exit.divergence: {div['window_hours']} h measured, {window} h required")
@@ -141,14 +158,14 @@ def human(gate, ev, release, conds, incidents):
         errors.append(f"exit.divergence: `divergences` is {div.get('divergences')!r}, must be exactly 0 (zero tolerance)")
     need(div, "evidence", errors, "exit.divergence", is_url, "an https link")
     need(div, "by", errors, "exit.divergence")
-    legs = ev.get("exit", {}).get("legs", {})
+    legs = sub(ex, "legs", errors, "exit")
     if not is_zero(legs.get("unresolved")):
         errors.append(f"exit.legs: `unresolved` is {legs.get('unresolved')!r}: every final source leg must be "
                       "delivered, refunded or held in a named condition with an owner (must be exactly 0)")
     need(legs, "evidence", errors, "exit.legs", is_url, "an https link")
     need(legs, "by", errors, "exit.legs")
 
-    soak, want = ev.get("soak", {}), gate.get("soak", {})
+    soak, want = sub(ev, "soak", errors, "evidence"), sub(gate, "soak", errors, "release/gate.toml")
     hours, per_day = want.get("hours"), want.get("statements_per_day")
     if not is_int(hours) or not is_int(per_day):
         errors.append("soak: release/gate.toml [soak] needs integer `hours` and `statements_per_day` (DEC-19: 48, 2)")
@@ -162,11 +179,17 @@ def human(gate, ev, release, conds, incidents):
     need(soak, "evidence", errors, "soak", is_url, "an https link")
     need(soak, "by", errors, "soak")
 
-    for role in gate.get("signoff", {}).get("required", []):
-        s = ev.get("signoff", {}).get(role, {})
-        for k, pred in (("by", bool), ("pr", lambda v: is_int(v) and v > 0), ("on", is_date)):
-            need(s, k, errors, f"signoff {role}", pred)
-    if not gate.get("signoff", {}).get("required"):
+    required = sub(gate, "signoff", errors, "release/gate.toml").get("required", [])
+    if not isinstance(required, list) or not all(is_name(r) for r in required):
+        errors.append("signoff: release/gate.toml [signoff].required must be a list of role names")
+        required = []
+    signed = sub(ev, "signoff", errors, "evidence")
+    for role in required:
+        s = sub(signed, role, errors, "signoff")
+        for k, pred, what in (("by", is_name, "a login (a string)"), ("pr", lambda v: is_int(v) and v > 0, "a positive integer"),
+                              ("on", is_date, "an ISO date")):
+            need(s, k, errors, f"signoff {role}", pred, what)
+    if not required:
         errors.append("signoff: release/gate.toml lists no required sign-off")
     return errors, lines
 
@@ -244,13 +267,28 @@ def online_signoffs(gate, ev, repo, api, roles, release, git_fn):
     evidence, it is merged, `by` approved its final commit, and no two roles are one person."""
     errors, people = [], {}
     required = gate.get("signoff", {}).get("required", [])
+    if not isinstance(required, list) or not required:
+        return ["signoff: release/gate.toml lists no required sign-off"]
     for role in required:
-        s = (ev or {}).get("signoff", {}).get(role, {})
-        n, by = s.get("pr"), s.get("by")
-        if not (is_int(n) and n > 0 and isinstance(by, str) and by):
-            continue  # already an error from human()
         where = f"signoff {role}"
-        members = {m.lower() for m in roles.get("role", {}).get(role, {}).get("members", []) if isinstance(m, str)}
+        signed = (ev or {}).get("signoff")
+        s = signed.get(role) if isinstance(signed, dict) else None
+        if not isinstance(s, dict):
+            errors.append(f"{where}: no sign-off table in the evidence; not checked online, and a gate that skips a role fails")
+            continue
+        n, by = s.get("pr"), s.get("by")
+        if not (is_int(n) and n > 0 and is_name(by)):
+            # Never a silent skip: with no pull request or no login there is no approval, roles-list, merge or
+            # two-person check to run, and that is a failure of its own, not only of human().
+            errors.append(f"{where}: `by` must be a login (a string) and `pr` a positive integer, found "
+                          f"by={by!r}, pr={n!r}; the approval, roles-list, merge and two-person checks cannot run")
+            continue
+        entry = (roles.get("role") or {}).get(role) if isinstance(roles.get("role"), dict) else None
+        members_raw = entry.get("members", []) if isinstance(entry, dict) else []
+        if not isinstance(members_raw, list):
+            errors.append(f"{where}: release/roles.toml `members` must be a list of logins, found {type(members_raw).__name__}")
+            members_raw = []
+        members = {m.lower() for m in members_raw if isinstance(m, str)}
         if not members:
             errors.append(f"{where}: release/roles.toml lists no member for the role (fail closed)")
         elif by.lower() not in members:
@@ -352,7 +390,7 @@ def run(release, evidence_path, online, repo, api=gh_api, git_fn=git):
         try:
             errors += online_checks(gate, release, repo, api)
             errors += online_signoffs(gate, ev, repo, api, roles, release, git_fn)
-        except (subprocess.CalledProcessError, RuntimeError, KeyError, TypeError, ValueError) as e:
+        except (subprocess.CalledProcessError, RuntimeError, KeyError, TypeError, ValueError, AttributeError) as e:
             # An unreadable answer is a failure, never a pass and never a traceback nobody reads.
             errors.append(f"github: could not read what the gate needs ({type(e).__name__}: {e})")
     else:

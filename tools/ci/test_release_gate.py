@@ -288,6 +288,48 @@ class Gate(unittest.TestCase):
         self.assertTrue(files)
         self.assertEqual(rg.evidence_pr_errors("pr", pr, files, "0" * 40, lambda *a: (0, "x"))[0].split(": ")[1][:15], "does not change")
 
+    def test_a_login_that_is_not_a_string_is_an_error_in_both_halves(self):
+        # `by = 1` or `true` is truthy: it once passed human() and was skipped online, so no approval, roles-list,
+        # merged-PR or two-person check ran at all.
+        for bad in (1, True, ["a"], "", "  "):
+            ev = complete_evidence()
+            ev["signoff"]["maintainer"]["by"] = bad
+            self.assertTrue(any("signoff maintainer" in e and "`by`" in e for e in human(ev=ev)), bad)
+            errors = self.signoffs(ev=ev)
+            self.assertTrue(any("signoff maintainer" in e and "cannot run" in e for e in errors), (bad, errors))
+        ev = complete_evidence()
+        ev["signoff"]["maintainer"]["pr"] = True
+        self.assertTrue(any("cannot run" in e for e in self.signoffs(ev=ev)))
+
+    def test_a_missing_or_mistyped_signoff_table_is_never_skipped_online(self):
+        ev = complete_evidence()
+        del ev["signoff"]["maintainer"]
+        self.assertTrue(any("signoff maintainer" in e for e in self.signoffs(ev=ev)))
+        ev["signoff"] = ["spec-owner"]
+        self.assertEqual(len([e for e in self.signoffs(ev=ev) if "no sign-off table" in e]), 2)
+        self.assertTrue(any("must be a table" in e for e in human(ev=ev)))
+
+    def test_a_wrong_type_in_the_evidence_is_an_error_not_a_skipped_check(self):
+        for path in (("runbook",), ("exit",), ("soak",), ("exit", "divergence"), ("exit", "legs"), ("signoff",),
+                     ("signoff", "maintainer")):
+            ev = complete_evidence()
+            d = ev
+            for k in path[:-1]:
+                d = d[k]
+            d[path[-1]] = "oops"
+            errors = human(ev=ev)  # no traceback, and an error naming the table
+            self.assertTrue(any("must be a table" in e for e in errors), (path, errors))
+        g = complete_gate()
+        g["signoff"]["required"] = "spec-owner"
+        self.assertTrue(any("list of role names" in e for e in human(gate=g)))
+
+    def test_a_roles_list_that_is_a_string_does_not_make_everyone_a_member(self):
+        # members = "alice" iterates to the letters, so a login `a` would be in the list.
+        roles = {"role": {"spec-owner": {"members": "alice"}, "maintainer": {"members": ["b"]}}}
+        errors = self.signoffs(roles=roles)
+        self.assertTrue(any("must be a list" in e for e in errors))
+        self.assertTrue(any("not in the role's list" in e or "lists no member" in e for e in errors))
+
     def test_a_flag_or_a_float_is_not_a_zero_count(self):
         for bad in (False, 0.0, None, "0"):
             ev = complete_evidence()
