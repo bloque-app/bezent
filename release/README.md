@@ -19,5 +19,9 @@ value (`SPEC.md` section 15, `PLAN.md` `DEC-19`, `M-4`). It fails closed.
 | 48 hours on mainnet, two verified daily statements, zero divergence | human, needs mainnet | `evidence.toml` `[soak]` |
 | Sign-off of the spec owner and a maintainer | human | `evidence.toml` `[signoff.*]` |
 
-The evidence is one reviewed pull request: `release_commit` (the full sha) and an entry per item with an `https` link to
-what was run, who ran it (`by`) and when (`on`). Evidence for another commit proves nothing about this one.
+The evidence is one reviewed pull request that changes `release/evidence.toml` and nothing else: `release_commit` (the
+full sha of the code released) and an entry per item with an `https` link to what was run, who ran it (`by`) and when
+(`on`). A file cannot hold the hash of its own commit, so the gate runs on that later commit and requires the release
+commit to be its ancestor with only `evidence.toml` between them. Before the gate, dispatch `ci`, `contracts`,
+`evm-contracts`, `e2e-evm` and `e2e-zombienet` on the release commit: the gate reads their checks there and a missing
+or skipped one fails. The `DCO` check runs on pull requests only, so the gate does not read it.

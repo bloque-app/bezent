@@ -8,10 +8,8 @@
 # request's runs, and a workflow filtered by path does not run on a commit that touches none of them, so the
 # release procedure dispatches those workflows (contracts, evm-contracts, e2e-evm, e2e-zombienet) on the release
 # commit first. The two zombienet jobs run on the self-hosted pool and never on a pull request. A skipped or
-# missing check fails the gate.
-
-[[check]]
-name = "DCO sign-off"
+# missing check fails the gate. The DCO check is not listed: it runs only on pull requests, so no commit that is
+# not a PR head can show it; it is enforced when the change merges.
 
 [[check]]
 name = "rustfmt"

@@ -12,6 +12,22 @@ sys.path.insert(0, str(Path(__file__).parent))
 import release_gate as rg  # noqa: E402
 
 SHA = "a" * 40
+
+
+def _dump(d, prefix=""):
+    """A minimal TOML writer for the evidence shape (tables of scalars)."""
+    out, tables = [], []
+    for k, v in d.items():
+        if isinstance(v, dict):
+            tables.append((k, v))
+        else:
+            out.append(f"{k} = {v!r}".replace("'", '"') if isinstance(v, str) else f"{k} = {v}")
+    text = "\n".join(out) + "\n"
+    for k, v in tables:
+        name = f"{prefix}{k}" if not prefix else f"{prefix}.{k}"
+        key = ".".join(f'"{p}"' for p in name.split("."))
+        text += f"\n[{key}]\n" + _dump(v, name)
+    return text
 GATE = tomllib.loads((rg.ROOT / "release/gate.toml").read_text())
 
 
@@ -143,8 +159,42 @@ class Gate(unittest.TestCase):
         changes = approved + [{"user": {"login": "a"}, "state": "CHANGES_REQUESTED"}]
         self.assertEqual(len(rg.online_signoffs(GATE, ev, "o/r", self.api([], changes))), 1)
 
+    def test_the_evidence_commit_may_differ_from_the_release_only_by_the_evidence(self):
+        def git(diff, ancestor=0):
+            return lambda *a: (ancestor, "") if a[0] == "merge-base" else (0, diff)
+        self.assertEqual(rg.evidence_follows_release(SHA, git("release/evidence.toml\n")), [])
+        self.assertEqual(rg.evidence_follows_release(SHA, git("")), [])
+        errors = rg.evidence_follows_release(SHA, git("release/evidence.toml\nservices/core/src/engine.rs\n"))
+        self.assertTrue(errors and "engine.rs" in errors[0])
+        self.assertTrue(rg.evidence_follows_release(SHA, git("", ancestor=1)))
+
+    def test_a_complete_release_passes_end_to_end(self):
+        # Everything satisfied, with the repository's own gate.toml plus the ruled window: the one path to a pass.
+        import tempfile
+        from unittest import mock
+        gate_text = (rg.ROOT / "release/gate.toml").read_text().replace(
+            "[exit]\n", "[exit]\nsustained_divergence_free_hours = 48\n")
+        runs = [{"name": c["name"], "conclusion": "success"} for c in GATE["check"]]
+        approved = [{"user": {"login": "a"}, "state": "APPROVED"}, {"user": {"login": "b"}, "state": "APPROVED"}]
+        with tempfile.TemporaryDirectory() as d:
+            gate_file = Path(d) / "gate.toml"
+            gate_file.write_text(gate_text)
+            ev = Path(d) / "evidence.toml"
+            ev.write_text(_dump(complete_evidence()))
+            git = lambda *a: (0, "release/evidence.toml") if a[0] == "diff" else (0, "")  # noqa: E731
+            with mock.patch.object(rg, "GATE_PATH", gate_file), mock.patch.object(rg, "mechanical_map", lambda: []):
+                errors, _ = rg.run("", str(ev), True, "o/r", api=self.api(runs, approved), git_fn=git)
+                self.assertEqual(errors, [])
+                runs[0]["conclusion"] = "failure"
+                errors, _ = rg.run("", str(ev), True, "o/r", api=self.api(runs, approved), git_fn=git)
+                self.assertEqual(len(errors), 1)
+
+    def test_no_release_commit_anywhere_fails(self):
+        errors, _ = rg.run("", "/nonexistent/evidence.toml", online=False, repo="o/r")
+        self.assertTrue(any("no release commit" in e for e in errors))
+
     def test_the_real_run_fails_closed_without_evidence(self):
-        errors, _ = rg.run(SHA, "/nonexistent/evidence.toml", online=False, repo="o/r")
+        errors, _ = rg.run(SHA, "/nonexistent/evidence.toml", online=False, repo="o/r", git_fn=lambda *a: (1, ""))
         self.assertTrue(errors)
         self.assertTrue(any("not verified" in e for e in errors))
 

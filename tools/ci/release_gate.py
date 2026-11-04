@@ -23,7 +23,12 @@ Human, recorded in release/evidence.toml and demanded here, each tied to this re
 Items 3 to 6 need a live environment (a test bed running the core against zombienet and the testnets, a mainnet
 instance) that does not exist in CI; this script cannot produce them, only refuse to pass without them.
 
-    release_gate.py --release <sha> [--online --repo owner/name] [--evidence release/evidence.toml]
+A file cannot hold the hash of the commit it is in, so the release and the evidence are two commits: `--release`
+is the commit of code being released (default: the `release_commit` the evidence names), the checkout is a later
+commit (the workflow's own ref) that adds the evidence, and the only file that may differ between the two is
+release/evidence.toml. The checks and the criteria map are read at the release commit.
+
+    release_gate.py [--release <sha>] [--online --repo owner/name] [--evidence release/evidence.toml]
 """
 import argparse
 import datetime
@@ -40,6 +45,7 @@ import criteria_map  # noqa: E402
 
 ROOT = criteria_map.ROOT
 NETWORKS = {"zombienet", "anvil", "testnet"}
+GATE_PATH = ROOT / "release/gate.toml"
 
 
 def named_conditions():
@@ -206,9 +212,30 @@ def gh_api(path):
     return json.loads(out)
 
 
-def run(release, evidence_path, online, repo, api=gh_api):
+def git(*args):
+    r = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+def evidence_follows_release(release, git_fn=git):
+    """The checkout is the release commit or a descendant of it that differs only by release/evidence.toml."""
+    errors = []
+    code, _ = git_fn("merge-base", "--is-ancestor", release, "HEAD")
+    if code != 0:
+        return [f"release: {release[:10]} is not an ancestor of the commit checked out (is the checkout shallow?)"]
+    code, out = git_fn("diff", "--name-only", release, "HEAD")
+    if code != 0:
+        return [f"release: cannot diff {release[:10]} against the checkout"]
+    other = [f for f in out.splitlines() if f and f != "release/evidence.toml"]
+    if other:
+        errors.append(f"release: the checkout differs from {release[:10]} beyond release/evidence.toml "
+                      f"({', '.join(other[:5])}{', ...' if len(other) > 5 else ''}); the evidence speaks for that code only")
+    return errors
+
+
+def run(release, evidence_path, online, repo, api=gh_api, git_fn=git):
     errors, notes = [], []
-    gate_path = ROOT / "release/gate.toml"
+    gate_path = GATE_PATH
     try:
         gate = tomllib.loads(gate_path.read_text())
     except (OSError, tomllib.TOMLDecodeError) as e:
@@ -218,6 +245,10 @@ def run(release, evidence_path, online, repo, api=gh_api):
     except (OSError, tomllib.TOMLDecodeError) as e:
         ev = {}
         errors.append(f"evidence: {evidence_path}: {e}")
+    release = release or ev.get("release_commit")
+    if not isinstance(release, str) or not re.fullmatch(r"[0-9a-f]{40}", release):
+        return errors + ["release: no release commit (--release, or `release_commit` in the evidence)"], notes
+    errors += evidence_follows_release(release, git_fn)
     errors += mechanical_map()
     if online:
         errors += online_checks(gate, release, repo, api)
@@ -230,16 +261,13 @@ def run(release, evidence_path, online, repo, api=gh_api):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--release", required=True, help="the full commit sha being released")
+    ap.add_argument("--release", default="", help="full sha of the code being released (default: the evidence's)")
     ap.add_argument("--evidence", default=str(ROOT / "release/evidence.toml"))
     ap.add_argument("--online", action="store_true")
     ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", "bloque-app/bezent"))
     a = ap.parse_args()
-    if not re.fullmatch(r"[0-9a-f]{40}", a.release):
-        print("error: --release must be a full 40-hex commit sha")
-        sys.exit(2)
     errors, notes = run(a.release, a.evidence, a.online, a.repo)
-    print(f"### Release gate for {a.release[:10]}: {'FAILED' if errors else 'passed'}\n")
+    print(f"### Release gate for {a.release[:10] or 'the evidence'}: {'FAILED' if errors else 'passed'}\n")
     for n in notes:
         print(f"- ok: {n}")
     for e in errors:
