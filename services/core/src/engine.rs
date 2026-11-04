@@ -120,6 +120,8 @@ pub struct Report {
 pub struct Core {
     pool: PgPool,
     settings: Settings,
+    /// The late-mint check's count of failed cycles (issue #26).
+    late_mint: std::sync::Arc<crate::late_mint::Watcher>,
 }
 
 /// What a step did to a transfer.
@@ -265,7 +267,11 @@ impl Core {
     /// The core over `pool`, which connects as the core's login (a member of `bezent_core`
     /// only, #46).
     pub fn new(pool: PgPool, settings: Settings) -> Self {
-        Self { pool, settings }
+        Self {
+            pool,
+            settings,
+            late_mint: Default::default(),
+        }
     }
 
     /// The store pool.
@@ -283,9 +289,7 @@ impl Core {
             tracing::warn!(error = %e, "REQ-BK-7: pending movements not posted; the cycle goes on");
         }
         // Issue #26 (AC-I1.2, INV-8): a mint of a reference after its proof raises the alert.
-        if let Err(e) = crate::late_mint::watch(&self.pool).await {
-            tracing::warn!(error = %e, "AC-I1.2: late mints not checked; the cycle goes on");
-        }
+        self.late_mint.cycle(&self.pool).await;
         let mut report = Report {
             withdrawals: self.withdrawals_from_redemptions().await?,
             ..Report::default()

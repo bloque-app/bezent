@@ -16,6 +16,7 @@
 
 mod common;
 
+use bezent_core_service::late_mint::{HELD_PAGE_AFTER_CYCLES, PAGE_AFTER_FAILURES};
 use common::*;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -48,6 +49,12 @@ async fn proven_deposit_from(w: &World, block: i64, proof_at: i64) -> (i64, Vec<
 
 /// A final `Minted` of `reference` at the issuing network's `block`.
 async fn mint_at(pool: &PgPool, block: i64, reference: &[u8]) -> i64 {
+    mint_final_at(pool, block, reference, block + 2).await
+}
+
+/// A `Minted` of `reference` at `block`, decided final at the final head `at`: far past the block
+/// when the observer is catching up on old history.
+async fn mint_final_at(pool: &PgPool, block: i64, reference: &[u8], at: i64) -> i64 {
     let o = observe(
         pool,
         ISSUING,
@@ -62,7 +69,7 @@ async fn mint_at(pool: &PgPool, block: i64, reference: &[u8]) -> i64 {
         json!({"event": "Minted"}),
     )
     .await;
-    decide(pool, o, "final", block + 2).await;
+    decide(pool, o, "final", at).await;
     o
 }
 
@@ -156,6 +163,51 @@ async fn checked(w: &World, observation: i64) -> Option<chrono::DateTime<chrono:
 async fn pages(w: &World) -> i64 {
     w.count("SELECT count(*) FROM event_log WHERE kind = 'late-mint-check-failed'")
         .await
+}
+
+/// Pages of the prover not deciding an attempt a mint waits on.
+async fn watch_pages(w: &World) -> i64 {
+    w.count("SELECT count(*) FROM event_log WHERE kind = 'late-mint-watch-failed'")
+        .await
+}
+
+async fn silent_pages(w: &World) -> i64 {
+    w.count("SELECT count(*) FROM event_log WHERE kind = 'late-mint-prover-silent'")
+        .await
+}
+
+/// Every pause the core requested, whatever raised it.
+async fn all_pauses(w: &World) -> i64 {
+    w.count("SELECT count(*) FROM event_log WHERE kind = 'pause-requested'")
+        .await
+}
+
+async fn held_cycles(w: &World, observation: i64) -> i32 {
+    sqlx::query_scalar("SELECT held_cycles FROM late_mint_checks WHERE observation_id = $1")
+        .bind(observation)
+        .fetch_one(&w.admin)
+        .await
+        .unwrap()
+}
+
+/// The prover records attempt `signed` refused on chain at `block` (its inclusion, not executed),
+/// as it records a refusal (`REQ-OB-6`).
+async fn prover_refuses(w: &World, signed: i64, block: i64, reference: &[u8]) {
+    included(&w.admin, signed, block, reference, false).await;
+}
+
+/// The prover records a `delivery-anomaly` naming attempt `signed`: the contract says the
+/// reference was used, so nothing is proven (`INV-8`).
+async fn prover_flags(w: &World, signed: i64) {
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO event_log (kind, payload) VALUES ('delivery-anomaly', \
+               '{{\"network\": \"{ISSUING}\", \"signed_transaction\": {signed}, \
+                 \"reason\": \"reference used\"}}')"
+        ),
+    )
+    .await;
 }
 
 async fn verdict(w: &World, observation: i64) -> Option<String> {
@@ -603,8 +655,175 @@ async fn inv_8_a_second_mint_in_the_block_of_an_executed_attempt_is_not_explaine
     assert_eq!((alerts(&w).await, pauses(&w).await), (2, 2));
 }
 
+// The prover and the head (second review of PR #72). The wait on an undecided attempt ends on the
+// prover's own record (a proof, an inclusion, an anomaly), never on the observer's final head: the
+// two are written by separate workers, and the alarm is a global pause.
+
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn ac_i1_2_an_attempt_never_decided_holds_the_alert_only_until_the_head_passes_its_era(
+async fn req_rf_5_a_retry_in_its_eras_last_block_with_the_head_past_the_era_waits_for_the_prover(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    let second = signed_of(&w.admin, id, 2).await;
+    // Attempt 2 is signed, and included at block 150, the last block of its era; the observer
+    // records the mint at 150 as final under a head of 152, past the era. The prover has not
+    // stepped yet: it has recorded nothing for attempt 2.
+    set_era(&w, id, 2, 90, 150).await;
+    let m = mint_at(&w.admin, 150, &reference).await;
+    for _ in 0..3 {
+        w.cycle(now()).await;
+    }
+    assert_eq!(
+        (
+            alerts(&w).await,
+            all_pauses(&w).await,
+            open_checks(&w).await
+        ),
+        (0, 0, 1),
+        "the head is past the era, the prover is not: nothing is raised, the row stays open"
+    );
+    // The prover steps and records the inclusion, executed: the retry is the mint.
+    included(&w.admin, second, 150, &reference, true).await;
+    w.cycle(now()).await;
+    assert_eq!(verdict(&w, m).await.as_deref(), Some("explained"));
+    assert_eq!((alerts(&w).await, all_pauses(&w).await), (0, 0));
+    assert_eq!(silent_pages(&w).await, 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_5_an_observer_catching_up_on_old_history_raises_nothing_while_the_prover_has_not_decided(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    let second = signed_of(&w.admin, id, 2).await;
+    set_era(&w, id, 2, 90, 150).await;
+    // The observer reads old history and records the mint at 105 as final under a head of 5000:
+    // far past the era from the first look. The prover is behind.
+    let m = mint_final_at(&w.admin, 105, &reference, 5_000).await;
+    for _ in 0..3 {
+        w.cycle(now()).await;
+    }
+    assert_eq!((alerts(&w).await, all_pauses(&w).await), (0, 0));
+    assert_eq!(verdict(&w, m).await, None);
+    // The prover catches up: attempt 2 was included, and executed, at 105.
+    included(&w.admin, second, 105, &reference, true).await;
+    w.cycle(now()).await;
+    assert_eq!(verdict(&w, m).await.as_deref(), Some("explained"));
+    assert_eq!((alerts(&w).await, all_pauses(&w).await), (0, 0));
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_real_late_mint_still_raises_once_when_the_prover_decides_against_the_retry(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // Refused on chain: the prover records the retry's inclusion, not executed; the mint at 105 is
+    // another's.
+    let w = World::new(options.clone(), connect.clone()).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    let second = signed_of(&w.admin, id, 2).await;
+    set_era(&w, id, 2, 90, 150).await;
+    let m = mint_final_at(&w.admin, 105, &reference, 5_000).await;
+    w.cycle(now()).await;
+    assert_eq!(alerts(&w).await, 0, "the prover has not decided: waits");
+    prover_refuses(&w, second, 104, &reference).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+    assert_eq!(verdict(&w, m).await.as_deref(), Some("alerted"));
+    w.cycle(now()).await;
+    w.restarted().await.cycle(now()).await.unwrap();
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1), "once");
+    assert_eq!(silent_pages(&w).await, 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_real_late_mint_raises_once_when_the_prover_flags_the_retry_as_an_anomaly(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // A key minted the reference under another nonce: the contract says it was used, so the prover
+    // proves nothing and records an anomaly for the retry (INV-8).
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    let second = signed_of(&w.admin, id, 2).await;
+    set_era(&w, id, 2, 90, 150).await;
+    mint_final_at(&w.admin, 105, &reference, 5_000).await;
+    w.cycle(now()).await;
+    assert_eq!(alerts(&w).await, 0);
+    prover_flags(&w, second).await;
+    w.cycle(now()).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_prover_that_never_decides_pages_once_without_a_pause_and_the_alarm_still_raises_later(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, reference) = proven_deposit(&w, 100).await;
+    deliver(&w, id, 2, now()).await;
+    let second = signed_of(&w.admin, id, 2).await;
+    set_era(&w, id, 2, 90, 150).await;
+    let m = mint_final_at(&w.admin, 105, &reference, 152).await;
+    let pauses_before = all_pauses(&w).await;
+    // Cycles that find the attempt undecided with its era over count; the page is at the bound.
+    for _ in 0..HELD_PAGE_AFTER_CYCLES - 1 {
+        w.cycle(now()).await;
+    }
+    assert_eq!(held_cycles(&w, m).await, HELD_PAGE_AFTER_CYCLES - 1);
+    assert_eq!((silent_pages(&w).await, alerts(&w).await), (0, 0));
+    w.cycle(now()).await;
+    assert_eq!(silent_pages(&w).await, 1, "the page, at the bound");
+    // Once, however long it goes on, and across a restart; the row stays open; nothing is raised,
+    // and nothing is paused.
+    for _ in 0..3 {
+        w.cycle(now()).await;
+    }
+    w.restarted().await.cycle(now()).await.unwrap();
+    assert_eq!(silent_pages(&w).await, 1, "once");
+    assert_eq!(
+        (
+            alerts(&w).await,
+            all_pauses(&w).await,
+            open_checks(&w).await
+        ),
+        (0, pauses_before, 1)
+    );
+    let page: Value =
+        sqlx::query_scalar("SELECT payload FROM event_log WHERE kind = 'late-mint-prover-silent'")
+            .fetch_one(&w.admin)
+            .await
+            .unwrap();
+    assert_eq!(page["observation"], json!(m.to_string()));
+    assert_eq!(
+        page["on_chain_reference"],
+        json!(format!("0x{}", hex::encode(&reference)))
+    );
+    assert_eq!(page["final_head"], json!(152));
+    assert_eq!(page["attempts"][0]["signed_transaction"], json!(second));
+    assert_eq!(page["attempts"][0]["attempt"], json!(2));
+    assert_eq!(page["attempts"][0]["valid_until"], json!(150));
+    // The prover decides at last, against the mint: the alarm raises, once, and the page stands.
+    prover_flags(&w, second).await;
+    w.cycle(now()).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+    assert_eq!(verdict(&w, m).await.as_deref(), Some("alerted"));
+    assert_eq!(silent_pages(&w).await, 1);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_an_attempt_within_its_era_never_pages_however_long_it_waits(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -612,23 +831,17 @@ async fn ac_i1_2_an_attempt_never_decided_holds_the_alert_only_until_the_head_pa
     let (id, reference) = proven_deposit(&w, 100).await;
     deliver(&w, id, 2, now()).await;
     set_era(&w, id, 2, 90, 150).await;
-    let m = mint_at(&w.admin, 105, &reference).await;
-    // Within the era (up to its last block), and never decided: the check waits.
-    head(&w.admin, ISSUING, 150).await;
-    w.cycle(now()).await;
-    assert_eq!((alerts(&w).await, open_checks(&w).await), (0, 1));
-    // The final head passes the era's end and the endpoint still has not decided it: it no longer
-    // explains the mint.
-    head(&w.admin, ISSUING, 151).await;
-    w.cycle(now()).await;
-    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
-    assert_eq!(verdict(&w, m).await.as_deref(), Some("alerted"));
-    w.cycle(now()).await;
-    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+    // The head is at the era's last block: the prover cannot have decided an open era yet.
+    let m = mint_final_at(&w.admin, 105, &reference, 150).await;
+    for _ in 0..HELD_PAGE_AFTER_CYCLES + 5 {
+        w.cycle(now()).await;
+    }
+    assert_eq!(held_cycles(&w, m).await, 0, "an open era is not counted");
+    assert_eq!((silent_pages(&w).await, alerts(&w).await), (0, 0));
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn ac_i1_2_real_signing_rows_always_name_their_era_and_one_without_is_held_then_bounded(
+async fn ac_i1_2_real_signing_rows_always_name_their_era_and_one_without_waits_on_the_prover_and_pages(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -662,8 +875,8 @@ async fn ac_i1_2_real_signing_rows_always_name_their_era_and_one_without_is_held
     assert!(refused.contains("signing intent refused"), "{refused}");
 
     // A fixture for the case that should not occur: a signed row on an intent with no prepared
-    // transaction, so no era. It holds the alert back for UNKNOWN_ERA_BLOCKS past the mint, loudly,
-    // and no longer.
+    // transaction, so no era. It waits on the prover like any other attempt, whatever the head
+    // (the head is not a decision), and counts toward the page from the first look.
     exec(
         &w.admin,
         &format!(
@@ -674,13 +887,52 @@ async fn ac_i1_2_real_signing_rows_always_name_their_era_and_one_without_is_held
     )
     .await;
     // (Attempt 2's own signing intent also has a signed row: the unknown-era row is the other.)
-    mint_at(&w.admin, 105, &reference).await;
-    head(&w.admin, ISSUING, 233).await;
-    w.cycle(now()).await;
+    let m = mint_final_at(&w.admin, 105, &reference, 5_000).await;
+    for _ in 0..HELD_PAGE_AFTER_CYCLES {
+        w.cycle(now()).await;
+    }
     assert_eq!((alerts(&w).await, open_checks(&w).await), (0, 1));
-    head(&w.admin, ISSUING, 234).await;
+    assert_eq!(silent_pages(&w).await, 1);
+    assert_eq!(held_cycles(&w, m).await, HELD_PAGE_AFTER_CYCLES);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_core_that_cannot_list_the_mints_warns_then_pages_once_per_streak(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (_, reference) = proven_deposit(&w, 100).await;
+    let m = mint_at(&w.admin, 105, &reference).await;
+    // The core's login cannot read the queue: the candidate query fails every cycle.
+    exec(
+        &w.admin,
+        "REVOKE SELECT ON late_mint_checks FROM bezent_core",
+    )
+    .await;
+    for _ in 0..PAGE_AFTER_FAILURES - 1 {
+        w.cycle(now()).await;
+    }
+    assert_eq!(watch_pages(&w).await, 0, "a failure warns");
     w.cycle(now()).await;
-    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+    assert_eq!(watch_pages(&w).await, 1, "a streak pages");
+    w.cycle(now()).await;
+    w.cycle(now()).await;
+    assert_eq!(watch_pages(&w).await, 1, "once");
+    assert_eq!(verdict(&w, m).await, None, "nothing was checked meanwhile");
+    // It recovers: the mints are checked, and a new streak would page again.
+    exec(&w.admin, "GRANT SELECT ON late_mint_checks TO bezent_core").await;
+    w.cycle(now()).await;
+    assert!(verdict(&w, m).await.is_some());
+    exec(
+        &w.admin,
+        "REVOKE SELECT ON late_mint_checks FROM bezent_core",
+    )
+    .await;
+    for _ in 0..PAGE_AFTER_FAILURES {
+        w.cycle(now()).await;
+    }
+    assert_eq!(watch_pages(&w).await, 2, "the next streak pages again");
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]

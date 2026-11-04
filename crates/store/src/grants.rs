@@ -123,7 +123,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         crate::CORE_ROLE,
         "UPDATE",
         &[
-            "late_mint_checks(checked_at,failures,settled_at,verdict)",
+            "late_mint_checks(checked_at,failures,settled_at,verdict,held_cycles)",
             "transfers(on_chain_reference)",
         ],
     ),
