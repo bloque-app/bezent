@@ -22,7 +22,10 @@ name: E2E (zombienet)
 #   is stopped and removed whatever the outcome.
 #
 # What differs: Kreivo 0.17.1 (aledgent pins 0.17.0), one Kreivo node, bezent's assets, and it runs
-# on pull requests that touch the bed (the check is short: the spawn dominates).
+# on pull requests that touch the bed (the spawn dominates, until the community-vote check of #89 below: about 35 minutes).
+#
+# Issue #89: AC-I2.2 on the bed: the dedicated community holds the contract's governance role and a vote of its
+# members, not one key, unpauses (e2e/kreivo/ac-i2.2.community-vote.mjs).
 #
 # T-013-05 (plan DEC-6, REQ-HN-10): the bezent contract (contracts/bezent), built with
 # `cargo contract build --release` on a hosted runner (the fleet has no Rust toolchain and the build
@@ -306,10 +309,21 @@ jobs:
           CONTRACT_STATE: ${{ env.WORK }}/out/contract-state.json
         run: node req-hn-7.req-hn-8.inv-3.inv-8.ac-d2.2.ac-b5.1.ac-b5.2.ac-i2.1.ac-i2.2.mjs --summary "$E2E_OUT/contract-e2e.md"
 
+      # Issue #89: the contract's governance role held by the dedicated community; a lone member cannot
+      # unpause or raise a bound, and a referendum at the community's support does both. It waits on
+      # finality about 30 times and on one referendum that must end Rejected (30 relay blocks).
+      - name: "#89: AC-I2.2 on the chain, through a real community vote"
+        timeout-minutes: 45
+        working-directory: e2e/kreivo
+        env:
+          CONTRACT_DIR: ${{ env.WORK }}/contract
+          CONTRACT_STATE: ${{ env.WORK }}/out/contract-state.json
+        run: node ac-i2.2.community-vote.mjs --summary "$E2E_OUT/community-vote.md"
+
       - name: Job summary
         if: always()
         run: |
-          for f in assets contract contract-e2e; do
+          for f in assets contract contract-e2e community-vote; do
             cat "$E2E_OUT/$f.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           done
 
