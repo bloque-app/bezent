@@ -242,7 +242,8 @@ None of these is applied; each is the owner's.
    the endpoint's classification (`convertible_arrival`, from its configured convertibles) is the evidence, and the asset is
    the one of the reserve the arrival is at. Open.
 6. **An output named after review.** A deposit in `Needs-Review` takes no conversion request (`ERR-SourceConsumed`); its review
-   ends by evidence (`REQ-RV-2`), and whether a named output is such evidence is not decided. Open.
+   ends by evidence (`REQ-RV-2`), and whether a named output is such evidence is not decided. The build refuses it today,
+   pending the owner's ruling; the specification does not settle it. Open.
 7. **When a conversion completes by its deadline.** As built, the condition clears only when the output named for the deposit
    is from a block at or before the deadline (on the output's network's clock) and the deposit has not gone to review; an
    output from a later block leaves the deposit to go to review once the issuing network's final head passes the deadline.

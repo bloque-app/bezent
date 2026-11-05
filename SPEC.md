@@ -824,8 +824,8 @@ reserve equation, and published in the statement (`REQ-PR-1`). They back nothing
 make a delivery or a mint up to a quoted amount; it mints or delivers what was observed.
 
 **`REQ-CV-6`** A conversion that does not complete by its deadline goes to `Needs-Review` (`REQ-RV-1`): a
-deposit holding `CND-AwaitingConversion` past the route's deadline, counted from the convertible arrival's
-finality, goes to `Needs-Review`, and MUST NOT be refunded on a timer (`REQ-RF-1`). Its convertible holdings stay
+deposit holding `CND-AwaitingConversion` past the route's deadline, as for any condition held at `Source-Final`,
+goes to `Needs-Review`, and MUST NOT be refunded on a timer (`REQ-RF-1`). Its convertible holdings stay
 itemised; they are never written off and never counted as reserve.
 
 **`REQ-CV-7`** A requester MAY hold a role on a reserve address that lets it convert, at a protocol venue,
@@ -1028,9 +1028,9 @@ backend's attesting grant may add them. For a public backend, any requester hold
 the first accepted wins; a later different body is refused (`ERR-ReferenceConflict`).
 
 A deposit that names a convertible arrival takes one extra the same way: the requester that made it MAY add, by
-the deposit's request reference, the coordinate of its conversion's output (`REQ-CV-2`), while the deposit holds
-`CND-AwaitingConversion`. It is written once, by that requester only; a later different body is refused
-(`ERR-ReferenceConflict`).
+the deposit's request reference, the coordinate of its conversion's output (`REQ-CV-2`). Whether an output may be
+named once the deposit is in `Needs-Review` is open (amendment 0018, Open 6). It is written once, by that requester
+only; a later different body is refused (`ERR-ReferenceConflict`).
 
 **`REQ-RQ-5`** *Withdrawn by amendment 0001 (A12).*
 
