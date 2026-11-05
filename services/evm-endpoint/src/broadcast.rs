@@ -23,7 +23,8 @@ use crate::rpc::Rpc;
 
 /// How long one broadcast node may take to answer a send. It is well under the provider
 /// `REQUEST_TIMEOUT` (30 s) and the health `PASS_ALLOWANCE` (120 s): the nodes are asked at once,
-/// so one that hangs delays a pass by this and no more.
+/// so one that hangs delays one send by this and no more. A pass sends several rows one after
+/// another, so it is bounded by the re-send budget (`submit::RESEND_BUDGET`, 30 s), not by this.
 pub const BROADCAST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The public nodes a network's signed transactions are sent to.

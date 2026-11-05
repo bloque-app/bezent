@@ -43,6 +43,8 @@
 //! never signs holds the lane (an EVM transaction does not expire). Stated plainly: one unknown
 //! payout holds every later one until it executes or a cancel consumes its nonce.
 
+use std::time::Duration;
+
 use alloy::consensus::TxEip1559;
 use alloy::consensus::{Transaction as _, TxEnvelope};
 use alloy::eips::eip2718::Decodable2718;
@@ -290,6 +292,12 @@ pub enum Submitted {
     /// A provider failed; tried again next cycle.
     Unavailable(String),
 }
+
+/// How long one [`Submitter::resend`] pass may spend sending. Unsettled rows go out one after
+/// another, in nonce order, and each can cost up to `BROADCAST_TIMEOUT` (10 s) when every
+/// broadcast node hangs. 30 s keeps the whole pass, with its reads, well inside the health
+/// `PASS_ALLOWANCE` (120 s); what it leaves unsent waits for the next pass.
+pub const RESEND_BUDGET: Duration = Duration::from_secs(30);
 
 /// Builds, signs and submits the network's payouts. See the module documentation.
 pub struct Submitter<'a, R> {
@@ -1035,8 +1043,16 @@ impl<R: Rpc> Submitter<'_, R> {
     }
 
     /// Re-sends every signed transaction of this lane whose outcome is not recorded: the same
-    /// bytes, never a new signature (`REQ-EO-1`, `AC-D2.1`). Returns how many a broadcast node took.
+    /// bytes, never a new signature (`REQ-EO-1`, `AC-D2.1`), in nonce order, for at most
+    /// [`RESEND_BUDGET`]. Returns how many a broadcast node took.
     pub async fn resend(&self) -> Result<usize, sqlx::Error> {
+        self.resend_within(RESEND_BUDGET).await
+    }
+
+    /// [`resend`](Self::resend) with an explicit budget for the whole pass. Once it is spent, no
+    /// more is sent: the rest stays stored and goes out on the next pass, in the same order.
+    pub async fn resend_within(&self, budget: Duration) -> Result<usize, sqlx::Error> {
+        let deadline = tokio::time::Instant::now() + budget;
         let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
             "SELECT st.id, st.bytes FROM signed_transactions st \
              JOIN intents si ON si.id = st.intent_id \
@@ -1051,14 +1067,30 @@ impl<R: Rpc> Submitter<'_, R> {
         .bind(self.lane_bytes())
         .fetch_all(self.pool)
         .await?;
+        let total = rows.len();
+        let mut done = 0;
         let mut sent = 0;
         for (id, bytes) in rows {
-            match self.broadcast.send_raw(&bytes).await {
-                Ok(_) => sent += 1,
-                Err(e) => {
+            // The deadline also cuts a send in flight, so one hung node cannot run past it.
+            match tokio::time::timeout_at(deadline, self.broadcast.send_raw(&bytes)).await {
+                Ok(Ok(_)) => sent += 1,
+                Ok(Err(e)) => {
                     tracing::debug!(network = self.network, signed = id, error = %e, "a re-send was not taken")
                 }
+                Err(_) => break,
             }
+            done += 1;
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+        if done < total {
+            tracing::info!(
+                network = self.network,
+                deferred = total - done,
+                total,
+                "the re-send budget is spent; the rest goes out on the next pass"
+            );
         }
         Ok(sent)
     }

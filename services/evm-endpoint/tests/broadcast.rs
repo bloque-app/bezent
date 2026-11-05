@@ -170,11 +170,56 @@ async fn amendment_0023_start_up_refuses_a_wrong_chain_and_tolerates_an_unreacha
 
     let bad = Broadcast::new(vec![MockRpc::new("a", &right), MockRpc::new("b", &wrong)]);
     let err = bad.check_chain(CHAIN_ID).await.unwrap_err();
-    assert!(err.contains("b") && err.contains("chain"), "{err}");
+    assert!(err.contains("broadcast node b serves chain"), "{err}");
 
     let unreachable = Broadcast::new(vec![MockRpc::new("a", &right), MockRpc::new("b", &down)]);
     unreachable.check_chain(CHAIN_ID).await.unwrap();
     // Even all of them down starts: it is the send that fails, and is tried again.
     let all_down = Broadcast::new(vec![MockRpc::new("b", &down)]);
     all_down.check_chain(CHAIN_ID).await.unwrap();
+}
+
+/// Every broadcast node hangs and many rows are unsettled: a re-send pass stops at its budget
+/// instead of costing the node bound per row, leaves the rest stored, and a later pass, once a
+/// node answers, sends all of them as the same bytes, in nonce order.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn amendment_0023_a_resend_pass_is_bounded_when_every_node_hangs_and_the_rest_goes_next_pass(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect, 5).await;
+    let honest = nodes(&f.broadcast_chain, &[Send::Honest]);
+    for n in 1..=8 {
+        assert!(matches!(
+            sign_through(&f, &honest, n).await,
+            Submitted::Submitted { .. }
+        ));
+    }
+    let first = f.broadcast_chain.sent();
+    assert_eq!(first.len(), 8);
+
+    // Each send would cost 400 ms; eight of them, 3.2 s. The budget is 600 ms.
+    let mut hung = nodes(&f.broadcast_chain, &[Send::Hang, Send::Hang]);
+    hung.timeout = Duration::from_millis(400);
+    let start = Instant::now();
+    let taken = f
+        .submitter_via(&hung)
+        .resend_within(Duration::from_millis(600))
+        .await
+        .unwrap();
+    let took = start.elapsed();
+    assert_eq!(taken, 0);
+    assert!(took < Duration::from_millis(1500), "{took:?}");
+    assert_eq!(
+        f.broadcast_chain.sent().len(),
+        8,
+        "a hung node recorded a send"
+    );
+
+    // A later pass, a node answering: every row goes out again, same bytes, nonce order.
+    assert_eq!(f.submitter_via(&honest).resend().await.unwrap(), 8);
+    let sent = f.broadcast_chain.sent();
+    assert_eq!(sent.len(), 16);
+    assert_eq!(&sent[8..], &first[..]);
+    assert_eq!(f.count("SELECT count(*) FROM signatures").await, 8);
 }

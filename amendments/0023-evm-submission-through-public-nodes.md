@@ -40,7 +40,9 @@ it.
   credentials in a URL. A configuration that breaks these does not load. This is a breaking change to every endpoint
   configuration.
 - **Sending.** The same bytes go to every broadcast node at once, each bounded to 10 s so that one hung node cannot
-  stall a pass (a provider request is bounded at 30 s and a pass at 120 s by the health check).
+  stall one send. Re-sends go one row after another in nonce order, so a pass of them has its own budget of 30 s (a
+  provider request is bounded at 30 s and a pass at 120 s by the health check); once it is spent the rest is left for
+  the next pass and the count deferred is logged at info. The bytes are never changed, and never signed again.
 - **A send is taken** when at least one node returns a hash equal to the `keccak256` of the signed bytes. A node that
   returns another hash has failed, and is logged at warn with its name and both hashes. The hash stored is always the
   one computed from the signed bytes; no hash a node returns is stored.
