@@ -83,12 +83,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let pool = match bezent_store::tls::connect(
-        bezent_store::login::pool_options().max_connections(config.max_connections),
-        &url,
-    )
-    .await
-    {
+    let pool = match bezent_store::tls::connect(config.pool_options(), &url).await {
         Ok(pool) => pool,
         Err(e) => {
             eprintln!("{NAME}: store: {e}");

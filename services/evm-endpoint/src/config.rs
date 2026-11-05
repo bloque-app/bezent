@@ -201,6 +201,12 @@ pub struct Config {
     /// is the Safe's address.
     #[serde(default)]
     pub vault_login: Option<VaultConfig>,
+    /// The longest one statement may run on the store, in milliseconds (issue #84): 60 000 by
+    /// default. It also bounds a wait for a lock. Raise it only if a statement legitimately takes
+    /// longer; see the runbook's `reserve-check-failed` page. Past `PASS_ALLOWANCE` (120 s), one
+    /// statement can outlast the health window and the service is restarted.
+    #[serde(default = "default_statement_timeout_ms")]
+    pub statement_timeout_ms: u64,
     /// The pool size.
     #[serde(default = "default_connections")]
     pub max_connections: u32,
@@ -230,6 +236,9 @@ fn default_range() -> u64 {
 }
 fn default_poll() -> u64 {
     2_000
+}
+fn default_statement_timeout_ms() -> u64 {
+    bezent_store::login::STATEMENT_TIMEOUT_MS
 }
 fn default_connections() -> u32 {
     4
@@ -308,9 +317,19 @@ impl Config {
         Ok(c)
     }
 
+    /// The options of the service's store pool: the store's bounds with the configured statement
+    /// bound (`statement_timeout_ms`).
+    pub fn pool_options(&self) -> sqlx::postgres::PgPoolOptions {
+        bezent_store::login::pool_options_bounded(
+            bezent_store::login::Bounds::DEFAULT.with_statement_ms(self.statement_timeout_ms),
+        )
+        .max_connections(self.max_connections)
+    }
+
     /// The checks that need no network (`T-009-01`): two independent providers, every address
     /// well formed, the lane's key a secp256k1 key.
     pub fn check(&self) -> Result<Checked, String> {
+        bezent_store::login::statement_bound(self.statement_timeout_ms)?;
         if self.network.is_empty() {
             return Err("network: empty".into());
         }
@@ -532,6 +551,18 @@ mod tests {
         assert_eq!(
             checked.contracts.delivery_role,
             evm::role_key("bezent.delivery").unwrap()
+        );
+    }
+
+    #[test]
+    fn issue_84_the_statement_bound_defaults_to_a_minute_and_zero_is_refused() {
+        let c = Config::parse(FIXTURE).unwrap();
+        assert_eq!(c.statement_timeout_ms, 60_000);
+        let zero = format!("statement_timeout_ms = 0\n{FIXTURE}");
+        assert!(
+            Config::parse(&zero)
+                .unwrap_err()
+                .contains("statement_timeout_ms")
         );
     }
 

@@ -676,6 +676,46 @@ async fn a_failure_at_n_keeps_the_versions_before_it_and_a_second_run_resumes(po
     assert!(status(&pool, &fixed).await.unwrap().is_current());
 }
 
+/// Issue #84: the services' pools bound a statement, and the runner's does not, so a long
+/// migration is not an error. The same slow statement is cancelled on a service pool made with a
+/// short bound and completes under the runner.
+#[sqlx::test]
+async fn issue_84_a_slow_migration_is_not_bounded_by_the_services_statement_timeout(pool: PgPool) {
+    use bezent_store::login::{Bounds, pool_options_bounded};
+
+    let slow = migrator(&[(1, "SELECT pg_sleep(1.5); CREATE TABLE slow (id int)")]);
+    let runner = pool_with(&pool, Duration::from_secs(120)).await;
+    let timeout: String = sqlx::query_scalar("SELECT current_setting('statement_timeout')")
+        .fetch_one(&runner)
+        .await
+        .unwrap();
+    assert_eq!(
+        timeout, "0",
+        "the runner's connections carry no statement bound"
+    );
+    assert_eq!(apply(&runner, &slow).await.unwrap(), vec![1]);
+
+    // The same wait, on a connection made as a service makes its own: cancelled.
+    let service = pool_options_bounded(Bounds {
+        statement: Duration::from_millis(300),
+        ..Bounds::DEFAULT
+    })
+    .max_connections(1)
+    .connect_with((*pool.connect_options()).clone())
+    .await
+    .unwrap();
+    let e = sqlx::query("SELECT pg_sleep(1.5)")
+        .execute(&service)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.as_database_error().and_then(|d| d.code()).as_deref(),
+        Some("57014"),
+        "{e}"
+    );
+    runner.close().await;
+}
+
 #[sqlx::test]
 async fn a_migration_behind_a_held_lock_fails_at_the_lock_timeout_and_resumes_after(pool: PgPool) {
     let release = migrator(&[

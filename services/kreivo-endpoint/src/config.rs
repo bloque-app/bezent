@@ -140,6 +140,12 @@ pub struct Config {
     /// The largest number of store connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    /// The longest one statement may run on the store, in milliseconds (issue #84): 60 000 by
+    /// default. It also bounds a wait for a lock. Raise it only if a statement legitimately takes
+    /// longer; see the runbook's `reserve-check-failed` page. Past `PASS_ALLOWANCE` (120 s), one
+    /// statement can outlast the health window and the service is restarted.
+    #[serde(default = "default_statement_timeout_ms")]
+    pub statement_timeout_ms: u64,
     /// How often the endpoint looks at the finalized head, in milliseconds.
     #[serde(default = "default_poll_ms")]
     pub poll_ms: u64,
@@ -166,6 +172,11 @@ pub struct Config {
     /// How long one request to a history source may take, in milliseconds.
     #[serde(default = "default_archive_timeout_ms")]
     pub archive_timeout_ms: u64,
+    /// How long a submitted transaction's watch may hear nothing, in milliseconds, before it is
+    /// dropped and the transaction may be submitted again (issue #84): 120 000 by default, about
+    /// twenty blocks. Silence is not an outcome; nothing is concluded from it.
+    #[serde(default = "default_watch_silence_ms")]
+    pub watch_silence_ms: u64,
     /// The most bytes one answer of a history source may be (issue #49): a longer one is a failed
     /// request. 16 MiB by default; a block's events are far smaller.
     #[serde(default = "default_archive_max_response_bytes")]
@@ -222,6 +233,9 @@ pub struct SignerConfig {
 fn default_max_connections() -> u32 {
     4
 }
+fn default_statement_timeout_ms() -> u64 {
+    bezent_store::login::STATEMENT_TIMEOUT_MS
+}
 fn default_poll_ms() -> u64 {
     6_000
 }
@@ -236,6 +250,9 @@ fn default_light_client_depth() -> u64 {
 }
 fn default_archive_timeout_ms() -> u64 {
     30_000
+}
+fn default_watch_silence_ms() -> u64 {
+    120_000
 }
 fn default_archive_max_response_bytes() -> u32 {
     16 * 1024 * 1024
@@ -308,8 +325,18 @@ impl Config {
         Ok(config)
     }
 
+    /// The options of the service's store pool: the store's bounds with the configured statement
+    /// bound (`statement_timeout_ms`).
+    pub fn pool_options(&self) -> sqlx::postgres::PgPoolOptions {
+        bezent_store::login::pool_options_bounded(
+            bezent_store::login::Bounds::DEFAULT.with_statement_ms(self.statement_timeout_ms),
+        )
+        .max_connections(self.max_connections)
+    }
+
     /// Refuses a configuration with a malformed field.
     pub fn check(&self) -> Result<(), String> {
+        bezent_store::login::statement_bound(self.statement_timeout_ms)?;
         if self.network.is_empty() {
             return Err("network is empty".into());
         }
@@ -323,6 +350,9 @@ impl Config {
         }
         if !(1..256).contains(&self.light_client_depth) || self.archive_timeout_ms == 0 {
             return Err("light_client_depth must be 1 to 255, archive_timeout_ms positive".into());
+        }
+        if self.watch_silence_ms == 0 {
+            return Err("watch_silence_ms must be positive".into());
         }
         if self.archive_max_response_bytes < 1024 {
             return Err("archive_max_response_bytes must be at least 1024".into());
@@ -586,6 +616,25 @@ mod tests {
                 .unwrap_err()
                 .contains("archive_max_response_bytes")
         );
+    }
+
+    #[test]
+    fn issue_84_the_watch_silence_defaults_to_two_minutes_and_is_positive() {
+        let mut c = sample();
+        assert_eq!(
+            c.watch_silence_ms,
+            u64::try_from(crate::chain::watch::WATCH_SILENCE.as_millis()).unwrap()
+        );
+        c.watch_silence_ms = 0;
+        assert!(c.check().unwrap_err().contains("watch_silence_ms"));
+    }
+
+    #[test]
+    fn issue_84_the_statement_bound_defaults_to_a_minute_and_zero_is_refused() {
+        let mut c = sample();
+        assert_eq!(c.statement_timeout_ms, 60_000);
+        c.statement_timeout_ms = 0;
+        assert!(c.check().unwrap_err().contains("statement_timeout_ms"));
     }
 
     const VAULT: &str = "\n[vault]\naddress = \"https://vault.example:8200\"\nmount = \"bezent\"\nrole = \"bezent-kreivo-endpoint-iam\"\nsts_region = \"us-east-2\"\nserver_id = \"vault.example\"\n";

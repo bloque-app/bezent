@@ -155,6 +155,12 @@ pub struct Config {
     /// or password, or `keys.vault`.
     #[serde(default)]
     pub vault: Option<VaultConfig>,
+    /// The longest one statement may run on the store, in milliseconds (issue #84): 60 000 by
+    /// default. It also bounds the wait for the signing lock. Raise it only if a statement
+    /// legitimately takes longer; past `PASS_ALLOWANCE` (120 s) one statement can outlast a health
+    /// window.
+    #[serde(default = "default_statement_timeout_ms")]
+    pub statement_timeout_ms: u64,
     /// Who may ask for signatures.
     pub callers: Vec<Caller>,
     /// The networks the signer signs for.
@@ -448,7 +454,18 @@ pub struct KeyPolicy {
     pub window_seconds: u64,
 }
 
+fn default_statement_timeout_ms() -> u64 {
+    bezent_store::login::STATEMENT_TIMEOUT_MS
+}
+
 impl Config {
+    /// The options of the signer's store pool: its own bounds (see
+    /// [`crate::signer::pool_options`]) with the configured statement bound
+    /// (`statement_timeout_ms`).
+    pub fn pool_options(&self) -> sqlx::postgres::PgPoolOptions {
+        crate::signer::pool_options_with_statement_ms(self.statement_timeout_ms)
+    }
+
     /// Reads the configuration at `path`, resolving relative paths against its directory.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let bytes = std::fs::read(path)
@@ -497,6 +514,7 @@ impl Config {
             ))
         })?;
         config.check_secrets()?;
+        bezent_store::login::statement_bound(config.statement_timeout_ms).map_err(ConfigError)?;
         Ok(config)
     }
 
@@ -1031,6 +1049,16 @@ mod secret_tests {
             serde_json::from_str(include_str!("../fixtures/signer.json")).unwrap();
         edit(&mut json);
         Config::parse(json.to_string().as_bytes())
+    }
+
+    #[test]
+    fn issue_84_the_statement_bound_defaults_to_a_minute_and_zero_is_refused() {
+        assert_eq!(parse(|_| {}).unwrap().statement_timeout_ms, 60_000);
+        let err = parse(|j| j["statement_timeout_ms"] = 0.into()).unwrap_err();
+        assert!(
+            err.0.contains("statement_timeout_ms must be positive"),
+            "{err}"
+        );
     }
 
     const VAULT: &str = r#"{"address":"https://vault.example:8200","mount":"bezent","role":"bezent-signer-iam","sts_region":"us-east-2","server_id":"vault.example"}"#;
