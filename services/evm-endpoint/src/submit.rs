@@ -27,7 +27,7 @@
 //!    signature comes over the signer link, which checks it against the recorded bytes
 //!    (`Client::sign`); the endpoint checks it is the lane key's and recovers the lane's address,
 //!    persists the exact signed transaction in `signed_transactions` (`REQ-EO-1`, `INV-9`), and only
-//!    then sends it to both providers.
+//!    then sends it to every public broadcast node at once (amendment 0023).
 //! 5. **After a restart** ([`Submitter::resend`]): every signed transaction whose outcome is not
 //!    recorded is re-sent as the same bytes; nothing is signed twice for an intent (`AC-D2.1`).
 //!
@@ -51,6 +51,7 @@ use bezent_signer::link::{Dialer, LinkError, Response};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
+use crate::broadcast::Broadcast;
 use crate::evm::{self, Contracts, Delivery, Gas};
 use crate::network::Declarations;
 use crate::pair::{Pair, Read};
@@ -292,8 +293,10 @@ pub enum Submitted {
 
 /// Builds, signs and submits the network's payouts. See the module documentation.
 pub struct Submitter<'a, R> {
-    /// The two providers.
+    /// The two providers: every read, never a send.
     pub pair: &'a Pair<R>,
+    /// The public nodes a signed transaction is sent to, and only they (amendment 0023).
+    pub broadcast: &'a Broadcast<R>,
     /// The store, as the EVM endpoint's role.
     pub pool: &'a PgPool,
     /// The network id.
@@ -1022,7 +1025,7 @@ impl<R: Rpc> Submitter<'_, R> {
         .fetch_one(self.pool)
         .await?;
         tracing::info!(network = self.network, intent = intent_id, signed = id, hash = %signed.hash, "REQ-EO-1: signed bytes persisted; submitting");
-        Ok(match self.pair.send_raw(&signed.bytes).await {
+        Ok(match self.broadcast.send_raw(&signed.bytes).await {
             Ok(_) => Submitted::Submitted {
                 id,
                 hash: signed.hash,
@@ -1032,7 +1035,7 @@ impl<R: Rpc> Submitter<'_, R> {
     }
 
     /// Re-sends every signed transaction of this lane whose outcome is not recorded: the same
-    /// bytes, never a new signature (`REQ-EO-1`, `AC-D2.1`). Returns how many a provider took.
+    /// bytes, never a new signature (`REQ-EO-1`, `AC-D2.1`). Returns how many a broadcast node took.
     pub async fn resend(&self) -> Result<usize, sqlx::Error> {
         let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
             "SELECT st.id, st.bytes FROM signed_transactions st \
@@ -1050,7 +1053,7 @@ impl<R: Rpc> Submitter<'_, R> {
         .await?;
         let mut sent = 0;
         for (id, bytes) in rows {
-            match self.pair.send_raw(&bytes).await {
+            match self.broadcast.send_raw(&bytes).await {
                 Ok(_) => sent += 1,
                 Err(e) => {
                     tracing::debug!(network = self.network, signed = id, error = %e, "a re-send was not taken")

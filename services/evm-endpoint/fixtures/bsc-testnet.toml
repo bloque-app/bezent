@@ -25,6 +25,9 @@ start_block = 140659727
 max_range = 500
 database_url_file = "/run/secrets/bezent-evm-bsc-testnet-db"
 
+# Public nodes signed transactions are sent to, and only those (amendment 0023). No secret: written here.
+broadcast = ["https://data-seed-prebsc-1-s1.bnbchain.org:8545", "https://bsc-testnet-rpc.publicnode.com", "https://bsc-testnet.drpc.org"]
+
 [[providers]]
 name = "a"
 url_file = "/run/secrets/bezent-evm-bsc-testnet-rpc-a"

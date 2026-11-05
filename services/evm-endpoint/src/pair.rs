@@ -8,8 +8,9 @@
 //! [`Read::Disagree`]: unknown, never an arrival, never a proof (`REQ-NX-3`, `AC-C1.2`). A
 //! provider that fails is [`Read::Unavailable`], unknown too.
 //!
-//! Only reads that prepare a transaction (fees, the latest nonce, the dry run) and sending are not
-//! decisions; those use both providers where both answer, as each method says.
+//! Only reads that prepare a transaction (fees, the latest nonce, the dry run) are not decisions;
+//! those use both providers where both answer, as each method says. The pair never sends: signed
+//! transactions go to public nodes only ([`crate::broadcast`], amendment 0023).
 
 use std::fmt;
 
@@ -215,16 +216,6 @@ impl<R: Rpc> Pair<R> {
             .priority_fee()
             .await?
             .max(self.b.priority_fee().await?))
-    }
-
-    /// Sends the same bytes to both; it is sent if either accepted it.
-    pub async fn send_raw(&self, bytes: &[u8]) -> Result<B256, String> {
-        let a = self.a.send_raw(bytes).await;
-        let b = self.b.send_raw(bytes).await;
-        match (a, b) {
-            (Ok(h), _) | (_, Ok(h)) => Ok(h),
-            (Err(x), Err(y)) => Err(format!("{x}; {y}")),
-        }
     }
 }
 

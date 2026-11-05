@@ -25,6 +25,7 @@ use alloy::primitives::{Address, B256, U256, keccak256};
 use alloy::rpc::client::{ClientBuilder, RpcClient};
 use alloy::sol;
 use alloy::sol_types::SolCall;
+use bezent_evm_endpoint::broadcast::Broadcast;
 use bezent_evm_endpoint::evm::{self, Contracts};
 use bezent_evm_endpoint::network::{self, Declarations, Identity, Token};
 use bezent_evm_endpoint::observe::{Follower, Step, Watch};
@@ -342,6 +343,12 @@ impl Anvil {
         }
     }
 
+    /// The one broadcast node: this anvil, over plain loopback http (amendment 0023). The payouts
+    /// the suite sends go through here, not through the pair.
+    fn broadcast(&self) -> Broadcast<Http> {
+        Broadcast::new(vec![Http::new("anvil", &self.url("127.0.0.1")).unwrap()])
+    }
+
     /// Mines `n` blocks.
     async fn mine(&self, n: u64) {
         self.rpc("anvil_mine", json!([format!("0x{n:x}")])).await;
@@ -501,6 +508,7 @@ struct World {
     net: &'static Net,
     anvil: Anvil,
     pair: Pair<Http>,
+    broadcast: Broadcast<Http>,
     admin: PgPool,
     endpoint: PgPool,
     core: PgPool,
@@ -577,6 +585,7 @@ impl World {
         World {
             net,
             pair: anvil.pair(),
+            broadcast: anvil.broadcast(),
             anvil,
             endpoint: role_pool(&connect, "bezent_evm_endpoint").await,
             core: role_pool(&connect, "bezent_core").await,
@@ -622,6 +631,7 @@ impl World {
     fn submitter(&self) -> Submitter<'_, Http> {
         Submitter {
             pair: &self.pair,
+            broadcast: &self.broadcast,
             pool: &self.endpoint,
             network: self.net.name,
             chain_id: self.net.chain_id,
@@ -754,6 +764,9 @@ macro_rules! fork_tests {
             let Some(upstream) = upstream(&$net) else { return };
             let anvil = Anvil::start(&$net, &upstream).await;
             let pair = anvil.pair();
+            // Amendment 0023: the broadcast node serves the declared chain, and not another.
+            anvil.broadcast().check_chain($net.chain_id).await.unwrap();
+            anvil.broadcast().check_chain($net.other_chain).await.unwrap_err();
             let polygon = Identity {
                 chain_id: $net.chain_id,
                 pinned_number: $net.block,

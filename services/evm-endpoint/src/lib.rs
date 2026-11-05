@@ -16,6 +16,7 @@
 //! | [`evm`] | | the delivery call, EIP-1559 payloads, the vault's events |
 //! | [`signal`], [`store`] | | compromise and anomaly signals; store helpers |
 
+pub mod broadcast;
 pub mod config;
 pub mod evm;
 pub mod fee;

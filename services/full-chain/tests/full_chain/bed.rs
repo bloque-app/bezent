@@ -36,6 +36,7 @@ use alloy::sol_types::SolCall;
 use bezent_core_service::reserve::check::{LogPager, ReserveCheck};
 use bezent_core_service::reserve::readings::Recorded;
 use bezent_core_service::{Core, Settings};
+use bezent_evm_endpoint::broadcast::Broadcast;
 use bezent_evm_endpoint::evm::{self, Contracts};
 use bezent_evm_endpoint::network::{self, Declarations, Identity};
 use bezent_evm_endpoint::observe::{Follower as EvmFollower, Step as EvmStep, Watch};
@@ -309,6 +310,12 @@ impl Anvil {
             a: Http::new("a", &self.url("127.0.0.1")).unwrap(),
             b: Http::new("b", &self.url("localhost")).unwrap(),
         }
+    }
+
+    /// The one broadcast node: this anvil, over plain loopback http (amendment 0023). The payouts
+    /// the suite sends go through here, not through the pair.
+    pub fn broadcast(&self) -> Broadcast<Http> {
+        Broadcast::new(vec![Http::new("anvil", &self.url("127.0.0.1")).unwrap()])
     }
 
     pub async fn mine(&self, n: u64) {
@@ -630,6 +637,7 @@ pub struct Bed {
     pub vault: Vault,
     pub chain: FakeChain,
     pub pair: Pair<Http>,
+    pub broadcast: Broadcast<Http>,
     pub evm_pool: PgPool,
     pub kreivo_pool: PgPool,
     pub core_pool: PgPool,
@@ -753,6 +761,7 @@ impl Bed {
         // passed the pinned block.
         anvil.finalize().await;
         let pair = anvil.pair();
+        let broadcast = anvil.broadcast();
         let head = network::check(
             &pair,
             &Identity {
@@ -815,6 +824,7 @@ impl Bed {
             vault,
             chain,
             pair,
+            broadcast,
             evm_pool,
             kreivo_pool,
             core_pool,
@@ -871,6 +881,7 @@ impl Bed {
     fn evm_submitter(&self) -> EvmSubmitter<'_, Http> {
         EvmSubmitter {
             pair: &self.pair,
+            broadcast: &self.broadcast,
             pool: &self.evm_pool,
             network: POLYGON,
             chain_id: CHAIN_ID,

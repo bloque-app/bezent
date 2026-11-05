@@ -22,6 +22,9 @@ start_block = 54124452
 max_range = 500
 database_url_file = "/run/secrets/bezent-evm-base-sepolia-db"
 
+# Public nodes signed transactions are sent to, and only those (amendment 0023). No secret: written here.
+broadcast = ["https://sepolia.base.org", "https://base-sepolia-rpc.publicnode.com", "https://base-sepolia.drpc.org"]
+
 [[providers]]
 name = "a"
 url_file = "/run/secrets/bezent-evm-base-sepolia-rpc-a"

@@ -264,6 +264,20 @@ impl MockChain {
     }
 }
 
+/// How a mock node answers `eth_sendRawTransaction`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Send {
+    /// It records the bytes and returns their hash.
+    #[default]
+    Honest,
+    /// It records the bytes and returns a hash that is not theirs.
+    WrongHash,
+    /// It fails, and records nothing.
+    Fail,
+    /// It never answers (a hung node).
+    Hang,
+}
+
 /// A provider answering from a [`MockChain`].
 #[derive(Clone, Debug)]
 pub struct MockRpc {
@@ -271,6 +285,8 @@ pub struct MockRpc {
     pub name: String,
     /// Its chain.
     pub chain: MockChain,
+    /// How it answers a send.
+    pub send: Send,
 }
 
 impl MockRpc {
@@ -279,7 +295,14 @@ impl MockRpc {
         Self {
             name: name.into(),
             chain: chain.clone(),
+            send: Send::Honest,
         }
+    }
+
+    /// This provider, answering sends as `send`.
+    pub fn sending(mut self, send: Send) -> Self {
+        self.send = send;
+        self
     }
 }
 
@@ -396,7 +419,17 @@ impl Rpc for MockRpc {
 
     async fn send_raw(&self, bytes: &[u8]) -> Result<B256, RpcError> {
         self.chain.check()?;
-        self.chain.state().sent.push(bytes.to_vec());
-        Ok(keccak256(bytes))
+        match self.send {
+            Send::Honest => {
+                self.chain.state().sent.push(bytes.to_vec());
+                Ok(keccak256(bytes))
+            }
+            Send::WrongHash => {
+                self.chain.state().sent.push(bytes.to_vec());
+                Ok(keccak256([bytes, b"other"].concat()))
+            }
+            Send::Fail => Err(RpcError(format!("{}: refused the send", self.name))),
+            Send::Hang => std::future::pending().await,
+        }
     }
 }
