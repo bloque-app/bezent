@@ -304,10 +304,13 @@ pub fn guard(options: PgPoolOptions) -> PgPoolOptions {
 ///   postings in full (`as_of`, `surplus_movements`); none is known to take more than seconds, but
 ///   none has been measured on a large book. A query this slow is a defect to see (an error each
 ///   pass, in the log), not a normal cost to wait for; if the owner finds one that is legitimate,
-///   this is the number to raise.
+///   this is the number to raise, per service, with `statement_timeout_ms` (no release needed).
 /// - Below `PASS_ALLOWANCE` (two minutes of silence before the health check restarts a service),
-///   so a stuck statement ends, and the pass fails or carries on, before the container is
-///   restarted for it.
+///   so that one stuck statement ends, and its pass fails or carries on, before the container is
+///   restarted for it. That is the bound of one statement and no more: the health window covers a
+///   whole pass, and a pass that is slow in several statements in a row (each cut at this bound)
+///   can still outrun `PASS_ALLOWANCE` and be restarted. The outcome is the same as for a hang
+///   (a restart), only later; it is not "below two minutes, so never a restart".
 /// - A statement that times out is rolled back whole. What the services keep in the store is
 ///   written by transactions that commit or do not (see [`pool_options`]); none depends on a
 ///   statement outliving this.
@@ -316,21 +319,42 @@ pub fn guard(options: PgPoolOptions) -> PgPoolOptions {
 /// not use [`pool_options`] and is not bounded: a long migration is not an error.
 pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// A service's configured `statement_timeout_ms` as a statement bound: the value in milliseconds, or
+/// an error that names the key when it is zero (zero would be no bound at all, which the services
+/// do not offer: a statement that hangs must end). Every service's `check` goes through this, so
+/// they refuse the same thing in the same words.
+///
+/// The key is how an operator raises [`STATEMENT_TIMEOUT`] without a release: a service whose
+/// evaluation of a large book legitimately takes longer than a minute is told so by configuration
+/// (see the `reserve-check-failed` page in the runbook).
+pub fn statement_bound(ms: u64) -> Result<Duration, String> {
+    if ms == 0 {
+        return Err("statement_timeout_ms must be positive".into());
+    }
+    Ok(Duration::from_millis(ms))
+}
+
+/// [`STATEMENT_TIMEOUT`] in milliseconds: the default of the `statement_timeout_ms` key of every
+/// service but the ingress, which has a shorter one of its own.
+pub const STATEMENT_TIMEOUT_MS: u64 = STATEMENT_TIMEOUT.as_millis() as u64;
+
 /// The longest a session may sit idle inside a transaction before the server ends it: the tool for
 /// a holder of a lock that stopped answering (a process stuck between statements, a peer that is
 /// gone), which `statement_timeout` cannot reach because nothing is running (issue #84). The
 /// session is closed, the transaction rolled back and its locks released.
 ///
 /// A minute and a half. Some transactions are open across an await that is not a query: the core's
-/// statement publish across S3 and the signer (cut off by its own 60 s budget), the Kreivo endpoint's
-/// `prepare` and `record` across chain reads (no bound of their own, so this is theirs). The
-/// bounded ones end well inside 90 s, so the server only ever ends a transaction whose client is no
-/// longer making progress. One ended early rolls back whole and the caller sees an error, the
-/// same as for a lost connection. The signer's transaction is open across the key backend's `sign`,
-/// which can take longer (a Vault login and a sign, each retried), so it has a bound of its own
-/// (`bezent_signer::signer::IDLE_IN_TRANSACTION_TIMEOUT`). Not `transaction_timeout`
-/// (PostgreSQL 17 and later): that cuts a healthy transaction at a fixed age, whichever way it
-/// is going.
+/// statement publish across S3 and the signer, which the core cuts off as a whole at its own
+/// `STATEMENT_BUDGET` of 60 s (`services/core/src/main.rs`; it is the core's budget, not the
+/// signer's), and the Kreivo endpoint's `prepare` and `record` across chain reads (no bound of their
+/// own, so this is theirs). The core's is cut off well inside 90 s, so the server only ever ends a
+/// transaction whose client is no longer making progress. One ended early rolls back whole and the
+/// caller sees an error, the same as for a lost connection. The signer's transaction is open across
+/// the key backend's `sign`, which can take longer (a Vault login and a sign, each retried, about
+/// 92 s together) and has no budget of that kind, so it has an idle bound of its own
+/// (`bezent_signer::signer::IDLE_IN_TRANSACTION_TIMEOUT`, 150 s). Not `transaction_timeout`
+/// (PostgreSQL 17 and later): that cuts a healthy transaction at a fixed age, whichever way it is
+/// going.
 pub const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The server-side bounds a pool's connections are given when they open.
@@ -348,6 +372,16 @@ impl Bounds {
         statement: STATEMENT_TIMEOUT,
         idle_in_transaction: IDLE_IN_TRANSACTION_TIMEOUT,
     };
+
+    /// These bounds with the statement bound a service's `statement_timeout_ms` configures. The
+    /// services refuse zero when they read their configuration ([`statement_bound`]); a zero that
+    /// got here anyway leaves the bound as it was, so that no value turns the bound off.
+    pub fn with_statement_ms(self, ms: u64) -> Bounds {
+        Bounds {
+            statement: statement_bound(ms).unwrap_or(self.statement),
+            ..self
+        }
+    }
 }
 
 /// [`PgPoolOptions`] with [`guard`] and the server-side [`Bounds::DEFAULT`]: how every service makes

@@ -140,6 +140,12 @@ pub struct Config {
     /// The largest number of store connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    /// The longest one statement may run on the store, in milliseconds (issue #84): 60 000 by
+    /// default. It also bounds a wait for a lock. Raise it only if a statement legitimately takes
+    /// longer; see the runbook's `reserve-check-failed` page. Past `PASS_ALLOWANCE` (120 s), one
+    /// statement can outlast the health window and the service is restarted.
+    #[serde(default = "default_statement_timeout_ms")]
+    pub statement_timeout_ms: u64,
     /// How often the endpoint looks at the finalized head, in milliseconds.
     #[serde(default = "default_poll_ms")]
     pub poll_ms: u64,
@@ -226,6 +232,9 @@ pub struct SignerConfig {
 
 fn default_max_connections() -> u32 {
     4
+}
+fn default_statement_timeout_ms() -> u64 {
+    bezent_store::login::STATEMENT_TIMEOUT_MS
 }
 fn default_poll_ms() -> u64 {
     6_000
@@ -316,8 +325,18 @@ impl Config {
         Ok(config)
     }
 
+    /// The options of the service's store pool: the store's bounds with the configured statement
+    /// bound (`statement_timeout_ms`).
+    pub fn pool_options(&self) -> sqlx::postgres::PgPoolOptions {
+        bezent_store::login::pool_options_bounded(
+            bezent_store::login::Bounds::DEFAULT.with_statement_ms(self.statement_timeout_ms),
+        )
+        .max_connections(self.max_connections)
+    }
+
     /// Refuses a configuration with a malformed field.
     pub fn check(&self) -> Result<(), String> {
+        bezent_store::login::statement_bound(self.statement_timeout_ms)?;
         if self.network.is_empty() {
             return Err("network is empty".into());
         }
@@ -608,6 +627,14 @@ mod tests {
         );
         c.watch_silence_ms = 0;
         assert!(c.check().unwrap_err().contains("watch_silence_ms"));
+    }
+
+    #[test]
+    fn issue_84_the_statement_bound_defaults_to_a_minute_and_zero_is_refused() {
+        let mut c = sample();
+        assert_eq!(c.statement_timeout_ms, 60_000);
+        c.statement_timeout_ms = 0;
+        assert!(c.check().unwrap_err().contains("statement_timeout_ms"));
     }
 
     const VAULT: &str = "\n[vault]\naddress = \"https://vault.example:8200\"\nmount = \"bezent\"\nrole = \"bezent-kreivo-endpoint-iam\"\nsts_region = \"us-east-2\"\nserver_id = \"vault.example\"\n";

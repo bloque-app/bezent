@@ -405,10 +405,19 @@ impl From<KeyError> for Failure {
 /// the server ends rolls back whole: the signature the backend made is dropped with it, nothing is
 /// recorded, and the caller sees "unavailable" and asks again.
 pub fn pool_options() -> PgPoolOptions {
-    bezent_store::login::pool_options_bounded(bezent_store::login::Bounds {
-        idle_in_transaction: IDLE_IN_TRANSACTION_TIMEOUT,
-        ..bezent_store::login::Bounds::DEFAULT
-    })
+    pool_options_with_statement_ms(bezent_store::login::STATEMENT_TIMEOUT_MS)
+}
+
+/// [`pool_options`] with the statement bound the signer's `statement_timeout_ms` configures
+/// ([`crate::config::Config::pool_options`] is how the signer's process gets it).
+pub fn pool_options_with_statement_ms(statement_ms: u64) -> PgPoolOptions {
+    bezent_store::login::pool_options_bounded(
+        bezent_store::login::Bounds {
+            idle_in_transaction: IDLE_IN_TRANSACTION_TIMEOUT,
+            ..bezent_store::login::Bounds::DEFAULT
+        }
+        .with_statement_ms(statement_ms),
+    )
     .max_connections(4)
 }
 

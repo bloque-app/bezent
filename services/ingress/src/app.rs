@@ -48,10 +48,6 @@ pub struct App {
 /// How long ago the store may last have answered for a saturated pool to still count as alive.
 pub const BUSY_WINDOW: Duration = Duration::from_secs(60);
 
-/// The longest one statement may run on the ingress's connections: shorter than the other
-/// services' ([`bezent_store::login::STATEMENT_TIMEOUT`]), because a request is waiting on it.
-const STATEMENT_TIMEOUT: Duration = Duration::from_secs(30);
-
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -213,12 +209,7 @@ pub async fn connect_with(
     let pool = bezent_store::tls::connect(
         // A statement that hangs ends, and frees its connection (issue #61); the idle-in-
         // transaction bound is the other services' (issue #84).
-        bezent_store::login::pool_options_bounded(bezent_store::login::Bounds {
-            statement: STATEMENT_TIMEOUT,
-            ..bezent_store::login::Bounds::DEFAULT
-        })
-        .max_connections(config.max_connections)
-        .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms)),
+        config.pool_options(),
         &url,
     )
     .await

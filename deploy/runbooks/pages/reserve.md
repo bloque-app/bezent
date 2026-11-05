@@ -68,6 +68,20 @@ stopped recording final heads, or a gap) and at the endpoint's own health (`depl
    surplus: `INV-1`; it is never absorbed); a reserve short because value left the reserve outside a referenced
    transfer (`INV-14`): that is a custody incident, so treat it as `key-compromise`
    (`pages/key-compromise.md`).
+   **A statement timeout.** If `reserve_evaluations.reason` (or the page's `error`) reads `canceling statement due to
+   statement timeout` (SQLSTATE `57014`) on every pass, the evaluation is being cut off by the store's statement bound,
+   not by anything on a chain. It fails closed: it is recorded as incomplete and the asset's routes stay paused, and
+   it will repeat every pass until the statement fits. The evaluation (`as_of`) sums every posting of the asset in one
+   statement; the bound is 60 s for each statement of the core's store session. Measured on a test book of 4.6 million
+   postings of one asset (5.6 million in all), it took about 5 s and grew in step with the postings, so reaching 60 s
+   is a book of the order of fifty million postings of one asset, or a database that is unwell. Look at the database
+   first (locks, load, a stuck session), because raising the bound does not mend a database that is slow. If the book
+   has legitimately outgrown it, **the lever is `statement_timeout_ms` in the core's configuration** (milliseconds;
+   default `60000`; zero is refused at start): raise it and restart the core, with no release. Do not raise it past
+   `120000`: one statement could then outlast the core's health window (`PASS_ALLOWANCE`) and the core would be
+   restarted in the middle of the check, which does not end the problem. The other services have the same key
+   (`statement_timeout_ms`; the ingress's default is `30000`), and it bounds a wait for a lock as well as a query.
+   The pause is lifted as in step 6 once an evaluation holds.
 4. A `book-quarantine` names the observation it set aside and the reason; correcting the book is a correction entry
    (`INV-17`), made by the reserve-book tooling, not an edit. Resolve the reason first, then follow F-004 NOTES 14.
 5. For a surplus alert the fix is to fund the reserve from a declared operator funding address (an arrival there is
