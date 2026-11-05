@@ -295,8 +295,9 @@ pub enum Submitted {
 
 /// How long one [`Submitter::resend`] pass may spend sending. Unsettled rows go out one after
 /// another, in nonce order, and each can cost up to `BROADCAST_TIMEOUT` (10 s) when every
-/// broadcast node hangs. 30 s keeps the whole pass, with its reads, well inside the health
-/// `PASS_ALLOWANCE` (120 s); what it leaves unsent waits for the next pass.
+/// broadcast node hangs. This bounds the re-send's share of a pass to 30 s, and nothing more:
+/// first sends, prepare and the prover are not bounded by it. What it leaves unsent waits for
+/// the next pass.
 pub const RESEND_BUDGET: Duration = Duration::from_secs(30);
 
 /// Builds, signs and submits the network's payouts. See the module documentation.
@@ -1049,8 +1050,11 @@ impl<R: Rpc> Submitter<'_, R> {
         self.resend_within(RESEND_BUDGET).await
     }
 
-    /// [`resend`](Self::resend) with an explicit budget for the whole pass. Once it is spent, no
-    /// more is sent: the rest stays stored and goes out on the next pass, in the same order.
+    /// [`resend`](Self::resend) with an explicit budget for the re-send. Once it is spent, no
+    /// more is sent: the rest stays stored and goes out on a later pass. Each pass starts again
+    /// from the lowest unsettled nonce, so rows the budget did not reach wait until the ones
+    /// before them are settled or answered quickly. That is harmless: a later nonce cannot
+    /// execute before an earlier one.
     pub async fn resend_within(&self, budget: Duration) -> Result<usize, sqlx::Error> {
         let deadline = tokio::time::Instant::now() + budget;
         let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
