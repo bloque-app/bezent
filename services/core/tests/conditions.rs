@@ -240,17 +240,31 @@ async fn cnd_awaiting_conversion_mints_nothing_and_goes_to_review_past_its_deadl
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
-    // REQ-CV-1, REQ-CV-6. The conversion itself is the requester's (F-010); the hold is here.
+    // REQ-CV-1, REQ-CV-6. The conversion itself is the requester's (F-010); the hold is here. The
+    // deposit names a convertible arrival (amendment 0018, A1b), and the core puts the condition
+    // there itself, on the edge into Source-Final: no transition is written by hand.
     let w = World::new(options, connect).await;
-    let id = source_final_deposit(&w).await;
-    exec(
+    let a = observe(
         &w.admin,
-        &format!(
-            "INSERT INTO transitions (transfer_id, from_state, to_state, condition) \
-             VALUES ({id}, 'Source-Final', 'Source-Final', 'CND-AwaitingConversion')"
-        ),
+        ORIGIN,
+        10,
+        0,
+        "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        5_000,
+        Some("0xfunder"),
+        Some(RESERVE),
+        None,
+        true,
+        json!({"event": "ConvertibleArrival"}),
     )
     .await;
+    decide(&w.admin, a, "final", 12).await;
+    let id = deposit(&w.admin, 10, 5_000).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-AwaitingConversion".into()))
+    );
     head(&w.admin, ISSUING, 100).await;
     w.settle(t0()).await;
     assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
@@ -260,6 +274,13 @@ async fn cnd_awaiting_conversion_mints_nothing_and_goes_to_review_past_its_deadl
         w.state(id).await,
         ("Needs-Review".into(), Some("CND-AwaitingConversion".into()))
     );
+    // REQ-RF-1: review, never a refund on a timer.
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]

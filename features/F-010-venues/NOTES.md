@@ -20,15 +20,15 @@ normative: `SPEC.md` and `PLAN.md` decide.
 | The mint is the observation's amount, scaled and rounded down | `services/core/src/engine.rs` (F-003, F-009 T-009-08) | `services/core/tests/lifecycle.rs`, `scaling.rs` |
 | A conversion's output is booked as reserve, its input is not; convertible holdings are read per token and network, outside the equation | `services/core/src/reserve/` (F-004) | `services/core/tests/reserve_book.rs`, `reserve_check.rs`, `services/evm-endpoint/tests/reserve.rs` |
 | The statement itemises unconverted holdings | `services/core/src/reserve/statement.rs` | `services/core/tests/statement.rs` |
-| A transfer in `Source-Final` holding `CND-AwaitingConversion` mints nothing and goes to `Needs-Review` past its deadline (`REQ-CV-6`) | `services/core/src/engine.rs` (`source_final`) | `services/core/tests/conditions.rs`, with the condition put there by a hand-inserted transition |
+| A transfer in `Source-Final` holding `CND-AwaitingConversion` mints nothing and goes to `Needs-Review` past its deadline (`REQ-CV-6`) | `services/core/src/engine.rs` (`source_final`) | `services/core/tests/conditions.rs`, with the condition put there by a hand-inserted transition (until amendment 0018 was built: see "Amendment 0018, A1b" below) |
 
 ## Added
 
 | Test | Layer (SPEC §9) | Criterion |
 |---|---|---|
-| `services/core/tests/conversions.rs` `req_cv_1_the_store_refuses_…` | Store | `REQ-CV-1`: no transfer names a convertible arrival; it stays an unassociated arrival |
+| `services/core/tests/conversions.rs` `req_cv_1_the_store_refuses_…` (rewritten as `ac_a5_1_req_cv_1_inv_6_…` by amendment 0018's build: a deposit now names the arrival, and the store refuses a mint against it) | Store | `REQ-CV-1`: no transfer names a convertible arrival; it stays an unassociated arrival |
 | `services/core/tests/conversions.rs` `req_cv_2_req_cv_5_the_store_refuses_…` | Store | `REQ-CV-2`, `REQ-CV-5`: a transfer's amount is the output's, not the input's |
-| `services/core/tests/conversions.rs` `ac_a5_1_ac_a5_2_…_the_ingress_binds_the_output_and_the_core_mints_it` | Service, across the seam: the real ingress router on its own login, the core on its own, observations in the shape the EVM endpoint records them | `AC-A5.1` (a request naming the convertible arrival or the swap's input is refused, nothing minted), `AC-A5.2` (not final: nothing; final: bound for the output's amount and minted for it, never the input's; the coordinate is consumed once), `REQ-CV-1`, `REQ-CV-2`, `REQ-CV-5`, `INV-2`, `INV-6` |
+| `services/core/tests/conversions.rs` `ac_a5_1_ac_a5_2_…_the_ingress_binds_the_output_and_the_core_mints_it` (now `ac_a5_2_req_cv_2_req_cv_5_inv_6_an_output_named_directly_is_bound_and_minted`; its `AC-A5.1` half moved to the A1b tests below) | Service, across the seam: the real ingress router on its own login, the core on its own, observations in the shape the EVM endpoint records them | `AC-A5.1` (a request naming the convertible arrival or the swap's input is refused, nothing minted), `AC-A5.2` (not final: nothing; final: bound for the output's amount and minted for it, never the input's; the coordinate is consumed once), `REQ-CV-1`, `REQ-CV-2`, `REQ-CV-5`, `INV-2`, `INV-6` |
 | `services/core/tests/statement.rs` `ac_a5_3_…` | Service (the statement) | `AC-A5.3`, `REQ-CV-4` |
 | `services/evm-endpoint/tests/fork.rs` `fork_ac_a5_1_ac_a5_2_…` | Chain + service, on an anvil fork of Polygon | A convertible arrives; Swaps' member approves and swaps through the vault's role; the endpoint records a convertible arrival (never an arrival), the swap's input and its output, the output carrying both amounts and equal to the vault's balance change |
 
@@ -59,17 +59,28 @@ destination is the request's. Grants are per kind (`REQ-PN-2`). So:
 Nothing in this pull request closes or hides that. It needs its own decision (amendment 0018, "The exposure the binding
 rules do not close"), and none of the options there closes it for ordinary arrivals.
 
-## What waits (amendment 0018, proposed)
+## What waited (amendment 0018, proposed)
 
-The spec does not say which convertible arrival a conversion's output belongs to, or what object holds
-`CND-AwaitingConversion` (conditions sit on transfers, and the store refuses a transfer on a convertible arrival). Two findings
-from reading the code:
+The spec did not say which convertible arrival a conversion's output belongs to, or what object holds
+`CND-AwaitingConversion` (conditions sit on transfers, and the store refused a transfer on a convertible arrival). The
+engine's `Source-Final` + `CND-AwaitingConversion` branch could not be reached in production, and `unassociated_arrivals`
+listed a final convertible arrival with `CND-Unassociated`. `amendments/0018-conversion-record.md` set out the options.
 
-- The engine's `Source-Final` + `CND-AwaitingConversion` branch cannot be reached in production: nothing puts a transfer there.
-  Its test inserts the transition by hand.
-- `unassociated_arrivals` lists a final convertible arrival, with `CND-Unassociated` (`REQ-IN-6`), not `CND-AwaitingConversion`.
-  Reporting the second there would stay true forever, because nothing links an arrival to the conversion that spent it.
+## Amendment 0018, A1b (ruled 2026-11-05, `d-cv-conversion-link`)
 
-`amendments/0018-conversion-record.md` sets out the options without choosing. Until it is ruled: the record of the arrival
-with its amount against a deposit, `CND-AwaitingConversion` held by an arrival, and the `REQ-CV-6` deadline on a real
-conversion are not built. The pull request is `Part of #10`.
+Built by migration 0120 and the ingress and core changes below. `SPEC.md` v0.5.5 carries the text.
+
+| Requirement | Where it is built | Where it is tested (layer, SPEC §9) |
+|---|---|---|
+| A deposit may name a final convertible arrival; nothing is minted against it (`REQ-RQ-3`, `REQ-CV-1`, `INV-6`) | `source_bindable()`, `transfers_observed_amount()` (0120); `decide_deposit` (`services/ingress/src/intake.rs`); the mint order's guard (0049, 0056) refuses a token not admitted | Store: `crates/store/tests/arrival_kind.rs` `m2_…`, `m1_inv_2_req_cv_1_…`. Service: `services/core/tests/conversions.rs` `ac_a5_1_req_cv_1_inv_6_…` (the core's own login is refused a hand-written mint) |
+| It holds `CND-AwaitingConversion` at `Source-Final`, taken on the edge from `Accepted`, with no hand-inserted transition (`AC-A5.1`) | `Core::accepted` | Service: `conversions.rs` `ac_a5_1_…`; `conditions.rs` `cnd_awaiting_conversion_…` |
+| Its requester names the output by the deposit's request reference, once (`REQ-RQ-4`) | `POST /v0/deposits/conversion` (`decide_conversion`); `deposit_conversion_record()` | Store: `deposit_conversions.rs` `req_rq_4_only_the_deposits_requester_names_its_output`. Service: `conversions.rs` `req_rq_4_inv_2_an_output_named_by_a_different_requester_is_refused`, and `ERR-ReferenceConflict` in the happy path |
+| The source moves once from the arrival to the output, with its amount; the arrival is recorded with both amounts; each is consumed once (`REQ-CV-2`, `INV-2`) | `deposit_conversions`, `deposit_conversion_record()`, `transfers_guard_update`, `transfers_source_bindable()` (0120) | Store: `deposit_conversions.rs` `req_cv_2_req_rq_4_inv_2_…`, `inv_2_an_arrival_recorded_by_a_conversion_is_never_bound_again`, `inv_2_an_output_already_consumed_is_refused`. Service: `conversions.rs` `inv_2_an_arrival_named_twice_is_refused`, `inv_2_an_output_already_consumed_is_refused` |
+| Only a final conversion output at the same reserve, of the deposit's asset (`REQ-CV-2`, `INV-6`) | `deposit_conversion_record()`, `decide_conversion` | Store: `deposit_conversions.rs` `req_cv_2_inv_6_…` |
+| The mint is the output's, under the reference derived from the output (`AC-A5.2`, `REQ-CV-5`, `REQ-IN-4`) | `Core::conversion`, `Core::source_final` | Service: `conversions.rs` `ac_a5_2_req_cv_2_req_cv_5_req_rq_4_inv_2_inv_6_the_request_comes_first_then_the_output_then_the_mint` |
+| Past its deadline, `Needs-Review`, never a refund; an output from after the deadline does not complete it; none named after review (`REQ-CV-6`, `REQ-RF-1`) | `Core::conversion`, `Core::source_final`; `decide_conversion` | Store: `deposit_conversions.rs` `req_cv_6_no_move_once_the_deposit_is_in_review`. Service: `conversions.rs` `req_cv_6_req_rf_1_…`, `req_cv_6_an_output_after_the_deadline_…` |
+
+The direct path stays as it was: a deposit may name a conversion output itself (`ac_a5_2_req_cv_2_req_cv_5_inv_6_an_output_named_directly_is_bound_and_minted`),
+and records no convertible arrival. What the ruling did not settle (this path, which amount the route's limits measure while
+a deposit awaits, the conversion's input amount, which convertibles an asset admits, an output named after review) and the
+exposure of "What the binding rules do not do" above are open in the amendment. Issue #10 stays open on them.

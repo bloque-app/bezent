@@ -196,7 +196,9 @@ Migration `0034_ingress_0010` (additive). What changed, and what supersedes the 
   Acceptable for V0, with one attested backend and one attesting party. Revisit when a second attested backend is
   declared: `requester_grants` then gains a backend.
 - **Left open, each to its own issue:** a conversion deposit records only the output's coordinate; REQ-CV-2's record of
-  the convertible arrival with both amounts is not built. A refund of a `convertible_arrival` that was since converted
+  the convertible arrival with both amounts is not built. *(Since amendment 0018, A1b, migration 0120: a deposit that
+  names a convertible arrival records it with both amounts once its requester names the output; one that names the
+  output directly still records only the output, open in the amendment.)* A refund of a `convertible_arrival` that was since converted
   is not linked to its `conversion_output` in the store, so both could be released; the operator's second approver on
   a refund (REQ-RQ-6) is the check until they are linked. The reserve book still classifies by `detail.event`
   (`services/core/src/reserve/book.rs`); moving it to `kind` is F-004's.

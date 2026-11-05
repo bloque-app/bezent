@@ -20,11 +20,13 @@ Mostly nothing new: `F-008`, `F-009`, `F-002`, `F-003` and `F-004` already built
 mint and the statement (see `NOTES.md`). This feature adds the tests that name `AC-A5.1`–`AC-A5.3` at the layers §9 names,
 including a real swap on the Polygon fork, and records what is left.
 
-Left, and waiting for a ruling: the record of the convertible arrival with both amounts (`REQ-CV-2`, last sentence) and the
-condition `CND-AwaitingConversion` held by an arrival. `amendments/0018-conversion-record.md` is the proposal; nothing is
-built on it.
+Then amendment 0018 as ruled (`d-cv-conversion-link`, 2026-11-05: A1b, the request comes first): a deposit may name a
+convertible arrival and holds `CND-AwaitingConversion` at `Source-Final`; its requester names the conversion's output by
+the deposit's request reference; the store moves the deposit's source to the output once and records the arrival with both
+amounts (migration 0120); the core mints against the output, or sends the deposit to review past its deadline. What the
+ruling left open is in the amendment ("Open after the ruling").
 
 ## Done when
 
-A convertible deposit is minted for what the swap delivered into the vault (`AC-A5.1`–`AC-A5.3`). Until amendment 0018 is
-ruled and built, issue #10 stays open.
+A convertible deposit is minted for what the swap delivered into the vault (`AC-A5.1`–`AC-A5.3`), a deposit naming a
+convertible arrival records it with both amounts (`REQ-CV-2`), and its deadline sends it to review (`REQ-CV-6`).
