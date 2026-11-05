@@ -94,6 +94,13 @@ fn req_ky_1_no_two_instances_share_a_secret_path() {
 }
 
 #[test]
+fn amendment_0023_every_instance_has_public_broadcast_nodes() {
+    for c in configs() {
+        assert!(c.broadcast.len() >= 2, "{}", c.network);
+    }
+}
+
+#[test]
 fn dec_12_every_instance_has_two_providers_of_different_names() {
     for c in configs() {
         assert_eq!(c.providers.len(), 2, "{}", c.network);

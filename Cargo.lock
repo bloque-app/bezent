@@ -1822,6 +1822,7 @@ dependencies = [
  "bezent-signer",
  "bezent-store",
  "bezent-vault",
+ "futures-util",
  "hex",
  "k256",
  "serde",

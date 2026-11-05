@@ -19,6 +19,9 @@ start_block = 95400000
 max_range = 500
 database_url_file = "/run/secrets/bezent-evm-polygon-db"
 
+# Public nodes signed transactions are sent to, and only those (amendment 0023). No secret: written here.
+broadcast = ["https://polygon-rpc.com", "https://polygon-bor-rpc.publicnode.com", "https://polygon.drpc.org"]
+
 [[providers]]
 name = "a"
 url_file = "/run/secrets/bezent-evm-polygon-rpc-a"

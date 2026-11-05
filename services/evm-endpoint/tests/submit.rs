@@ -311,17 +311,20 @@ async fn req_eo_1_ac_d2_1_signed_bytes_are_persisted_then_sent_and_only_ever_re_
 ) {
     let f = Fixture::new(pool, connect, 5).await;
     let (id, bytes) = f.signed_payout(reference(1), 700).await;
-    // The bytes recover to the lane and are what was sent, to both providers.
+    // The bytes recover to the lane and are what was sent, to both public nodes and never to the
+    // paid pair (amendment 0023).
     let (tx, _) = bezent_evm_endpoint::submit::decode_signed(&bytes).unwrap();
     assert_eq!(
         evm::decode_delivery_call(&contracts(), &tx.input),
         Some(delivery(reference(1), 700))
     );
-    assert_eq!(f.chain.sent(), [bytes.clone(), bytes.clone()]);
+    assert_eq!(f.broadcast_chain.sent(), [bytes.clone(), bytes.clone()]);
+    assert!(f.chain.sent().is_empty() && f.chain_b.sent().is_empty());
     // A restart: the same bytes again, never a second signature (AC-D2.1).
     assert_eq!(f.submitter().resend().await.unwrap(), 1);
-    assert_eq!(f.chain.sent().len(), 4);
-    assert!(f.chain.sent().iter().all(|b| *b == bytes));
+    assert_eq!(f.broadcast_chain.sent().len(), 4);
+    assert!(f.broadcast_chain.sent().iter().all(|b| *b == bytes));
+    assert!(f.chain.sent().is_empty());
     let intent: i64 = sqlx::query_scalar("SELECT intent_id FROM signed_transactions WHERE id = $1")
         .bind(id)
         .fetch_one(&f.admin)

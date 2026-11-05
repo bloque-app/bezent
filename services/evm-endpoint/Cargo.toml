@@ -39,6 +39,8 @@ alloy = { version = "1.8", default-features = false, features = [
 # Public keys to addresses (the lane key, AC-I1.2).
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 url = "2"
+# Sends to every broadcast node at once (join_all).
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

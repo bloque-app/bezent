@@ -16,11 +16,14 @@
 //! At start-up, before anything is read or built (`AC-I4.1`, `DEC-12`): both providers must serve
 //! the declared chain id, hold the pinned block at its pinned hash, and agree on the finalized head
 //! they both stand on; the store must declare the network as an EVM origin network whose reserves
-//! are the configured vault. Any mismatch exits with status 1.
+//! are the configured vault. Any mismatch exits with status 1. Each public broadcast node (signed
+//! transactions are sent to those and no others, amendment 0023) must serve the declared chain id;
+//! one that cannot be reached is logged and the endpoint starts.
 
 use std::process::ExitCode;
 use std::time::Duration;
 
+use bezent_evm_endpoint::broadcast::Broadcast;
 use bezent_evm_endpoint::config::Config;
 use bezent_evm_endpoint::network::{self, Identity};
 use bezent_evm_endpoint::observe::{Follower, Step, Watch};
@@ -108,6 +111,17 @@ async fn run(config: Config) -> Result<(), String> {
         a: Http::new(&config.providers[0].name, &urls[0])?,
         b: Http::new(&config.providers[1].name, &urls[1])?,
     };
+    // Amendment 0023: signed transactions go to the public broadcast nodes and only them. Each must
+    // serve this chain; one that cannot be reached is logged, and the endpoint starts.
+    let nodes = config.broadcast_nodes()?;
+    let broadcast = Broadcast::new(
+        nodes
+            .iter()
+            .map(|(name, url)| Http::new(name, url))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    broadcast.check_chain(config.chain_id).await?;
+    tracing::info!(network = %config.network, nodes = nodes.len(), "amendment 0023: signed transactions are sent to the public broadcast nodes only; every read stays on the paid pair");
     // AC-I4.1, DEC-12: the declared network on both providers, or nothing starts.
     let head = network::check(
         &pair,
@@ -174,6 +188,7 @@ async fn run(config: Config) -> Result<(), String> {
     };
     let submitter = Submitter {
         pair: &pair,
+        broadcast: &broadcast,
         pool: &pool,
         network: &config.network,
         chain_id: config.chain_id,

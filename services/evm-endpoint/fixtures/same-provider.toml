@@ -13,6 +13,9 @@ multisend = "0x9641d764fc13c8B624c04430C7356C1C7C8102e2"
 start_block = 95400000
 database_url_file = "/run/secrets/bezent-evm-polygon-db"
 
+# Public nodes signed transactions are sent to, and only those (amendment 0023). No secret: written here.
+broadcast = ["https://polygon-rpc.com", "https://polygon-bor-rpc.publicnode.com"]
+
 [[providers]]
 name = "a"
 url_file = "/run/secrets/bezent-evm-polygon-rpc-a"
