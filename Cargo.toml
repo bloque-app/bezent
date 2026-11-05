@@ -8,6 +8,7 @@
 #
 #   crates/core              F-001   types: amounts, asset and network ids, references, coordinates
 #   crates/health            #61     the liveness heartbeat the services' `health` subcommands read
+#   crates/logging           F-014   the services' one log format (plain text, no colour), so a page matches a `kind=` filter
 #   crates/vault             #64     the Vault client (IAM login, KV, PKI) and `SecretRef`, which the services read their secrets with
 #   crates/store             F-001   the PostgreSQL schema of `DEC-4` (sqlx migrations) and its store tests
 #   services/ingress         F-001   empty binary; behaviour from F-002
@@ -16,6 +17,7 @@
 #   services/signer          F-001   empty binary
 #   services/core            F-003   the core: state machine, conditions, review (DEC-3)
 #   services/migrate         prod  bezent-migrate: applies the store's migrations as the owner (the only production path that migrates)
+#   services/full-chain      F-013 the full-chain suite: the real services against an anvil fork and an in-memory issuing network (a test target behind the `fork` feature; TEST only)
 #   services/sidecar         e2e   ingress, core, a test signer and a chain-event driver in one process, for other repos' harnesses (TEST only)
 #
 # The ink! contract (contracts/bezent/) and the Foundry projects (contracts/evm/) are workspaces of
@@ -25,6 +27,7 @@ resolver = "3"
 members = [
     "crates/core",
     "crates/health",
+    "crates/logging",
     "crates/store",
     "crates/vault",
     "services/ingress",
@@ -34,6 +37,7 @@ members = [
     "services/core",
     "services/sidecar",
     "services/migrate",
+    "services/full-chain",
 ]
 # Workspaces of their own (F-006 and later): never members of this one.
 exclude = ["contracts/bezent"]

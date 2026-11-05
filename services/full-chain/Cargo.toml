@@ -1,0 +1,52 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# F-013 (T-013-08; plan DEC-19): the full-chain suite. The ingress, the core, the signer and both
+# endpoints run together on one store, each on its own login, against an anvil fork of Polygon and
+# an in-memory model of the issuing network. TEST only: nothing here ships. It lives under services/
+# because it links the services (GPL-3.0-or-later; docs/oss/LICENSING.md). The suite is a test
+# target behind the `fork` feature, so `cargo build --workspace` and `cargo test --workspace` do not
+# build or run it; the `e2e-full-chain` workflow does (`--features fork`) and a run with no fork or no
+# anvil fails there instead of skipping.
+[package]
+name = "bezent-e2e-full-chain"
+description = "bezent's full-chain end-to-end suite: the real services together against an anvil fork of Polygon and an in-memory issuing network; TEST only"
+edition.workspace = true
+version.workspace = true
+license = "GPL-3.0-or-later"
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bezent_e2e_full_chain"
+path = "src/lib.rs"
+
+[features]
+# Builds the suite. Off, the package is an empty library.
+fork = []
+
+[[test]]
+name = "full_chain"
+path = "tests/full_chain/main.rs"
+required-features = ["fork"]
+
+[dev-dependencies]
+alloy = { version = "1.8", default-features = false, features = ["std", "consensus", "eips", "rlp", "sol-types", "rpc-client", "reqwest", "reqwest-rustls-tls", "k256"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+bezent-core-service = { path = "../core" }
+bezent-evm-endpoint = { path = "../evm-endpoint" }
+bezent-ingress = { path = "../ingress" }
+# Without the light client: the suite runs the endpoint on its in-memory chain, which needs none of
+# smoldot.
+bezent-kreivo-endpoint = { path = "../kreivo-endpoint", default-features = false }
+bezent-signer = { path = "../signer" }
+bezent-store = { path = "../../crates/store" }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+hex = "0.4"
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { workspace = true, features = ["json", "chrono"] }
+tokio = { workspace = true, features = ["net", "time", "io-util", "sync", "fs"] }
+
+[lints]
+workspace = true

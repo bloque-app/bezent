@@ -65,6 +65,16 @@ pub const MAX_FRAME: usize = 64 * 1024;
 /// How long the signer waits for a connection's token.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The longest a caller spends reaching the signer: the connection, the TLS handshake and the
+/// hello that is answered with a welcome. The signer bounds its own end with [`HELLO_TIMEOUT`],
+/// but a peer that never answers (a blackholed address, a stopped process that still holds the
+/// socket) would otherwise hold the caller for good, and with it the endpoint's whole pass.
+///
+/// It ends before any `Sign` frame is written, so a dial that times out asked the signer for
+/// nothing: the intent is plainly not signed and is asked for again. The wait for the answer to a
+/// `Sign` is not bounded here: a request that was written may have been signed.
+pub const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// What the core sends.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -190,7 +200,7 @@ impl fmt::Display for LinkError {
             } => write!(
                 f,
                 "signer link: the signature returned for intent {intent} is not over its recorded \
-                 bytes (AC-I1.2, INV-9); key-compromise at {alert_seq}, pause requested at {pause_seq}"
+                 bytes (AC-I1.2, INV-9); key-compromise at {alert_seq}, pause recorded at {pause_seq}"
             ),
             Self::Store(why) => write!(f, "signer link: store: {why}"),
         }
@@ -512,6 +522,22 @@ where
 trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
 
+/// `dial`, which must end within `within`: a dial that does not is [`LinkError::Io`] of kind
+/// `TimedOut`, like any other failure to reach the signer.
+async fn dialed(
+    within: Duration,
+    dial: impl std::future::Future<Output = Result<Client, LinkError>>,
+) -> Result<Client, LinkError> {
+    tokio::time::timeout(within, dial)
+        .await
+        .unwrap_or_else(|_| {
+            Err(LinkError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the signer did not answer in time",
+            )))
+        })
+}
+
 /// The core's end of the link.
 pub struct Client {
     stream: Box<dyn Duplex>,
@@ -614,31 +640,57 @@ impl Dialer {
 impl Client {
     /// Connects to the signer at `path`, served by user `signer_uid`, and presents `token`.
     pub async fn connect(path: &Path, token: &str, signer_uid: u32) -> Result<Self, LinkError> {
-        let stream = UnixStream::connect(path).await?;
-        let uid = stream.peer_cred().ok().map(|c| c.uid());
-        if uid != Some(signer_uid) {
-            return Err(LinkError::WrongPeer { uid });
-        }
-        let hello = Request::Hello {
-            token: Zeroizing::new(token.to_owned()),
+        Self::connect_within(path, token, signer_uid, DIAL_TIMEOUT).await
+    }
+
+    /// [`Client::connect`], giving up after `within` ([`DIAL_TIMEOUT`] is the bound callers use).
+    pub async fn connect_within(
+        path: &Path,
+        token: &str,
+        signer_uid: u32,
+        within: Duration,
+    ) -> Result<Self, LinkError> {
+        let dial = async {
+            let stream = UnixStream::connect(path).await?;
+            let uid = stream.peer_cred().ok().map(|c| c.uid());
+            if uid != Some(signer_uid) {
+                return Err(LinkError::WrongPeer { uid });
+            }
+            let hello = Request::Hello {
+                token: Zeroizing::new(token.to_owned()),
+            };
+            Self::hello(Box::new(stream), hello).await
         };
-        Self::hello(Box::new(stream), hello).await
+        dialed(within, dial).await
     }
 
     /// Connects over mutual TLS to the signer `link` names, which must present a certificate for
     /// exactly that name, and presents `token`. A refused client certificate shows as an error
     /// here: TLS 1.3 reports it on the first read.
     pub async fn connect_tls(link: &ClientLink, token: &str) -> Result<Self, LinkError> {
-        let tcp = TcpStream::connect(&link.address).await?;
-        let connector = tokio_rustls::TlsConnector::from(link.config.clone());
-        let stream = connector
-            .connect(link.server_name.clone(), tcp)
-            .await
-            .map_err(LinkError::Io)?;
-        let hello = Request::Hello {
-            token: Zeroizing::new(token.to_owned()),
+        Self::connect_tls_within(link, token, DIAL_TIMEOUT).await
+    }
+
+    /// [`Client::connect_tls`], giving up after `within` ([`DIAL_TIMEOUT`] is the bound callers
+    /// use).
+    pub async fn connect_tls_within(
+        link: &ClientLink,
+        token: &str,
+        within: Duration,
+    ) -> Result<Self, LinkError> {
+        let dial = async {
+            let tcp = TcpStream::connect(&link.address).await?;
+            let connector = tokio_rustls::TlsConnector::from(link.config.clone());
+            let stream = connector
+                .connect(link.server_name.clone(), tcp)
+                .await
+                .map_err(LinkError::Io)?;
+            let hello = Request::Hello {
+                token: Zeroizing::new(token.to_owned()),
+            };
+            Self::hello(Box::new(stream), hello).await
         };
-        Self::hello(Box::new(stream), hello).await
+        dialed(within, dial).await
     }
 
     async fn hello(mut stream: Box<dyn Duplex>, hello: Request) -> Result<Self, LinkError> {

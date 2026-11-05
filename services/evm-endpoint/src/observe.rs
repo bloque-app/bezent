@@ -50,6 +50,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use crate::evm::{self, REFERENCE_TOPIC, TRANSFER_TOPIC};
+use crate::fee;
 use crate::network::Declarations;
 use crate::pair::{Pair, Read};
 use crate::reserve;
@@ -108,6 +109,9 @@ pub struct Watch<'a> {
     pub declarations: &'a Declarations,
     /// The admitted convertibles and their declared pools (F-008, "Pinned pools").
     pub convertibles: &'a [(Address, Address)],
+    /// The delivery account (the lane's address), whose native balance is the network's fee
+    /// position (`REQ-ST-6`, [`crate::fee`]).
+    pub delivery: Address,
 }
 
 /// An address as bezent writes it: the store's spelling for the vault and the admitted tokens,
@@ -348,10 +352,15 @@ impl<R: Rpc> Follower<'_, R> {
             // payout prover recorded first, with no readings, is read now, or the check would
             // find no reading at the latest final point while a payout is in flight and pause
             // the asset (PR #50 review M4).
-            let readings = if store::head_read(self.pool, self.network, &head).await? {
-                Vec::new()
+            let (readings, fee) = if store::head_read(self.pool, self.network, &head).await? {
+                (Vec::new(), None)
             } else {
-                reserve::readings(self.pair, &self.watch, head.number).await
+                (
+                    reserve::readings(self.pair, &self.watch, head.number).await,
+                    // Issue #14: the delivery account's fee position, read at the same point and
+                    // recorded with it. A read that fails is an unknown reading, never an error.
+                    Some(fee::read(self.pair, self.watch.delivery, head.number).await),
+                )
             };
             let mut tx = self.pool.begin().await?;
             if let Head::Conflict(stored) = store::final_head(&mut tx, self.network, &head).await? {
@@ -363,7 +372,36 @@ impl<R: Rpc> Follower<'_, R> {
                 )));
             }
             store::record_readings(&mut tx, self.network, &head, &readings).await?;
+            if let Some(f) = &fee {
+                // A fee position is not the head: if it cannot be written (a table not yet
+                // migrated, a grant or a guard that drifted), a savepoint takes back only it, and
+                // the head and the readings commit. Only a failure of the savepoint itself, the
+                // connection, is the step's.
+                let mut sp = sqlx::Acquire::begin(&mut *tx).await?;
+                match store::record_fee_position(&mut sp, self.network, &head, f).await {
+                    Ok(()) => sp.commit().await?,
+                    Err(e) => {
+                        sp.rollback().await?;
+                        tracing::error!(
+                            network = self.network,
+                            block = head.number,
+                            error = %e,
+                            "REQ-ST-6: the delivery account's fee position could not be recorded; \
+                             the head and the reserve readings are recorded without it, and \
+                             fee_position_age_seconds grows until it can be"
+                        );
+                    }
+                }
+            }
             tx.commit().await?;
+            if let Some(f) = fee.as_ref().filter(|f| f.amount.is_none()) {
+                tracing::warn!(
+                    network = self.network,
+                    block = head.number,
+                    reason = f.unknown_reason.as_deref().unwrap_or_default(),
+                    "REQ-ST-6: the delivery account's fee position is unknown at this final head"
+                );
+            }
             for r in readings.iter().filter(|r| r.amount.is_none()) {
                 tracing::warn!(
                     network = self.network,

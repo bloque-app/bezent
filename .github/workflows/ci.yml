@@ -240,7 +240,7 @@ jobs:
         if: failure()
         run: cat "$RUNNER_TEMP/vault.log"
 
-  # F-009: the EVM endpoint against an anvil fork of Polygon at the block e2e/evm/forks.env pins,
+  # F-009: the EVM endpoint against an anvil fork of Polygon, Base and BNB Chain at the block e2e/evm/forks.env pins,
   # with F-008's vault deployed by its own script and Foundry's test keys (services/evm-endpoint/
   # tests/fork.rs). anvil reads the pinned state from the upstream archive RPC; nothing is sent to
   # a real network.
@@ -251,6 +251,10 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       BEZENT_EVM_FORK_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.drpc.org' }}
+      # Base and BNB Chain (M-2): the same secret names e2e-evm.yml reads, the same keyless public
+      # fallbacks. Without them fork.rs skips that network and passes.
+      BEZENT_EVM_FORK_URL_BASE: ${{ secrets.BASE_RPC_URL || 'https://mainnet.base.org' }}
+      BEZENT_EVM_FORK_URL_BSC: ${{ secrets.BSC_RPC_URL || 'https://bsc-mainnet.public.blastapi.io' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -273,8 +277,30 @@ jobs:
         with:
           path: ~/.foundry/cache/rpc
           key: evm-endpoint-fork-${{ hashFiles('e2e/evm/forks.env', 'services/evm-endpoint/tests/fork.rs') }}
-      - name: "T-009-01 to T-009-06 on the Polygon fork"
+      - name: "T-009-01 to T-009-06 on the Polygon, Base and BNB Chain forks"
         run: cargo test -p bezent-evm-endpoint --test fork --locked -- --test-threads=1
+
+  # F-013 (DEC-19): every V0 acceptance criterion of SPEC.md section 6 has a test that names it at the layer
+  # SPEC section 9 gives it, or an entry in e2e/criteria/exceptions.toml with its reason. Needs no secret and
+  # no database, so it runs for every pull request, forks included. The unit tests show that the map and the
+  # release gate fail closed.
+  criteria-map:
+    name: criteria map and release gate self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tools/ci -p 'test_*.py' -v
+      - name: Every V0 acceptance criterion has a test at its layer
+        run: |
+          python3 tools/ci/criteria_map.py | tee criteria-map.md
+          cat criteria-map.md >> "$GITHUB_STEP_SUMMARY"
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: criteria-map
+          path: criteria-map.md
+          if-no-files-found: ignore
 
   # Licensing (docs/oss/LICENSING.md): every tracked file carries its licence (an SPDX header where
   # the format allows a comment, REUSE.toml otherwise), the licence its path requires, and every

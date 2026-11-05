@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use alloy::primitives::{Address, B256, Bytes, U256, keccak256};
+use bezent_evm_endpoint::broadcast::Broadcast;
 use bezent_evm_endpoint::evm::{self, Contracts, Delivery, Gas};
 use bezent_evm_endpoint::network::{Declarations, Token};
 use bezent_evm_endpoint::observe::{Follower, Watch};
@@ -161,16 +162,59 @@ pub async fn declare(admin: &PgPool) {
 
 /// [`declare`], with the vault at `vault`.
 pub async fn declare_vault(admin: &PgPool, vault: &str) {
+    declare_on(
+        admin,
+        vault,
+        &Declared {
+            network: NETWORK,
+            chain_id: CHAIN_ID,
+            asset: ASSET,
+            asset_precision: 6,
+            token: &usdc().to_string(),
+            token_precision: 6,
+        },
+    )
+    .await;
+}
+
+/// What the operator declares for one EVM network (M-2: bEURC on Base, bBTC on BNB Chain).
+pub struct Declared<'a> {
+    /// The network's id in the store.
+    pub network: &'a str,
+    /// Its chain id.
+    pub chain_id: u64,
+    /// The bridged asset.
+    pub asset: &'a str,
+    /// The asset's precision on the issuing network.
+    pub asset_precision: i16,
+    /// The origin token.
+    pub token: &'a str,
+    /// The origin token's precision (the asset's, or more: `REQ-AS-4`).
+    pub token_precision: i16,
+}
+
+/// [`declare_vault`] for any network: the networks, the asset, its token, the vault as its
+/// reserve, and the endpoint's login as the instance of the network.
+pub async fn declare_on(admin: &PgPool, vault: &str, d: &Declared<'_>) {
+    let Declared {
+        network,
+        chain_id,
+        asset,
+        asset_precision,
+        token,
+        token_precision,
+    } = d;
     sqlx::raw_sql(&format!(
         "INSERT INTO networks (network, role, address_format, backend) VALUES \
-           ('{ISSUING}', 'issuing', 'ss58', NULL), ('{NETWORK}', 'origin', 'evm', 'evm:{CHAIN_ID}'); \
+           ('{ISSUING}', 'issuing', 'ss58', NULL), ('{network}', 'origin', 'evm', 'evm:{chain_id}'); \
          INSERT INTO assets (asset, precision, assurance_class, issuing_asset) VALUES \
-           ('{ASSET}', 6, 'public', 'Here(101)'); \
+           ('{asset}', {asset_precision}, 'public', 'Here(101)'); \
          INSERT INTO admitted_tokens (network, token, asset, precision) VALUES \
-           ('{NETWORK}', '{}', '{ASSET}', 6); \
-         INSERT INTO reserves (asset, network, address) VALUES ('{ASSET}', '{NETWORK}', '{}');",
-        usdc(),
-        vault
+           ('{network}', '{token}', '{asset}', {token_precision}); \
+         INSERT INTO reserves (asset, network, address) VALUES ('{asset}', '{network}', '{vault}'); \
+         INSERT INTO evm_endpoint_networks (login, network) VALUES \
+           ('evm_endpoint_tests_{}', '{network}');",
+        bezent_store::EVM_ENDPOINT_ROLE
     ))
     .execute(admin)
     .await
@@ -202,6 +246,18 @@ pub async fn start_signer(connect: &PgConnectOptions) -> (SignerLink, Lane) {
 /// As [`start_signer`], with the vault's contracts `vault` declared to the signer: what a payout's
 /// bytes must name (audit must-fix 2).
 pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (SignerLink, Lane) {
+    start_signer_on(connect, vault, NETWORK, CHAIN_ID, KEY).await
+}
+
+/// As [`start_signer_for`], for the EVM network `network` of chain `chain_id`, the delivery key being
+/// `key` (M-2: one instance per network, each with its own key and binding).
+pub async fn start_signer_on(
+    connect: &PgConnectOptions,
+    vault: Contracts,
+    network: &str,
+    chain_id: u64,
+    key: &str,
+) -> (SignerLink, Lane) {
     let dir = temp_dir();
     let keys_path = dir.join("keys.json");
     std::fs::write(
@@ -209,7 +265,7 @@ pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (
         serde_json::to_vec(&json!({
             "comment": "TEST KEYS: Foundry's test account 4",
             "environment": "test",
-            "keys": [{"id": KEY, "scheme": "secp256k1-evm", "seed": LANE_SECRET}],
+            "keys": [{"id": key, "scheme": "secp256k1-evm", "seed": LANE_SECRET}],
         }))
         .unwrap(),
     )
@@ -228,7 +284,7 @@ pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (
         serde_json::to_vec(&json!({
             "socket": dir.join("s.sock"),
             "callers": [{"name": caller.name, "uid": uid, "token_sha256": caller.token_sha256}],
-            "networks": [{"id": NETWORK, "environment": "test", "chain_id": CHAIN_ID,
+            "networks": [{"id": network, "environment": "test", "chain_id": chain_id,
                           "cancel_max_fee_per_gas": MAX_FEE.to_string(),
                           // What a payout's bytes must name (audit must-fix 2).
                           "delivery": {"roles": vault.roles.to_string(),
@@ -236,8 +292,9 @@ pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (
                                        "emitter": vault.emitter.to_string(),
                                        "role": "bezent.delivery"}}],
             "keys": {"backend": "file", "path": keys_path},
-            "bindings": [{"key": KEY, "network": NETWORK, "purposes": ["payout", "cancel"],
-                          "window_cap": "1000000000000", "window_seconds": 3600}],
+            // The cap is in the origin token's minor units: high enough for an 18-decimal token.
+            "bindings": [{"key": key, "network": network, "purposes": ["payout", "cancel"],
+                          "window_cap": "1000000000000000000000000", "window_seconds": 3600}],
         }))
         .unwrap(),
     )
@@ -260,7 +317,7 @@ pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (
         Arc::new(Callers::sharing_the_signer_uid_in_tests(&[caller])),
         signer,
     ));
-    let public_key = backend.public_key(KEY).unwrap();
+    let public_key = backend.public_key(key).unwrap();
     let address = evm::address_of(&public_key).unwrap();
     (
         SignerLink {
@@ -268,7 +325,7 @@ pub async fn start_signer_for(connect: &PgConnectOptions, vault: Contracts) -> (
             token: TOKEN.into(),
         },
         Lane {
-            key: KEY.into(),
+            key: key.into(),
             public_key,
             address,
         },
@@ -289,6 +346,11 @@ pub struct Fixture {
     pub chain_b: MockChain,
     /// The two providers.
     pub pair: Pair<MockRpc>,
+    /// The chain the public broadcast nodes answer from: apart from the pair's, so a send the
+    /// pair never sees is a send to these alone (amendment 0023).
+    pub broadcast_chain: MockChain,
+    /// Two honest public broadcast nodes over `broadcast_chain`.
+    pub broadcast: Broadcast<MockRpc>,
     /// The lane.
     pub lane: Lane,
     /// The signer link.
@@ -317,6 +379,7 @@ impl Fixture {
         declare(&admin).await;
         let (link, lane) = start_signer(&connect).await;
         let address = lane.address;
+        let broadcast_chain = MockChain::new(CHAIN_ID, 1);
         chain.set_balance(address, U256::from(10u128.pow(21)));
         Fixture {
             endpoint: role_pool(&connect, "bezent_evm_endpoint").await,
@@ -326,6 +389,11 @@ impl Fixture {
                 a: MockRpc::new("a", &chain),
                 b: MockRpc::new("b", &chain_b),
             },
+            broadcast: Broadcast::new(vec![
+                MockRpc::new("p1", &broadcast_chain),
+                MockRpc::new("p2", &broadcast_chain),
+            ]),
+            broadcast_chain,
             chain,
             chain_b,
             lane,
@@ -346,6 +414,7 @@ impl Fixture {
                 emitter: contracts().emitter,
                 declarations: &self.declarations,
                 convertibles: &self.convertibles,
+                delivery: self.lane.address,
             },
             start_block: 1,
             max_range: 4,
@@ -354,8 +423,17 @@ impl Fixture {
 
     /// The submitter.
     pub fn submitter(&self) -> Submitter<'_, MockRpc> {
+        self.submitter_via(&self.broadcast)
+    }
+
+    /// The submitter sending through `broadcast` instead of the fixture's honest nodes.
+    pub fn submitter_via<'a>(
+        &'a self,
+        broadcast: &'a Broadcast<MockRpc>,
+    ) -> Submitter<'a, MockRpc> {
         Submitter {
             pair: &self.pair,
+            broadcast,
             pool: &self.endpoint,
             network: NETWORK,
             chain_id: CHAIN_ID,
@@ -524,6 +602,23 @@ impl Fixture {
             .fetch_one(&self.admin)
             .await
             .unwrap()
+    }
+
+    /// The `key-compromise` alerts recorded, having checked each paused the bridge (`AC-I1.2`,
+    /// issue #77): a route that raises an alert with no pause fails here.
+    pub async fn compromises(&self) -> i64 {
+        let alerts = self
+            .count("SELECT count(*) FROM event_log WHERE kind = 'key-compromise'")
+            .await;
+        let paused = self
+            .count(
+                "SELECT count(*) FROM pauses p JOIN event_log e ON e.seq = p.alert_seq \
+                 WHERE e.kind = 'key-compromise' AND p.cause = 'REQ-IC-4' AND p.asset IS NULL \
+                   AND p.network IS NULL AND p.direction IS NULL",
+            )
+            .await;
+        assert_eq!(paused, alerts, "AC-I1.2: an alert with no pause");
+        alerts
     }
 
     /// Mines `bytes` (a signed EIP-1559 transaction) into a new block of both chains, consuming

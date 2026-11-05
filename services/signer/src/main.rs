@@ -33,7 +33,7 @@ use bezent_signer::kms::{AwsKms, KmsBackend};
 use bezent_signer::link::{self, Callers};
 use bezent_signer::log::Log;
 use bezent_signer::process;
-use bezent_signer::signer::{Signer, check_login, pool_options};
+use bezent_signer::signer::{Signer, check_login};
 use bezent_signer::transit::{TransitBackend, VaultTransit};
 use bezent_signer::vault_plugin::{PluginBackend, VaultPlugin};
 use bezent_vault::Resolver;
@@ -255,7 +255,7 @@ async fn run(config: Config, backend: Custody, policy: Policy, log: Log) -> Resu
             .map_err(|e| e.to_string())?,
         (None, None) => unreachable!("checked above"),
     };
-    let pool = bezent_store::tls::connect(pool_options(), url.trim())
+    let pool = bezent_store::tls::connect(config.pool_options(), url.trim())
         .await
         .map_err(|e| format!("store: {e}"))?;
     // The keys' environment is held to the networks the store declares, as the core does

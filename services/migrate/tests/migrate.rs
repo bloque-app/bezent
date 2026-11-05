@@ -535,6 +535,37 @@ async fn createrole_owner_run(pool: &PgPool, self_grant: &str) {
         "the owner can act as a store role"
     );
 
+    // 0095 (NFR-7): this owner is not a superuser, so it is `pg_has_role` that admits it to replay
+    // an alert and to load the pause row that comes with it. The store's own test cannot show the
+    // production shape (it runs as a superuser); this run does, in the CI job that runs it as
+    // a CREATEROLE owner on a server of its own.
+    sqlx::raw_sql(
+        "INSERT INTO networks (network, role, address_format) VALUES ('kreivo', 'issuing', 'ss58')",
+    )
+    .execute(&owner)
+    .await
+    .unwrap();
+    let seq: i64 = sqlx::query_scalar(
+        "INSERT INTO event_log (kind, payload) VALUES ('key-compromise', \
+           '{\"dedupe\": \"createrole-owner-replay\", \"network\": \"kreivo\"}') RETURNING seq",
+    )
+    .fetch_one(&owner)
+    .await
+    .unwrap();
+    let pauses: i64 = sqlx::query_scalar("SELECT count(*) FROM pauses")
+        .fetch_one(&owner)
+        .await
+        .unwrap();
+    assert_eq!(
+        pauses, 0,
+        "the owner's replay of an alert paused the bridge"
+    );
+    sqlx::query("INSERT INTO pauses (cause, alert_seq) VALUES ('REQ-IC-4', $1)")
+        .bind(seq)
+        .execute(&owner)
+        .await
+        .expect("the owner loads the pause row of the alert it replays");
+
     // The catalogue-wide grants check is clean, and the owner can make a service's login.
     let mut known = logins(&owner).await;
     known.push(OWNER.to_owned());
@@ -643,6 +674,46 @@ async fn a_failure_at_n_keeps_the_versions_before_it_and_a_second_run_resumes(po
     assert_eq!(apply(&pool, &fixed).await.unwrap(), vec![3, 4]);
     assert_eq!(applied(&pool).await, vec![1, 2, 3, 4]);
     assert!(status(&pool, &fixed).await.unwrap().is_current());
+}
+
+/// Issue #84: the services' pools bound a statement, and the runner's does not, so a long
+/// migration is not an error. The same slow statement is cancelled on a service pool made with a
+/// short bound and completes under the runner.
+#[sqlx::test]
+async fn issue_84_a_slow_migration_is_not_bounded_by_the_services_statement_timeout(pool: PgPool) {
+    use bezent_store::login::{Bounds, pool_options_bounded};
+
+    let slow = migrator(&[(1, "SELECT pg_sleep(1.5); CREATE TABLE slow (id int)")]);
+    let runner = pool_with(&pool, Duration::from_secs(120)).await;
+    let timeout: String = sqlx::query_scalar("SELECT current_setting('statement_timeout')")
+        .fetch_one(&runner)
+        .await
+        .unwrap();
+    assert_eq!(
+        timeout, "0",
+        "the runner's connections carry no statement bound"
+    );
+    assert_eq!(apply(&runner, &slow).await.unwrap(), vec![1]);
+
+    // The same wait, on a connection made as a service makes its own: cancelled.
+    let service = pool_options_bounded(Bounds {
+        statement: Duration::from_millis(300),
+        ..Bounds::DEFAULT
+    })
+    .max_connections(1)
+    .connect_with((*pool.connect_options()).clone())
+    .await
+    .unwrap();
+    let e = sqlx::query("SELECT pg_sleep(1.5)")
+        .execute(&service)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.as_database_error().and_then(|d| d.code()).as_deref(),
+        Some("57014"),
+        "{e}"
+    );
+    runner.close().await;
 }
 
 #[sqlx::test]

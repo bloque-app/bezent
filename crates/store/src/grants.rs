@@ -9,6 +9,10 @@
 //! ([`crate::login::check_login`]), so a store whose grants were widened by hand is refused.
 //! `crates/store/README.md` explains it in prose.
 //!
+//! A pause by compromise is deliberately absent: no role holds `pauses(alert_seq)`, nor anything on
+//! `pauses` beyond the core's asset pauses, and the signer and the endpoints hold nothing on it.
+//! The store makes it on the alert's insert (migration 0095), so issue #77 widened nothing here.
+//!
 //! A privilege is one of:
 //! - `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER` on a table or
 //!   view of the schema, named alone when held on the whole relation, and as `table(col,…)` when
@@ -67,6 +71,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "intake",
             "intake_answers",
             "intents",
+            "late_mint_checks",
             "ledger_accounts",
             "ledger_accounts_listed",
             "manual_actions",
@@ -121,7 +126,10 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
     (
         crate::CORE_ROLE,
         "UPDATE",
-        &["transfers(on_chain_reference)"],
+        &[
+            "late_mint_checks(checked_at,failures,settled_at,verdict,held_cycles)",
+            "transfers(on_chain_reference)",
+        ],
     ),
     (
         crate::CORE_ROLE,
@@ -133,6 +141,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "bezent_writer_holds(text,oid)",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
+            "ops_observables()",
             "pause_reading_is_supply_mismatch(text,bigint)",
             "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
         ],
@@ -215,8 +224,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         KREIVO_ENDPOINT_INSERT,
     ),
     (crate::KREIVO_ENDPOINT_ROLE, "EXECUTE", ENDPOINT_EXECUTE),
-    (crate::EVM_ENDPOINT_ROLE, "SELECT", ENDPOINT_SELECT),
-    (crate::EVM_ENDPOINT_ROLE, "INSERT", ENDPOINT_INSERT),
+    // Its own login-to-network mapping (migration 0056): read only, to be told why it was refused.
+    (crate::EVM_ENDPOINT_ROLE, "SELECT", EVM_ENDPOINT_SELECT),
+    (crate::EVM_ENDPOINT_ROLE, "INSERT", EVM_ENDPOINT_INSERT),
     (crate::EVM_ENDPOINT_ROLE, "EXECUTE", ENDPOINT_EXECUTE),
     // The webhook dispatcher (migration 0044): the sealed secrets and URLs, the cursor, the holds
     // and the outbox.
@@ -292,11 +302,14 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         crate::OPERATOR_ROLE,
         "SELECT",
         &[
+            "admin_actions",
             "book_quarantine",
+            "event_log",
             "ledger_accounts",
             "ledger_accounts_listed",
             "manual_actions",
             "manual_approvals",
+            "pauses",
             "reserve_evaluations",
             "reserve_readings",
             "reserve_statement_abandoned",
@@ -304,6 +317,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "reserve_statements",
             "reviews",
             "surplus_funding_addresses",
+            "transfer_status",
             "unassociated_arrivals",
         ],
     ),
@@ -323,16 +337,25 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "bezent_applied_migrations()",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
+            "operator_approve_unpause(bigint,text)",
+            "ops_observables()",
+            "operator_pause(text,text,text,text)",
+            "operator_record(text,text,jsonb,text)",
+            "operator_request_unpause(bigint,text)",
             "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
         ],
     ),
 ];
 
-const ENDPOINT_SELECT: &[&str] = &[
+/// What the EVM endpoint reads: the endpoints' common tables and its login-to-network mapping
+/// (migration 0056).
+const EVM_ENDPOINT_SELECT: &[&str] = &[
     "admitted_tokens",
     "assets",
     "endpoint_scopes",
     "event_log",
+    "evm_endpoint_networks",
+    "fee_position_readings",
     "final_heads",
     "intents",
     "networks",
@@ -349,8 +372,11 @@ const ENDPOINT_SELECT: &[&str] = &[
     "signed_transactions",
 ];
 
-const ENDPOINT_INSERT: &[&str] = &[
+/// What the EVM endpoint appends: the endpoints' common records and the delivery account's fee
+/// position (migration 0110; the Kreivo endpoint records none).
+const EVM_ENDPOINT_INSERT: &[&str] = &[
     "event_log",
+    "fee_position_readings",
     "final_heads",
     "non_execution_proofs",
     "observation_outcomes",
@@ -361,7 +387,7 @@ const ENDPOINT_INSERT: &[&str] = &[
     "signed_transactions",
 ];
 
-/// [`ENDPOINT_SELECT`] and the Kreivo endpoint's walk anchors.
+/// What the Kreivo endpoint reads: the endpoints' common tables and its walk anchors.
 const KREIVO_ENDPOINT_SELECT: &[&str] = &[
     "admitted_tokens",
     "assets",
@@ -384,7 +410,7 @@ const KREIVO_ENDPOINT_SELECT: &[&str] = &[
     "signed_transactions",
 ];
 
-/// [`ENDPOINT_INSERT`] and the Kreivo endpoint's walk anchors.
+/// What the Kreivo endpoint appends: the endpoints' common records and its walk anchors.
 const KREIVO_ENDPOINT_INSERT: &[&str] = &[
     "event_log",
     "final_heads",

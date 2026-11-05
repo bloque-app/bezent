@@ -311,17 +311,20 @@ async fn req_eo_1_ac_d2_1_signed_bytes_are_persisted_then_sent_and_only_ever_re_
 ) {
     let f = Fixture::new(pool, connect, 5).await;
     let (id, bytes) = f.signed_payout(reference(1), 700).await;
-    // The bytes recover to the lane and are what was sent, to both providers.
+    // The bytes recover to the lane and are what was sent, to both public nodes and never to the
+    // paid pair (amendment 0023).
     let (tx, _) = bezent_evm_endpoint::submit::decode_signed(&bytes).unwrap();
     assert_eq!(
         evm::decode_delivery_call(&contracts(), &tx.input),
         Some(delivery(reference(1), 700))
     );
-    assert_eq!(f.chain.sent(), [bytes.clone(), bytes.clone()]);
+    assert_eq!(f.broadcast_chain.sent(), [bytes.clone(), bytes.clone()]);
+    assert!(f.chain.sent().is_empty() && f.chain_b.sent().is_empty());
     // A restart: the same bytes again, never a second signature (AC-D2.1).
     assert_eq!(f.submitter().resend().await.unwrap(), 1);
-    assert_eq!(f.chain.sent().len(), 4);
-    assert!(f.chain.sent().iter().all(|b| *b == bytes));
+    assert_eq!(f.broadcast_chain.sent().len(), 4);
+    assert!(f.broadcast_chain.sent().iter().all(|b| *b == bytes));
+    assert!(f.chain.sent().is_empty());
     let intent: i64 = sqlx::query_scalar("SELECT intent_id FROM signed_transactions WHERE id = $1")
         .bind(id)
         .fetch_one(&f.admin)
@@ -445,7 +448,6 @@ async fn sf1_ac_i1_2_the_lane_used_while_idle_raises_compromise_and_pause(
     connect: PgConnectOptions,
 ) {
     let f = Fixture::new(pool, connect, 5).await;
-    let compromises = "SELECT count(*) FROM event_log WHERE kind = 'key-compromise'";
     let pauses = "SELECT count(*) FROM event_log WHERE kind = 'pause-requested'";
     // bezent signs nonce 0, and it is included: the lane is at 1, nothing in flight.
     let (_, bytes) = f.signed_payout(reference(1), 700).await;
@@ -458,7 +460,7 @@ async fn sf1_ac_i1_2_the_lane_used_while_idle_raises_compromise_and_pause(
     let intent = f
         .signing_intent("payout", Some(reference(2).as_slice()), &prepared, 700)
         .await;
-    assert_eq!(f.count(compromises).await, 0);
+    assert_eq!(f.compromises().await, 0);
 
     // The key is used outside bezent, twice: the lane's nonce is 3.
     for c in f.chains() {
@@ -470,7 +472,7 @@ async fn sf1_ac_i1_2_the_lane_used_while_idle_raises_compromise_and_pause(
     };
     assert!(why.contains("SF1"), "{why}");
     assert_eq!(signatures(&f).await, before);
-    assert_eq!(f.count(compromises).await, 1);
+    assert_eq!(f.compromises().await, 1);
     assert_eq!(f.count(pauses).await, 1);
 
     // Nor is anything prepared from it; the alert is raised once for that nonce.
@@ -479,7 +481,7 @@ async fn sf1_ac_i1_2_the_lane_used_while_idle_raises_compromise_and_pause(
         panic!("prepared from a lane the key was used on outside bezent");
     };
     assert!(why.contains("SF1"), "{why}");
-    assert_eq!(f.count(compromises).await, 1);
+    assert_eq!(f.compromises().await, 1);
 }
 
 /// PR #39 third review SF-B (`REQ-KY-4`, `INV-9`): a payout's decoded chain id is its order's
@@ -542,4 +544,26 @@ async fn sf_b_req_ky_4_a_payout_on_another_chain_id_is_not_signed(
     assert!(why.contains("chain id 8453"), "{why}");
     assert_eq!(signatures(&f).await, 0);
     assert_eq!(anomalies(&f).await, 1);
+}
+
+/// `AC-I1.2`, issue #77: the signer answers for the lane with another key: the signature is not the
+/// lane key's, so the alert raises and the bridge pauses, on the endpoint's login.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_signature_of_another_key_pauses_the_bridge(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect, 5).await;
+    let order = f.order_payout(reference(9), beneficiary(), 700).await;
+    let prepared = f.submitter().prepare(order).await.unwrap();
+    let signing = f
+        .signing_intent("payout", Some(reference(9).as_slice()), &prepared, 700)
+        .await;
+    let mut rotated = f.lane.clone();
+    rotated.public_key = vec![0x02; 33];
+    let mut s = f.submitter();
+    s.lane = &rotated;
+    let answer = s.sign_and_submit(signing).await.unwrap();
+    assert!(matches!(answer, Submitted::NotSigned(_)), "{answer:?}");
+    assert_eq!(f.compromises().await, 1);
 }

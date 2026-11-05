@@ -252,11 +252,7 @@ async fn ac_c2_1_a_wrapped_copy_never_proves(pool: PgPoolOptions, connect: PgCon
     assert!(why.contains("carries this reference"), "{why}");
     assert_eq!(proofs(&f).await, 0);
     // bezent did not sign it: the compromise path (S2), not only an anomaly.
-    assert_eq!(
-        f.count("SELECT count(*) FROM event_log WHERE kind = 'key-compromise'")
-            .await,
-        1
-    );
+    assert_eq!(f.compromises().await, 1);
 }
 
 /// PR #39 review S5 (`AC-I1.2`, `REQ-NX-4`): a lane that holds code (an EIP-7702 delegation)
@@ -276,7 +272,6 @@ async fn s5_ac_i1_2_no_cancel_from_a_lane_that_holds_code(
             c.set_code(f.lane.address, code.to_vec());
         }
     };
-    let compromises = "SELECT count(*) FROM event_log WHERE kind = 'key-compromise'";
 
     // Prepared: refused.
     set_code(&delegation);
@@ -285,7 +280,7 @@ async fn s5_ac_i1_2_no_cancel_from_a_lane_that_holds_code(
         panic!("a cancel was prepared from a lane that holds code");
     };
     assert!(why.contains("holds code"), "{why}");
-    assert_eq!(f.count(compromises).await, 1);
+    assert_eq!(f.compromises().await, 1);
     assert_eq!(
         f.count("SELECT count(*) FROM event_log WHERE kind = 'pause-requested'")
             .await,
@@ -305,7 +300,7 @@ async fn s5_ac_i1_2_no_cancel_from_a_lane_that_holds_code(
     };
     assert!(why.contains("holds code"), "{why}");
     assert_eq!(f.count("SELECT count(*) FROM signatures").await, signatures);
-    assert_eq!(f.count(compromises).await, 1, "raised once per lane");
+    assert_eq!(f.compromises().await, 1, "raised once per lane");
 }
 
 /// PR #39 review S2 (`AC-I1.2`, `INV-8`): the delivery key consumes the payout's nonce with the
@@ -342,11 +337,7 @@ async fn s2_ac_i1_2_a_lane_transaction_carrying_the_reference_raises_compromise_
     }
     // A second look raises nothing new.
     let _ = outcome(&f, signed).await;
-    assert_eq!(
-        f.count("SELECT count(*) FROM event_log WHERE kind = 'key-compromise'")
-            .await,
-        1
-    );
+    assert_eq!(f.compromises().await, 1);
 }
 
 /// PR #39 review S1 (`INV-8`, `INV-14`): anyone can call the emitter. A bare `Reference` of the
@@ -438,16 +429,55 @@ async fn req_nx_3_a_consumer_bezent_did_not_sign_proves_nothing_and_raises_compr
     };
     assert!(why.contains("no recorded intent signed"), "{why}");
     assert_eq!(proofs(&f).await, 0);
-    assert_eq!(
-        f.count("SELECT count(*) FROM event_log WHERE kind = 'key-compromise'")
-            .await,
-        1
-    );
+    assert_eq!(f.compromises().await, 1);
     assert_eq!(
         f.count("SELECT count(*) FROM event_log WHERE kind = 'pause-requested'")
             .await,
         1
     );
+}
+
+/// `AC-I1.2`, `REQ-NX-3`, issue #77: the lane's nonce moved in a block that holds no transaction of
+/// the lane at that nonce. Nothing is proven, and the alert pauses the bridge.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_nonce_consumed_with_no_consumer_in_its_block_pauses_the_bridge(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect, 5).await;
+    let (signed, _) = f.signed_payout(reference(1), 700).await;
+    for c in f.chains() {
+        let h = c.mine();
+        c.set_nonce(f.lane.address, h.number, 1);
+    }
+    f.advance(1);
+    let Outcome::Unknown(why) = outcome(&f, signed).await else {
+        panic!("a nonce with no consumer decided something");
+    };
+    assert!(why.contains("0 transactions of the lane"), "{why}");
+    assert_eq!(proofs(&f).await, 0);
+    assert_eq!(f.compromises().await, 1);
+}
+
+/// `AC-I1.2`, `REQ-NX-3`, issue #77: the lane's nonce was consumed by a transaction bezent does not
+/// build (not EIP-1559). Nothing is proven, and the alert pauses the bridge.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_consumer_bezent_does_not_build_pauses_the_bridge(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect, 5).await;
+    let (signed, _) = f.signed_payout(reference(1), 700).await;
+    let mut legacy = sign_outside(&lane_tx(0, Address::repeat_byte(0x42), vec![]));
+    legacy.tx_type = 0;
+    f.mine_tx(legacy, true);
+    f.advance(1);
+    let Outcome::Unknown(why) = outcome(&f, signed).await else {
+        panic!("a consumer bezent does not build decided something");
+    };
+    assert!(why.contains("not an EIP-1559 transaction"), "{why}");
+    assert_eq!(proofs(&f).await, 0);
+    assert_eq!(f.compromises().await, 1);
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]

@@ -378,6 +378,11 @@ disagree, the disposition is unknown, never a mint.** Ruled by @pandres95 (`pl-r
 
 - There is no light client for these networks in our stack, so a single provider could lie or fail unseen. A
   disagreement is treated like any other read bezent cannot trust: unknown, not proof.
+- Signed transactions are sent through public nodes only (@pandres95, `d-evm-submit-public`, 2026-11-05; amendment
+  0023): "Submit on public nodes, and read on private ones." Only `eth_sendRawTransaction` moves. Every read, the nonce,
+  the fee and gas estimates, the dry run, receipts, logs and headers, stays on the paid pair, cross-checked. A public
+  node cannot forge a signed transaction, only drop it, and the endpoint sends the same bytes again until the pair
+  shows the outcome. There is no fallback to the paid pair.
 - Alternatives: one provider, or our own nodes.
 
 *Serves:* finality with the hash re-checked (`REQ-OB-2`), decisions only at final blocks (`REQ-OB-5`), unknown rather

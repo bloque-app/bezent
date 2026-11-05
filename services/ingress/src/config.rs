@@ -37,6 +37,12 @@ pub struct Config {
     /// The largest number of store connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    /// The longest one statement may run on the store, in milliseconds (issue #84): 30 s by
+    /// default. It also bounds a wait for a lock. Raise it only if a statement legitimately takes
+    /// longer; see the runbook's `reserve-check-failed` page. Past `PASS_ALLOWANCE` (120 s), one
+    /// statement can outlast the health window and the service is restarted.
+    #[serde(default = "default_statement_timeout_ms")]
+    pub statement_timeout_ms: u64,
     /// How long a request waits for a store connection before it is refused with `ERR-Overloaded`
     /// (`REQ-LM-4`), in milliseconds.
     #[serde(default = "default_acquire_timeout_ms")]
@@ -194,6 +200,9 @@ fn default_timeout_ms() -> u64 {
 fn default_max_connections() -> u32 {
     16
 }
+fn default_statement_timeout_ms() -> u64 {
+    30_000
+}
 fn default_acquire_timeout_ms() -> u64 {
     250
 }
@@ -214,7 +223,27 @@ impl Config {
         config
             .check_secrets(path.parent().unwrap_or(Path::new(".")))
             .map_err(|e| format!("invalid configuration {}: {e}", path.display()))?;
+        bezent_store::login::statement_bound(config.statement_timeout_ms)
+            .map_err(|e| format!("invalid configuration {}: {e}", path.display()))?;
         Ok(config)
+    }
+
+    /// The options of the request pool: the store's bounds with the configured statement bound
+    /// (`statement_timeout_ms`, 30 s by default) and the idle-in-transaction bound of the others.
+    pub fn pool_options(&self) -> sqlx::postgres::PgPoolOptions {
+        bezent_store::login::pool_options_bounded(
+            bezent_store::login::Bounds::DEFAULT.with_statement_ms(self.statement_timeout_ms),
+        )
+        .max_connections(self.max_connections)
+        .acquire_timeout(std::time::Duration::from_millis(self.acquire_timeout_ms))
+    }
+
+    /// The options of the webhook dispatcher's pool: the request pool's bounds (so the configured
+    /// `statement_timeout_ms` applies to it too) with two connections and a short wait for one.
+    pub fn dispatcher_pool_options(&self) -> sqlx::postgres::PgPoolOptions {
+        self.pool_options()
+            .max_connections(2)
+            .acquire_timeout(Duration::from_secs(5))
     }
 
     /// The checks of the secrets' sources, which touch no network: one source for each URL and
@@ -286,6 +315,7 @@ impl fmt::Debug for Config {
             .field("store", &self.store)
             .field("vault", &self.vault)
             .field("max_connections", &self.max_connections)
+            .field("statement_timeout_ms", &self.statement_timeout_ms)
             .field("acquire_timeout_ms", &self.acquire_timeout_ms)
             .field("max_in_flight", &self.max_in_flight)
             .field("log_page", &self.log_page)
@@ -297,6 +327,42 @@ impl fmt::Debug for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_84_the_statement_bound_defaults_to_thirty_seconds_and_zero_is_refused() {
+        let dir = std::env::temp_dir().join(format!("bzi-config-84-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ingress.toml");
+        let load = |extra: &str| {
+            std::fs::write(
+                &path,
+                format!(
+                    "listen = \"127.0.0.1:8080\"\ndatabase_url = \"postgres://svc@db/bezent\"\n{extra}"
+                ),
+            )
+            .unwrap();
+            Config::from_file(&path)
+        };
+        assert_eq!(load("").unwrap().statement_timeout_ms, 30_000);
+        assert_eq!(
+            load("statement_timeout_ms = 45000\n")
+                .unwrap()
+                .statement_timeout_ms,
+            45_000
+        );
+        let err = load("statement_timeout_ms = 0\n").unwrap_err();
+        assert!(
+            err.contains("statement_timeout_ms must be positive"),
+            "{err}"
+        );
+        // PostgreSQL's own limit is accepted; one past it is refused here, not at connect.
+        assert!(load("statement_timeout_ms = 2147483647\n").is_ok());
+        let err = load("statement_timeout_ms = 2147483648\n").unwrap_err();
+        assert!(
+            err.contains("statement_timeout_ms must be at most 2147483647"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn req_pn_1_configuration_never_prints_the_store_credentials() {

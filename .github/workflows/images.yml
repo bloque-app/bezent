@@ -21,6 +21,18 @@ name: Images
 # each `sha-<commit>` back from the registry and records its digest in the run's summary
 # (`<image>:sha-<commit>@sha256:<digest>`), which is what a harness pins.
 #
+# Each pushed image, at its digest, also gets a signed build attestation (SLSA provenance, keyless
+# through GitHub's OIDC, stored in the registry next to the image), made only by the publish job, which
+# alone holds `id-token` and `attestations`. Anyone can check that an image was built by this
+# repository's `images` workflow from a given commit:
+#
+#   gh attestation verify oci://ghcr.io/bloque-app/bezent-core@sha256:<digest> --repo bloque-app/bezent \
+#     --signer-workflow bloque-app/bezent/.github/workflows/images.yml
+#
+# Images published before this step have no attestation. A pull request attests nothing.
+# The run's summary says, under each image, that it was attested or, in a line of its own, that it was published
+# without an attestation (the step failed, or the run was cancelled between the push and the attestation).
+#
 # The packages are public, so any harness pulls them without credentials; deploy/e2e/README.md says how.
 # Pushing needs this repository's own GITHUB_TOKEN, so it only happens in bloque-app/bezent.
 
@@ -347,6 +359,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write # the keyless signing certificate, from GitHub's OIDC
+      attestations: write
     env:
       IMAGE: ghcr.io/bloque-app/bezent-${{ matrix.target }}
     steps:
@@ -388,3 +402,28 @@ jobs:
           test -n "$PUSHED"
           test "$digest" = "$PUSHED" || { echo "digest mismatch: registry $digest, build $PUSHED"; exit 1; }
           echo "- \`$IMAGE:sha-$GITHUB_SHA@$digest\`" >> "$GITHUB_STEP_SUMMARY"
+      # The signed provenance of the image the build pushed, at that digest (not a tag), stored in the
+      # registry. After the digest check above, so it never signs a digest the registry disagrees with.
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      # The job summary says plainly whether the image that was pushed carries an attestation. A
+      # failed or skipped attestation fails the job, but the image is already in the registry: this
+      # line is what tells a reader of the summary that it is there without one. `always()` and not
+      # `!cancelled()`: a cancellation between the push and the attestation is exactly that case.
+      - name: Say whether the image was attested
+        if: ${{ always() && steps.push.outcome == 'success' }}
+        env:
+          ATTEST: ${{ steps.attest.outcome }}
+          PUSHED: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$ATTEST" = success ]; then
+            echo "  - attested: signed build provenance stored for this digest" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- :warning: **\`$IMAGE@$PUSHED\` was published WITHOUT an attestation** (the attestation step: ${ATTEST:-did not run}). It is in the registry under \`sha-$GITHUB_SHA\` and \`edge\`; do not deploy it as attested, and run the workflow again for this commit." >> "$GITHUB_STEP_SUMMARY"
+          fi

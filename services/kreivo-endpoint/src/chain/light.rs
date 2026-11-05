@@ -49,6 +49,7 @@ use subxt::{OnlineClient, PolkadotConfig};
 use tokio::sync::{mpsc, oneshot};
 
 use super::archive::{Archive, Fail, Source, StartCheck};
+use super::watch::Watches;
 use super::{
     BlockEvents, BlockRef, Chain, ChainError, ChainResult, Emitted, ExtrinsicResult, Header,
     RuntimeVersion,
@@ -633,8 +634,9 @@ pub struct LightChain {
     rpc: LegacyRpcMethods<PolkadotConfig>,
     /// Every transaction submitted and still watched, by hash: smoldot-light panics when one
     /// transaction has two status watchers and one closes (aledgent F-027 NOTES, decision 40), so
-    /// the same bytes are never watched twice at once.
-    watching: Mutex<HashMap<[u8; 32], tokio::task::JoinHandle<()>>>,
+    /// the same bytes are never watched twice at once. A watch silent for too long is dropped
+    /// (issue #84), so a quiet one does not hold its hash until a restart.
+    watching: Watches,
     /// History beyond the light client's reach (issue #49).
     archive: Archive<WsSource>,
     /// Blocks further than this behind the finalized head are read from `archive` first.
@@ -695,9 +697,13 @@ impl LightChain {
     /// Starts the light client on `chain_spec` (Kreivo), a parachain of `relay_chain_spec`, with
     /// `archive_rpc` for history older than `depth` blocks (issue #49).
     ///
+    /// `watch_silence` is how long a submitted transaction's watch may hear nothing before it is
+    /// dropped and the transaction may be submitted again (issue #84).
+    ///
     /// `progress` is called while the light client warms up, each time its bootstrap moves
     /// forward (a warp sync that reached a higher block, the sync that finished), and never while
     /// it is stalled or still: the container's health check counts those calls (issue #61).
+    #[allow(clippy::too_many_arguments)] // each is one bound or one source the caller declares
     pub async fn start(
         chain_spec: &str,
         relay_chain_spec: Option<&str>,
@@ -705,6 +711,7 @@ impl LightChain {
         depth: u64,
         timeout: Duration,
         max_response: u32,
+        watch_silence: Duration,
         progress: impl Fn() + Send + Sync + 'static,
     ) -> ChainResult<LightChain> {
         let rpc = LightRpc::new(chain_spec, relay_chain_spec).map_err(unavailable)?;
@@ -735,7 +742,7 @@ impl LightChain {
         Ok(LightChain {
             client,
             rpc: LegacyRpcMethods::<PolkadotConfig>::new(rpc_client),
-            watching: Mutex::default(),
+            watching: Watches::new(watch_silence),
             archive: Archive::new(
                 archive_rpc
                     .iter()
@@ -1093,30 +1100,13 @@ impl Chain for LightChain {
 
     async fn submit(&self, extrinsic: &[u8]) -> ChainResult<()> {
         let hash = blake2_256(extrinsic);
-        {
-            let mut watching = lock(&self.watching);
-            watching.retain(|_, w| !w.is_finished());
-            if watching.contains_key(&hash) {
-                return Ok(());
-            }
+        if self.watching.is_watching(&hash) {
+            return Ok(());
         }
         let tx = SubmittableTransaction::from_bytes(self.client.clone(), extrinsic.to_vec());
         match tx.submit_and_watch().await {
-            Ok(mut progress) => {
-                let watch = tokio::spawn(async move {
-                    while let Some(status) = progress.next().await {
-                        match status {
-                            Ok(s) => {
-                                tracing::debug!(hash = %hex::encode(hash), status = ?std::mem::discriminant(&s), "a submitted transaction's status")
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, hash = %hex::encode(hash), "a submitted transaction's watch ended");
-                                break;
-                            }
-                        }
-                    }
-                });
-                lock(&self.watching).insert(hash, watch);
+            Ok(progress) => {
+                self.watching.watch(hash, progress);
                 Ok(())
             }
             // The bytes are persisted and sent again while their era lasts: a node's refusal is

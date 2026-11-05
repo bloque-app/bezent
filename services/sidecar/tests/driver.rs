@@ -102,6 +102,13 @@ impl World {
         )
         .await
         .unwrap();
+        // This test's driver login is the instance of the origin network (migration 0056).
+        sqlx::query("INSERT INTO evm_endpoint_networks (login, network) VALUES ($1, $2)")
+            .bind(EVM_LOGIN)
+            .bind(ORIGIN)
+            .execute(&admin)
+            .await
+            .unwrap();
         let core = Core::new(
             login(&admin, CORE_LOGIN, bezent_store::CORE_ROLE).await,
             Settings::default(),

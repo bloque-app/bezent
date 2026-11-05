@@ -40,6 +40,17 @@ services:
       --health-retries 30
 ```
 
+Each published image also carries a signed build attestation (keyless, through GitHub's OIDC, stored in the
+registry), made by the `publish` job of `images.yml`. To check that an image at a digest was built by this
+repository's workflow, and from which commit:
+
+```sh
+gh attestation verify oci://ghcr.io/bloque-app/bezent-sidecar@sha256:<digest> --repo bloque-app/bezent \
+  --signer-workflow bloque-app/bezent/.github/workflows/images.yml --format json | jq '.[0].verificationResult.signature.certificate.sourceRepositoryDigest'
+```
+
+It exits non-zero when there is no valid attestation. Images published before the attestation was added have none.
+
 The packages are public, so no credentials are needed. To bump the pin, take the digest from the summary of
 bezent's "Images" run on `main` and change it with the commit that needs it.
 
@@ -71,7 +82,7 @@ nothing else (`bezent_ingress` for the ingress, `bezent_core` for the core, `bez
 signer, `bezent_webhooks` for the webhook dispatcher, and with the driver `bezent_kreivo_endpoint`
 and `bezent_evm_endpoint`), with random passwords that live in memory only. Each login is checked
 as its service checks it at start-up (#46, `crates/store/README.md`); a login an earlier sidecar
-made a member of the retired `bezent_service` is brought back to its own role alone. The ingress listens last, so a healthy container is a ready one. The query surface is
+made a member of the retired `bezent_service` is brought back to its own role alone. The driver's EVM login is also mapped to its network (`evm_endpoint_networks`, migration 0056); a deployment that is not the sidecar does this itself, as the migration owner, once per login and network, before starting each EVM endpoint instance (`crates/store/README.md`). The ingress listens last, so a healthy container is a ready one. The query surface is
 `/v0/…` (the OpenAPI document: `bezent-ingress openapi`); `/health` needs no credential.
 
 ## The chain-event driver

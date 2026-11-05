@@ -33,6 +33,9 @@ pub const COLLATOR: &str = "kreivo01";
 /// bed's own (aledgent's test community is 4242).
 pub const COMMUNITY_ID: u16 = 4243;
 
+/// How many memberships genesis puts in stock (ids from 1) for the communities of the bed to draw on.
+pub const MEMBERSHIPS_IN_STOCK: u16 = 16;
+
 /// What Alice holds of each asset she owns at genesis.
 pub const GENESIS_ASSET_BALANCE: u128 = 100_000_000_000;
 
@@ -129,7 +132,11 @@ pub fn kreivo_genesis_overrides() -> serde_json::Value {
         .map(|a| serde_json::json!([{ "Here": a.id }, alice.clone(), GENESIS_ASSET_BALANCE]))
         .collect();
     serde_json::json!({
-        "assets": { "assets": assets, "metadata": metadata, "accounts": accounts }
+        "assets": { "assets": assets, "metadata": metadata, "accounts": accounts },
+        // A stock of memberships for communities to take their members from. Only Root or a Kreivo
+        // governance origin creates them at runtime (`CreateMembershipsOrigin`), and the bed has
+        // neither, so genesis does (the pallet's own genesis config). Free, no gas tank, no expiry.
+        "communitiesManager": { "memberships": [[1, MEMBERSHIPS_IN_STOCK, 0, [null, null], null]] }
     })
 }
 

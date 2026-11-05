@@ -48,9 +48,6 @@ pub struct App {
 /// How long ago the store may last have answered for a saturated pool to still count as alive.
 pub const BUSY_WINDOW: Duration = Duration::from_secs(60);
 
-/// The longest one statement may run on the ingress's connections.
-const STATEMENT_TIMEOUT: &str = "30s";
-
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -210,18 +207,9 @@ pub async fn connect_with(
 ) -> Result<PgPool, String> {
     let url = config.store_url(resolver).await?;
     let pool = bezent_store::tls::connect(
-        bezent_store::login::pool_options()
-            .max_connections(config.max_connections)
-            .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
-            // A statement that hangs ends, and frees its connection (issue #61).
-            .after_connect(|conn, _| {
-                Box::pin(async move {
-                    sqlx::query(&format!("SET statement_timeout = '{STATEMENT_TIMEOUT}'"))
-                        .execute(&mut *conn)
-                        .await?;
-                    Ok(())
-                })
-            }),
+        // A statement that hangs ends, and frees its connection (issue #61); the idle-in-
+        // transaction bound is the other services' (issue #84).
+        config.pool_options(),
         &url,
     )
     .await
@@ -281,9 +269,8 @@ pub async fn serve(
     if let (Some(hooks), Some(w)) = (hooks, &config.webhooks) {
         app = app.with_webhooks(hooks.clone());
         let dispatch_pool = bezent_store::tls::connect(
-            bezent_store::login::pool_options()
-                .max_connections(2)
-                .acquire_timeout(Duration::from_secs(5)),
+            // The configured statement bound applies here too (issue #84).
+            config.dispatcher_pool_options(),
             &w.store_url(&resolver).await?,
         )
         .await

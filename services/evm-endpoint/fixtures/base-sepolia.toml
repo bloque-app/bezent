@@ -1,0 +1,47 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The configuration shape of the Base Sepolia instance (F-009, M-2; PLAN DEC-8: one instance per
+# network, with its own configuration, key lane and signer binding). For `--check` in CI and the
+# tests. No secret is here: the files it names hold them, and they need not exist for --check.
+# The vault, its Roles modifier and the emitter are placeholders until the vault is deployed on
+# Base Sepolia (an owner item, F-014); the lane's key is Foundry's test account 8, a test key with
+# no power anywhere (REQ-KY-6). The origin token (Circle's EURC, 6 decimals, for bEURC) is not here:
+# it is admitted in the store (REQ-AS-2).
+network = "base-sepolia"
+chain_id = 84532
+# Block 54124452, finalized when it was chosen; its hash was read from two public providers.
+pinned_block = 54124452
+pinned_hash = "0xfcb37c6976afc73d9dbc306a8f26bd8c86e8c2efc9a64594e5af9c8a3398685a"
+vault = "0x00000000000000000000000000000000000000b1"
+roles = "0x00000000000000000000000000000000000000b2"
+emitter = "0x00000000000000000000000000000000000000b3"
+# MultiSendCallOnly 1.4.1 (the same address on Base Sepolia, checked by its code).
+multisend = "0x9641d764fc13c8B624c04430C7356C1C7C8102e2"
+delivery_role = "bezent.delivery"
+start_block = 54124452
+max_range = 500
+database_url_file = "/run/secrets/bezent-evm-base-sepolia-db"
+
+# Public nodes signed transactions are sent to, and only those (amendment 0023). No secret: written here.
+broadcast = ["https://sepolia.base.org", "https://base-sepolia-rpc.publicnode.com", "https://base-sepolia.drpc.org"]
+
+[[providers]]
+name = "a"
+url_file = "/run/secrets/bezent-evm-base-sepolia-rpc-a"
+
+[[providers]]
+name = "b"
+url_file = "/run/secrets/bezent-evm-base-sepolia-rpc-b"
+
+[lane]
+key = "base-sepolia-payout"
+public_key = "0x03931e7fda8da226f799f791eefc9afebcd7ae2b1b19a03c5eaa8d72122d9fe74d"
+
+[gas]
+max_gas = 500000
+max_fee_per_gas = "100000000000"
+
+[signer]
+socket = "/run/bezent-signer/signer.sock"
+uid = 1001
+token_file = "/run/secrets/bezent-evm-base-sepolia-signer-token"

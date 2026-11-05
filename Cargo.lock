@@ -1763,9 +1763,12 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-smithy-http-client",
+ "axum",
  "base64 0.22.1",
  "bezent-core",
  "bezent-health",
+ "bezent-ingress",
+ "bezent-logging",
  "bezent-signer",
  "bezent-store",
  "bezent-vault",
@@ -1775,6 +1778,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "http 1.5.0",
+ "http-body-util",
  "k256",
  "serde",
  "serde_json",
@@ -1783,8 +1787,29 @@ dependencies = [
  "sqlx",
  "tokio",
  "toml 0.8.23",
+ "tower",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "bezent-e2e-full-chain"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "axum",
+ "bezent-core-service",
+ "bezent-evm-endpoint",
+ "bezent-ingress",
+ "bezent-kreivo-endpoint",
+ "bezent-signer",
+ "bezent-store",
+ "chrono",
+ "hex",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tokio",
 ]
 
 [[package]]
@@ -1793,9 +1818,11 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "bezent-health",
+ "bezent-logging",
  "bezent-signer",
  "bezent-store",
  "bezent-vault",
+ "futures-util",
  "hex",
  "k256",
  "serde",
@@ -1805,7 +1832,6 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
- "tracing-subscriber",
  "url",
 ]
 
@@ -1820,6 +1846,7 @@ dependencies = [
  "axum",
  "bezent-core",
  "bezent-health",
+ "bezent-logging",
  "bezent-store",
  "bezent-vault",
  "blake2",
@@ -1840,7 +1867,6 @@ dependencies = [
  "toml 0.8.23",
  "tower",
  "tracing",
- "tracing-subscriber",
  "url",
  "utoipa",
 ]
@@ -1851,6 +1877,7 @@ version = "0.1.0"
 dependencies = [
  "bezent-core-service",
  "bezent-health",
+ "bezent-logging",
  "bezent-signer",
  "bezent-store",
  "bezent-vault",
@@ -1871,6 +1898,13 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
+name = "bezent-logging"
+version = "0.1.0"
+dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
@@ -1896,6 +1930,7 @@ dependencies = [
  "bezent-core-service",
  "bezent-evm-endpoint",
  "bezent-ingress",
+ "bezent-logging",
  "bezent-signer",
  "bezent-store",
  "chrono",
@@ -1908,7 +1943,6 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

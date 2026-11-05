@@ -13,7 +13,7 @@ use bezent_kreivo_endpoint::kreivo::{
 };
 use bezent_kreivo_endpoint::observe::Step;
 use bezent_kreivo_endpoint::proof::Disposition;
-use bezent_kreivo_endpoint::submit::{Prepared, Submitted, signing_intent_payload};
+use bezent_kreivo_endpoint::submit::{Lane, Prepared, Submitted, signing_intent_payload};
 use common::*;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -435,11 +435,7 @@ async fn ac_i1_2_the_delivery_key_used_while_the_lane_is_idle_starts_the_comprom
             Prepared::Ready { nonce: 2, .. } | Prepared::Ready { nonce: 3, .. }
         ));
     }
-    assert_eq!(
-        f.count("SELECT count(*) FROM event_log WHERE kind = 'key-compromise'")
-            .await,
-        1
-    );
+    assert_eq!(f.compromises().await, 1);
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -479,4 +475,28 @@ async fn req_ot_6_a_refund_mint_goes_to_the_redeemer_of_the_redemption(
     .unwrap();
     assert_eq!(recipient, Some(format!("0x{}", hex::encode(redeemer))));
     assert_eq!(amount, "40");
+}
+
+/// `AC-I1.2`, issue #77: the signer answers for the lane with another key: the signer is not
+/// signing what it must, so the alert raises and the bridge pauses, on the endpoint's login.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_a_signature_of_another_key_pauses_the_bridge(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    let order = f.order_mint([18; 32], TO, 1).await;
+    let prepared = f.submitter().prepare(order).await.unwrap();
+    let signing = f.signing_intent("mint", [18; 32], &prepared, 1).await;
+    let rotated = Lane {
+        key: "rotated-in-the-endpoint-only".into(),
+        ..f.lane.clone()
+    };
+    let mut s = f.submitter();
+    s.lane = &rotated;
+    assert!(!matches!(
+        s.sign_and_submit(signing).await.unwrap(),
+        Submitted::Submitted { .. }
+    ));
+    assert_eq!(f.compromises().await, 1);
 }

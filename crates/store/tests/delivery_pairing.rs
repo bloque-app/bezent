@@ -97,6 +97,13 @@ async fn mf1_inv_9_an_evm_endpoint_login_cannot_prepare_a_kreivo_order(pool: PgP
         &[bezent_store::EVM_ENDPOINT_ROLE],
     )
     .await;
+    // This login is the instance of polygon (migration 0056).
+    common::exec(
+        &pool,
+        "INSERT INTO evm_endpoint_networks (login, network) \
+         VALUES ('evm_endpoint_pairing_for_tests', 'polygon')",
+    )
+    .await;
     // The reviewer's scenario: a `polygon` row for a Kreivo order.
     assert_refused(
         insert(&evm, &prepared(kreivo_order, "polygon", 0xaa)).await,

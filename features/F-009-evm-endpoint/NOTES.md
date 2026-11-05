@@ -162,3 +162,64 @@ Fixed in the PR: M1, S1, S2, S4, S5, S6 (each has a test named after its id). No
   the payload's chain id with its network's.
 - Not done here: the reviewer's suggested start-up login check for the core and both endpoints (no superuser, no
   table owner), and N4 and the zero-value `paid` note on observation kinds.
+
+## M-2: Base and BNB Chain (implementer, 2026-11-03, issue #30)
+
+The endpoint is network-agnostic already (chain id, vault, lane, providers and the signer link are all
+configuration), so a network is an instance, not code. What `M-2` added:
+
+- **Example configurations** `fixtures/base-sepolia.toml` (chain 84532) and `fixtures/bsc-testnet.toml` (chain 97),
+  each pinned at a block that both of two public providers served with one hash (read 2026-11-03), each with its own
+  lane key (Foundry test accounts 8 and 9), secret paths and placeholder vault. `tests/instances.rs` loads all three
+  and fails if any two share a network, chain id, pinned hash, lane key, delivery address, vault or secret path
+  (`DEC-8`, `REQ-KY-1`).
+- **Finality on BNB Chain** (`REQ-OB-1`): the testnet providers serve the `finalized` tag (fast finality), as Base
+  Sepolia does (L1-finalized), so the follower's rule is unchanged. Checked by a keyless `eth_getBlockByNumber`.
+- **S7, one login per network** (migration `0056_evm_endpoint_networks`): `evm_endpoint_networks (login, network)`,
+  written by the owner only. The guard of 0035 now refuses a record of an EVM network unless every login in play
+  (`session_user`, `current_user`) is mapped to it; a login holding the role with no row records nothing. Existing
+  deployments keep working: the migration maps every login that holds the role to the EVM networks declared at that
+  moment. **Deployment:** each new instance's login needs its row before it can record: the migration owner inserts one row per login and network before starting the instance, and the endpoint refuses to start without it (`network::check_mapping`). A login backfilled by 0056 holds a row for every EVM network declared at that time; delete the surplus. (README, "Bring every login to its role alone".) The role still inherits
+  `bezent_service`'s grants through `bezent_endpoint` (S7's second half) and is unchanged.
+- **Signer**: no code change. `services/signer/tests/evm_instances.rs` extends the central fixture in memory with
+  one caller per instance (own certificate name, token and `allow` of its own network, `payout` and `cancel`) and
+  asserts `permits` is true only for the instance's own network, never `*`, and that a name with another instance's
+  token is not recognised. A `window_cap` for an EVM key is in the **origin token's** minor units (1 BTCB is 10^18),
+  not the bridged asset's.
+- **A bug found by the boundary tests, fixed in the same migration** (`REQ-AS-9`): the store's guard of mint orders
+  (0049/0050) expected `floor(arrival / ratio)` in `NUMERIC`, whose division rounds to about sixteen significant
+  digits. For an arrival of 9999999999999999999999 BTCB units (ratio 10^10) it expected 10^12, one more than the exact
+  floor 999999999999: it refused the core's correct mint (the deposit stuck, retried every cycle) and would have accepted
+  an order one minor unit over. The same shape hits any bBTC arrival of about 0.99999999999999999 BTC or more with a
+  long run of nines. Migration 0056 replaces it with `div`, the exact integer quotient.
+- **Scaling** (`REQ-AS-9`, `REQ-AS-10`): already in the core (mint floors, the book posts the remainder, a payout is
+  the redeemed amount times the ratio, checked). `services/core/tests/scaling.rs` drives bBTC as the plan declares it
+  (8 against 18, ratio 10^10) through the store at the boundaries (r, r+1, 2r-1, 2r, 2r+1, just under 1 BTC, the
+  largest the route takes) and seeded values. An arrival under one ratio mints nothing, and a probe showed what the
+  core did with a deposit of one: it ordered a mint of 0, the transfer sat in `Source-Final` for good, and the
+  remainder stayed in owed mint, never in surplus. `REQ-LM-1` settles it (a route's minimum is at least one minor
+  unit of the bridged asset, in the origin token, and the request is refused below it), but 0010 only checked
+  `minimum >= 1`. Migration 0057 refuses a route under its ratio, whichever of the route and the token's precision
+  is declared last. **Open question for the owner:** an arrival under one ratio that is already bound (a route
+  declared before 0057, or any future path that binds one) still orders a mint of 0; the spec does not say whether the
+  core should instead book the whole arrival as surplus and complete, or hold a named condition. Not invented here.
+
+- **Fork tests on each network** (`tests/fork.rs`, now generic over a `Net`): the four scenarios (start-up identity,
+  the vault's Roles check, an arrival then a payout with its reference, a forced non-execution and a wrapped copy)
+  run on Polygon, Base (EURC, 6 decimals) and BNB Chain (BTCB, 18 decimals) at the blocks of `e2e/evm/forks.env`, whose
+  hashes were read from two public providers. The vault is deployed on each fork by `DeployVault` with that network's
+  configuration (no conversion member where there is no venue). The balance slot of the token is found by probing, not
+  assumed. On BNB Chain the payout is 12 345 678 units of bBTC times 10^10 (`REQ-AS-10`), received exactly, and the
+  arrival keeps its remainder (`REQ-AS-9`: the endpoint records the arrival whole, the core scales). Run with
+  `BEZENT_EVM_FORK_URL` (Polygon), `BEZENT_EVM_FORK_URL_BASE`, `BEZENT_EVM_FORK_URL_BSC`; public archive endpoints
+  rate-limit parallel forks, so pass `-- --test-threads=1` on BNB Chain's.
+
+### Open for the owner (needs a deployment, a funded key or a ruling)
+
+- **The testnet vaults**: Safe, Roles and emitter on Base Sepolia and BNB Chain testnet (`contracts/evm`, `DeployVault`),
+  the lane keys and their funding, two providers each, and the signer's entries for them. Until then the exit criteria
+  "bEURC on Base Sepolia and bBTC on BNB Chain testnet pass the `M-1` criteria" cannot run on a testnet.
+- **bEURC's token**: Circle's EURC on Base Sepolia, `0x808456652fdb597867f38412077A9182bf77359F` (6 decimals, symbol
+  `EURC`, checked on chain). **bBTC's token**: Binance's BTCB (`0x7130…ad9c`, 18 decimals) has no code on BNB Chain
+  testnet. A token symbolled `BTCB` with 18 decimals exists there (`0xA808…B8e4`), but nothing shows Binance issued it,
+  and `REQ-AS-3` (one issuer per bridged asset) means a stand-in token is the owner's ruling, not an implementation choice.

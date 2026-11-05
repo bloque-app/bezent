@@ -15,7 +15,11 @@
 
 #![allow(dead_code)]
 
+pub mod pagelog;
 pub mod reserve;
+
+#[allow(unused_imports)]
+pub use pagelog::{PageLog, assert_page};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -184,14 +188,19 @@ fn signer_files() -> (FileBackend, SignerConfig) {
         "keys": {"backend": "file", "path": key_path},
         "bindings": [
             {"key": "kreivo-mint", "network": ISSUING, "purposes": ["mint", "refund-mint"],
-             "window_cap": "1000000000000", "window_seconds": 3600},
+             "window_cap": WINDOW_CAP, "window_seconds": 3600},
             {"key": "polygon-payout", "network": ORIGIN, "purposes": ["payout", "cancel"],
-             "window_cap": "1000000000000", "window_seconds": 3600},
+             "window_cap": WINDOW_CAP, "window_seconds": 3600},
         ],
     });
     let config = SignerConfig::parse(&serde_json::to_vec(&config).unwrap()).unwrap();
     (FileBackend::load(&key_path).unwrap(), config)
 }
+
+/// The signer's window cap in the fixtures, in minor units of the network the key signs for: high
+/// enough for bBTC's BTCB (18 decimals) to be paid out in the scaling tests (M-2); no test depends
+/// on reaching it.
+const WINDOW_CAP: &str = "1000000000000000000000000";
 
 /// Runs `sql` as the owner.
 pub async fn exec(pool: &PgPool, sql: &str) {

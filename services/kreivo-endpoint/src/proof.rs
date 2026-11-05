@@ -328,7 +328,11 @@ impl<C: Chain> Prover<'_, C> {
         signal::anomaly_once(
             self.pool,
             &format!("{}:signed:{}:bytes", self.network, w.id),
-            json!({"network": self.network, "signed_transaction": w.id, "reason": why}),
+            // `bytes_unreadable`: written before the chain is read, so it says nothing of whether
+            // these bytes executed; the core must not read it as "this attempt did not mint"
+            // (see `late_mint`, "What decides an attempt").
+            json!({"network": self.network, "signed_transaction": w.id, "reason": why,
+                   "bytes_unreadable": true}),
         )
         .await?;
         Ok(Err(why.to_owned()))
@@ -495,6 +499,24 @@ impl<C: Chain> Prover<'_, C> {
         self.consumer(w, s, &at, finalized, nonce_at_final).await
     }
 
+    /// Whether `x` is one of the signed transactions recorded for this lane, by its hash: any of
+    /// them, not only the one being watched (`REQ-IC-4`, `AC-I1.2`).
+    async fn recorded_by_this_lane(&self, x: &[u8]) -> Result<bool, sqlx::Error> {
+        let hash = blake2_256(x);
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM signed_transactions st \
+               JOIN intents si ON si.id = st.intent_id \
+               JOIN prepared_transactions p ON p.id::text = si.payload ->> 'prepared' \
+               WHERE si.network = $1 AND p.lane = $2 AND (st.tx_hash = $3 OR st.bytes = $4))",
+        )
+        .bind(self.network)
+        .bind(self.lane.account.as_slice())
+        .bind(hash.as_slice())
+        .bind(x)
+        .fetch_one(self.pool)
+        .await
+    }
+
     /// Identifies the extrinsic of block `at` that consumed `s`'s nonce, and what that means.
     async fn consumer(
         &self,
@@ -511,6 +533,10 @@ impl<C: Chain> Prover<'_, C> {
         };
         let mut found = None;
         let mut undecodable = Vec::new();
+        // Extrinsics of the lane's account that this decoder rejects but bezent itself recorded
+        // (signed in a format an earlier build wrote): bezent's own, never an alert (REQ-IC-4:
+        // "a signature bezent did *not* record").
+        let mut recorded_undecodable = Vec::new();
         for (index, x) in extrinsics.iter().enumerate() {
             match kreivo::decode_extrinsic(x) {
                 Some(d) if d.account == account && u64::from(d.nonce) == s.nonce => {
@@ -518,7 +544,13 @@ impl<C: Chain> Prover<'_, C> {
                     break;
                 }
                 Some(_) => {}
-                None if kreivo::signed_sender(x) == Some(account) => undecodable.push(index),
+                None if kreivo::signed_sender(x) == Some(account) => {
+                    if self.recorded_by_this_lane(x).await? {
+                        recorded_undecodable.push(index);
+                    } else {
+                        undecodable.push(index);
+                    }
+                }
                 None => {}
             }
         }
@@ -532,6 +564,39 @@ impl<C: Chain> Prover<'_, C> {
             })
         };
         let Some((index, d, x)) = found else {
+            if undecodable.is_empty() && !recorded_undecodable.is_empty() {
+                // The nonce was consumed by an extrinsic bezent recorded and this decoder cannot
+                // read: nothing is proven (REQ-NX-3), and nothing is alarming either, so no
+                // compromise. It is not silent: the transfer would wait on this nonce every cycle
+                // with no trail, so it is recorded once as an anomaly for the operator. It is not
+                // resolved through `events` by the hash: a success or a failure of an extrinsic
+                // this build cannot read says nothing of which reference it carried, and a proof
+                // from it would be one on a payload nobody decoded (INV-8).
+                signal::anomaly_once(
+                    self.pool,
+                    &format!(
+                        "{}:signed:{}:recorded-undecodable:{}",
+                        self.network, w.id, recorded_undecodable[0]
+                    ),
+                    json!({
+                        "network": self.network,
+                        "signed_transaction": w.id,
+                        "reason": "the lane nonce was consumed by an extrinsic bezent recorded and this build cannot decode; nothing is proven (REQ-NX-3), and it stays unknown until a build that decodes it reads it",
+                        "nonce": s.nonce,
+                        "coordinate": coordinate(recorded_undecodable.first().copied()),
+                        // The extrinsic that consumed the nonce is a recorded attempt of bezent's
+                        // this build cannot read: it may have minted. The core must not read this
+                        // anomaly as "this attempt did not mint" (see `late_mint`, "What decides
+                        // an attempt").
+                        "recorded_undecodable": true,
+                    }),
+                )
+                .await?;
+                return Ok(unknown(format!(
+                    "the nonce {} was consumed at block {} by a transaction bezent recorded in a format this build does not decode",
+                    s.nonce, at.number
+                )));
+            }
             // REQ-NX-3: the consumer is not identified, so nothing is proven; AC-I1.2: the key
             // consumed a nonce in a way bezent cannot match to anything it recorded.
             let (dedupe, reason) = match undecodable.first() {

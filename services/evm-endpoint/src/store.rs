@@ -114,6 +114,32 @@ pub async fn record_readings(
     Ok(())
 }
 
+/// Records the delivery account's fee position, read at `head`, a recorded final head of
+/// `network` (issue #14, `REQ-ST-6`). A reading already recorded is not recorded again.
+pub async fn record_fee_position(
+    conn: &mut PgConnection,
+    network: &str,
+    head: &Header,
+    r: &crate::fee::Reading,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO fee_position_readings (network, block_number, block_hash, holder, amount, \
+             unknown_reason, detail) \
+         VALUES ($1, $2, $3, $4, $5::numeric, $6, $7::text::jsonb) \
+         ON CONFLICT ON CONSTRAINT fee_position_readings_once DO NOTHING",
+    )
+    .bind(network)
+    .bind(i64_of(head.number)?)
+    .bind(head.hash.as_slice())
+    .bind(&r.holder)
+    .bind(r.amount.map(|a| a.to_string()))
+    .bind(&r.unknown_reason)
+    .bind(r.detail.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// Records blocks `first` to `last` as a gap under `head`, unless the same gap is already open.
 pub async fn record_gap(
     pool: &PgPool,

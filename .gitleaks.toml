@@ -30,3 +30,9 @@ paths = [
 [[allowlists]]
 description = "HashiCorp's published release-signing key fingerprint (the vault-dev job pins it)"
 regexes = ['''C874011F0AB405110D02105534365D9472D7468F''']
+
+[[allowlists]]
+description = "Public token contract addresses of the fork tests (USDC on Polygon, EURC on Base, BTCB on BNB Chain): on-chain addresses, no secret"
+condition = "AND"
+paths = ['''^services/evm-endpoint/tests/fork\.rs$''']
+regexes = ['''0x(3c499c542cEF5E3811e1192ce70d8cC03d5c3359|60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42|7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c)''']

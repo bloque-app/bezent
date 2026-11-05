@@ -187,6 +187,18 @@ async fn ac_i1_2_core_refuses_a_returned_signature_over_other_bytes(
         panic!("not refused as forged: {err}");
     };
     assert_eq!(intent, id);
+    let pause: Option<i64> = sqlx::query_scalar(
+        "SELECT alert_seq FROM pauses WHERE cause = 'REQ-IC-4' AND asset IS NULL \
+           AND network IS NULL AND direction IS NULL",
+    )
+    .fetch_optional(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        pause,
+        Some(alert_seq),
+        "AC-I1.2: the alert paused the bridge"
+    );
     let rows: Vec<(i64, String, String)> =
         sqlx::query_as("SELECT seq, kind, payload::text FROM event_log ORDER BY seq")
             .fetch_all(&f.admin)

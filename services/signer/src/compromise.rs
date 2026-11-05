@@ -7,9 +7,11 @@
 //! nothing but signatures). A signature that is bezent's own answers a recorded intent. One that
 //! answers none was made outside the signer, or by a signer that no longer signs only what the
 //! core recorded: a key compromise. [`check`] then appends, in one transaction, an alert record
-//! (`key-compromise`, with the key, the signature and where it was seen) and a pause request
-//! (`pause-requested`, global) to the event log, for the operator and the pause path to act on:
-//! pause, rotate, report (`REQ-IC-4`).
+//! (`key-compromise`, with the key, the signature and where it was seen) and a record of the pause
+//! (`pause-requested`, global) to the event log. The store pauses the bridge in that transaction, on
+//! the alert's insert, whichever role raises it and with every other service down (migration 0095,
+//! issue #77; `features/F-005-signer/NOTES.md`, "The compromise pause"). Rotating and reporting
+//! remain a person's (`REQ-IC-4`), as does the on-chain pause, which is what stops a stolen key.
 //!
 //! A signature is bezent's own only if it **verifies**, with the key's public key, over the exact
 //! bytes (`message`) of an intent the core recorded (`INV-9`; review M1). The `signatures` row the
@@ -258,14 +260,15 @@ pub fn is_repeat(e: &sqlx::Error) -> bool {
         .is_some_and(|d| d.code().as_deref() == Some("23505"))
 }
 
-/// Appends the alert record (`key-compromise`) and a global pause request (`pause-requested`) to
-/// the event log, in one transaction, for the operator and the pause path (`REQ-IC-4`, `REQ-IC-2`).
+/// Appends the alert record (`key-compromise`) and a record of the global pause
+/// (`pause-requested`) to the event log, in one transaction, which is also the one the store
+/// pauses the bridge in, on the alert's insert (migration 0095; `REQ-IC-4`, `REQ-IC-2`).
 /// Public for an endpoint that sees the key used where no signature can be matched (a lane nonce
 /// consumed by an extrinsic it cannot decode, F-007 review S3). `pool` connects as the service role.
 ///
 /// The store keeps one alert per detector and detection key (migration 0049): when this detector
-/// already raised this one, nothing is written and the positions of the alert on record are
-/// returned (or 0 where they cannot be read).
+/// already raised this one, nothing is written, no second pause is made, and the positions of the
+/// alert on record are returned (or 0 where they cannot be read).
 pub async fn raise(pool: &PgPool, alert: &serde_json::Value) -> Result<(i64, i64), sqlx::Error> {
     match raise_new(pool, alert).await {
         Err(e) if is_repeat(&e) => {
