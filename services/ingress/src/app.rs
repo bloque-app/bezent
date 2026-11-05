@@ -269,9 +269,8 @@ pub async fn serve(
     if let (Some(hooks), Some(w)) = (hooks, &config.webhooks) {
         app = app.with_webhooks(hooks.clone());
         let dispatch_pool = bezent_store::tls::connect(
-            bezent_store::login::pool_options()
-                .max_connections(2)
-                .acquire_timeout(Duration::from_secs(5)),
+            // The configured statement bound applies here too (issue #84).
+            config.dispatcher_pool_options(),
             &w.store_url(&resolver).await?,
         )
         .await

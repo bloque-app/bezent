@@ -79,9 +79,34 @@ stopped recording final heads, or a gap) and at the endpoint's own health (`depl
    suddenly, is a database that is unwell. Look at the database
    first (locks, load, a stuck session), because raising the bound does not mend a database that is slow. If the book
    has legitimately outgrown it, **the lever is `statement_timeout_ms` in the core's configuration** (milliseconds;
-   default `60000`; zero is refused at start): raise it and restart the core, with no release. Do not raise it past
-   `120000`: one statement could then outlast the core's health window (`PASS_ALLOWANCE`) and the core would be
-   restarted in the middle of the check, which does not end the problem. The other services have the same key
+   default `60000`; zero is refused at start, and so is anything above `2147483647`, PostgreSQL's own limit). Raise it
+   only with the care below, then restart the core. Whether that needs a release depends on how the configuration
+   reaches the core: where the file is mounted into the image, restarting the core is enough; where the configuration
+   is baked into the image, changing it means building a new image and rolling it out, and there is no change without
+   that.
+
+   **Raising it can make the health check restart the core.** The core writes its liveness beat once per pass, after
+   the cycle and the reserve check, and the statement publish (up to its own 60 s budget) comes after the beat, so
+   it sits between two beats. The reserve check evaluates the assets one after another, so each asset whose
+   evaluation hits the bound adds the whole bound. The health check allows `3 x cycle_seconds + 120 s` between beats
+   (`PASS_ALLOWANCE`), 135 s at the default `cycle_seconds = 5`. The time between beats in the worst case is:
+
+   `N x statement_timeout + 60 s (statement publish) + the pass's other work`
+
+   where `N` is the number of assets whose evaluation times out in the same pass. At the default of 60 s and one
+   asset that is 60 + 60 = 120 s plus the other work, under 135 s with about 15 s to spare. Two assets timing out in
+   one pass, with a statement due, is 180 s: over the limit already at the default. At `120000` one asset gives
+   120 + 60 = 180 s, over 135 s, so the health check restarts the core in the middle of the pass, which does not end
+   the problem (the restart starts the same statement again). Without a statement due the 60 s drops out, but
+   `120000` with two assets is still 240 s.
+
+   **No raised value is safe by itself** with the default `cycle_seconds`: the room above the default is 135 - 120 =
+   15 s for one asset, and the other work of the pass uses it. To raise the bound, `cycle_seconds` has to rise with
+   it, so that `3 x cycle_seconds + 120 s` is greater than `N x statement_timeout + 60 s + the other work`. For one
+   asset at `120000` and about 15 s of other work that is 195 s, so `cycle_seconds` above 25: use 30
+   (limit 210 s). The cost is that everything the cycle does (routes, deadlines, retries) then runs every 30 s instead
+   of every 5 s; weigh that before choosing it over fixing the query or the database. The health logic is not
+   changed by any of this; the limit simply moves with `cycle_seconds`. The other services have the same key
    (`statement_timeout_ms`; the ingress's default is `30000`), and it bounds a wait for a lock as well as a query.
    The pause is lifted as in step 6 once an evaluation holds.
 4. A `book-quarantine` names the observation it set aside and the reason; correcting the book is a correction entry

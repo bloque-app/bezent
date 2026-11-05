@@ -246,3 +246,28 @@ async fn issue_84_a_commit_is_not_cut_by_the_statement_bound(pool: PgPool) {
         .unwrap();
     assert_eq!(rows, vec![2]);
 }
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_84_the_statement_bound_is_refused_above_what_postgres_takes(pool: PgPool) {
+    use bezent_store::login::{MAX_STATEMENT_TIMEOUT_MS, statement_bound};
+    // The cap is PostgreSQL's own: it takes the cap and refuses one more, which is why the
+    // configuration must, instead of letting a connection fail to open with a store error.
+    let mut conn = pool.acquire().await.unwrap();
+    for (ms, takes) in [
+        (MAX_STATEMENT_TIMEOUT_MS, true),
+        (MAX_STATEMENT_TIMEOUT_MS + 1, false),
+    ] {
+        let set = sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+            .bind(ms.to_string())
+            .execute(&mut *conn)
+            .await;
+        assert_eq!(set.is_ok(), takes, "{ms}: {set:?}");
+    }
+    assert!(statement_bound(MAX_STATEMENT_TIMEOUT_MS).is_ok());
+    assert!(statement_bound(0).unwrap_err().contains("positive"));
+    let err = statement_bound(MAX_STATEMENT_TIMEOUT_MS + 1).unwrap_err();
+    assert!(
+        err.contains("statement_timeout_ms must be at most 2147483647"),
+        "{err}"
+    );
+}

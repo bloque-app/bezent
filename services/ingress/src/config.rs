@@ -37,7 +37,7 @@ pub struct Config {
     /// The largest number of store connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
-    /// The longest one statement may run on the store, in milliseconds (issue #84): %s by
+    /// The longest one statement may run on the store, in milliseconds (issue #84): 30 s by
     /// default. It also bounds a wait for a lock. Raise it only if a statement legitimately takes
     /// longer; see the runbook's `reserve-check-failed` page. Past `PASS_ALLOWANCE` (120 s), one
     /// statement can outlast the health window and the service is restarted.
@@ -238,6 +238,14 @@ impl Config {
         .acquire_timeout(std::time::Duration::from_millis(self.acquire_timeout_ms))
     }
 
+    /// The options of the webhook dispatcher's pool: the request pool's bounds (so the configured
+    /// `statement_timeout_ms` applies to it too) with two connections and a short wait for one.
+    pub fn dispatcher_pool_options(&self) -> sqlx::postgres::PgPoolOptions {
+        self.pool_options()
+            .max_connections(2)
+            .acquire_timeout(Duration::from_secs(5))
+    }
+
     /// The checks of the secrets' sources, which touch no network: one source for each URL and
     /// key, a valid `[vault]` table, and one wherever a secret comes from Vault.
     fn check_secrets(&mut self, base: &Path) -> Result<(), String> {
@@ -345,6 +353,13 @@ mod tests {
         let err = load("statement_timeout_ms = 0\n").unwrap_err();
         assert!(
             err.contains("statement_timeout_ms must be positive"),
+            "{err}"
+        );
+        // PostgreSQL's own limit is accepted; one past it is refused here, not at connect.
+        assert!(load("statement_timeout_ms = 2147483647\n").is_ok());
+        let err = load("statement_timeout_ms = 2147483648\n").unwrap_err();
+        assert!(
+            err.contains("statement_timeout_ms must be at most 2147483647"),
             "{err}"
         );
     }

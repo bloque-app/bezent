@@ -319,10 +319,15 @@ pub fn guard(options: PgPoolOptions) -> PgPoolOptions {
 /// not use [`pool_options`] and is not bounded: a long migration is not an error.
 pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The largest `statement_timeout_ms` PostgreSQL takes: its setting is a 32-bit count of
+/// milliseconds (2 147 483 647, about 24.8 days). A larger value would fail when a connection opens,
+/// as a store error, so the configuration refuses it up front.
+pub const MAX_STATEMENT_TIMEOUT_MS: u64 = i32::MAX as u64;
+
 /// A service's configured `statement_timeout_ms` as a statement bound: the value in milliseconds, or
 /// an error that names the key when it is zero (zero would be no bound at all, which the services
-/// do not offer: a statement that hangs must end). Every service's `check` goes through this, so
-/// they refuse the same thing in the same words.
+/// do not offer: a statement that hangs must end) or above [`MAX_STATEMENT_TIMEOUT_MS`]. Every
+/// service's `check` goes through this, so they refuse the same thing in the same words.
 ///
 /// The key is how an operator raises [`STATEMENT_TIMEOUT`] without a release: a service whose
 /// evaluation of a large book legitimately takes longer than a minute is told so by configuration
@@ -330,6 +335,11 @@ pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(60);
 pub fn statement_bound(ms: u64) -> Result<Duration, String> {
     if ms == 0 {
         return Err("statement_timeout_ms must be positive".into());
+    }
+    if ms > MAX_STATEMENT_TIMEOUT_MS {
+        return Err(format!(
+            "statement_timeout_ms must be at most {MAX_STATEMENT_TIMEOUT_MS} (PostgreSQL's limit)"
+        ));
     }
     Ok(Duration::from_millis(ms))
 }

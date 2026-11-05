@@ -51,3 +51,25 @@ async fn issue_84_the_ingress_statement_bound_is_the_configured_one(base: PgPool
     let code = e.as_database_error().and_then(DatabaseError::code);
     assert_eq!(code.as_deref(), Some(QUERY_CANCELED), "{e}");
 }
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn issue_84_the_webhook_dispatcher_pool_has_the_configured_statement_bound(base: PgPool) {
+    // `main` makes the dispatcher's pool with this function; it used to take the store's fixed 60 s.
+    let pool = config(Some(400))
+        .dispatcher_pool_options()
+        .connect_with((*base.connect_options()).clone())
+        .await
+        .unwrap();
+    let bound: String = sqlx::query_scalar("SELECT current_setting('statement_timeout')")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(bound, "400ms");
+    assert_eq!(pool.options().get_max_connections(), 2);
+    let e = sqlx::query("SELECT pg_sleep(30)")
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    let code = e.as_database_error().and_then(DatabaseError::code);
+    assert_eq!(code.as_deref(), Some(QUERY_CANCELED), "{e}");
+}
