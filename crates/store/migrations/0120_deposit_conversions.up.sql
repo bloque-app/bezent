@@ -657,11 +657,12 @@ REVOKE EXECUTE ON FUNCTION
 FROM PUBLIC;
 
 GRANT SELECT ON deposit_conversions TO bezent_ingress, bezent_core, bezent_operator;
--- The binding rule runs as the inserting login (0034): every login that binds a source calls these.
+-- The binding rule runs as the inserting login (0034): the ingress is the one login that binds a
+-- deposit's or an unassociated refund's source (0047), so it calls these; the core binds none.
 GRANT EXECUTE ON FUNCTION
     coordinate_recorded_converted(TEXT, BIGINT, BYTEA, position_kind, BIGINT),
     coordinate_lock(TEXT, BIGINT, BYTEA, position_kind, BIGINT)
-    TO bezent_ingress, bezent_core;
+    TO bezent_ingress;
 GRANT EXECUTE ON FUNCTION
     deposit_conversion_record(BIGINT, BIGINT, TEXT, BIGINT, BYTEA, position_kind, BIGINT)
     TO bezent_ingress;

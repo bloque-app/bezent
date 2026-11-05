@@ -140,8 +140,6 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "attempts_unproven(bigint)",
             "bezent_applied_migrations()",
             "bezent_writer_holds(text,oid)",
-            "coordinate_lock(text,bigint,bytea,position_kind,bigint)",
-            "coordinate_recorded_converted(text,bigint,bytea,position_kind,bigint)",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
             "ops_observables()",

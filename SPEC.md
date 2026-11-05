@@ -823,12 +823,10 @@ reserve equation, and published in the statement (`REQ-PR-1`). They back nothing
 **`REQ-CV-5`** The price, the slippage and any fee of a conversion are the requester's. bezent MUST NOT
 make a delivery or a mint up to a quoted amount; it mints or delivers what was observed.
 
-**`REQ-CV-6`** A conversion that does not complete by its deadline goes to `Needs-Review` (`REQ-RV-1`). The
-deadline is the route's, counted from the convertible arrival's finality; the conversion completes by it when
-its output, from a block at or before the deadline, is named for the deposit before the deposit goes to review.
-A deposit holding `CND-AwaitingConversion` past its deadline goes to `Needs-Review`, and MUST NOT be refunded on
-a timer (`REQ-RF-1`). Its convertible holdings stay itemised; they are never written off and never counted as
-reserve.
+**`REQ-CV-6`** A conversion that does not complete by its deadline goes to `Needs-Review` (`REQ-RV-1`): a
+deposit holding `CND-AwaitingConversion` past the route's deadline, counted from the convertible arrival's
+finality, goes to `Needs-Review`, and MUST NOT be refunded on a timer (`REQ-RF-1`). Its convertible holdings stay
+itemised; they are never written off and never counted as reserve.
 
 **`REQ-CV-7`** A requester MAY hold a role on a reserve address that lets it convert, at a protocol venue,
 convertible holdings at that address into the origin token. The network MUST enforce, by on-chain code

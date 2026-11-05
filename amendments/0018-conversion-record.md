@@ -192,9 +192,9 @@ ordinary arrivals; the table above stands.
   never minted against, each is consumed once (`INV-2`), and the deposit records both, with both amounts. bezent verifies what
   A1b needs of A2: the output is a final conversion output at the reserve address the convertible arrived at, of a token
   admitted for the deposit's asset, not consumed. That the arrival fed that conversion is the requester's word.
-- **`REQ-CV-6`**: the deadline is the route's, from the convertible arrival's finality; the conversion completes by it when its
-  output, from a block at or before the deadline, is named before the deposit goes to review. Past it, `Needs-Review`, never
-  a refund on a timer (`REQ-RF-1`).
+- **`REQ-CV-6`**, applied to the deposit unchanged: past the route's deadline, counted from the convertible arrival's
+  finality (as for any condition held at `Source-Final`), the deposit goes to `Needs-Review`, never to a refund on a timer
+  (`REQ-RF-1`). When a conversion counts as complete by that deadline is not stated (Open 7).
 - **`REQ-RQ-3`**: the coordinate may be of a convertible arrival. **`REQ-RQ-4`**: the one extra of such a deposit, the output's
   coordinate, written once, by the deposit's requester only (`ERR-ReferenceConflict` for a second). It is part of requesting
   a deposit, so it rides on the deposit grant (`REQ-PN-2`, unchanged).
@@ -218,6 +218,9 @@ ordinary arrivals; the table above stands.
 - The core: the edge `Accepted -> Source-Final` of such a deposit carries `CND-AwaitingConversion`; once the source is the
   output, and the output's block is at or before the deadline, the condition clears, resting on the output's final point, and
   the mint is ordered against the output. Past the deadline, `Needs-Review`.
+- `REQ-ST-7`: the deposit's source and amount change once, in place. What it was asked and what each network did stay
+  stateable from durable state: `deposit_conversions` holds the arrival, its token and amount, the output, its amount and the
+  request that named it, and the status reports the arrival (`converted_arrival`).
 
 ## Open after the ruling
 
@@ -240,3 +243,7 @@ None of these is applied; each is the owner's.
    the one of the reserve the arrival is at. Open.
 6. **An output named after review.** A deposit in `Needs-Review` takes no conversion request (`ERR-SourceConsumed`); its review
    ends by evidence (`REQ-RV-2`), and whether a named output is such evidence is not decided. Open.
+7. **When a conversion completes by its deadline.** As built, the condition clears only when the output named for the deposit
+   is from a block at or before the deadline (on the output's network's clock) and the deposit has not gone to review; an
+   output from a later block leaves the deposit to go to review once the issuing network's final head passes the deadline.
+   The specification says only that a conversion not completed by its deadline goes to review. Open.
