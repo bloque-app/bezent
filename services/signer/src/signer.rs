@@ -400,7 +400,7 @@ impl From<KeyError> for Failure {
 /// ([`bezent_store::login::guard`]).
 ///
 /// It carries the store's server-side bounds (issue #84): [`bezent_store::login::STATEMENT_TIMEOUT`]
-/// for a statement, which also ends a wait for the signing lock, and
+/// (by default; `statement_timeout_ms`) for a statement, which also ends a wait for the signing lock, and
 /// [`IDLE_IN_TRANSACTION_TIMEOUT`] for a holder of that lock that stopped answering. A transaction
 /// the server ends rolls back whole: the signature the backend made is dropped with it, nothing is
 /// recorded, and the caller sees "unavailable" and asks again.

@@ -72,9 +72,11 @@ stopped recording final heads, or a gap) and at the endpoint's own health (`depl
    statement timeout` (SQLSTATE `57014`) on every pass, the evaluation is being cut off by the store's statement bound,
    not by anything on a chain. It fails closed: it is recorded as incomplete and the asset's routes stay paused, and
    it will repeat every pass until the statement fits. The evaluation (`as_of`) sums every posting of the asset in one
-   statement; the bound is 60 s for each statement of the core's store session. Measured on a test book of 4.6 million
-   postings of one asset (5.6 million in all), it took about 5 s and grew in step with the postings, so reaching 60 s
-   is a book of the order of fifty million postings of one asset, or a database that is unwell. Look at the database
+   statement; the bound is 60 s for each statement of the core's store session. Measured once, on a synthetic test
+   book of 4.6 million postings of one asset (5.6 million in all), it took about 5 s. Only that size was measured: if
+   it grew in step with the postings 60 s would be tens of millions of postings of one asset, but a hash aggregate that
+   spills can grow faster, so treat that as an estimate. A timeout at a much smaller book, or one that starts
+   suddenly, is a database that is unwell. Look at the database
    first (locks, load, a stuck session), because raising the bound does not mend a database that is slow. If the book
    has legitimately outgrown it, **the lever is `statement_timeout_ms` in the core's configuration** (milliseconds;
    default `60000`; zero is refused at start): raise it and restart the core, with no release. Do not raise it past
