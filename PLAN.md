@@ -1,9 +1,9 @@
 ---
 name: bezent
-plan_version: 0.6.3
-status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`)
-date: 2026-10-30
-binds: SPEC.md v0.5.4
+plan_version: 0.6.4
+status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first)
+date: 2026-11-06
+binds: SPEC.md v0.5.5
 ---
 
 # bezent — Implementation Plan
@@ -21,7 +21,7 @@ that serves nothing in the spec is not in this plan.
 | `M-*` | A milestone: a set of features that together make a stated claim true, with exit criteria |
 | `RISK-*` | A risk to the plan, with its mitigation |
 
-1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.4. If a technical fact makes a requirement
+1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.5. If a technical fact makes a requirement
    impossible to meet, that becomes a spec amendment first (`amendments/`), and the plan follows it. A gap in the spec
    is handled the same way: we stop, propose an amendment, and do not fill the gap in code.
 2. **Facts come from the notes.** Numbers and properties of Kreivo, the EVM networks, CCTP, evmhot and Swaps come from
@@ -36,6 +36,7 @@ that serves nothing in the spec is not in this plan.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.6.4 | 2026-11-06 | The plan binds `SPEC.md` v0.5.5, as the owner asked in chat on 2026-11-06. Amendment 0018 (A1b, ruled `d-cv-conversion-link`, 2026-11-05) makes a convertible deposit begin with its request: the request names the final convertible arrival (`REQ-RQ-3`) and the deposit holds `CND-AwaitingConversion` until its requester names the conversion's output by the request reference (`REQ-RQ-4`, `REQ-CV-2`). `DEC-9`, `DEC-13` and `F-010` are worded to match. Nothing else changes |
 | 0.6.3 | 2026-10-30 | @pandres95's ruling `d-polygon-central-signer` (2026-10-30): there is no Polygon signer sidecar. The central signer, which has its own task role, signs Polygon through the Vault signing plugin, and the EVM endpoint reaches it over the mTLS signer link (`PUB-1b`) like every other caller. Containers in one task share one cloud IAM role, so a sidecar would let the EVM endpoint authenticate as the plugin role and sign arbitrary hashes, bypassing the signer's intent check (`REQ-AR-3`). `DEC-11` and `F-005` follow; `PUB-1b` becomes a prerequisite of Polygon delivery (`F-009`, `M-1`). `SPEC.md` is unchanged |
 | 0.6.2 | 2026-10-29 | The plan binds `SPEC.md` v0.5.4 (amendment 0015: `REQ-CU-1` names a boundary, not a store). @pandres95's ruling `d-delivery-keys` (2026-10-29) moves both delivery keys off AWS KMS: `DEC-11` names the store per key, and `RISK-7` is closed. The signer gets one `SigningEngine` interface (`F-005`) |
 | 0.6.1 | 2026-10-22 | The plan binds `SPEC.md` v0.5.3 (amendments 0013 and 0014; no requirement the plan relies on changes). @pandres95's rulings of 2026-10-22: the 48-hour mainnet soak exercises tiny synthetic transfers within the bounds between Polygon and Kreivo (his option A; `DEC-19`, `M-4`); the vault guard's bounds are confirmed: a delay cooldown from 1 hour to 30 days and an expiration from 1 day to 90 days, with a deployment default of a 24-hour cooldown and a 7-day expiration (`DEC-10`); and the guardian key is replaced by a key held by an independent party before the vault is funded, the holder still to be decided, a hot key until then (`DEC-10`, `RISK-10`) |
@@ -291,8 +292,10 @@ evmhot's sweeps; Swaps then requests the deposit by naming the arrival's coordin
 - A coordinate is consumed once (`INV-2`), so an arrival can back one deposit only. An arrival nobody claims by the
   route's deadline stays unassociated with an owner (`REQ-IN-6`).
 - Nothing is matched by amount or time: the request names the coordinate, and bezent checks it itself at finality.
-- A convertible token that arrives (for example USDT on Polygon) is itemised outside the reserve until Swaps converts
-  it under its role (`DEC-10`, `DEC-13`), and the deposit is minted against the converted output.
+- A convertible token that arrives (for example USDT on Polygon) is itemised outside the reserve. Swaps requests the
+  deposit by naming that arrival's coordinate, and the deposit holds `CND-AwaitingConversion` while Swaps converts it
+  under its role (`DEC-10`, `DEC-13`). Swaps then names the conversion's output by the deposit's request reference,
+  and the deposit is minted against that output (`REQ-CV-1`, `REQ-CV-2`).
 - evmhot is revamped (outside this plan) to sweep deposit addresses straight into the vault.
 
 *Serves:* deposits bound by coordinate (`REQ-IN-3`, `REQ-RQ-3`, `REQ-IN-4`), arrivals de-duplicated by coordinate
@@ -398,7 +401,9 @@ Ruled by @pandres95 (`pl-scope`, 2026-10-13; `pl-cross-network`, in chat, 2026-1
 admitted convertible is USDT0 on Polygon for bUSDC (`pl-convertibles`, 2026-10-13); bEURC and bBTC have none, so
 the Base and BNB Chain vaults carry no conversion role.
 
-- The minimum output of a conversion is Swaps' own. bezent mints what the swap delivered into the vault.
+- The minimum output of a conversion is Swaps' own. A deposit in a convertible token is requested first, naming the
+  convertible arrival, and Swaps then names the conversion's output by the request reference; bezent mints what the
+  swap delivered into the vault (`REQ-CV-1`, `REQ-CV-2`).
 - CCTP stays Swaps' own: no Circle account is needed, standard transfers carry no Circle fee, and Polygon to Base
   takes seconds (constraints note). bezent observes only the Polygon payout to Swaps.
 - In V0, bEURC pays out only on Base and bBTC only on BNB Chain.
@@ -687,7 +692,7 @@ coordinate (`REQ-IN-3`), arrivals are minted only after finality (`AC-A2.1`–`A
 central signer, never through a sidecar.
 
 **`F-010` Venues.** Swaps' conversions on the vault: the role configuration, observing them, and minting against
-the output
+the output once Swaps names it by the deposit's request reference
 (`DEC-13`). A gate of the bUSDC launch (`M-4`), by ruling (`pl-busdc-first`). Done when a convertible deposit is minted for what Swaps' swap delivered into the vault (`AC-A5.1`–`AC-A5.3`).
 
 **`F-011` Attested backend.** Swaps' reports as observations, the instruction commitment, and the statement's attested

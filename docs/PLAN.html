@@ -92,7 +92,7 @@ Traceability</a></li>
       <div class="kicker">PLAN.md</div>
       <h1>bezent</h1>
       
-      <dl class="meta"><div><dt>Version</dt><dd>0.6.1</dd></div><div><dt>Status</dt><dd>approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22</dd></div><div><dt>Date</dt><dd>2026-10-22</dd></div><div><dt>Source</dt><dd><code>bezent/PLAN.md</code> · ec2ea18 2026-10-21 + local changes</dd></div></dl>
+      <dl class="meta"><div><dt>Version</dt><dd>0.6.4</dd></div><div><dt>Status</dt><dd>approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first)</dd></div><div><dt>Date</dt><dd>2026-11-06</dd></div><div><dt>Source</dt><dd><code>bezent/PLAN.md</code> · 9a9aa94 2026-11-05 + local changes</dd></div></dl>
     </header>
     
 <h1 id="bezent--implementation-plan">bezent — Implementation Plan</h1>
@@ -134,7 +134,7 @@ true, with exit criteria</td>
 </table></div>
 <ol type="1">
 <li><strong>The plan never contradicts the spec.</strong> It binds
-<code>SPEC.md</code> v0.5.3. If a technical fact makes a requirement
+<code>SPEC.md</code> v0.5.5. If a technical fact makes a requirement
 impossible to meet, that becomes a spec amendment first
 (<code>amendments/</code>), and the plan follows it. A gap in the spec
 is handled the same way: we stop, propose an amendment, and do not fill
@@ -164,6 +164,44 @@ would change the spec goes through an amendment first.</li>
 </thead>
 <tbody>
 <tr class="odd">
+<td>0.6.4</td>
+<td>2026-11-06</td>
+<td>The plan binds <code>SPEC.md</code> v0.5.5, as the owner asked in
+chat on 2026-11-06. Amendment 0018 (A1b, ruled
+<code>d-cv-conversion-link</code>, 2026-11-05) makes a convertible
+deposit begin with its request: the request names the final convertible
+arrival (<code>REQ-RQ-3</code>) and the deposit holds
+<code>CND-AwaitingConversion</code> until its requester names the
+conversion's output by the request reference (<code>REQ-RQ-4</code>,
+<code>REQ-CV-2</code>). <code>DEC-9</code>, <code>DEC-13</code> and
+<code>F-010</code> are worded to match. Nothing else changes</td>
+</tr>
+<tr class="even">
+<td>0.6.3</td>
+<td>2026-10-30</td>
+<td>@pandres95's ruling <code>d-polygon-central-signer</code>
+(2026-10-30): there is no Polygon signer sidecar. The central signer,
+which has its own task role, signs Polygon through the Vault signing
+plugin, and the EVM endpoint reaches it over the mTLS signer link
+(<code>PUB-1b</code>) like every other caller. Containers in one task
+share one cloud IAM role, so a sidecar would let the EVM endpoint
+authenticate as the plugin role and sign arbitrary hashes, bypassing the
+signer's intent check (<code>REQ-AR-3</code>). <code>DEC-11</code> and
+<code>F-005</code> follow; <code>PUB-1b</code> becomes a prerequisite of
+Polygon delivery (<code>F-009</code>, <code>M-1</code>).
+<code>SPEC.md</code> is unchanged</td>
+</tr>
+<tr class="odd">
+<td>0.6.2</td>
+<td>2026-10-29</td>
+<td>The plan binds <code>SPEC.md</code> v0.5.4 (amendment 0015:
+<code>REQ-CU-1</code> names a boundary, not a store). @pandres95's
+ruling <code>d-delivery-keys</code> (2026-10-29) moves both delivery
+keys off AWS KMS: <code>DEC-11</code> names the store per key, and
+<code>RISK-7</code> is closed. The signer gets one
+<code>SigningEngine</code> interface (<code>F-005</code>)</td>
+</tr>
+<tr class="even">
 <td>0.6.1</td>
 <td>2026-10-22</td>
 <td>The plan binds <code>SPEC.md</code> v0.5.3 (amendments 0013 and
@@ -178,7 +216,7 @@ replaced by a key held by an independent party before the vault is
 funded, the holder still to be decided, a hot key until then
 (<code>DEC-10</code>, <code>RISK-10</code>)</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>0.6.0</td>
 <td>2026-10-20</td>
 <td>@pandres95's rulings of 2026-10-15 to 2026-10-20;
@@ -199,7 +237,7 @@ float (<code>DEC-18</code>, <code>F-014</code>). Block-denominated
 constants use 41,739 blocks a day (<code>DEC-6</code>). New
 <code>RISK-9</code> and <code>RISK-10</code></td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>0.1.0 to 0.5.0</td>
 <td>2026-10-13</td>
 <td>The first draft (0.1.0), the plan rulings (0.2.0), the sign-off, the
@@ -287,8 +325,9 @@ are the observations (<code>DEC-14</code>)</td>
 </tr>
 <tr class="odd">
 <td>Custody, §4.4(c)</td>
-<td>AWS KMS for delivery keys, Vault for the others, behind the signer
-process (<code>DEC-11</code>)</td>
+<td>Vault for every key, behind the signer process: Transit for the
+Kreivo delivery key, a signing plugin for the Polygon one
+(<code>DEC-11</code>)</td>
 </tr>
 <tr class="even">
 <td>Protocol venues, §4.4(d)</td>
@@ -515,9 +554,9 @@ Last, the roles of <code>Here(101)</code>–<code>Here(103)</code> were
 handed to the community account by signed calls from the Bloque account
 that held them (<code>DEC-7</code>).</li>
 <li>Roles on the contract: delivery is the Kreivo delivery account,
-whose key lives in KMS (<code>DEC-11</code>); pause is @pandres95's
-account for now; governance is the community account. The raise delay is
-24 hours, 41,739 blocks.</li>
+whose key moves from KMS to Vault Transit (<code>DEC-11</code>); pause
+is @pandres95's account for now; governance is the community account.
+The raise delay is 24 hours, 41,739 blocks.</li>
 <li>Launch mints bUSDC only: the ceilings for bEURC and bBTC start at 0
 (<code>DEC-17</code>).</li>
 </ul></li>
@@ -637,9 +676,13 @@ deadline stays unassociated with an owner (<code>REQ-IN-6</code>).</li>
 <li>Nothing is matched by amount or time: the request names the
 coordinate, and bezent checks it itself at finality.</li>
 <li>A convertible token that arrives (for example USDT on Polygon) is
-itemised outside the reserve until Swaps converts it under its role
-(<code>DEC-10</code>, <code>DEC-13</code>), and the deposit is minted
-against the converted output.</li>
+itemised outside the reserve. Swaps requests the deposit by naming that
+arrival's coordinate, and the deposit holds
+<code>CND-AwaitingConversion</code> while Swaps converts it under its
+role (<code>DEC-10</code>, <code>DEC-13</code>). Swaps then names the
+conversion's output by the deposit's request reference, and the deposit
+is minted against that output (<code>REQ-CV-1</code>,
+<code>REQ-CV-2</code>).</li>
 <li>evmhot is revamped (outside this plan) to sweep deposit addresses
 straight into the vault.</li>
 </ul>
@@ -721,34 +764,81 @@ Roles allow exactly that pair. The transfer and its reference are then
 atomic.</p>
 </blockquote>
 <h3 id="dec-11-custody">DEC-11 Custody</h3>
-<p><strong>Delivery keys (mint, payout from a reserve, refund) sign
-inside AWS KMS (secp256k1, for EVM keys and ECDSA Kreivo accounts);
-every other key comes from Vault and is loaded only by the signer
-process.</strong> Ruled by @pandres95 (<code>pl-custody</code>,
-2026-10-13); amendment 0006 rewrote <code>REQ-CU-1</code> to match.</p>
+<p><strong>No delivery key stays on AWS KMS. The Kreivo delivery key is
+a Vault Transit ed25519 key, and the Polygon delivery key is held by the
+Vault signing plugin
+<code>blockchain-signer-vault-plugin</code>.</strong> Ruled by
+@pandres95 (<code>d-delivery-keys</code>, 2026-10-29), who replaced the
+ruling of 2026-10-13 (<code>pl-custody</code>, amendment 0006): DevOps
+asked to avoid KMS where Vault offers the capability, and KMS rotation
+is hard. Amendment 0015 rewrote <code>REQ-CU-1</code> as a boundary, so
+this is a plan change and no store is named in the specification.</p>
+<div class="scroll"><table>
+<thead>
+<tr class="header">
+<th>Key</th>
+<th>Store</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Kreivo delivery key</td>
+<td>Vault Transit, ed25519. A new key and so a new account, because the
+current one is ECDSA in KMS; the contract's delivery role moves to
+it</td>
+</tr>
+<tr class="even">
+<td>Polygon delivery key</td>
+<td>The Vault signing plugin (secp256k1, which Transit cannot hold),
+signed by the central signer, which has its own task role and reaches
+the plugin under its own Vault role
+(<code>d-polygon-central-signer</code>). The EVM endpoint asks the
+signer over the mTLS signer link (<code>PUB-1b</code>) and has no Vault
+role for the plugin. Vault KV read by the signer stays only as a
+fallback</td>
+</tr>
+<tr class="odd">
+<td>Pause and statement keys</td>
+<td>Unchanged: read from Vault by the signer process</td>
+</tr>
+<tr class="even">
+<td>Existing KMS keys</td>
+<td>Left unused, not deleted</td>
+</tr>
+</tbody>
+</table></div>
 <ul>
-<li>Options: (a) AWS KMS secp256k1 for EVM keys and for ECDSA Kreivo
-accounts; (b) keys from Vault, loaded only by the signer process; (c)
-KMS for delivery keys, Vault for the rest. The spec, as written, names a
-key-management service or hardware module that never releases key
-material. Until the ruling, the plan builds against that text, which
-only (a) satisfies.</li>
-<li>aledgent ruled that its requirement is the property, not the
-product: no key material in the stateful process and none readable from
-a process environment (in this spec, <code>REQ-AR-3</code> and
-<code>REQ-KY-1</code>). Choosing (b) or (c) needs an amendment that
-rewords <code>REQ-CU-1</code> to name that property.</li>
-<li>Kreivo accounts can be ECDSA, so one KMS key type could serve both
-kinds of network. The plan must still check the account type per role,
-and that ContractsStore and the asset roles accept it.</li>
+<li>The signer holds every engine behind one <code>SigningEngine</code>
+interface (<code>services/signer/src/engine.rs</code> in the public
+repository, PR #65), modelled on aledgent's signature engines
+(<code>F-042</code>). An engine answers a key's scheme, public key and
+address, and signs; it has no way to be asked for a secret. Engines: the
+test-key file, Vault KV, Vault Transit, the Vault plugin and, for the
+keys already made, AWS KMS. Changing where a key rests is a change of
+engine, and a later move of the Polygon key to a full signing service
+needs no new interface.</li>
+<li><strong>No Polygon signer sidecar</strong>
+(<code>d-polygon-central-signer</code>, 2026-10-30). Containers in one
+task share one cloud IAM role, so a sidecar in the EVM endpoint's task
+would let the endpoint authenticate as the plugin role and sign
+arbitrary hashes, bypassing the signer's intent check
+(<code>REQ-AR-3</code>). The central signer signs both delivery keys,
+with the plugin role bound to its own task role alone. The signer link
+(<code>PUB-1b</code>, mutual TLS) is therefore a prerequisite of Polygon
+delivery.</li>
+<li>A key that never leaves a signing service meets
+<code>REQ-CU-1</code> more strictly than one read into a signer.
+Whichever the store, <code>REQ-AR-3</code>, <code>REQ-KY-1</code> and
+<code>REQ-KY-3</code> bound the key as before.</li>
 </ul>
 <p><em>Serves:</em> keys in the custody capability
 (<code>REQ-CU-1</code>, <code>REQ-KY-1</code>), separate keys per
 network and role with rotation (<code>REQ-CU-2</code>,
 <code>REQ-KY-4</code>), no test key with production power
 (<code>REQ-KY-6</code>), and the isolated signer
-(<code>REQ-AR-3</code>). <em>Cost:</em> (a) ties every signature to AWS,
-with its latency and price; (b) and (c) need the amendment first.</p>
+(<code>REQ-AR-3</code>). <em>Cost:</em> a new Kreivo delivery account
+and the hand-over of its roles; the plugin is third-party code, built
+from a pinned commit in CI.</p>
 <h3 id="dec-12-rpc-for-evm-networks">DEC-12 RPC for EVM networks</h3>
 <p><strong>Each EVM network is read through two independent paid
 providers, cross-checked at the finalized block; when they disagree, the
@@ -758,6 +848,15 @@ disposition is unknown, never a mint.</strong> Ruled by @pandres95
 <li>There is no light client for these networks in our stack, so a
 single provider could lie or fail unseen. A disagreement is treated like
 any other read bezent cannot trust: unknown, not proof.</li>
+<li>Signed transactions are sent through public nodes only (@pandres95,
+<code>d-evm-submit-public</code>, 2026-11-05; amendment 0023): "Submit
+on public nodes, and read on private ones." Only
+<code>eth_sendRawTransaction</code> moves. Every read, the nonce, the
+fee and gas estimates, the dry run, receipts, logs and headers, stays on
+the paid pair, cross-checked. A public node cannot forge a signed
+transaction, only drop it, and the endpoint sends the same bytes again
+until the pair shows the outcome. There is no fallback to the paid
+pair.</li>
 <li>Alternatives: one provider, or our own nodes.</li>
 </ul>
 <p><em>Serves:</em> finality with the hash re-checked
@@ -778,8 +877,11 @@ A5). The only admitted convertible is USDT0 on Polygon for bUSDC
 (<code>pl-convertibles</code>, 2026-10-13); bEURC and bBTC have none, so
 the Base and BNB Chain vaults carry no conversion role.</p>
 <ul>
-<li>The minimum output of a conversion is Swaps' own. bezent mints what
-the swap delivered into the vault.</li>
+<li>The minimum output of a conversion is Swaps' own. A deposit in a
+convertible token is requested first, naming the convertible arrival,
+and Swaps then names the conversion's output by the request reference;
+bezent mints what the swap delivered into the vault
+(<code>REQ-CV-1</code>, <code>REQ-CV-2</code>).</li>
 <li>CCTP stays Swaps' own: no Circle account is needed, standard
 transfers carry no Circle fee, and Polygon to Base takes seconds
 (constraints note). bezent observes only the Polygon payout to
@@ -1361,12 +1463,15 @@ and the daily signed statement (<code>DEC-16</code>). Done when
 and a bBTC remainder lands in surplus (<code>REQ-AS-9</code>).</p>
 <p><strong><code>F-005</code> Signer and guards.</strong> The stateless
 signer and its guards (<code>DEC-3</code>) on the custody of
-<code>DEC-11</code>: a stub with test keys in <code>M-0</code>, signing
-for both kinds of network by <code>M-1</code>. Done when no unrecorded
-intent is signed (<code>INV-9</code>), a restart re-sends recorded bytes
+<code>DEC-11</code>: a stub with test keys in <code>M-0</code>, and the
+Transit and plugin engines behind the <code>SigningEngine</code>
+interface by <code>M-1</code>. Done when no unrecorded intent is signed
+(<code>INV-9</code>), a restart re-sends recorded bytes
 (<code>AC-D2.1</code>), an unrecorded signature starts the compromise
 path (<code>AC-I1.2</code>), and a test key holds no production
-authority (<code>AC-I4.2</code>).</p>
+authority (<code>AC-I4.2</code>). The central signer signs Polygon
+through the plugin engine, so the signer link (<code>PUB-1b</code>) is
+built before Polygon delivery.</p>
 <p><strong><code>F-006</code> Kreivo contract.</strong> The ink!
 contract of <code>DEC-6</code>, deployed on zombienet through
 ContractsStore as on mainnet. Done when a redemption destroys in the
@@ -1396,13 +1501,16 @@ Done when arrivals at the vault wait until a request names their
 coordinate (<code>REQ-IN-3</code>), arrivals are minted only after
 finality (<code>AC-A2.1</code>–<code>AC-A2.3</code>), reports carry
 coordinates (<code>AC-C1.3</code>), a forced non-execution is checkable
-(<code>AC-C2.1</code>), and gaps are filled (<code>AC-D2.3</code>).</p>
+(<code>AC-C2.1</code>), and gaps are filled (<code>AC-D2.3</code>).
+Polygon delivery waits on the signer link (<code>PUB-1b</code>): the
+endpoint signs through the central signer, never through a sidecar.</p>
 <p><strong><code>F-010</code> Venues.</strong> Swaps' conversions on the
 vault: the role configuration, observing them, and minting against the
-output (<code>DEC-13</code>). A gate of the bUSDC launch
-(<code>M-4</code>), by ruling (<code>pl-busdc-first</code>). Done when a
-convertible deposit is minted for what Swaps' swap delivered into the
-vault (<code>AC-A5.1</code>–<code>AC-A5.3</code>).</p>
+output once Swaps names it by the deposit's request reference
+(<code>DEC-13</code>). A gate of the bUSDC launch (<code>M-4</code>), by
+ruling (<code>pl-busdc-first</code>). Done when a convertible deposit is
+minted for what Swaps' swap delivered into the vault
+(<code>AC-A5.1</code>–<code>AC-A5.3</code>).</p>
 <p><strong><code>F-011</code> Attested backend.</strong> Swaps' reports
 as observations, the instruction commitment, and the statement's
 attested wording (<code>DEC-14</code>). Done when a report without the
@@ -1610,11 +1718,11 @@ supply minted outside the contract as divergence and pauses
 </tr>
 <tr class="odd">
 <td><code>RISK-7</code></td>
-<td>The key custody choice is still open, and two of its options need an
-amendment</td>
-<td>The signer is the only process that touches keys under every option.
-If (b) or (c) is ruled, the amendment to <code>REQ-CU-1</code> comes
-before <code>F-005</code> is complete</td>
+<td><em>Closed 2026-10-29:</em> The key custody choice was open, and two
+of its options needed an amendment</td>
+<td>Ruled (<code>d-delivery-keys</code>); amendment 0015 reworded
+<code>REQ-CU-1</code> to a boundary, so the plan names the store per key
+(<code>DEC-11</code>) and needs no further amendment</td>
 </tr>
 <tr class="even">
 <td><code>RISK-8</code></td>
@@ -1699,7 +1807,7 @@ built in the ingress (<code>F-002</code>)</td>
 </tr>
 <tr class="odd">
 <td>Custody (§4.4(c), <code>REQ-CU-*</code>)</td>
-<td>Key service behind the signer (<code>DEC-11</code>), built in
+<td>Signing engines behind the signer (<code>DEC-11</code>), built in
 <code>F-005</code></td>
 </tr>
 <tr class="even">
