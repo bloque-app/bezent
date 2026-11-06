@@ -86,6 +86,8 @@ struct State {
     /// The runtime's metadata, as `runtime_metadata` answers it; none answers "unavailable"
     /// (issue #104).
     metadata: Option<Vec<u8>>,
+    /// What `runtime_metadata` fails with instead of answering, if anything (issue #104).
+    metadata_error: Option<ChainError>,
     /// What the contract's `roles()` answers; none fails the getter (issue #104).
     roles: Option<kreivo::Roles>,
 }
@@ -157,6 +159,7 @@ impl FakeChain {
                 code_hash: None,
                 supply: HashMap::new(),
                 metadata: None,
+                metadata_error: None,
                 roles: None,
             }),
         }
@@ -185,6 +188,19 @@ impl FakeChain {
     /// Sets the runtime's metadata (issue #104): the bytes of a `RuntimeMetadataPrefixed`.
     pub fn set_metadata(&self, metadata: Vec<u8>) {
         self.lock().metadata = Some(metadata);
+    }
+
+    /// Makes `runtime_metadata` fail with `error` (`None` answers again): `Unavailable` is a chain
+    /// that did not answer, `Invalid` one whose answer cannot be used, such as a runtime with no V15
+    /// metadata (issue #104).
+    pub fn set_metadata_error(&self, error: Option<ChainError>) {
+        self.lock().metadata_error = error;
+    }
+
+    /// Makes the contract's `roles()` fail to dispatch, as a contract that does not answer it
+    /// does (issue #104).
+    pub fn clear_roles(&self) {
+        self.lock().roles = None;
     }
 
     /// Sets what the contract's `roles()` answers (issue #104).
@@ -813,6 +829,9 @@ impl Chain for FakeChain {
     async fn runtime_metadata(&self, at: &BlockRef) -> ChainResult<Vec<u8>> {
         self.answer(|s| {
             Self::block_at(s, at)?;
+            if let Some(e) = &s.metadata_error {
+                return Err(e.clone());
+            }
             s.metadata
                 .clone()
                 .ok_or_else(|| ChainError::Unavailable("no metadata".into()))

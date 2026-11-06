@@ -42,13 +42,21 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
    was checked against Kreivo mainnet (read-only, 2026-11-06): a mint signed by a throwaway account at (136, 14) is
    refused by `TaggedTransactionQueue_validate_transaction` only for its fee, and at (136, 13) as `BadProof`. The
    **gate** (`submit::Gate`) also requires the contract's `roles().delivery` to be the lane's account, so a key
-   rotated before governance moves the role spends no order's dry run on `Unauthorised` (item 5). Any other answer,
-   or none, closes the gate before anything is read for an order or recorded, and before a signature: the order
-   waits, observation, supply readings and proofs go on, and each change of state is logged once (an error while
-   closed). It is judged again whenever the runtime's version changes, and before each preparation and signature,
-   once per block. A payload prepared under one runtime and signed under another is stale, as before (item 14).
-   Limits: the metadata is read whole (about 450 KB) once per finalized block that has work; a change of the
-   delivery role is logged at the next order, not when it happens.
+   rotated before governance moves the role spends no order's dry run on `Unauthorised` (item 5). The three
+   conditions (transaction version, metadata, role) are read independently, so each is judged live whatever
+   the others say, and every one that fails is named in the reason. A chain that answers what the endpoint
+   cannot use (a `roles()` that does not decode, a runtime with no V15 metadata) has answered: the gate is
+   **closed** with that reason, and nothing is built or recorded before a signature. Only a chain that does
+   not answer leaves it **unavailable**, which is asked again; it is logged at warn level once it has stayed
+   so for five minutes (`submit::UNAVAILABLE_WARN_AFTER`, about twenty-five blocks, longer than a light
+   client's resync or a slow provider) and again for each further five. The order waits, observation, supply
+   readings and proofs go on, and each change of state is logged once (an error while closed). It is also a
+   metric, `submission_gate_state` (0 open, 1 closed; unknown, left out of the line, while it cannot be
+   judged), written once a minute from a fresh judgement and not a liveness matter (`deploy/runbooks/alerts.md`).
+   It is judged again whenever the runtime's version changes, and before each preparation and signature, once
+   per block. A payload prepared under one runtime and signed under another is stale, as before (item 14).
+   Limits: the metadata is read whole (about 450 KB) once per finalized block that is judged, including while
+   the role is wrong, since the format is checked live whatever the role says.
 5. **One attempt per order, plus fresh eras.** A failed dry run is recorded and the order is not prepared again:
    retrying is the core's (a new order). An order whose prepared transaction expired *unsigned* is prepared
    again (attempt n+1); nothing could have executed. A signed one blocks every new attempt for its reference

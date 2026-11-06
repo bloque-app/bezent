@@ -15,6 +15,7 @@
 //! | [`proof`] | `T-007-04` | Inclusion, refusal and non-execution, from chain data anyone can check (`REQ-NX-1`, `REQ-NX-2`, `AC-C2.1`) |
 //! | [`supply`] | issue #42 | Each bridged asset's supply at each recorded final head, the component's count and the issuance, for the reserve check (`REQ-BK-8`, `NFR-5`) |
 //! | [`signal`] | | Compromise and anomaly signals, written to the store once and never dropped (`AC-I1.2`) |
+//! | [`metric`] | issue #104 | The submission gate's state as a metric an alarm can read (`submission_gate_state`) |
 //! | [`kreivo`] | | Kreivo's and the contract's encoding |
 //! | [`chain`] | | The chain interface; an in-memory chain for tests; the light client (feature `light-client`) |
 
@@ -23,6 +24,7 @@ pub mod config;
 pub mod format;
 pub mod health;
 pub mod kreivo;
+pub mod metric;
 pub mod network;
 pub mod observe;
 pub mod proof;

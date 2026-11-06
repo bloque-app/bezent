@@ -641,4 +641,310 @@ mod tests {
         m.apis.retain(|a| a.name != "ContractsApi");
         assert!(failures(&m)[0].contains("no ContractsApi::call"));
     }
+
+    // --- The shapes the endpoint reads by position, each changed in turn (issue #104). ---
+
+    /// The type `id` of `m`, mutably.
+    fn type_def(m: &mut RuntimeMetadataV15, id: u32) -> &mut TypeDef<PortableForm> {
+        &mut m
+            .types
+            .types
+            .iter_mut()
+            .find(|t| t.id == id)
+            .unwrap()
+            .ty
+            .type_def
+    }
+
+    /// The variants of enum `id`, through any single-field wrapper.
+    fn variants(
+        m: &mut RuntimeMetadataV15,
+        id: u32,
+    ) -> &mut Vec<scale_info::Variant<PortableForm>> {
+        let id = transparent(&m.types, id);
+        let TypeDef::Variant(v) = type_def(m, id) else {
+            panic!("not an enum")
+        };
+        &mut v.variants
+    }
+
+    /// The fields of struct `id`, through any single-field wrapper.
+    fn struct_fields(
+        m: &mut RuntimeMetadataV15,
+        id: u32,
+    ) -> &mut Vec<scale_info::Field<PortableForm>> {
+        let id = transparent(&m.types, id);
+        let TypeDef::Composite(c) = type_def(m, id) else {
+            panic!("not a struct")
+        };
+        &mut c.fields
+    }
+
+    /// The type of `ContractsApi_call`'s result.
+    fn dry_run_result(m: &RuntimeMetadataV15) -> u32 {
+        m.apis
+            .iter()
+            .find(|a| a.name == "ContractsApi")
+            .unwrap()
+            .methods
+            .iter()
+            .find(|c| c.name == "call")
+            .unwrap()
+            .output
+            .id
+    }
+
+    /// The type of the field `name` of the dry run's result.
+    fn dry_run_field(m: &mut RuntimeMetadataV15, name: &str) -> u32 {
+        let result = dry_run_result(m);
+        struct_fields(m, result)
+            .iter()
+            .find(|f| f.name.as_deref() == Some(name))
+            .unwrap()
+            .ty
+            .id
+    }
+
+    /// Whether some failure names `item`.
+    fn names(f: &[String], item: &str) -> bool {
+        f.iter().any(|x| x.starts_with(item))
+    }
+
+    #[test]
+    fn issue_104_a_dry_run_result_read_by_position_that_changes_is_named() {
+        // A field added before `result`, which is read after four others.
+        let mut m = v15(136);
+        let result = dry_run_result(&m);
+        let fields = struct_fields(&mut m, result);
+        let first = fields[0].clone();
+        fields.insert(2, first);
+        assert!(names(&failures(&m), "api.ContractsApi.call"));
+
+        // The first two fields exchanged.
+        let mut m = v15(136);
+        let result = dry_run_result(&m);
+        struct_fields(&mut m, result).swap(0, 1);
+        assert!(names(&failures(&m), "api.ContractsApi.call"));
+
+        // `StorageDeposit`'s arms exchanged: `Refund` and `Charge` are read by index.
+        let mut m = v15(136);
+        let deposit = dry_run_field(&mut m, "storage_deposit");
+        for v in variants(&mut m, deposit) {
+            v.index = 1 - v.index;
+        }
+        let f = failures(&m);
+        assert!(
+            names(&f, "api.ContractsApi.call") && f.iter().any(|x| x.contains("variant 0 is")),
+            "{f:?}"
+        );
+
+        // `Ok` is read as variant 0 of the result.
+        let mut m = v15(136);
+        let result = dry_run_field(&mut m, "result");
+        for v in variants(&mut m, result) {
+            v.index = 1 - v.index;
+        }
+        assert!(names(&failures(&m), "api.ContractsApi.call"));
+
+        // The debug message is no longer bytes.
+        let mut m = v15(136);
+        let u32_id = add(&mut m, TypeDef::Primitive(TypeDefPrimitive::U32));
+        let result = dry_run_result(&m);
+        struct_fields(&mut m, result)
+            .iter_mut()
+            .find(|f| f.name.as_deref() == Some("debug_message"))
+            .unwrap()
+            .ty = UntrackedSymbol::from(u32_id);
+        assert!(names(&failures(&m), "api.ContractsApi.call"));
+    }
+
+    #[test]
+    fn issue_104_a_weight_that_changes_is_named_wherever_it_is_used() {
+        // `ref_time` no longer compact: the dry run's weights and the call's `gas_limit`.
+        let mut m = v15(136);
+        let u64_id = u64_id_of(&mut m);
+        let weight = dry_run_field(&mut m, "gas_consumed");
+        struct_fields(&mut m, weight)[0].ty = UntrackedSymbol::from(u64_id);
+        let f = failures(&m);
+        assert!(names(&f, "api.ContractsApi.call"), "{f:?}");
+        assert!(names(&f, "call.Contracts.call"), "{f:?}");
+
+        // A third field.
+        let mut m = v15(136);
+        let weight = dry_run_field(&mut m, "gas_required");
+        let extra = struct_fields(&mut m, weight)[0].clone();
+        struct_fields(&mut m, weight).push(extra);
+        assert!(names(&failures(&m), "api.ContractsApi.call"));
+    }
+
+    #[test]
+    fn issue_104_an_option_whose_arms_move_is_named() {
+        // `storage_deposit_limit: Option<Compact<u128>>`: `None` is read at 0 and `Some` at 1.
+        let mut m = v15(136);
+        let ty = {
+            let pallet = m.pallets.iter().find(|p| p.name == "Contracts").unwrap();
+            let calls = pallet.calls.as_ref().unwrap().ty.id;
+            let TypeDef::Variant(v) = m.types.resolve(calls).unwrap().type_def.clone() else {
+                panic!()
+            };
+            v.variants
+                .iter()
+                .find(|v| v.name == "call")
+                .unwrap()
+                .fields
+                .iter()
+                .find(|f| f.name.as_deref() == Some("storage_deposit_limit"))
+                .unwrap()
+                .ty
+                .id
+        };
+        for v in variants(&mut m, ty) {
+            v.index = 1 - v.index;
+        }
+        let f = failures(&m);
+        assert!(names(&f, "call.Contracts.call"), "{f:?}");
+
+        // The same in the dry run's inputs.
+        let mut m = v15(136);
+        let ty = {
+            let api = m.apis.iter().find(|a| a.name == "ContractsApi").unwrap();
+            let call = api.methods.iter().find(|c| c.name == "call").unwrap();
+            call.inputs
+                .iter()
+                .find(|p| p.name == "gas_limit")
+                .unwrap()
+                .ty
+                .id
+        };
+        variants(&mut m, ty)[0].name = "Nothing".into();
+        assert!(names(&failures(&m), "api.ContractsApi.call"));
+    }
+
+    #[test]
+    fn issue_104_the_fee_extension_that_changes_is_named() {
+        let fee_at = |m: &RuntimeMetadataV15| {
+            m.extrinsic
+                .signed_extensions
+                .iter()
+                .position(|e| e.identifier == "ChargeAssetTxPayment")
+                .unwrap()
+        };
+        // The tip no longer compact.
+        let mut m = v15(136);
+        let ty = m.extrinsic.signed_extensions[fee_at(&m)].ty.id;
+        let u128_id = add(&mut m, TypeDef::Primitive(TypeDefPrimitive::U128));
+        struct_fields(&mut m, ty)[0].ty = UntrackedSymbol::from(u128_id);
+        let f = failures(&m);
+        assert!(
+            names(&f, "extension.ChargeAssetTxPayment (explicit)"),
+            "{f:?}"
+        );
+
+        // `asset_id`'s `None` moves.
+        let mut m = v15(136);
+        let ty = m.extrinsic.signed_extensions[fee_at(&m)].ty.id;
+        let asset = struct_fields(&mut m, ty)[1].ty.id;
+        for v in variants(&mut m, asset) {
+            v.index = 1 - v.index;
+        }
+        let f = failures(&m);
+        assert!(
+            names(&f, "extension.ChargeAssetTxPayment (explicit)"),
+            "{f:?}"
+        );
+
+        // A field after `asset_id`.
+        let mut m = v15(136);
+        let ty = m.extrinsic.signed_extensions[fee_at(&m)].ty.id;
+        let extra = struct_fields(&mut m, ty)[0].clone();
+        struct_fields(&mut m, ty).push(extra);
+        let f = failures(&m);
+        assert!(
+            names(&f, "extension.ChargeAssetTxPayment (explicit)"),
+            "{f:?}"
+        );
+
+        // Its implicit data starts to carry something.
+        let mut m = v15(136);
+        let at = fee_at(&m);
+        m.extrinsic.signed_extensions[at].additional_signed =
+            UntrackedSymbol::from(u64_id_of(&mut m));
+        let f = failures(&m);
+        assert!(
+            names(&f, "extension.ChargeAssetTxPayment (implicit)"),
+            "{f:?}"
+        );
+    }
+
+    #[test]
+    fn issue_104_pass_authenticate_that_changes_is_named() {
+        // `None` is the arm the endpoint writes, at 0, with no data.
+        let mut m = v15(136);
+        let ty = m.extrinsic.signed_extensions[0].ty.id;
+        let u8_id = add(&mut m, TypeDef::Primitive(TypeDefPrimitive::U8));
+        let none = variants(&mut m, ty)
+            .iter_mut()
+            .find(|v| v.index == 0)
+            .unwrap();
+        none.fields.push(scale_info::Field {
+            name: None,
+            ty: UntrackedSymbol::from(u8_id),
+            type_name: None,
+            docs: Vec::new(),
+        });
+        let f = failures(&m);
+        assert!(names(&f, "extension.PassAuthenticate (explicit)"), "{f:?}");
+
+        // `None` moves away from 0.
+        let mut m = v15(136);
+        let ty = m.extrinsic.signed_extensions[0].ty.id;
+        for v in variants(&mut m, ty) {
+            if v.index == 0 {
+                v.index = 200;
+            }
+        }
+        let f = failures(&m);
+        assert!(names(&f, "extension.PassAuthenticate (explicit)"), "{f:?}");
+
+        // Its implicit data starts to carry something.
+        let mut m = v15(136);
+        m.extrinsic.signed_extensions[0].additional_signed =
+            UntrackedSymbol::from(u64_id_of(&mut m));
+        let f = failures(&m);
+        assert!(names(&f, "extension.PassAuthenticate (implicit)"), "{f:?}");
+    }
+
+    #[test]
+    fn issue_104_an_era_that_changes_is_named() {
+        let era_ty = |m: &RuntimeMetadataV15| m.extrinsic.signed_extensions[5].ty.id;
+        // A variant fewer.
+        let mut m = v15(136);
+        let ty = era_ty(&m);
+        variants(&mut m, ty).pop();
+        let f = failures(&m);
+        assert!(names(&f, "extension.CheckMortality (explicit)"), "{f:?}");
+
+        // `Mortal1` carries two bytes.
+        let mut m = v15(136);
+        let ty = era_ty(&m);
+        let u16_id = add(&mut m, TypeDef::Primitive(TypeDefPrimitive::U16));
+        variants(&mut m, ty)[1].fields[0].ty = UntrackedSymbol::from(u16_id);
+        let f = failures(&m);
+        assert!(names(&f, "extension.CheckMortality (explicit)"), "{f:?}");
+
+        // `Immortal` is no longer variant 0 (the encoding follows the index, not the position).
+        let mut m = v15(136);
+        let ty = era_ty(&m);
+        let v = variants(&mut m, ty);
+        (v[0].index, v[1].index) = (v[1].index, v[0].index);
+        let f = failures(&m);
+        assert!(names(&f, "extension.CheckMortality (explicit)"), "{f:?}");
+
+        // The implicit data is no longer a block hash.
+        let mut m = v15(136);
+        m.extrinsic.signed_extensions[5].additional_signed =
+            UntrackedSymbol::from(u64_id_of(&mut m));
+        let f = failures(&m);
+        assert!(names(&f, "extension.CheckMortality (implicit)"), "{f:?}");
+    }
 }
