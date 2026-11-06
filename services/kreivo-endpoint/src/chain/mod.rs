@@ -21,6 +21,8 @@ pub mod fake;
 #[cfg(feature = "light-client")]
 pub mod light;
 #[cfg(feature = "light-client")]
+pub mod runtime;
+#[cfg(feature = "light-client")]
 pub mod watch;
 
 use std::future::Future;

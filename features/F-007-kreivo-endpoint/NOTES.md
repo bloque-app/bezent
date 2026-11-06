@@ -280,6 +280,34 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
     fails the header of block N and counts the headers asked for: the walk keeps its anchors, a new follower resumes
     below the lowest anchor and asks for no header above it.
 
+41. **Each block's events are decoded with its own runtime's metadata** (issue #102). The walk stopped at block 40,004,557
+    (spec 134) because its events were decoded with the metadata subxt fetched at start-up (spec 136). Spec 136 widened
+    `CommunityTracks`' track id from `u16` to `u32`. As a result, that block's `CommunityReferenda::Submitted` read
+    two bytes of its proposal as track and found no variant 227. Every pass was a gap. The second half of the gap's reason
+    was the fallback to the light client, whose peers keep no state that old (item 33). It was not a second fault. Now
+    ([`chain::runtime`](../../services/kreivo-endpoint/src/chain/runtime.rs)):
+    - `System::LastRuntimeUpgrade` is read with `Timestamp::Now` and `System::Events`, in the same proof from a history
+      source, and decoded by hand (`Compact<u32>`, `String`). It names the runtime that executed the block.
+    - On a spec version not yet met, `:code` and `:heappages` are read, proven like any other value, **at the block's
+      parent**. In the block that applies an upgrade, the block's own `:code` is already the next runtime. The code's
+      embedded runtime version (spec name and version) must be the one named, or the block is a gap.
+    - The metadata is `Metadata_metadata_at_version(15)`, run in smoldot's executor (already in the tree) over an
+      **empty state**: every storage read is answered "absent". Kreivo's call reads state for constants
+      (`System::Digest`, and it iterates `CommunityTracks::Tracks` for a referenda constant). Proving next keys from a
+      history source is not something `chain::archive` does. Types are the code's whatever the state. The test checks
+      that the resulting type registry is exactly spec 134's own. So **constants in it are not the chain's, and none
+      is read**.
+    - The result is kept by spec version, seeded with the light client's (spec, metadata) pair.
+    - Decoding now happens after the read. A proven answer that does not decode is `Invalid` and no longer falls back to
+      the other side.
+
+    Still read with subxt's metadata: storage keys and the values read by field name (`System::Account`'s nonce,
+    `Contracts::ContractInfoOf`, `Assets::Asset`). Their layouts are the same at 134 and 136. `ContractEmitted`,
+    `ExtrinsicSuccess` and `ExtrinsicFailed` are the same shape at both too, so observations recorded before 40,004,557
+    stand. Tests use block 40,004,557 as recorded (`fixtures/kreivo-40004557.json`), spec 134's code, and both
+    metadata. Spec 136's metadata fails with variant 227. The walk decodes the block through spec 134's code read at the
+    parent, never at the block. A parent whose code is another runtime is refused.
+
 **Runbook** (first start on Kreivo mainnet): `start_block = 39867043`, `first_seq = 0`, `archive_rpc` with the
 archive node first, `max_walk` above the blocks from `start_block` to the head (a smaller value records the backlog as a gap that never
 fills; the walk itself is kept in rungs, item 37). The replay is sequential: a header and a
@@ -296,6 +324,6 @@ zombienet node run as an archive, back to `start_block` and its parent.
   start while no source passes the check. A second archive node is an owner decision.
 - **The replay is sequential** (one request at a time per block). Pipelining the header walk and the proofs would cut
   the first start from hours to minutes; not done here.
-- **Runtime upgrades**: events are decoded with the metadata subxt holds; an old block of an earlier runtime
-  may not decode, and becomes a gap.
+- **Runtime upgrades**: events are decoded with the metadata of the block's own runtime (item 41). The first block of
+  each runtime not yet met reads and runs its code (about 2 MB) once per process.
 - **The light-client code path is compiled in CI but exercised only by `T-013-05`** (zombienet).
