@@ -1197,6 +1197,28 @@ impl Chain for LightChain {
             .map_err(unavailable)
     }
 
+    async fn runtime_metadata(&self, at: &BlockRef) -> ChainResult<Vec<u8>> {
+        // A runtime call the light client serves: run on the block's own code, over proven state.
+        // `Option<OpaqueMetadata>`: `None` when the runtime has no metadata of that version.
+        let answer = self
+            .rpc
+            .state_call(
+                "Metadata_metadata_at_version",
+                Some(&crate::format::METADATA_VERSION.encode()),
+                Some(H256(at.hash)),
+            )
+            .await
+            .map_err(unavailable)?;
+        <Option<Vec<u8>>>::decode(&mut &answer[..])
+            .map_err(invalid)?
+            .ok_or_else(|| {
+                invalid(format!(
+                    "the runtime has no metadata V{}",
+                    crate::format::METADATA_VERSION
+                ))
+            })
+    }
+
     async fn submit(&self, extrinsic: &[u8]) -> ChainResult<()> {
         let hash = blake2_256(extrinsic);
         if self.watching.is_watching(&hash) {

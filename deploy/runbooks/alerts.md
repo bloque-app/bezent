@@ -83,7 +83,8 @@ unauthenticated caller, the database's storage and CPU.
 ## Metrics
 
 The core writes the observables of `REQ-ST-6` once a minute as CloudWatch embedded-metric-format lines, namespace
-`bezent`, dimensions `Asset`, `Network`, `Direction` where they apply (`services/core/src/observe.rs`). A value that is
+`bezent`, dimensions `Asset`, `Network`, `Direction` where they apply (`services/core/src/observe.rs`). The Kreivo
+endpoint writes one more of its own, in the same format and namespace, below (`submission_gate_state`). A value that is
 unknown is left out and named in the line's `unknown` list: an alarm on **missing data** catches it, and a read that fails
 writes nothing, which is the same alarm. Values pass through a 64-bit float: `reserve_amount` is exact up to 2^53 minor
 units and approximate beyond (an 18-decimal token above about 0.009 units); `ops_observables()` holds the exact value
@@ -104,6 +105,25 @@ deployment):
 | `fee_position_amount` | the floor is in the core's configuration and the core pages on it (`fee-position-low`, below); this alarm is for **missing data**, which the page does not cover: a breach. Every network | `REQ-ST-6`, `REQ-TR-5` |
 | `fee_position_age_seconds` | growing without bound: the endpoint is not recording a reading | `REQ-ST-6` |
 | `pauses_in_force` | above 0 (information) | `REQ-GV-1` |
+| `submission_gate_state` (dimension `Network`; written by the Kreivo endpoint) | not 0 for a few minutes (alert); missing data is a breach. `0` open, `1` closed | issue #104, `REQ-ST-6` |
+
+**The Kreivo submission gate** (issue #104, `services/kreivo-endpoint/src/metric.rs`). The endpoint builds and signs a
+delivery only while the runtime's transaction version and metadata are ones it writes and the contract's delivery role
+is the lane's account (`features/F-007-kreivo-endpoint/NOTES.md`, item 4). **While the gate is closed the endpoint stays
+healthy**: it keeps observing, so the liveness file and the container health check say nothing, and every delivery
+waits. The gate's state is therefore its own signal, in two places. (1) `submission_gate_state`, once a minute, from a
+fresh judgement at the finalized head: `0` open, `1` closed. It is left out of the line, and named in `unknown`, when
+the gate cannot be judged (the chain does not answer, or the finalized head cannot be read), never written as a zero, so
+an alarm that treats missing data as breaching catches it, as for the other metrics. No line is written at all while the
+endpoint is catching up on a backlog of blocks or a pass ends early on a store error, since the line is written after
+those steps: that missing data is the backlog or the store, not the gate, so look at the follower's logs before the
+gate's. The line carries no reason. (2) The log: each change of a settled state is one line, at ERROR level while
+closed, naming every reason (`issue #104: submissions closed: ...`), and at INFO when open. A gate that cannot be judged
+is logged at WARN level once it has stayed so for five minutes, and again for each further five (`issue #104:
+submissions are shut because the gate cannot be judged`). **None of these lines has a `kind=` field and none is a
+page**; the alarm is on the metric, and the operator reads the reason in the log. A closed gate is not a fault of the
+endpoint: live minting needs governance to set the delivery role to the lane's account, and a runtime whose format the
+endpoint does not write needs a build that knows it.
 
 `observer_lag_estimate_seconds` is an **estimate** of `NFR-6`'s quantity, the distance between an observer and its network's
 own final head. The store never holds the network's head, only the heads the endpoint recorded, so the value is the clock

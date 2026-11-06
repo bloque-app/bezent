@@ -93,6 +93,13 @@ struct State {
     balance_hangs: bool,
     /// The number of every block a balance was asked at, in order (issue #14).
     balance_log: Vec<u64>,
+    /// The runtime's metadata, as `runtime_metadata` answers it; none answers "unavailable"
+    /// (issue #104).
+    metadata: Option<Vec<u8>>,
+    /// What `runtime_metadata` fails with instead of answering, if anything (issue #104).
+    metadata_error: Option<ChainError>,
+    /// What the contract's `roles()` answers; none fails the getter (issue #104).
+    roles: Option<kreivo::Roles>,
 }
 
 /// Kreivo in memory. See the module documentation.
@@ -166,6 +173,9 @@ impl FakeChain {
                 balance_unavailable: false,
                 balance_hangs: false,
                 balance_log: Vec::new(),
+                metadata: None,
+                metadata_error: None,
+                roles: None,
             }),
         }
     }
@@ -188,6 +198,29 @@ impl FakeChain {
     /// Sets the runtime version.
     pub fn set_version(&self, version: RuntimeVersion) {
         self.lock().version = version;
+    }
+
+    /// Sets the runtime's metadata (issue #104): the bytes of a `RuntimeMetadataPrefixed`.
+    pub fn set_metadata(&self, metadata: Vec<u8>) {
+        self.lock().metadata = Some(metadata);
+    }
+
+    /// Makes `runtime_metadata` fail with `error` (`None` answers again): `Unavailable` is a chain
+    /// that did not answer, `Invalid` one whose answer cannot be used, such as a runtime with no V15
+    /// metadata (issue #104).
+    pub fn set_metadata_error(&self, error: Option<ChainError>) {
+        self.lock().metadata_error = error;
+    }
+
+    /// Makes the contract's `roles()` fail to dispatch, as a contract that does not answer it
+    /// does (issue #104).
+    pub fn clear_roles(&self) {
+        self.lock().roles = None;
+    }
+
+    /// Sets what the contract's `roles()` answers (issue #104).
+    pub fn set_roles(&self, roles: kreivo::Roles) {
+        self.lock().roles = Some(roles);
     }
 
     /// Sets what dry runs answer.
@@ -834,6 +867,12 @@ impl Chain for FakeChain {
                 let count = block.supply.get(&id).map_or(0, |(c, _)| *c);
                 return Ok(getter(count.encode()));
             }
+            if sel == kreivo::selector("roles") {
+                return match s.roles {
+                    Some(roles) => Ok(getter(roles.encode())),
+                    None => Ok(kreivo::encode_dry_run(gas, 0, Err(()))),
+                };
+            }
             if sel == kreivo::selector("redemption") {
                 let key = <(AccountId32, [u8; 32])>::decode(&mut rest)
                     .map_err(|_| ChainError::Invalid("redemption input".into()))?;
@@ -844,6 +883,18 @@ impl Chain for FakeChain {
                 DryRunMode::Refuse(e) => kreivo::encode_dry_run(gas, 0, Ok((true, vec![0, 1, e]))),
                 DryRunMode::Trap => kreivo::encode_dry_run(gas, 0, Err(())),
             })
+        })
+    }
+
+    async fn runtime_metadata(&self, at: &BlockRef) -> ChainResult<Vec<u8>> {
+        self.answer(|s| {
+            Self::block_at(s, at)?;
+            if let Some(e) = &s.metadata_error {
+                return Err(e.clone());
+            }
+            s.metadata
+                .clone()
+                .ok_or_else(|| ChainError::Unavailable("no metadata".into()))
         })
     }
 

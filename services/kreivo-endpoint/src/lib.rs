@@ -16,14 +16,17 @@
 //! | [`supply`] | issue #42 | Each bridged asset's supply at each recorded final head, the component's count and the issuance, for the reserve check (`REQ-BK-8`, `NFR-5`) |
 //! | [`fee`] | issue #14 | The delivery account's fee position (free balance less frozen) at each recorded final head, recorded with the supply (`REQ-ST-6`, `AC-H3.1`) |
 //! | [`signal`] | | Compromise and anomaly signals, written to the store once and never dropped (`AC-I1.2`) |
+//! | [`metric`] | issue #104 | The submission gate's state as a metric an alarm can read (`submission_gate_state`) |
 //! | [`kreivo`] | | Kreivo's and the contract's encoding |
 //! | [`chain`] | | The chain interface; an in-memory chain for tests; the light client (feature `light-client`) |
 
 pub mod chain;
 pub mod config;
 pub mod fee;
+pub mod format;
 pub mod health;
 pub mod kreivo;
+pub mod metric;
 pub mod network;
 pub mod observe;
 pub mod proof;

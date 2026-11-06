@@ -52,7 +52,7 @@ use bezent_kreivo_endpoint::kreivo::{self, AccountId32, AssetId, ContractEvent, 
 use bezent_kreivo_endpoint::observe::{Follower as KreivoFollower, Step as KreivoStep};
 use bezent_kreivo_endpoint::proof::Prover as KreivoProver;
 use bezent_kreivo_endpoint::submit::{
-    Lane as KreivoLane, SignerLink as KreivoLink, Submitter as KreivoSubmitter,
+    Gate as KreivoGate, Lane as KreivoLane, SignerLink as KreivoLink, Submitter as KreivoSubmitter,
 };
 use bezent_kreivo_endpoint::supply::Supplies;
 use bezent_signer::config::{Caller, Config as SignerConfig};
@@ -673,6 +673,20 @@ impl Bed {
 
         let chain = FakeChain::new(GENESIS, CONTRACT);
         let signing = start_signer(&admin, keys_path, &backend, &vault, &chain).await;
+        // Kreivo endpoint issue #104: spec 134's own metadata, and the lane holding the
+        // contract's delivery role.
+        chain.set_metadata(
+            std::fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../kreivo-endpoint/fixtures/kreivo-spec-134.metadata"
+            ))
+            .unwrap(),
+        );
+        chain.set_roles(kreivo::Roles {
+            delivery: signing.kreivo_lane.account,
+            pause: [0xee; 32],
+            governance: [0xef; 32],
+        });
         chain.advance(3);
 
         // The declarations, as the operator makes them.
@@ -933,6 +947,7 @@ impl Bed {
             contract: CONTRACT,
             lane: &self.signing.kreivo_lane,
             signer: &self.signing.kreivo,
+            gate: KreivoGate::default(),
         }
     }
 

@@ -195,6 +195,11 @@ pub trait Chain: Send + Sync {
         args: &[u8],
     ) -> impl Future<Output = ChainResult<Vec<u8>>> + Send;
 
+    /// The SCALE bytes of the runtime's metadata at `at` (`RuntimeMetadataPrefixed`, version
+    /// [`crate::format::METADATA_VERSION`]), from the runtime itself: what its transaction format is
+    /// checked against before anything is built (issue #104).
+    fn runtime_metadata(&self, at: &BlockRef) -> impl Future<Output = ChainResult<Vec<u8>>> + Send;
+
     /// Broadcast `extrinsic`. Broadcasting the same bytes again is harmless.
     fn submit(&self, extrinsic: &[u8]) -> impl Future<Output = ChainResult<()>> + Send;
 }
