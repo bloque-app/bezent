@@ -382,7 +382,7 @@ const EVM_ENDPOINT_SELECT: &[&str] = &[
 ];
 
 /// What the EVM endpoint appends: the endpoints' common records and the delivery account's fee
-/// position (migration 0110; the Kreivo endpoint records none).
+/// position (migration 0110; the Kreivo endpoint's own is `KREIVO_ENDPOINT_INSERT`, migration 0130).
 const EVM_ENDPOINT_INSERT: &[&str] = &[
     "event_log",
     "fee_position_readings",
@@ -396,12 +396,14 @@ const EVM_ENDPOINT_INSERT: &[&str] = &[
     "signed_transactions",
 ];
 
-/// What the Kreivo endpoint reads: the endpoints' common tables and its walk anchors.
+/// What the Kreivo endpoint reads: the endpoints' common tables, its walk anchors and its own fee
+/// position (migration 0130).
 const KREIVO_ENDPOINT_SELECT: &[&str] = &[
     "admitted_tokens",
     "assets",
     "endpoint_scopes",
     "event_log",
+    "fee_position_readings",
     "final_heads",
     "intents",
     "networks",
@@ -419,9 +421,11 @@ const KREIVO_ENDPOINT_SELECT: &[&str] = &[
     "signed_transactions",
 ];
 
-/// What the Kreivo endpoint appends: the endpoints' common records and its walk anchors.
+/// What the Kreivo endpoint appends: the endpoints' common records, its walk anchors and the
+/// delivery account's fee position (migration 0130).
 const KREIVO_ENDPOINT_INSERT: &[&str] = &[
     "event_log",
+    "fee_position_readings",
     "final_heads",
     "non_execution_proofs",
     "observation_outcomes",

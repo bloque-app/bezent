@@ -1,7 +1,7 @@
 ---
 name: bezent
 summary: A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger's contract.
-spec_version: 0.5.7
+spec_version: 0.5.8
 status: draft
 date: 2026-11-06
 ---
@@ -15,13 +15,14 @@ It is normative and self-contained. It does not say how bezent is built, which t
 implement it, which networks it serves today, or why the project exists. `notes/` says why, and
 `notes/CONSTRAINTS-FOR-PLAN.md` says what the plan is expected to bind.
 
-Amendments 0001 to 0015, 0018, 0019 (A1d), 0020 and 0022 (A1b and A2a; A3 and A4 are not ruled) are applied (see
-`amendments/`).
+Amendments 0001 to 0015, 0018, 0019 (A1d), 0020, 0021 (A1b), 0022 (A1b and A2a; A3 and A4 are not ruled) and 0024 are
+applied (see `amendments/`).
 
 ### Change history
 
 | Version | Date | Change |
 |---|---|---|
+| 0.5.8 | 2026-11-06 | Amendment 0021 (decision item `d-gate-sustained`, ruled by @pandres95 on the decision form: "24 hours"): "sustained" in V0's exit criteria is 24 consecutive hours of the reserve equation's evaluations at exactly zero divergence, a divergence restarting the window (§15). Amendment 0024 (`d-gate-scope`, ruled the same day: "As recommended"): the exit criteria gate only a release that moves value, the first release that lets a bridged asset carry value and each that adds an asset or a network to it; every other release needs its automated checks and the approval of one owner of the specification; a release declares which it is, and one that does not is refused (§15). No `REQ-*` changes. |
 | 0.5.7 | 2026-11-06 | Amendment 0022 (decision item `d-pause-0022`, ruled by @pandres95 on the decision form: "As recommended"): new work is everything before an attempt's first recorded signature, and an attempt with a recorded signature is in flight (`REQ-GV-1`, A1b), so a pause holds an attempt recorded before it that has no signature (§10 `CND-Paused`); the on-chain pause stays a person's act (A2a, no text). Amendment 0019 (decision item `d-payout-late-signing`, ruled the same day: "Leave pause time out", A1d): the time a payout is held under a pause or a cut-off, taken and left, does not count toward its attempt's deadline (§5.4, `REQ-GV-1`, `REQ-LM-1`, §10 `CND-Paused`, `CND-CutOff`). `NFR-2` and `NFR-3` are unchanged: latency is still measured end to end. |
 | 0.5.6 | 2026-11-06 | Amendment 0020 (decision item `d-never-prepared`, ruled by @pandres95 in the decision form, Yes): a delivery attempt whose preparation never happened (the endpoint is down, so no preparation row, refused or not, is written) goes to `Needs-Review` at the route's deadline, counted from the later of the attempt's own clock and the first final head of the destination network seen at or after the attempt was ordered, from the state it is in. No refund, no retry (`REQ-EO-3`, `REQ-RF-1`, `REQ-RV-1`). §5.2's `Needs-Review` row, §5.4's `Source-Final` and `Delivering`, `Delivered` rows and `REQ-RV-1` follow. |
 | 0.5.5 | 2026-11-05 | Amendment 0018 (decision item `d-cv-conversion-link`, ruled by @pandres95 in chat: A1b, the request comes first; A1d not taken): a deposit may name a final convertible arrival (`REQ-RQ-3`) and begins at `Source-Final` holding `CND-AwaitingConversion`; its requester names the conversion's output by the deposit's request reference (`REQ-RQ-4`); the deposit's source then becomes the output, which is minted against, and the convertible arrival is recorded with both amounts, each consumed once (`REQ-CV-1`, `REQ-CV-2`); past its deadline the deposit goes to `Needs-Review`, never to a refund (`REQ-CV-6`). §5.4's `Source-Final` row, §10's `CND-AwaitingConversion` and `AC-A5.1`, `AC-A5.2` follow. That the arrival fed that conversion, and that the requester is the one the value belongs to, stay the requester's word: recorded as open in the amendment. |
@@ -1498,6 +1499,16 @@ backend (`REQ-AS-8`), protocol venues only (`DEF-8`), no fast path.**
 | I — Custody, governance, incidents | `US-I1`–`US-I4` | — |
 
 **V0 is first proven on a test network that reproduces the issuing network, before any value. Its exit
-criteria are the reserve equation at exactly zero divergence, sustained; every final source leg delivered,
-refunded or held in a named condition with an owner; and every runbook exercised.** Nothing else in this
+criteria are the reserve equation at exactly zero divergence for 24 consecutive hours; every final source leg
+delivered, refunded or held in a named condition with an owner; and every runbook exercised.** Nothing else in this
 document may be traded against them.
+
+"For 24 consecutive hours" means that every evaluation of the reserve equation in that time (`NFR-5`) is at exactly
+zero divergence. A divergence restarts the window.
+
+**Which releases these criteria gate.** A release that moves value is the first release that lets a bridged asset carry
+value, and each release that adds a bridged asset or a network to what carries value. It MUST meet the exit criteria
+above and every other condition of its release gate. Every other release is ordinary: its automated checks MUST pass
+and one owner of this specification (`GOVERNANCE.md` names them) MUST approve it. A release MUST declare which of the
+two it is, in a record that an owner of this specification reviews, and a release that does not declare it MUST be
+refused, not treated as ordinary.

@@ -3,24 +3,32 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 """F-013 release gate (SPEC section 15, PLAN DEC-19 and M-4). Fails closed: anything not shown is a failure.
 
-What it checks, in two kinds.
+What it checks, in two kinds, and for two classes of release (amendment 0024, SPEC section 15).
+
+A release is `value-moving` (the first release that lets a bridged asset carry value, and each that adds an asset or a
+network to what carries value) or `ordinary` (every other). The class is the top-level `class` of release/evidence.toml,
+the one source of it; a missing, non-string or unknown class is refused and never read as ordinary. A value-moving
+release needs everything below. An ordinary release needs 1 (the map itself, not its exceptions), 2 and the sign-off of
+item 6 for the spec owner alone, and skips items 3 to 5, which are what is proven before value moves.
 
 Mechanical, here and now:
-  1. the criteria map (tools/ci/criteria_map.py): every V0 acceptance criterion has a test at its layer, and none
-     is an exception (no test yet) or known unmet (a test, yet the criterion is not met: e2e/criteria/known_unmet.toml);
+  1. the criteria map (tools/ci/criteria_map.py): every V0 acceptance criterion has a test at its layer; for a
+     value-moving release, none is an exception (no test yet) or known unmet (a test, yet the criterion is not met:
+     e2e/criteria/known_unmet.toml);
   2. with --online: every check named in release/gate.toml succeeded on the release commit (a skipped or missing
      check is a failure; every check is read at the release commit itself), and each sign-off is backed by the pull
      request that merged this release's release/evidence.toml, approved on its final commit by the person named, who
-     is a member of the role's team (release/roles.toml), the two roles being two different people.
+     is a member of the role's team (release/roles.toml), the roles of the class being different people.
 
-Human, recorded in release/evidence.toml and demanded here, each tied to this release commit:
+Human, recorded in release/evidence.toml and demanded here, each tied to this release commit (value-moving only, but 6):
   3. every runbook exercised on a test network (NFR-9, REQ-IC-6): one per named condition (SPEC section 10) and one
      per incident class (notes/BRIDGE-REQUIREMENTS.md section 5);
   4. the exit criteria of section 15 as measured on the test bed: the reserve equation at zero divergence for the
-     sustained window of release/gate.toml (unruled: SPEC gives no duration, amendment 0021 proposes one, so the
-     gate fails until the owner sets it), and every final source leg delivered, refunded or held with an owner;
+     sustained window of release/gate.toml (24 hours, amendment 0021), and every final source leg delivered, refunded
+     or held with an owner;
   5. the 48-hour mainnet soak of DEC-19, with at least two verified daily statements and zero divergence;
-  6. sign-offs of the spec owner and a maintainer.
+  6. sign-offs: the spec owner and a maintainer for a value-moving release, one spec owner for an ordinary one
+     (release/gate.toml, [class.*].signoff).
 
 Items 3 to 6 need a live environment (a test bed running the core against zombienet and the testnets, a mainnet
 instance) that does not exist in CI; this script cannot produce them, only refuse to pass without them.
@@ -47,6 +55,10 @@ import criteria_map  # noqa: E402
 
 ROOT = criteria_map.ROOT
 NETWORKS = {"zombienet", "anvil", "testnet"}
+VALUE_MOVING, ORDINARY = "value-moving", "ordinary"
+CLASSES = (VALUE_MOVING, ORDINARY)
+# The role every class needs: whatever gate.toml says, no class is signed off without a spec owner.
+SPEC_OWNER = "spec-owner"
 GATE_PATH = ROOT / "release/gate.toml"
 ROLES_PATH = ROOT / "release/roles.toml"
 EVIDENCE = "release/evidence.toml"
@@ -115,9 +127,38 @@ def is_date(v):
         return False
 
 
-def human(gate, ev, release, conds, incidents):
-    """Items 3 to 6. Returns (errors, lines)."""
+def release_class(ev):
+    """The release's class from its evidence, and an error when it is not one of CLASSES. There is no default:
+    absent, a non-string and an unknown value are all refused, so a missing class never reads as `ordinary`."""
+    c = ev.get("class") if isinstance(ev, dict) else None
+    if isinstance(c, str) and c in CLASSES:
+        return c, []
+    return None, [f"class: release/evidence.toml `class` is {c!r}, it must be one of {list(CLASSES)} "
+                  "(amendment 0024: a release that does not declare its class is refused, never treated as ordinary)"]
+
+
+def class_roles(gate, cls, errors):
+    """The sign-off roles of `cls` from release/gate.toml `[class.<cls>].signoff`. It must be a non-empty list of
+    role names that includes the spec owner (a file edit cannot drop them); a value-moving release also needs a
+    second role, so that two people sign it."""
+    table = sub(sub(gate, "class", errors, "release/gate.toml"), cls, errors, "release/gate.toml [class]")
+    roles = table.get("signoff", [])
+    if not isinstance(roles, list) or not roles or not all(is_name(r) for r in roles):
+        errors.append(f"signoff: release/gate.toml [class.{cls}].signoff must be a non-empty list of role names")
+        return []
+    if SPEC_OWNER not in roles:
+        errors.append(f"signoff: release/gate.toml [class.{cls}].signoff must include {SPEC_OWNER!r}")
+    if cls == VALUE_MOVING and len(set(roles)) < 2:
+        errors.append(f"signoff: release/gate.toml [class.{VALUE_MOVING}].signoff needs two different roles")
+    return roles
+
+
+def human(gate, ev, release, conds, incidents, cls=None):
+    """Items 3 to 6. Returns (errors, lines). `cls` is the release's class (default: the evidence's own)."""
     errors, lines = [], []
+    if cls is None:
+        cls, class_errors = release_class(ev)
+        errors += class_errors
     if not conds or not incidents:
         errors.append(f"runbooks: parsed {len(conds)} named conditions and {len(incidents)} incident classes; "
                       "the SPEC or the notes changed shape, fix the parser, do not skip the check")
@@ -127,70 +168,68 @@ def human(gate, ev, release, conds, incidents):
     if ev.get("release_commit") != release:
         errors.append(f"evidence: release_commit is {ev.get('release_commit')!r}, the release is {release!r} "
                       "(evidence of another commit proves nothing about this one)")
-    rb = sub(ev, "runbook", errors, "evidence")
-    for item in conds + incidents:
-        e, where = rb.get(item), f"runbook {item}"
-        if not isinstance(e, dict):
-            errors.append(f"{where}: not exercised (no entry)")
-            continue
-        n0 = len(errors)
-        if e.get("status") != "exercised":
-            errors.append(f"{where}: status is {e.get('status')!r}, not 'exercised'")
-        need(e, "network", errors, where, lambda v: isinstance(v, str) and v in NETWORKS, f"one of {sorted(NETWORKS)} (NFR-9: a test network)")
-        need(e, "on", errors, where, is_date, "an ISO date")
-        need(e, "evidence", errors, where, is_url, "an https link")
-        need(e, "by", errors, where, is_name, "a name (a string)")
-        if len(errors) == n0:
-            lines.append(f"runbook {item}: exercised on {e['network']} by {e['by']}")
-    for item in sorted(set(rb) - set(conds) - set(incidents)):
-        errors.append(f"runbook {item}: names nothing in SPEC section 10 or the incident classes (misspelt, or withdrawn)")
+    # Items 3 to 5 are what is proven before value moves: a value-moving release needs them, an ordinary one does
+    # not. An unknown class (already an error) is held to them too: it never gets the lighter path.
+    if cls != ORDINARY:
+        rb = sub(ev, "runbook", errors, "evidence")
+        for item in conds + incidents:
+            e, where = rb.get(item), f"runbook {item}"
+            if not isinstance(e, dict):
+                errors.append(f"{where}: not exercised (no entry)")
+                continue
+            n0 = len(errors)
+            if e.get("status") != "exercised":
+                errors.append(f"{where}: status is {e.get('status')!r}, not 'exercised'")
+            need(e, "network", errors, where, lambda v: isinstance(v, str) and v in NETWORKS, f"one of {sorted(NETWORKS)} (NFR-9: a test network)")
+            need(e, "on", errors, where, is_date, "an ISO date")
+            need(e, "evidence", errors, where, is_url, "an https link")
+            need(e, "by", errors, where, is_name, "a name (a string)")
+            if len(errors) == n0:
+                lines.append(f"runbook {item}: exercised on {e['network']} by {e['by']}")
+        for item in sorted(set(rb) - set(conds) - set(incidents)):
+            errors.append(f"runbook {item}: names nothing in SPEC section 10 or the incident classes (misspelt, or withdrawn)")
 
-    window = sub(gate, "exit", errors, "release/gate.toml").get("sustained_divergence_free_hours")
-    if not is_int(window) or window <= 0:
-        errors.append("exit: release/gate.toml [exit].sustained_divergence_free_hours is unset. SPEC section 15 says "
-                      "'sustained' and gives no duration; amendment 0021 proposes one and is not ruled")
-    ex = sub(ev, "exit", errors, "evidence")
-    div = sub(ex, "divergence", errors, "exit")
-    if need(div, "window_hours", errors, "exit.divergence", lambda v: is_int(v) and v > 0, "a positive integer"):
-        if is_int(window) and div["window_hours"] < window:
-            errors.append(f"exit.divergence: {div['window_hours']} h measured, {window} h required")
-    if not is_zero(div.get("divergences")):
-        errors.append(f"exit.divergence: `divergences` is {div.get('divergences')!r}, must be exactly 0 (zero tolerance)")
-    need(div, "evidence", errors, "exit.divergence", is_url, "an https link")
-    need(div, "by", errors, "exit.divergence", is_name, "a name (a string)")
-    legs = sub(ex, "legs", errors, "exit")
-    if not is_zero(legs.get("unresolved")):
-        errors.append(f"exit.legs: `unresolved` is {legs.get('unresolved')!r}: every final source leg must be "
-                      "delivered, refunded or held in a named condition with an owner (must be exactly 0)")
-    need(legs, "evidence", errors, "exit.legs", is_url, "an https link")
-    need(legs, "by", errors, "exit.legs", is_name, "a name (a string)")
+        window = sub(gate, "exit", errors, "release/gate.toml").get("sustained_divergence_free_hours")
+        if not is_int(window) or window <= 0:
+            errors.append("exit: release/gate.toml [exit].sustained_divergence_free_hours must be a positive integer "
+                          "of hours (24, ruled in amendment 0021)")
+        ex = sub(ev, "exit", errors, "evidence")
+        div = sub(ex, "divergence", errors, "exit")
+        if need(div, "window_hours", errors, "exit.divergence", lambda v: is_int(v) and v > 0, "a positive integer"):
+            if is_int(window) and div["window_hours"] < window:
+                errors.append(f"exit.divergence: {div['window_hours']} h measured, {window} h required")
+        if not is_zero(div.get("divergences")):
+            errors.append(f"exit.divergence: `divergences` is {div.get('divergences')!r}, must be exactly 0 (zero tolerance)")
+        need(div, "evidence", errors, "exit.divergence", is_url, "an https link")
+        need(div, "by", errors, "exit.divergence", is_name, "a name (a string)")
+        legs = sub(ex, "legs", errors, "exit")
+        if not is_zero(legs.get("unresolved")):
+            errors.append(f"exit.legs: `unresolved` is {legs.get('unresolved')!r}: every final source leg must be "
+                          "delivered, refunded or held in a named condition with an owner (must be exactly 0)")
+        need(legs, "evidence", errors, "exit.legs", is_url, "an https link")
+        need(legs, "by", errors, "exit.legs", is_name, "a name (a string)")
 
-    soak, want = sub(ev, "soak", errors, "evidence"), sub(gate, "soak", errors, "release/gate.toml")
-    hours, per_day = want.get("hours"), want.get("statements_per_day")
-    if not is_int(hours) or not is_int(per_day):
-        errors.append("soak: release/gate.toml [soak] needs integer `hours` and `statements_per_day` (DEC-19: 48, 2)")
-    else:
-        if not is_int(soak.get("hours")) or soak["hours"] < hours:
-            errors.append(f"soak: {soak.get('hours')!r} h on mainnet, {hours} h required (DEC-19)")
-        elif not is_int(soak.get("statements_verified")) or soak["statements_verified"] < per_day * (soak["hours"] // 24):
-            errors.append(f"soak: {soak.get('statements_verified')!r} verified statements, at least {per_day} a day required")
-        if not is_zero(soak.get("divergences")):
-            errors.append(f"soak: `divergences` is {soak.get('divergences')!r}; a divergence restarts the clock (DEC-19)")
-    need(soak, "evidence", errors, "soak", is_url, "an https link")
-    need(soak, "by", errors, "soak", is_name, "a name (a string)")
+        soak, want = sub(ev, "soak", errors, "evidence"), sub(gate, "soak", errors, "release/gate.toml")
+        hours, per_day = want.get("hours"), want.get("statements_per_day")
+        if not is_int(hours) or not is_int(per_day):
+            errors.append("soak: release/gate.toml [soak] needs integer `hours` and `statements_per_day` (DEC-19: 48, 2)")
+        else:
+            if not is_int(soak.get("hours")) or soak["hours"] < hours:
+                errors.append(f"soak: {soak.get('hours')!r} h on mainnet, {hours} h required (DEC-19)")
+            elif not is_int(soak.get("statements_verified")) or soak["statements_verified"] < per_day * (soak["hours"] // 24):
+                errors.append(f"soak: {soak.get('statements_verified')!r} verified statements, at least {per_day} a day required")
+            if not is_zero(soak.get("divergences")):
+                errors.append(f"soak: `divergences` is {soak.get('divergences')!r}; a divergence restarts the clock (DEC-19)")
+        need(soak, "evidence", errors, "soak", is_url, "an https link")
+        need(soak, "by", errors, "soak", is_name, "a name (a string)")
 
-    required = sub(gate, "signoff", errors, "release/gate.toml").get("required", [])
-    if not isinstance(required, list) or not all(is_name(r) for r in required):
-        errors.append("signoff: release/gate.toml [signoff].required must be a list of role names")
-        required = []
+    required = class_roles(gate, cls if cls in CLASSES else VALUE_MOVING, errors)
     signed = sub(ev, "signoff", errors, "evidence")
     for role in required:
         s = sub(signed, role, errors, "signoff")
         for k, pred, what in (("by", is_name, "a login (a string)"), ("pr", lambda v: is_int(v) and v > 0, "a positive integer"),
                               ("on", is_date, "an ISO date")):
             need(s, k, errors, f"signoff {role}", pred, what)
-    if not required:
-        errors.append("signoff: release/gate.toml lists no required sign-off")
     return errors, lines
 
 
@@ -266,9 +305,12 @@ def online_signoffs(gate, ev, repo, api, roles, release, git_fn):
     workflow's token cannot read organisation teams), the pull request is the one that merged this release's
     evidence, it is merged, `by` approved its final commit, and no two roles are one person."""
     errors, people = [], {}
-    required = gate.get("signoff", {}).get("required", [])
-    if not isinstance(required, list) or not required:
-        return ["signoff: release/gate.toml lists no required sign-off"]
+    cls, class_errors = release_class(ev)
+    if cls is None:
+        return ["signoff: the release has no valid class, so no sign-off can be checked (fail closed)"]
+    required = class_roles(gate, cls, errors)
+    if errors:
+        return errors
     for role in required:
         where = f"signoff {role}"
         signed = (ev or {}).get("signoff")
@@ -313,8 +355,8 @@ def online_signoffs(gate, ev, repo, api, roles, release, git_fn):
 
 
 def blockers(table):
-    """What the map allows on a pull request and a release does not: an exception (no test yet) and a known-unmet
-    entry (a test, yet the criterion is known not met)."""
+    """What the map allows on a pull request and a value-moving release does not: an exception (no test yet) and a
+    known-unmet entry (a test, yet the criterion is known not met). An ordinary release is not held to it."""
     errors = []
     excepted = [t["ac"] for t in table if t["status"] == "exception"]
     if excepted:
@@ -328,7 +370,9 @@ def blockers(table):
     return errors
 
 
-def mechanical_map():
+def mechanical_map(cls=VALUE_MOVING):
+    """The criteria map. An exception or a known-unmet entry blocks a value-moving release (and an unclassed one);
+    an ordinary release needs the map itself to hold, which is what CI already asks of every pull request."""
     crit, _, stories = criteria_map.spec_criteria()
     layers = tomllib.loads((ROOT / "e2e/criteria/layers.toml").read_text()).get("layer", {})
     try:
@@ -337,7 +381,7 @@ def mechanical_map():
         return [f"criteria: {e}"]  # a gate error, not a traceback
     errors, table = criteria_map.check(crit, stories, criteria_map.v0_stories(), criteria_map.invariant_layers(),
                                        layers, cfg, criteria_map.scan())
-    return errors + blockers(table)
+    return errors + (blockers(table) if cls != ORDINARY else [])
 
 
 def gh_api(path):
@@ -384,7 +428,7 @@ def run(release, evidence_path, online, repo, api=gh_api, git_fn=git):
     if not isinstance(release, str) or not re.fullmatch(r"[0-9a-f]{40}", release):
         return errors + ["release: no release commit (--release, or `release_commit` in the evidence)"], notes
     errors += evidence_follows_release(release, git_fn)
-    errors += mechanical_map()
+    errors += mechanical_map(release_class(ev)[0])
     if online:
         try:
             roles = tomllib.loads(ROLES_PATH.read_text())

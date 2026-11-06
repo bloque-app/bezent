@@ -31,6 +31,7 @@ use bezent_signer::link::Dialer;
 use bezent_signer::tls::DialTls;
 use bezent_vault::{Resolver, SecretRef, StoreSource, VaultConfig, Zeroizing};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -89,6 +90,18 @@ pub struct Config {
     /// system is read-only names a writable path here.
     #[serde(default)]
     pub health_file: Option<PathBuf>,
+    /// The alert floor of each network's fee position (`REQ-ST-6`; PLAN `DEC-18`, amendment 0025): per network id,
+    /// in the smallest unit of its native token, as a decimal string (a count of wei or planck outgrows a TOML
+    /// integer). The core pages `fee-position-low` when a network's fee position is below its floor. A network
+    /// with no floor is logged at start and never paged on; a floor of zero is refused, since nothing is below it.
+    ///
+    /// ```toml
+    /// [fee_floors]
+    /// kreivo = "50000000000"      # 0.05 KSM, in planck
+    /// polygon = "100000000000000000"
+    /// ```
+    #[serde(default)]
+    pub fee_floors: BTreeMap<String, String>,
 }
 
 /// The deployment's environment (PR #50 review M2).
@@ -332,6 +345,9 @@ impl Config {
         let mut config: Config = toml::from_str(&text)
             .map_err(|e| format!("invalid configuration {}: {e}", path.display()))?;
         let test = config.environment == Environment::Test;
+        config
+            .fee_floors()
+            .map_err(|e| format!("invalid configuration {}: {e}", path.display()))?;
         // REQ-PR-1 (PR #50 review M2): a deployment publishes statements; only a test one may
         // say it does not.
         let statement = match config.statement.as_mut() {
@@ -556,6 +572,24 @@ impl Config {
         Ok(())
     }
 
+    /// The fee position floors, per network, parsed: each a positive integer in the network's smallest unit.
+    pub fn fee_floors(&self) -> Result<BTreeMap<String, u128>, String> {
+        self.fee_floors
+            .iter()
+            .map(|(network, floor)| {
+                let parsed = (!floor.is_empty() && floor.bytes().all(|b| b.is_ascii_digit()))
+                    .then(|| floor.parse::<u128>().ok())
+                    .flatten()
+                    .filter(|v| *v > 0);
+                parsed.map(|v| (network.clone(), v)).ok_or_else(|| {
+                    format!(
+                        "fee_floors.{network} must be a positive whole number of the network's smallest unit, as a string"
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// The engine's settings.
     pub fn settings(&self) -> crate::Settings {
         crate::Settings {
@@ -587,6 +621,7 @@ impl fmt::Debug for Config {
             .field("environment", &self.environment)
             .field("statement", &self.statement)
             .field("health_file", &self.health_file)
+            .field("fee_floors", &self.fee_floors)
             .finish()
     }
 }
@@ -1008,5 +1043,46 @@ mod tests {
             .unwrap();
         assert_eq!(statement.token(&resolver).await.unwrap().as_str(), "tok");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Amendment 0025: the fee position floors are in this configuration, per network, as positive whole numbers in
+    /// the network's smallest unit written as strings. A floor of zero (nothing is below it), a number that is not a
+    /// string (a TOML integer outgrown by 18 decimals), a decimal or an empty one is refused when the file is read.
+    #[test]
+    fn req_st_6_fee_floors_are_positive_whole_numbers_written_as_strings() {
+        let dir = std::env::temp_dir().join(format!("bzc-config-fee-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("core.toml");
+        let load = |extra: &str| {
+            std::fs::write(
+                &path,
+                format!(
+                    "database_url = \"postgres://core@db/bezent\"\nenvironment = \"test\"\n\
+                     statement = \"disabled-test-only\"\n{extra}"
+                ),
+            )
+            .unwrap();
+            Config::from_file(&path)
+        };
+        assert!(load("").unwrap().fee_floors().unwrap().is_empty());
+        let good = load(
+            "[fee_floors]\nkreivo = \"50000000000\"\npolygon = \"100000000000000000000000\"\n",
+        )
+        .unwrap()
+        .fee_floors()
+        .unwrap();
+        assert_eq!(good["kreivo"], 50_000_000_000);
+        assert_eq!(good["polygon"], 100_000_000_000_000_000_000_000);
+        for bad in ["\"0\"", "\"\"", "\"-1\"", "\"0.5\"", "\"1e18\"", "\" 5\""] {
+            let e = load(&format!("[fee_floors]\nkreivo = {bad}\n")).expect_err(bad);
+            assert!(e.contains("fee_floors"), "{bad}: {e}");
+        }
+        // Not a string at all: the file does not parse.
+        for bad in ["5", "true", "5.5"] {
+            assert!(
+                load(&format!("[fee_floors]\nkreivo = {bad}\n")).is_err(),
+                "{bad}"
+            );
+        }
     }
 }

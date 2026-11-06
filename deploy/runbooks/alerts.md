@@ -68,6 +68,7 @@ kind exists on `develop` at this commit.
 | `attested-withdrawal-awaiting-head` | engine | `pages/attested.md` | **no, PR #66** | no |
 | `attested-report-refused` | attested reports | `pages/attested.md` | **no, PR #66** | no |
 | `attested-instructions-refused` | engine | `pages/attested.md` | **no, PR #66** | no |
+| `fee-position-low` | core (`services/core/src/fees.rs`); once on crossing below a floor, then daily, from the log | `pages/float-top-up.md` | yes | **no** |
 | `late-mint-prover-silent` | late-mint check | `pages/late-mint.md` | yes | **no** |
 | `late-mint-watch-failed` | late-mint check | `pages/late-mint.md` | yes | **no** |
 | `late-mint-check-failed` | late-mint check | `pages/late-mint.md` | yes | **no** |
@@ -100,7 +101,7 @@ deployment):
 | `unassociated_arrivals_oldest_age_seconds`, `reviews_oldest_age_seconds` | above one business day | `REQ-IN-6`, `REQ-RV-1` |
 | `undelivered_notifications_oldest_age_seconds`, `dead_notifications` | growing, above 0 | `REQ-ST-5` |
 | `fee_short_transfers` | above 0 | `CND-FeeShort` |
-| `fee_position_amount` | below a floor set in configuration (`DEC-18`; where it lives is the owner's to say, F-014 notes Open 2); missing data is a breach. EVM networks only | `REQ-ST-6`, `REQ-LM-3` |
+| `fee_position_amount` | the floor is in the core's configuration and the core pages on it (`fee-position-low`, below); this alarm is for **missing data**, which the page does not cover: a breach. Every network | `REQ-ST-6`, `REQ-TR-5` |
 | `fee_position_age_seconds` | growing without bound: the endpoint is not recording a reading | `REQ-ST-6` |
 | `pauses_in_force` | above 0 (information) | `REQ-GV-1` |
 
@@ -112,17 +113,24 @@ from that figure by and by any difference between the chain's clock and the stor
 head. Before `F-014` it was named `observer_lag_seconds` and measured the time since `final_heads.seen_at`, which an endpoint
 that records old heads promptly keeps small, so it was renamed and replaced.
 
-**Fee positions** (`REQ-ST-6`). The EVM endpoint reads its delivery account's native balance at each final head it
-records, from both providers, and records it with the head (`fee_position_readings`, migration 0110; `services/evm-endpoint/src/fee.rs`).
-Providers that disagree, or one that cannot answer, make the reading unknown, and an unknown value is left out of the
-metric and named in the line's `unknown` list, as above. `fee_position_amount` is in the network's smallest unit (wei): it
+**Fee positions** (`REQ-ST-6`). Each endpoint reads its network's delivery account at each final head it records and
+records it with the head (`fee_position_readings`, migrations 0110 and 0130; `services/evm-endpoint/src/fee.rs`,
+`services/kreivo-endpoint/src/fee.rs`). On an EVM network the position is the native balance, from both providers; on the
+issuing network it is the account's **free balance less its frozen balance**, through the light client (amendment 0025,
+`d-fee-position-scope`; the owner expects usage subscriptions to replace the float, and this is the stopgap until they do).
+A reading that cannot be made, or that the providers disagree on, is unknown, and an unknown value is left out of the metric
+and named in the line's `unknown` list, as above. `fee_position_amount` is in the network's smallest unit (wei, planck): it
 is exact in `ops_observables()` and approximate above 2^53 in the metric (about 0.009 of a native unit at 18 decimals), so
-read the exact value from `ops_observables()` and use the metric for the alarm. **The Kreivo delivery account's balance is
-not read yet** (which amount of a Substrate account is the fee position is open, F-014 notes Open 2), so `fee_position_amount`
-for the issuing network is always missing: the KSM float still has no alert floor, and
-the network's row is the reminder. There is **no floor and no page for any fee position in this repository**: the
-floor is configuration (`DEC-18`), and which service holds it, and whether bezent pages on it or the alarm does, is not
-decided. A fee position that is already short shows as `fee_short_transfers` (`CND-FeeShort`).
+read the exact value from `ops_observables()` and use the metric for the alarm.
+
+**The floor is bezent's own configuration, and the core pages on it.** `fee_floors` in the core's configuration names, per
+network, a floor in the smallest unit as a string. Each minute the core compares each network's latest fee position with its
+floor, exactly (as the store's text, not the metric's float), and pages `fee-position-low` when it is below: once on
+crossing, then once a day while it stays below, and at once again after a recovery (`fee-position-recovered` in the
+`event_log`). The runbook is `pages/float-top-up.md`. A network with no floor is logged once at start and never paged on. An
+unknown or missing reading is not low and raises no page of its own: **the missing-data alarm on `fee_position_amount` and the
+growing `fee_position_age_seconds` are its signals**, and a delivery that already could not pay shows as `fee_short_transfers`
+(`CND-FeeShort`).
 
 A fee position that cannot be read or written never stops the head or the reserve readings. A read that fails or exceeds
 five seconds is recorded as unknown. A write the store refuses (a table not yet migrated, a grant or guard that drifted) is
@@ -145,7 +153,6 @@ Stated as needs; this repository changes none of it.
 3. Alarm on the metrics above, with missing data treated as breaching.
 4. Give the alarm topic a destination that reaches a person: an on-call service with acknowledgement and escalation, or at
    least a phone-reaching subscription, chosen by the owner. A chat post is not a page.
-5. An alarm on `fee_position_amount` for each EVM network, with the floor set in configuration (PLAN `DEC-18`), and, until the
-   Kreivo endpoint reads its delivery account (F-014 notes Open 2), a scheduled read-only check of that account's native
-   balance.
+5. An alarm on missing `fee_position_amount` for every network, and on `fee_position_age_seconds` growing without bound (the
+   floor itself is the core's configuration, and its page is `fee-position-low`, above).
 6. Start the services (`desired_count` above zero) before any of this is meaningful.

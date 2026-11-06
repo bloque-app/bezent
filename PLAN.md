@@ -1,9 +1,9 @@
 ---
 name: bezent
-plan_version: 0.6.6
-status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first); v0.6.5 binds SPEC.md v0.5.6 (amendment 0020: an attempt never prepared goes to review at the route's deadline); v0.6.6 binds SPEC.md v0.5.7 (amendments 0022, A1b, and 0019, A1d: a pause holds an unsigned attempt, and its time is left out of the deadline)
+plan_version: 0.6.7
+status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first); v0.6.5 binds SPEC.md v0.5.6 (amendment 0020: an attempt never prepared goes to review at the route's deadline); v0.6.6 binds SPEC.md v0.5.7 (amendments 0022, A1b, and 0019, A1d: a pause holds an unsigned attempt, and its time is left out of the deadline); v0.6.7 binds SPEC.md v0.5.8 (amendments 0021 and 0024: "sustained" is 24 hours, and the full release gate applies only to a release that moves value) and records the fee position ruling (amendment 0025)
 date: 2026-11-06
-binds: SPEC.md v0.5.7
+binds: SPEC.md v0.5.8
 ---
 
 # bezent — Implementation Plan
@@ -21,7 +21,7 @@ that serves nothing in the spec is not in this plan.
 | `M-*` | A milestone: a set of features that together make a stated claim true, with exit criteria |
 | `RISK-*` | A risk to the plan, with its mitigation |
 
-1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.7. If a technical fact makes a requirement
+1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.8. If a technical fact makes a requirement
    impossible to meet, that becomes a spec amendment first (`amendments/`), and the plan follows it. A gap in the spec
    is handled the same way: we stop, propose an amendment, and do not fill the gap in code.
 2. **Facts come from the notes.** Numbers and properties of Kreivo, the EVM networks, CCTP, evmhot and Swaps come from
@@ -36,6 +36,7 @@ that serves nothing in the spec is not in this plan.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.6.7 | 2026-11-06 | The plan binds `SPEC.md` v0.5.8. @pandres95's rulings on the decision form, 2026-11-06. `d-gate-sustained` ("24 hours"; amendment 0021): the test bed's "sustained" is 24 consecutive hours of zero divergence (§15; `DEC-19`, `F-013`). `d-gate-scope` ("As recommended"; amendment 0024): the full gate applies only to a release that moves value, which is the first release of bUSDC and each new asset or network; every other release needs its checks green and one spec owner's sign-off; a release's class is a field of its evidence and a missing one is refused (`DEC-19`, `F-013`). `d-fee-position-scope` ("As recommended", with his note that usage subscriptions will soon override it; amendment 0025): on Kreivo the fee position is the delivery account's free balance less its frozen balance, the alert floor is in bezent's own configuration, and the core pages when a position is below it (`DEC-18`, `F-014`). |
 | 0.6.6 | 2026-11-06 | The plan binds `SPEC.md` v0.5.7. @pandres95's rulings on the decision form, 2026-11-06. `d-pause-0022` ("As recommended"; amendment 0022): a signing intent recorded before a pause and not yet signed is new work, and the signer refuses it (`REQ-GV-1`, A1b; `F-005`); the on-chain pause stays a person's act (A2a); every detector login keeps its power to pause globally, for now (P1); and an EVM lane detector raises the compromise path only on both providers' word, one provider's being unknown and paged (P2; `DEC-12`, `F-009`). `d-payout-late-signing` ("Leave pause time out"; amendment 0019, A1d): the time a payout is held under a pause or a cut-off does not count toward its attempt's deadline (`F-003`). Nothing else changes |
 | 0.6.5 | 2026-11-06 | The plan binds `SPEC.md` v0.5.6. Amendment 0020 (`d-never-prepared`, ruled Yes by @pandres95 in the decision form, 2026-11-06): a delivery attempt whose preparation never happened (the endpoint is down) goes to `Needs-Review` at the route's deadline, counted from the order, from the state it is in; never a refund or a retry (`REQ-EO-3`, `REQ-RF-1`, `REQ-RV-1`). Nothing else changes |
 | 0.6.4 | 2026-11-06 | The plan binds `SPEC.md` v0.5.5, as the owner asked in chat on 2026-11-06. Amendment 0018 (A1b, ruled `d-cv-conversion-link`, 2026-11-05) makes a convertible deposit begin with its request: the request names the final convertible arrival (`REQ-RQ-3`) and the deposit holds `CND-AwaitingConversion` until its requester names the conversion's output by the request reference (`REQ-RQ-4`, `REQ-CV-2`). `DEC-9`, `DEC-13` and `F-010` are worded to match. Nothing else changes |
@@ -543,7 +544,10 @@ environment is not built; a testnet instance comes later.
   there and hold no authority on mainnet (`REQ-KY-6`). Bloque Test reaches the instance as a requester (`DEC-15`).
 - The Kreivo delivery account needs a KSM float. Kreivo charges a storage deposit: 0.0133 KSM on the first mint and about
   0.0067 KSM for each new reference after it. Topping the float up is a runbook item (`F-014`), and its balance has an
-  alert floor, set in configuration and not in this plan (ruled by @pandres95, 2026-10-20).
+  alert floor, set in configuration and not in this plan (ruled by @pandres95, 2026-10-20). The float's measure is the
+  account's free balance less its frozen balance, and the floor is a per-network setting in the core's own
+  configuration; the core pages `fee-position-low` when a network's position is below it (ruled 2026-11-06, amendment
+  0025: a stopgap until usage subscriptions replace the float).
 
 *Serves:* no test key with production power (`REQ-KY-6`), upgrades that lose nothing in flight (`REQ-GV-4`), and
 restore without loss (`NFR-7`). *Cost:* every infrastructure change waits for the operator's review; and Bloque Test's flows run on mainnet with real assets, under the same bounds.
@@ -575,9 +579,17 @@ end-to-end suite being green and every runbook exercised.**
   Kreivo (bezent mints → Swaps deposits into aledgent → aledgent withdraws → bezent redeems); the network definition
   stays upstream in aledgent's public harness with bezent's contract and assets as an optional layer, and the combined
   job lives in the Swaps platform (`notes/ALEDGENT-INTERPLAY.md`, 2026-10-15).
-- The gate also carries the spec's three exit criteria for V0 (§15): the reserve equation at exactly zero divergence,
-  sustained; every final source leg delivered, refunded, or held in a named condition with an owner; and every runbook
-  exercised.
+- The gate also carries the spec's three exit criteria for V0 (§15): the reserve equation at exactly zero divergence for
+  24 consecutive hours (`d-gate-sustained`, amendment 0021; a divergence restarts the window); every final source leg
+  delivered, refunded, or held in a named condition with an owner; and every runbook exercised.
+- **Which releases the gate binds in full** (`d-gate-scope`, amendment 0024, SPEC §15). The full gate (the exit criteria,
+  the runbook exercises, the soak, a criteria map with no exception or known-unmet entry, and the sign-off of the spec
+  owner and a maintainer) applies only to a release that moves value: the first release of bUSDC, and each new asset or
+  network. Every other release needs the checks of `release/gate.toml` green on its commit and one spec owner's
+  sign-off. The class is the top-level `class` of `release/evidence.toml`, `"value-moving"` or `"ordinary"`; the gate
+  reads nothing else for it, refuses a release with no class or an unknown one (it never defaults to ordinary), and
+  takes what each class needs from `gate.toml`. The evidence is one pull request approved by the spec owner, so the
+  class is attested by review. The soak is a requirement of every value-moving release.
 - **The soak** (@pandres95, `pl-soak`, 2026-10-15). Before bUSDC goes live, bezent runs for 48 hours on mainnet, as the single
   instance ruled on 2026-10-16 (`DEC-18`), with the bounds as ceilings and no real user flow. Zero reserve divergence
   holds throughout, with at least two daily statements published and verified; a divergence restarts the clock. The

@@ -96,7 +96,7 @@ and no role may DELETE or TRUNCATE anything but the dispatcher's own condition h
 | `observations`, `observation_outcomes`, `observation_ranges`, `final_heads` | Kreivo endpoint, EVM endpoint: each its own networks only, the Kreivo endpoint the issuing network, the EVM endpoint the EVM origin networks (the guard of 0049 on every chain table, by the session's login and the role it acts as; 0034 and 0035 before it) |
 | `prepared_transactions`, `signed_transactions`, `non_execution_proofs` | Kreivo endpoint, EVM endpoint: each its own networks only, a preparation counting as its order's network and a signed transaction as its intent's (0049) |
 | `reserve_readings` | Kreivo endpoint, EVM endpoint: each its own networks only (0049) |
-| `fee_position_readings` | EVM endpoint: its own network only, at a final head it recorded (0110); the Kreivo endpoint records none. The core and the operators read it through `ops_observables()` only |
+| `fee_position_readings` | each endpoint: its own network only, at a final head it recorded (0110; the Kreivo endpoint since 0130: free less frozen). The core and the operators read it through `ops_observables()` only |
 | `signatures` | signer (with the nonce and the asset it decoded from the bytes it signed, 0049) |
 | `webhook_secrets`, `webhook_transfer_urls`, `webhook_condition_urls` | ingress |
 | `webhook_deliveries`, `webhook_condition_holds` (and DELETE), `webhook_cursor(after)` UPDATE, `webhook_deliveries(state, attempts, next_attempt_at, leased_until, last_status, last_error, finished_at)` UPDATE | webhook dispatcher |

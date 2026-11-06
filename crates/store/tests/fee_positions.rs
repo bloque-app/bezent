@@ -3,7 +3,8 @@
 //! Issue #14, migration 0110: the delivery account's fee position is recorded by its network's
 //! endpoint at a final head and read through `ops_observables()` (`REQ-ST-6`, `AC-H3.1`,
 //! `REQ-OB-5`, `REQ-OB-6`, `REQ-NX-3`, `INV-8`, `INV-16`). A reading is exact in the store; an unknown
-//! one is NULL with its reason, never zero.
+//! one is NULL with its reason, never zero. Both endpoints record one: the EVM endpoint's since migration 0110,
+//! the Kreivo endpoint's since 0130 (amendment 0025).
 
 mod common;
 
@@ -135,19 +136,32 @@ async fn ac_h3_1_a_fee_position_is_exact_the_latest_counts_and_unknown_is_never_
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_ob_6_inv_8_only_the_evm_endpoint_records_an_evm_networks_fee_position(pool: PgPool) {
+async fn req_ob_6_inv_8_each_endpoint_records_only_its_own_networks_fee_position(pool: PgPool) {
     declare(&pool).await;
     let evm = bezent_store::EVM_ENDPOINT_ROLE;
+    let kreivo = bezent_store::KREIVO_ENDPOINT_ROLE;
     // The EVM endpoint records its own network's; never the issuing network's.
     assert_eq!(as_role(&pool, evm, &fee("polygon", 1, "7")).await, None);
     assert_eq!(
         as_role(&pool, evm, &fee("kreivo", 1, "7")).await.as_deref(),
         REFUSED
     );
-    // Nobody else may insert: the Kreivo endpoint records none (the amount is not decided), and
-    // the marks, the core, the signer and the operators never write it.
+    // The Kreivo endpoint records the issuing network's (migration 0130, amendment 0025); never an origin
+    // network's: its own login is held to the issuing network (REQ-OB-6, INV-8).
+    assert_eq!(as_role(&pool, kreivo, &fee("kreivo", 1, "7")).await, None);
+    assert_eq!(
+        as_role(&pool, kreivo, &fee("polygon", 1, "7"))
+            .await
+            .as_deref(),
+        REFUSED
+    );
+    assert_eq!(
+        as_role(&pool, kreivo, &unknown_fee("kreivo", 1)).await,
+        None,
+        "an unknown reading, with its reason"
+    );
+    // Nobody else may insert: the marks, the core, the signer and the operators never write it.
     for role in [
-        bezent_store::KREIVO_ENDPOINT_ROLE,
         bezent_store::ENDPOINT_ROLE,
         bezent_store::INGRESS_ROLE,
         bezent_store::SERVICE_ROLE,
@@ -155,13 +169,13 @@ async fn req_ob_6_inv_8_only_the_evm_endpoint_records_an_evm_networks_fee_positi
         bezent_store::SIGNER_ROLE,
         bezent_store::OPERATOR_ROLE,
     ] {
-        assert_eq!(
-            as_role(&pool, role, &fee("polygon", 1, "7"))
-                .await
-                .as_deref(),
-            DENIED,
-            "{role}"
-        );
+        for network in ["polygon", "kreivo"] {
+            assert_eq!(
+                as_role(&pool, role, &fee(network, 1, "7")).await.as_deref(),
+                DENIED,
+                "{role} on {network}"
+            );
+        }
     }
     // The core and the operators read it through ops_observables() alone.
     for role in [bezent_store::CORE_ROLE, bezent_store::OPERATOR_ROLE] {
@@ -178,6 +192,11 @@ async fn req_ob_6_inv_8_only_the_evm_endpoint_records_an_evm_networks_fee_positi
             "{role}"
         );
     }
+    // The Kreivo endpoint reads it (to know a head is read), as the EVM endpoint does.
+    assert_eq!(
+        as_role(&pool, kreivo, "SELECT * FROM fee_position_readings").await,
+        None
+    );
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
