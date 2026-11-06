@@ -1,9 +1,9 @@
 ---
 name: bezent
 summary: A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger's contract.
-spec_version: 0.5.5
+spec_version: 0.5.6
 status: draft
-date: 2026-11-05
+date: 2026-11-06
 ---
 
 # bezent — System Specification
@@ -21,6 +21,7 @@ Amendments 0001 to 0015, and 0018, are applied (see `amendments/`).
 
 | Version | Date | Change |
 |---|---|---|
+| 0.5.6 | 2026-11-06 | Amendment 0020 (decision item `d-never-prepared`, ruled by @pandres95 in the decision form, Yes): a delivery attempt whose preparation never happened (the endpoint is down, so no preparation row, refused or not, is written) goes to `Needs-Review` at the route's deadline, counted from the later of the attempt's own clock and the first final head of the destination network seen at or after the attempt was ordered, from the state it is in. No refund, no retry (`REQ-EO-3`, `REQ-RF-1`, `REQ-RV-1`). §5.2's `Needs-Review` row, §5.4's `Source-Final` and `Delivering`, `Delivered` rows and `REQ-RV-1` follow. |
 | 0.5.5 | 2026-11-05 | Amendment 0018 (decision item `d-cv-conversion-link`, ruled by @pandres95 in chat: A1b, the request comes first; A1d not taken): a deposit may name a final convertible arrival (`REQ-RQ-3`) and begins at `Source-Final` holding `CND-AwaitingConversion`; its requester names the conversion's output by the deposit's request reference (`REQ-RQ-4`); the deposit's source then becomes the output, which is minted against, and the convertible arrival is recorded with both amounts, each consumed once (`REQ-CV-1`, `REQ-CV-2`); past its deadline the deposit goes to `Needs-Review`, never to a refund (`REQ-CV-6`). §5.4's `Source-Final` row, §10's `CND-AwaitingConversion` and `AC-A5.1`, `AC-A5.2` follow. That the arrival fed that conversion, and that the requester is the one the value belongs to, stay the requester's word: recorded as open in the amendment. |
 | 0.5.4 | 2026-10-29 | Amendment 0015 (decision item `sp-custody-boundary`, ruled by @pandres95 in chat): `REQ-CU-1` names a boundary and its properties, not a store. Key material is never readable outside the component that signs with it, which is separate from the state and auditable on its own; the sentences naming a key-management service, a hardware security module and a secrets vault are removed. |
 | 0.5.3 | 2026-10-22 | Amendment 0013 (decision item `sp-needs-review-when`, ruled by @pandres95): two more occasions for `Needs-Review` in §5.4 — a delivery attempt whose preparation is refused without a named condition past the route's deadline, and a delivery anomaly recorded for the transfer's attempt. Amendment 0014 (`sp-inv8-unsigned`): an attempt for which no signature has been recorded, and which the store has closed to signing under the approved resolution that refunds, counts as proven not executed for `INV-8`; and the signer releases a signature only once it is recorded (`INV-9`). |
@@ -645,7 +646,7 @@ a refund destination, and a source binding: the coordinate of the leg that funds
 | `Refunded` | Its refund transfer is `Completed` | Yes |
 | `Expired` | Accepted, but its source leg never arrived before the request's expiry. Nothing moved | Yes |
 | `Withdrawn` | Its source observation no longer matches the chain, before finality. Nothing moved | Yes |
-| `Needs-Review` | A leg is unknown past its deadline, an execution was partial or mismatched, a condition that blocks delivery is past its deadline, a delivery attempt's preparation was refused without a named condition and the route's deadline is past, or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown at once, with no deadline to wait for (`REQ-RV-1`, `REQ-TR-3`, `REQ-TR-5`, `REQ-EO-3`, `REQ-NX-3`) | No |
+| `Needs-Review` | A leg is unknown past its deadline, an execution was partial or mismatched, a condition that blocks delivery is past its deadline, a delivery attempt's preparation was refused without a named condition, or never happened, and the route's deadline is past, or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown at once, with no deadline to wait for (`REQ-RV-1`, `REQ-TR-3`, `REQ-TR-5`, `REQ-EO-3`, `REQ-NX-3`) | No |
 
 A transfer that cannot proceed for a named reason that clears itself holds a **named condition**
 (`CND-*`, §10) in its current state. A condition is not a state and never a failure.
@@ -678,11 +679,11 @@ sends the transfer to `Needs-Review`.
 | `Accepted` | `Withdrawn` | The source observation no longer matches the chain, before finality (`REQ-IN-7`) |
 | `Accepted` | `Needs-Review` | The source leg is observed but neither final nor withdrawn past its deadline (`REQ-RV-1`) |
 | `Source-Final` | `Delivering` | A destination transaction is signed and recorded |
-| `Source-Final` | `Needs-Review` | A condition that blocks delivery (`CND-AwaitingConversion`, `CND-DestinationRefused`) is past its deadline (`REQ-CV-6`, `REQ-IN-9`); or the delivery attempt's preparation was refused without a named condition and the route's deadline is past (`REQ-EO-3`); or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown (`REQ-NX-3`, `INV-8`) |
+| `Source-Final` | `Needs-Review` | A condition that blocks delivery (`CND-AwaitingConversion`, `CND-DestinationRefused`) is past its deadline (`REQ-CV-6`, `REQ-IN-9`); or the delivery attempt's preparation was refused without a named condition, or never happened, and the route's deadline, counted from the later of the source leg's finality and the first final head seen after the attempt was ordered, is past (`REQ-EO-3`); or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown (`REQ-NX-3`, `INV-8`) |
 | `Delivering` | `Delivered` | The destination leg is included |
 | `Delivering`, `Delivered` | `Delivering` | A **new attempt** after the previous one is proven not executed at finality (`REQ-RF-5`); each attempt is numbered and recorded |
 | `Delivering`, `Delivered` | `Refunding` | The destination leg is proven not executed at finality, and a refund transfer exists |
-| `Delivering`, `Delivered` | `Needs-Review` | A leg unknown past its deadline; a partial or mismatched execution (`REQ-TR-3`, `REQ-TR-5`); or the next attempt's preparation was refused without a named condition and the route's deadline, counted from the proof it rests on, is past (`REQ-EO-3`); or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown (`REQ-NX-3`, `INV-8`) |
+| `Delivering`, `Delivered` | `Needs-Review` | A leg unknown past its deadline; a partial or mismatched execution (`REQ-TR-3`, `REQ-TR-5`); or the next attempt's preparation was refused without a named condition, or never happened, and the route's deadline, counted from the later of the proof it rests on and the first final head seen after the attempt was ordered, is past (`REQ-EO-3`); or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown (`REQ-NX-3`, `INV-8`) |
 | `Delivered` | `Completed` | The destination leg is final and executed in full (`REQ-TR-3`) |
 | `Refunding` | `Refunded` | Its refund transfer is `Completed` |
 | `Needs-Review` | Any state reachable by **one ordinary edge** from the state held before review | The evidence is that edge's coordinate, verified by bezent (`REQ-RV-2`); a resolution that moves value has a second approver (`REQ-GV-5`) |
@@ -787,8 +788,8 @@ proven before the next.
 ### 5.9 Review
 
 **`REQ-RV-1`** A transfer or venue delivery with an unknown leg past its deadline MUST go to `Needs-Review`,
-and so MUST a transfer whose delivery attempt's preparation was refused without a named condition past the route's
-deadline (`REQ-EO-3`), and one for which a delivery anomaly was recorded, which makes its leg unknown at once
+and so MUST a transfer whose delivery attempt's preparation was refused without a named condition, or never happened,
+past the route's deadline (`REQ-EO-3`), and one for which a delivery anomaly was recorded, which makes its leg unknown at once
 (`REQ-NX-3`), with no deadline to wait for. Each goes with an owner and a service level, and MUST NOT be
 refunded, retried as a new transaction, or failed. The owner of `Needs-Review` and `CND-Unassociated` is the operator's operations function, and the service level is one
 business day.

@@ -5,13 +5,11 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0020 — an attempt whose preparation never happens goes to review at the route's deadline
 
-**Status:** proposed, not ruled. Nothing in `SPEC.md` is changed by this file. **The code of issue #48 depends on it, and PR #71
-cannot merge until the owner rules.** `REQ-TR-6` makes the §5.4 table normative, and the rows `Source-Final` -> `Needs-Review`
-and `Delivering`, `Delivered` -> `Needs-Review` allow the edge only for a refused preparation, or for an unknown leg or a
-recorded anomaly. The store's trigger allows the edge; the occasion (a preparation that never happened) is not ruled.
-`REQ-EO-3` requires the final source leg to be delivered, refunded or held in a named condition or `Needs-Review` with an
-owner, which is the reason for the amendment, but it does not name this occasion.
-**Target:** `SPEC.md` v0.5.3 (§5.4, §5.2, `REQ-RV-1`)
+**Status:** **Ruled by @pandres95 in the decision form, 2026-11-06 (`d-never-prepared`): Yes.** An attempt that is never prepared
+goes to review at the route's deadline, counted from the order, from the state it is in; no refund, no retry, no new page.
+Applied to `SPEC.md` v0.5.6 (§5.2, §5.4, `REQ-RV-1`); built by issue #48 (PR #71). The two points under "A point for the
+owner" and "What the resolution of a review does" were not part of the ruling and stay **open**.
+**Target:** `SPEC.md` v0.5.5 (§5.4, §5.2, `REQ-RV-1`)
 **Date:** 2026-11-04
 **Rationale in one line:** amendment 0013 names one occasion for an attempt that cannot be delivered, "the delivery attempt's
 preparation was refused without a named condition and the route's deadline is past". An attempt whose preparation never
@@ -64,7 +62,10 @@ cycle after the lift sends the transfer to review, although the endpoint was nev
 The code does this today and pins it (`req_rv_1_issue_48_time_under_a_pause_counts_but_only_a_lifted_pause_is_read_as_never_prepared`).
 The question for the owner is whether the lift should give one grace cycle, so that the route's time is counted again from
 the first final head after the lift, and so an endpoint that is ready when the pause lifts is not sent to review for the
-pause. Not built: it changes what a pause costs, and a pause is the operator's tool.
+pause. Not built: it changes what a pause costs, and a pause is the operator's tool. The same lift touches the page below: a
+delivery that a review resolution ran, with the endpoint down through the pause, is already older than the route's time on
+the day the pause lifts, so `resolution-unprepared-alert` fires on the first cycle after the lift, whether or not the
+endpoint would have answered inside a grace cycle. If the owner wants the grace cycle, it covers this page as well.
 
 ## What the resolution of a review does, which is not ruled here
 

@@ -173,8 +173,9 @@ Still open from the verification: F3 (an attempt ordered but never signed blocks
     and no preparation. It is read only on the endpoint path; a backend with no endpoint has no such path. The order's own
     preparation is read before any other row of the attempt, so a late row of an earlier order hides nothing. A delivery a
     review resolution runs is not sent to review again; with no preparation after the same time it pages once per order
-    (`resolution-unprepared-alert`) and changes no state. **Not ruled:** the
-    never-prepared occasion is amendment 0020, proposed; pull request #71 waits for the ruling.
+    (`resolution-unprepared-alert`) and changes no state. **Ruled:** the
+    never-prepared occasion is amendment 0020 (`d-never-prepared`, Yes, 2026-11-06; SPEC v0.5.6). **Not ruled:** a grace
+    cycle after a pause lifts, and the resolution page (both in the amendment).
     **Ruled:** the §5.4 rows gain the refused-preparation occasion by amendment 0013 (SPEC v0.5.3, pull request #47).
     A resolution's delivery orders anew and never signs over a preparation of an earlier order (`INV-9`).
 25. **An attempt ordered and never signed is cancelled by the refund that needs it gone** (issue #25, the

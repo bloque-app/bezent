@@ -670,6 +670,55 @@ async fn inv_9_a_late_row_of_the_earlier_order_does_not_hide_the_resolutions_own
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_9_a_late_row_of_the_earlier_order_does_not_hide_the_own_row_of_a_plain_retry(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // The same read with no resolution: attempt 2 of a plain retry has an order A, then an order
+    // B for the same attempt (the latest is the one read). The endpoint writes B's row first and
+    // A's late row second, so A's has the higher id. B's own row is read first and signed over;
+    // A's is never used, and nothing is read as never prepared because of it.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [17; 32]).await;
+    deliver(&w, id, 1, t0()).await;
+    prove(&w.admin, id, 1, ORIGIN, 100).await;
+    endpoint_absent(&w, id, 2, 101).await;
+    let (old, _) = order(&w.admin, id, 2).await.unwrap();
+    sqlx::query(
+        "INSERT INTO intents (transfer_id, network, purpose, on_chain_reference, reference_scope, attempt, payload) \
+         SELECT transfer_id, network, purpose, on_chain_reference, reference_scope, attempt, payload \
+         FROM intents WHERE id = $1",
+    )
+    .bind(old)
+    .execute(&w.admin)
+    .await
+    .unwrap();
+    let (fresh, _) = order(&w.admin, id, 2).await.unwrap();
+    assert!(fresh > old, "a second order for the same attempt");
+
+    let own = prepare(&w.admin, fresh, None).await;
+    let stale = prepare(&w.admin, old, None).await;
+    assert!(
+        stale > own,
+        "the late row of the earlier order is the newest"
+    );
+    w.settle(t0()).await;
+    let over = |row: i64| {
+        format!(
+            "SELECT count(*) FROM intents WHERE transfer_id = {id} AND payload ->> 'prepared' = '{row}'"
+        )
+    };
+    assert_eq!(w.count(&over(stale)).await, 0, "signed over the stale row");
+    assert_eq!(
+        w.count(&over(own)).await,
+        1,
+        "no signing intent over the own row"
+    );
+    assert_eq!(w.state(id).await.0, "Delivering");
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_eo_3_a_resolutions_order_the_endpoint_never_prepares_pages_once_and_moves_nothing(
     options: PgPoolOptions,
     connect: PgConnectOptions,
