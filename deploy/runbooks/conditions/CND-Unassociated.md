@@ -8,7 +8,7 @@ kind: condition
 covers: [REQ-IN-3, REQ-IN-6, REQ-RV-1, REQ-RQ-6, REQ-GV-5, REQ-ST-6]
 pages: []
 observables: [unassociated_arrivals, unassociated_arrivals_oldest_age_seconds]
-tests: [services/core/tests/lifecycle.rs::ac_a4_1_an_arrival_that_cannot_become_a_deposit_is_unassociated_with_an_owner, services/core/tests/lifecycle.rs::ac_a4_2_an_unassociated_arrival_is_never_minted_and_leaves_only_by_a_two_person_release, services/core/tests/conversions.rs::req_cv_1_the_store_refuses_a_transfer_naming_a_convertible_arrival]
+tests: [services/core/tests/lifecycle.rs::ac_a4_1_an_arrival_that_cannot_become_a_deposit_is_unassociated_with_an_owner, services/core/tests/lifecycle.rs::ac_a4_2_an_unassociated_arrival_is_never_minted_and_leaves_only_by_a_two_person_release, services/core/tests/conversions.rs::ac_a5_2_req_cv_2_req_cv_5_inv_6_an_output_named_directly_is_bound_and_minted]
 exercised: no
 ---
 # CND-Unassociated
@@ -16,7 +16,8 @@ exercised: no
 ## What it is
 
 A final, executed arrival at a reserve address that no deposit binds, or one that cannot become a deposit (a token not
-admitted, an amount outside the route's bounds, a convertible token): `REQ-IN-3`, `REQ-IN-6`. It is a row of the
+admitted, an amount outside the route's bounds; a convertible token until a deposit names it, `REQ-CV-1`): `REQ-IN-3`,
+`REQ-IN-6`. It is a row of the
 `unassociated_arrivals` view, not a transfer state. It is never minted, absorbed into reserve or dropped (`REQ-IN-6`).
 Its owner is `operations`, due one business day after it became final (`REQ-RV-1`). It leaves by a requester binding it
 with a deposit request that names its coordinate (`REQ-IN-3`), or by a two-person release of its refund.

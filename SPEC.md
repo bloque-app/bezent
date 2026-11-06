@@ -1,9 +1,9 @@
 ---
 name: bezent
 summary: A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger's contract.
-spec_version: 0.5.4
+spec_version: 0.5.5
 status: draft
-date: 2026-10-13
+date: 2026-11-05
 ---
 
 # bezent — System Specification
@@ -15,12 +15,13 @@ It is normative and self-contained. It does not say how bezent is built, which t
 implement it, which networks it serves today, or why the project exists. `notes/` says why, and
 `notes/CONSTRAINTS-FOR-PLAN.md` says what the plan is expected to bind.
 
-Amendments 0001 to 0015 are applied (see `amendments/`).
+Amendments 0001 to 0015, and 0018, are applied (see `amendments/`).
 
 ### Change history
 
 | Version | Date | Change |
 |---|---|---|
+| 0.5.5 | 2026-11-05 | Amendment 0018 (decision item `d-cv-conversion-link`, ruled by @pandres95 in chat: A1b, the request comes first; A1d not taken): a deposit may name a final convertible arrival (`REQ-RQ-3`) and begins at `Source-Final` holding `CND-AwaitingConversion`; its requester names the conversion's output by the deposit's request reference (`REQ-RQ-4`); the deposit's source then becomes the output, which is minted against, and the convertible arrival is recorded with both amounts, each consumed once (`REQ-CV-1`, `REQ-CV-2`); past its deadline the deposit goes to `Needs-Review`, never to a refund (`REQ-CV-6`). §5.4's `Source-Final` row, §10's `CND-AwaitingConversion` and `AC-A5.1`, `AC-A5.2` follow. That the arrival fed that conversion, and that the requester is the one the value belongs to, stay the requester's word: recorded as open in the amendment. |
 | 0.5.4 | 2026-10-29 | Amendment 0015 (decision item `sp-custody-boundary`, ruled by @pandres95 in chat): `REQ-CU-1` names a boundary and its properties, not a store. Key material is never readable outside the component that signs with it, which is separate from the state and auditable on its own; the sentences naming a key-management service, a hardware security module and a secrets vault are removed. |
 | 0.5.3 | 2026-10-22 | Amendment 0013 (decision item `sp-needs-review-when`, ruled by @pandres95): two more occasions for `Needs-Review` in §5.4 — a delivery attempt whose preparation is refused without a named condition past the route's deadline, and a delivery anomaly recorded for the transfer's attempt. Amendment 0014 (`sp-inv8-unsigned`): an attempt for which no signature has been recorded, and which the store has closed to signing under the approved resolution that refunds, counts as proven not executed for `INV-8`; and the signer releases a signature only once it is recorded (`INV-9`). |
 | 0.5.2 | 2026-10-15 | Amendment 0012 (decision item `sp-payout-window`): new named condition `CND-PayoutWindow` — a withdrawal waits while the reserve's outflow allowance is spent and resumes when it refills. |
@@ -636,7 +637,7 @@ a refund destination, and a source binding: the coordinate of the leg that funds
 | `Received` | Taken in durably, not yet decided | No |
 | `Refused` | Refused at request with a named error. Nothing moved, and nothing will on its account | Yes |
 | `Accepted` | Within route rules; its source leg is not yet final | No |
-| `Source-Final` | Its source leg is final and consumed for it, on chain (`INV-2`) | No |
+| `Source-Final` | Its source leg is final and consumed for it, on chain (`INV-2`). A deposit that names a convertible arrival begins here holding `CND-AwaitingConversion`; its source becomes the conversion's output once its requester names it (`REQ-CV-2`) | No |
 | `Delivering` | A destination transaction is signed and recorded; it may be submitted | No |
 | `Delivered` | The destination leg is included, not final | No |
 | `Completed` | The destination leg is final and executed in full | Yes |
@@ -798,13 +799,20 @@ second approver (`REQ-GV-5`).
 
 ### 5.10 Conversions
 
-**`REQ-CV-1`** An arrival of a convertible token MUST NOT be minted against. It is held in
-`CND-AwaitingConversion` until a conversion turns it into the origin token.
+**`REQ-CV-1`** An arrival of a convertible token MUST NOT be minted against. A deposit request MAY name a
+final one at a reserve address (`REQ-RQ-3`); the deposit then begins at `Source-Final` holding
+`CND-AwaitingConversion` until its conversion's output is named (`REQ-CV-2`). A convertible arrival that no
+deposit names is an unassociated arrival (`CND-Unassociated`, `REQ-IN-6`).
 
 **`REQ-CV-2`** A conversion on a deposit MUST be executed by the requester under `REQ-CV-7`, as one
-transaction whose output lands in the reserve. The deposit is then minted against **that** output, at its
-observed amount, under every rule of §5.5. The deposit records the convertible arrival and the converted
-output, with both amounts.
+transaction whose output lands in the reserve. The deposit is minted against **that** output, at its observed
+amount, under every rule of §5.5. When the deposit named the convertible arrival (`REQ-CV-1`), the requester
+that made it names the output by the deposit's request reference (`REQ-RQ-4`); the deposit's source then
+becomes the output, and the convertible arrival is recorded against the deposit and never minted against. The
+arrival and the output are each consumed once (`INV-2`). Such a deposit records the convertible arrival and the
+converted output, with both amounts. bezent MUST verify that the output is a final conversion output at the
+reserve address the convertible arrived at, in a token admitted for the deposit's asset, and not consumed; that
+the arrival fed that conversion is the requester's word, as its price and slippage are (`REQ-CV-5`).
 
 **`REQ-CV-3`** *Withdrawn by amendment 0007 (A2), with `AC-B4.1` and `AC-B4.2`: every payout is in the
 origin token; a requester that wants another token converts what it receives.*
@@ -815,8 +823,10 @@ reserve equation, and published in the statement (`REQ-PR-1`). They back nothing
 **`REQ-CV-5`** The price, the slippage and any fee of a conversion are the requester's. bezent MUST NOT
 make a delivery or a mint up to a quoted amount; it mints or delivers what was observed.
 
-**`REQ-CV-6`** A conversion that does not complete by its deadline goes to `Needs-Review` (`REQ-RV-1`). Its
-convertible holdings stay itemised; they are never written off and never counted as reserve.
+**`REQ-CV-6`** A conversion that does not complete by its deadline goes to `Needs-Review` (`REQ-RV-1`): a
+deposit holding `CND-AwaitingConversion` past the route's deadline, as for any condition held at `Source-Final`,
+goes to `Needs-Review`, and MUST NOT be refunded on a timer (`REQ-RF-1`). Its convertible holdings stay
+itemised; they are never written off and never counted as reserve.
 
 **`REQ-CV-7`** A requester MAY hold a role on a reserve address that lets it convert, at a protocol venue,
 convertible holdings at that address into the origin token. The network MUST enforce, by on-chain code
@@ -860,10 +870,11 @@ deposit request names once it cannot be taken back, and not before.
 
 **`US-A5`** — As a **requester**, a deposit in a convertible token becomes the bridged asset for what the
 conversion actually delivered.
-- `AC-A5.1` Given an arrival of a convertible token, Then nothing is minted and it holds
-  `CND-AwaitingConversion` (`REQ-CV-1`).
-- `AC-A5.2` Given the conversion's output arrival at the reserve is final, Then the deposit is minted at that
-  arrival's amount, and both amounts are reported (`REQ-CV-2`, `REQ-CV-5`).
+- `AC-A5.1` Given a deposit request naming a final arrival of a convertible token, Then nothing is minted and
+  the deposit holds `CND-AwaitingConversion` (`REQ-CV-1`).
+- `AC-A5.2` Given the conversion's output arrival at the reserve is final and its requester names it for the
+  deposit, Then the deposit is minted at that arrival's amount, and both amounts are reported (`REQ-CV-2`,
+  `REQ-CV-5`).
 - `AC-A5.3` Given a statement, Then unconverted holdings appear itemised and outside the reserve equation
   (`REQ-CV-4`).
 
@@ -1007,13 +1018,19 @@ answered. The answer carries bezent reference and the state.
 **`REQ-RQ-2`** *Withdrawn by amendment 0007 (A1).*
 
 **`REQ-RQ-3`** **Request a deposit:** request reference, the coordinate of a final arrival at a reserve
-address, the destination, and the refund destination. A coordinate is consumed once (`INV-2`).
+address (of an admitted token, or of a convertible token, `REQ-CV-1`), the destination, and the refund
+destination. A coordinate is consumed once (`INV-2`).
 
 **`REQ-RQ-4`** **Request a withdrawal:** a redemption is the request. The requester MAY add, by the
 redemption's reference, an expiry, and for an attested backend the relayed instructions (`REQ-RQ-9`). A
 withdrawal's refund always goes to its redeemer (`REQ-RF-4`). Extras are written once. For an attested backend only the requester holding that
 backend's attesting grant may add them. For a public backend, any requester holding the withdrawal grant may, and
 the first accepted wins; a later different body is refused (`ERR-ReferenceConflict`).
+
+A deposit that names a convertible arrival takes one extra the same way: the requester that made it MAY add, by
+the deposit's request reference, the coordinate of its conversion's output (`REQ-CV-2`). Whether an output may be
+named once the deposit is in `Needs-Review` is open (amendment 0018, Open 6). It is written once, by that requester
+only; a later different body is refused (`ERR-ReferenceConflict`).
 
 **`REQ-RQ-5`** *Withdrawn by amendment 0001 (A12).*
 
@@ -1349,7 +1366,7 @@ The layers are:
 | `CND-AmountMismatch` | A delivery moved a different amount; both are reported |
 | `CND-Withdrawn` | An observation stopped matching the chain before finality |
 | `CND-Paused` | Work in flight continues; new work for this route waits |
-| `CND-AwaitingConversion` | A convertible-token arrival waiting for its conversion; never reserve (`REQ-CV-1`) |
+| `CND-AwaitingConversion` | A deposit at `Source-Final` whose source is a convertible-token arrival, waiting for its requester to name the conversion's output; nothing is minted, and the arrival is never reserve (`REQ-CV-1`, `REQ-CV-2`, `REQ-CV-6`) |
 | `CND-CutOff` | The transfer's next step falls outside its route's declared cut-off; resumes by itself when the route reopens (`REQ-LM-1`) |
 | `CND-PayoutWindow` | The reserve's outflow allowance for the current window is spent; the withdrawal waits and resumes by itself when the allowance refills. Nothing is refunded or failed because of it (`REQ-RN-4`, `REQ-KY-3`) |
 
@@ -1432,7 +1449,7 @@ invalid. This specification MUST NOT contain a requirement that serves no story.
 
 | Epic | Stories | Principal requirements | Key invariants |
 |---|---|---|---|
-| A — Deposits | `US-A2`, `US-A4`, `US-A5` | `REQ-IN-*`, `REQ-CV-1`, `REQ-CV-2`, `REQ-CV-4`, `REQ-CV-7`, `REQ-RQ-3`, `REQ-LG-*` | `INV-2`, `INV-6`, `INV-10` |
+| A — Deposits | `US-A2`, `US-A4`, `US-A5` | `REQ-IN-*`, `REQ-CV-1`, `REQ-CV-2`, `REQ-CV-4`, `REQ-CV-6`, `REQ-CV-7`, `REQ-RQ-3`, `REQ-RQ-4`, `REQ-LG-*` | `INV-2`, `INV-6`, `INV-10` |
 | B — Withdrawals | `US-B1`, `US-B3`, `US-B5` | `REQ-OT-*`, `REQ-RF-*`, `REQ-CV-5`, `REQ-CV-6`, `REQ-RQ-4`, `REQ-RQ-9`, `REQ-HN-8`, `REQ-LM-3` | `INV-2`, `INV-7`, `INV-8` |
 | C — Outcomes and proof | `US-C1`, `US-C2` | `REQ-NX-*`, `REQ-OB-*`, `REQ-ST-3`, `REQ-TR-*` | `INV-5`, `INV-16` |
 | D — Exactly once | `US-D1`, `US-D2` | `REQ-ID-*`, `REQ-EO-*`, `REQ-OB-3` | `INV-2`, `INV-9`, `INV-10` |

@@ -63,6 +63,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "book_entries",
             "book_postings",
             "book_quarantine",
+            "deposit_conversions",
             "endpoint_scopes",
             "event_log",
             "event_log_head",
@@ -157,6 +158,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "assets",
             "attempt_milestones",
             "book_balances",
+            "deposit_conversions",
             "event_log",
             "event_log_head",
             "event_log_position",
@@ -206,6 +208,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         &[
             "bezent_applied_migrations()",
             "bezent_writer_holds(text,oid)",
+            "coordinate_lock(text,bigint,bytea,position_kind,bigint)",
+            "coordinate_recorded_converted(text,bigint,bytea,position_kind,bigint)",
+            "deposit_conversion_record(bigint,bigint,text,bigint,bytea,position_kind,bigint)",
             "funding_arrival(text,text,text,bigint)",
             "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
         ],
@@ -304,6 +309,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         &[
             "admin_actions",
             "book_quarantine",
+            "deposit_conversions",
             "event_log",
             "ledger_accounts",
             "ledger_accounts_listed",

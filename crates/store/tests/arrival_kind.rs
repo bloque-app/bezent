@@ -4,9 +4,10 @@
 //! what a request may bind (`REQ-OB-6`, `REQ-RQ-3`, `REQ-RQ-6`, `REQ-IN-3`, `REQ-IN-6`,
 //! `REQ-CV-1`, `REQ-CV-2`, `INV-2`, `INV-8`).
 //!
-//! Every observation carries the kind its endpoint wrote. A deposit binds only an `arrival` or a
-//! `conversion_output` at a reserve; the refund of an unassociated arrival any arrival at a
-//! reserve; nothing binds an observation without an explicit bindable kind (M1). The store holds
+//! Every observation carries the kind its endpoint wrote. A deposit binds only an `arrival`, a
+//! `convertible_arrival` (amendment 0018, A1b: held, never minted against) or a `conversion_output`
+//! at a reserve; the refund of an unassociated arrival any arrival at a reserve but a convertible
+//! one; nothing binds an observation without an explicit bindable kind (M1). The store holds
 //! this on the binding, by insert or by update, and when the source becomes final (S2). Each
 //! endpoint's login records only its own network's observations, of the kinds that network's role
 //! produces. Role checks run under `SET LOCAL ROLE` inside a transaction that is rolled back, so no
@@ -132,11 +133,14 @@ async fn m1_inv_2_nothing_without_an_explicit_bindable_kind_binds(pool: PgPool) 
     assert_eq!(bound(&pool).await, 1);
 }
 
-/// M2: a deposit binds an `arrival` or a `conversion_output` at the reserve (REQ-CV-2); a
-/// convertible arrival is never minted against (REQ-CV-1), nor a token not admitted, a rebalance
-/// leg or a venue delivery.
+/// M2: a deposit binds an `arrival` or a `conversion_output` at the reserve (REQ-CV-2), and, since
+/// amendment 0018 (A1b), a convertible arrival, which it holds until it names the conversion's
+/// output and is never minted against (REQ-CV-1; `deposit_conversions.rs`); never a token not
+/// admitted, a rebalance leg or a venue delivery.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn m2_req_cv_1_req_cv_2_a_deposit_binds_an_arrival_or_a_conversion_output(pool: PgPool) {
+async fn m2_req_cv_1_req_cv_2_a_deposit_binds_an_arrival_a_convertible_arrival_or_a_conversion_output(
+    pool: PgPool,
+) {
     declarations(&pool).await;
     at_reserve(&pool, 1, Some("arrival")).await;
     at_reserve(&pool, 2, Some("conversion_output")).await;
@@ -144,7 +148,7 @@ async fn m2_req_cv_1_req_cv_2_a_deposit_binds_an_arrival_or_a_conversion_output(
     exec(&pool, &insert("deposit", "d-conversion", 2)).await;
 
     at_reserve(&pool, 10, Some("convertible_arrival")).await;
-    assert_refused(&pool, &insert("deposit", "d-convertible", 10), "REQ-CV-1").await;
+    exec(&pool, &insert("deposit", "d-convertible", 10)).await;
     at_reserve(&pool, 11, Some("other_arrival")).await;
     assert_refused(&pool, &insert("deposit", "d-other", 11), "REQ-RQ-3").await;
     observe(&pool, 12, "0xother-reserve", RESERVE, None, Some("arrival")).await;
@@ -159,7 +163,23 @@ async fn m2_req_cv_1_req_cv_2_a_deposit_binds_an_arrival_or_a_conversion_output(
     .await;
     observe(&pool, 13, "0xvenue", RESERVE, None, Some("arrival")).await;
     assert_refused(&pool, &insert("deposit", "d-venue", 13), "REQ-RQ-3").await;
-    assert_eq!(bound(&pool).await, 2);
+    // A convertible arrival from another reserve or a venue is no deposit either, as for an arrival.
+    observe(
+        &pool,
+        14,
+        "0xvenue",
+        RESERVE,
+        None,
+        Some("convertible_arrival"),
+    )
+    .await;
+    assert_refused(
+        &pool,
+        &insert("deposit", "d-venue-convertible", 14),
+        "REQ-RQ-3",
+    )
+    .await;
+    assert_eq!(bound(&pool).await, 3);
 }
 
 /// S1: the refund of an unassociated arrival binds any arrival at a reserve (REQ-IN-6): a token
@@ -218,10 +238,10 @@ async fn s2_inv_2_the_binding_rule_holds_on_update_and_at_source_final(pool: PgP
     )
     .await;
 
-    // A deposit bound ahead of its observation, which then turns out to be no arrival: it never
-    // reaches Source-Final.
+    // A deposit bound ahead of its observation, which then turns out to be no arrival it may name
+    // (a token not admitted): it never reaches Source-Final.
     exec(&pool, &insert("deposit", "d-ahead", 2)).await;
-    at_reserve(&pool, 2, Some("convertible_arrival")).await;
+    at_reserve(&pool, 2, Some("other_arrival")).await;
     let ahead: i64 =
         sqlx::query_scalar("SELECT id FROM transfers WHERE bridge_reference = 'd-ahead'")
             .fetch_one(&pool)
@@ -232,8 +252,12 @@ async fn s2_inv_2_the_binding_rule_holds_on_update_and_at_source_final(pool: PgP
         .expect("Received -> Accepted");
     let err = transition(&pool, ahead, "Accepted", "Source-Final")
         .await
-        .expect_err("a convertible arrival never becomes a deposit's final source");
-    assert_refusal(&err, "REQ-CV-1", "Source-Final on a convertible arrival");
+        .expect_err("a token not admitted never becomes a deposit's final source");
+    assert_refusal(
+        &err,
+        "REQ-RQ-3",
+        "Source-Final on an arrival of a token not admitted",
+    );
 
     // A deposit bound to a coordinate nothing was observed at never becomes final either.
     exec(&pool, &insert("deposit", "d-unseen", 3)).await;
@@ -485,18 +509,25 @@ async fn s2_inv_2_the_backfill_trusts_no_event_on_origin_rows(pool: PgPool) {
 
 /// M1: a refund never binds a `convertible_arrival` (INV-2, REQ-CV-1): it is held until it is
 /// converted, and its value is released only through its conversion, never refunded in its own
-/// right as well. A deposit does not bind it either.
+/// right as well. A deposit may name it (amendment 0018, A1b), and then a refund still may not.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn m1_inv_2_req_cv_1_a_refund_never_binds_a_convertible_arrival(pool: PgPool) {
     declarations(&pool).await;
     at_reserve(&pool, 1, Some("convertible_arrival")).await;
     assert_refused(&pool, &insert("refund", "r-convertible", 1), "REQ-RQ-6").await;
-    assert_refused(&pool, &insert("deposit", "d-convertible", 1), "REQ-CV-1").await;
     assert_eq!(bound(&pool).await, 0);
+    exec(&pool, &insert("deposit", "d-convertible", 1)).await;
+    assert_refused(
+        &pool,
+        &insert("refund", "r-convertible-after", 1),
+        "REQ-RQ-6",
+    )
+    .await;
+    assert_eq!(bound(&pool).await, 1);
     // Its conversion's output is what a refund (or a deposit) names.
     at_reserve(&pool, 2, Some("conversion_output")).await;
     exec(&pool, &insert("refund", "r-output", 2)).await;
-    assert_eq!(bound(&pool).await, 1);
+    assert_eq!(bound(&pool).await, 2);
 }
 
 /// S1: the venue and reserve sender exclusions apply to an `arrival` only: a conversion's output

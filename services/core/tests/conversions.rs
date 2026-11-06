@@ -14,11 +14,14 @@
 //! itemised holdings (`AC-A5.3`) are `statement.rs`; the on-chain role (`REQ-CV-7`) is
 //! `contracts/evm/test/fork/Conversion.t.sol`.
 //!
-//! What is not here: the record of the convertible arrival with both amounts, and the condition
-//! `CND-AwaitingConversion` held by an arrival. SPEC §5.10 does not say which arrival a deposit
-//! records or what holds the condition; `amendments/0018-conversion-record.md` proposes how, and
-//! nothing is built on it until it is ruled. Nor is anything here a claim that the binding rules
-//! tie a conversion's output, or any arrival, to a requester: they do not (amendment 0018, A2).
+//! Amendment 0018 as ruled (`d-cv-conversion-link`, A1b: the request comes first). A deposit may
+//! name a final convertible arrival; it reaches `Source-Final` holding `CND-AwaitingConversion`
+//! and nothing is minted. Its requester then names, by the deposit's request reference, the
+//! conversion's output (`POST /v0/deposits/conversion`, `REQ-RQ-4`); the store moves the deposit's
+//! source there (migration 0120), the core clears the condition and mints the output's amount.
+//! The store's own rules for the move (`INV-2`) are `crates/store/tests/deposit_conversions.rs`.
+//! Nothing here is a claim that bezent can tell that the arrival fed that conversion, or that the
+//! requester is the one the value belongs to: it cannot (amendment 0018, A2, open).
 
 mod common;
 
@@ -157,6 +160,132 @@ fn coordinate(block: i64, index: i64) -> Value {
     })
 }
 
+/// The second requester of the binding tests, holding the deposit grant only.
+const OTHER: &str = "other";
+const OTHER_CREDENTIAL: &str = "ot-1.other-secret-0123456789";
+
+/// Grants `requester` the deposit grant under `credential` (`<id>.<secret>`).
+async fn grant(w: &World, requester: &str, credential: &str) {
+    let (id, secret) = credential.split_once('.').unwrap();
+    let digest = hex::encode(Sha256::digest(secret.as_bytes()));
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO requesters (requester) VALUES ('{requester}'); \
+             INSERT INTO requester_grants (requester, grant_kind) VALUES ('{requester}', 'deposit'); \
+             INSERT INTO requester_credentials (credential_id, requester, secret_sha256) \
+               VALUES ('{id}', '{requester}', '\\x{digest}');"
+        ),
+    )
+    .await;
+}
+
+/// `POST` of `body` to `path` under `credential`: the status and the answer.
+async fn post(router: &Router, path: &str, credential: &str, body: Value) -> (StatusCode, Value) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post(path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {credential}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let answer =
+        serde_json::from_slice(&bytes).unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes)));
+    (status, answer)
+}
+
+/// `POST /v0/deposits` for `coordinate` under `credential`.
+async fn deposit_as(
+    router: &Router,
+    credential: &str,
+    reference: &str,
+    coordinate: &Value,
+) -> (StatusCode, Value) {
+    post(
+        router,
+        "/v0/deposits",
+        credential,
+        json!({
+            "request_reference": reference,
+            "coordinate": coordinate,
+            "destination": {"network": ISSUING, "address": DESTINATION},
+            "refund_destination": {"network": ORIGIN, "address": "0x52908400098527886E0F7030069857D2E4169EE7"},
+        }),
+    )
+    .await
+}
+
+/// `POST /v0/deposits/conversion`: under `credential`, request `reference` names `output` as the
+/// conversion output of the deposit requested as `deposit_reference` (`REQ-RQ-4`).
+async fn conversion_as(
+    router: &Router,
+    credential: &str,
+    reference: &str,
+    deposit_reference: &str,
+    output: &Value,
+) -> (StatusCode, Value) {
+    post(
+        router,
+        "/v0/deposits/conversion",
+        credential,
+        json!({
+            "request_reference": reference,
+            "deposit_reference": deposit_reference,
+            "conversion_output": output,
+        }),
+    )
+    .await
+}
+
+/// The transfer a request answered, by its bridge reference.
+async fn transfer_of(w: &World, answer: &Value) -> i64 {
+    scalar(
+        &w.admin,
+        &format!(
+            "SELECT id FROM transfers WHERE bridge_reference = '{}'",
+            answer["bridge_reference"]
+                .as_str()
+                .expect("a bridge reference")
+        ),
+    )
+    .await
+}
+
+/// The source block and log index a transfer is bound to, and its amount.
+async fn bound_to(w: &World, id: i64) -> (i64, i64, String) {
+    sqlx::query_as(
+        "SELECT source_block_number, source_position_index, amount::text FROM transfers WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&w.admin)
+    .await
+    .unwrap()
+}
+
+/// A convertible arrival of 5 000 at block 10, final at 14, requested as a deposit (`dep`) by the
+/// first requester: through the real ingress, then the core's cycles. The router and the deposit.
+async fn awaiting(w: &World) -> (Router, i64) {
+    let router = ingress(w).await;
+    let arrival = convertible_arrival(&w.admin, 10, 5_000).await;
+    decide(&w.admin, arrival, "final", 14).await;
+    let (status, answer) = deposit_as(&router, CREDENTIAL, "dep", &coordinate(10, 0)).await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["state"], "Accepted", "{answer}");
+    let id = transfer_of(w, &answer).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-AwaitingConversion".into()))
+    );
+    (router, id)
+}
+
 /// The real ingress, on its own login, and a requester holding the deposit grant.
 async fn ingress(w: &World) -> Router {
     let digest = hex::encode(Sha256::digest(
@@ -212,38 +341,314 @@ async fn request_deposit(
     (status, answer)
 }
 
-/// Store layer: a transfer never names a convertible arrival (`REQ-CV-1`), and the arrival stays
-/// where `REQ-IN-6` puts an arrival nothing can bind. That a deposit *request* for it is refused
-/// by the ingress, with nothing minted, is the seam test below.
+/// `AC-A5.1`, `REQ-CV-1`, `INV-6`, through the real ingress to the core, with no transition written
+/// by hand: a deposit request naming a final convertible arrival is accepted, the core takes it to
+/// `Source-Final` holding `CND-AwaitingConversion`, and nothing is ordered, cycle after cycle. The
+/// arrival is the deposit's now, not an unassociated one; and the store refuses, to the core's own
+/// login, a mint order written against it by hand (the order guard admits only a token admitted
+/// for the asset).
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_cv_1_the_store_refuses_a_transfer_naming_a_convertible_arrival(
+async fn ac_a5_1_req_cv_1_inv_6_a_deposit_naming_a_convertible_arrival_holds_cnd_awaiting_conversion_and_mints_nothing(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
-    let a = convertible_arrival(&w.admin, 10, 5_000).await;
-    decide(&w.admin, a, "final", 12).await;
-    let kind: String = scalar(
+    let (_, id) = awaiting(&w).await;
+    head(&w.admin, ISSUING, 100).await;
+    for _ in 0..3 {
+        w.settle(t0()).await;
+    }
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-AwaitingConversion".into()))
+    );
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+    assert_eq!(
+        w.count("SELECT count(*) FROM unassociated_arrivals").await,
+        0
+    );
+
+    let core = login_pool(&w.admin, CORE_LOGIN, bezent_store::CORE_ROLE, 1).await;
+    // The reference the core would write for it, so the order reaches the order guard itself.
+    sqlx::query("UPDATE transfers SET on_chain_reference = '\\x01' WHERE id = $1")
+        .bind(id)
+        .execute(&core)
+        .await
+        .expect("the core writes a deposit's reference");
+    let refused = sqlx::query(
+        "INSERT INTO intents (transfer_id, network, purpose, on_chain_reference, attempt, payload) \
+         VALUES ($1, $2, 'mint', '\\x01', 1, $3)",
+    )
+    .bind(id)
+    .bind(ISSUING)
+    .bind(json!({"order": {"asset": ISSUING_ASSET, "to": DESTINATION_ACCOUNT}, "amount": "5000"}))
+    .execute(&core)
+    .await
+    .expect_err("a mint against a convertible arrival")
+    .to_string();
+    assert!(refused.contains("INV-6"), "{refused}");
+}
+
+/// The happy path of A1b, `AC-A5.2`, `REQ-CV-2`, `REQ-CV-5`, `REQ-RQ-4`, `INV-2`, `INV-6`: the
+/// request first (the deposit holds `CND-AwaitingConversion`), then the output (named by the
+/// deposit's request reference; not final: nothing recorded; final: the source moves to it), then
+/// the mint, for exactly the output's amount. Both amounts are reported: the deposit's `amount` is
+/// the output's, its `converted_arrival` the arrival's.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a5_2_req_cv_2_req_cv_5_req_rq_4_inv_2_inv_6_the_request_comes_first_then_the_output_then_the_mint(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = awaiting(&w).await;
+    let (input, output) = swap(&w.admin, 12, 5_000, 4_990).await;
+
+    // The output is observed, not final: nothing recorded, the request reference not consumed.
+    let (status, answer) =
+        conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(12, 2)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+    assert_eq!(w.count("SELECT count(*) FROM deposit_conversions").await, 0);
+    // The swap's input is no output.
+    decide(&w.admin, input, "final", 16).await;
+    let (_, answer) =
+        conversion_as(&router, CREDENTIAL, "conv-in", "dep", &coordinate(12, 1)).await;
+    assert_eq!(answer["error"], "ERR-SourceNotFound", "{answer}");
+
+    decide(&w.admin, output, "final", 16).await;
+    let (status, answer) =
+        conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(12, 2)).await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["state"], "Source-Final", "{answer}");
+    assert_eq!(answer["amount"], "4990", "{answer}");
+    assert_eq!(answer["source"]["block_number"], 12, "{answer}");
+    assert_eq!(answer["source"]["position"]["index"], 2, "{answer}");
+    assert_eq!(answer["converted_arrival"]["amount"], "5000", "{answer}");
+    assert_eq!(
+        answer["converted_arrival"]["token"], CONVERTIBLE,
+        "{answer}"
+    );
+    assert_eq!(
+        answer["converted_arrival"]["coordinate"]["block_number"], 10,
+        "{answer}"
+    );
+    assert_eq!(bound_to(&w, id).await, (12, 2, "4990".into()));
+    // A repeat answers alike (REQ-ID-1); the deposit's own request now shows the same.
+    let (status, again) =
+        conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(12, 2)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["converted_arrival"], answer["converted_arrival"]);
+
+    // The core clears the condition on the output's final point, then orders the mint: the
+    // output's amount, to the request's destination, under the reference derived from the output.
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    w.cycle(t0()).await;
+    let (_, payload) = order(&w.admin, id, 1).await.expect("the mint order");
+    assert_eq!(
+        payload,
+        json!({"order": {"asset": ISSUING_ASSET, "to": DESTINATION_ACCOUNT}, "amount": "4990"})
+    );
+    assert_eq!(
+        w.count("SELECT count(*) FROM intents WHERE payload ? 'order'")
+            .await,
+        1
+    );
+    let reference: Vec<u8> = scalar(
         &w.admin,
-        &format!("SELECT kind FROM observations WHERE id = {a}"),
+        &format!("SELECT on_chain_reference FROM transfers WHERE id = {id}"),
     )
     .await;
-    assert_eq!(kind, "convertible_arrival");
+    let source = bezent_core_service::refs::Coordinate {
+        network: ORIGIN.into(),
+        block_number: 12,
+        block_hash: hash(ORIGIN, 12),
+        position_kind: "log".into(),
+        position_index: 2,
+    };
+    assert_eq!(
+        reference,
+        bezent_core_service::refs::mint_reference(&source).to_vec()
+    );
 
-    let err = try_deposit(&w.admin, 10, 0, 5_000)
-        .await
-        .expect_err("a deposit naming a convertible arrival");
-    assert!(err.to_string().contains("REQ-CV-1"), "{err}");
+    // Written once (REQ-RQ-4): another output for the same deposit is a conflict.
+    let (_, other_output) = swap(&w.admin, 18, 1, 1).await;
+    decide(&w.admin, other_output, "final", 20).await;
+    let (_, answer) = conversion_as(&router, CREDENTIAL, "conv-2", "dep", &coordinate(18, 2)).await;
+    assert_eq!(answer["error"], "ERR-ReferenceConflict", "{answer}");
+}
 
-    // It is held, not absorbed or dropped (REQ-IN-6): the operator's view of unbound arrivals lists
-    // it. The condition it holds there is `CND-Unassociated`; `CND-AwaitingConversion` on an arrival
-    // is what amendment 0018 proposes (SPEC §5.10 gives a transfer no arrival to hold it for).
+/// `REQ-RQ-4`, `INV-2`: an output is named only by the requester that made the deposit. Another
+/// requester, holding the deposit grant, finds no deposit of its own by that reference, and its
+/// request is refused with nothing moved. (That it could have bound the same output by a deposit of
+/// its own first is the exposure amendment 0018 leaves open; the next test.)
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rq_4_inv_2_an_output_named_by_a_different_requester_is_refused(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = awaiting(&w).await;
+    grant(&w, OTHER, OTHER_CREDENTIAL).await;
+    let (_, output) = swap(&w.admin, 12, 5_000, 4_990).await;
+    decide(&w.admin, output, "final", 16).await;
+
+    let (status, answer) =
+        conversion_as(&router, OTHER_CREDENTIAL, "conv", "dep", &coordinate(12, 2)).await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["error"], "ERR-SourceNotFound", "{answer}");
+    assert_eq!(bound_to(&w, id).await, (10, 0, "5000".into()));
+    assert_eq!(w.count("SELECT count(*) FROM deposit_conversions").await, 0);
+    w.settle(t0()).await;
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+}
+
+/// `INV-2`: an output already consumed is refused. A second requester binds the swap's output with
+/// a deposit of its own first (nothing ties an output to a requester: amendment 0018's exposure,
+/// open); the first requester's conversion request is then `ERR-SourceConsumed`, and its deposit
+/// still awaits, minting nothing.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_2_an_output_already_consumed_is_refused(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = awaiting(&w).await;
+    grant(&w, OTHER, OTHER_CREDENTIAL).await;
+    let (_, output) = swap(&w.admin, 12, 5_000, 4_990).await;
+    decide(&w.admin, output, "final", 16).await;
+    let (_, answer) = deposit_as(&router, OTHER_CREDENTIAL, "theirs", &coordinate(12, 2)).await;
+    assert_eq!(answer["state"], "Accepted", "{answer}");
+
+    let (_, answer) = conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(12, 2)).await;
+    assert_eq!(answer["error"], "ERR-SourceConsumed", "{answer}");
+    assert_eq!(bound_to(&w, id).await, (10, 0, "5000".into()));
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-AwaitingConversion".into()))
+    );
     assert_eq!(
         w.count(&format!(
-            "SELECT count(*) FROM unassociated_arrivals WHERE observation_id = {a}"
+            "SELECT count(*) FROM intents WHERE transfer_id = {id}"
         ))
         .await,
+        0
+    );
+}
+
+/// `INV-2`: a convertible arrival is consumed once. A second deposit naming it is refused while the
+/// first awaits its output, and still after the first moved on to the output: the arrival is
+/// recorded against the first deposit, never bound again.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_2_an_arrival_named_twice_is_refused(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = awaiting(&w).await;
+    grant(&w, OTHER, OTHER_CREDENTIAL).await;
+    let (_, answer) = deposit_as(&router, CREDENTIAL, "dep-again", &coordinate(10, 0)).await;
+    assert_eq!(answer["error"], "ERR-SourceConsumed", "{answer}");
+
+    let (_, output) = swap(&w.admin, 12, 5_000, 4_990).await;
+    decide(&w.admin, output, "final", 16).await;
+    let (_, answer) = conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(12, 2)).await;
+    assert_eq!(answer["state"], "Source-Final", "{answer}");
+    for (credential, reference) in [
+        (CREDENTIAL, "dep-later"),
+        (OTHER_CREDENTIAL, "theirs-later"),
+    ] {
+        let (_, answer) = deposit_as(&router, credential, reference, &coordinate(10, 0)).await;
+        assert_eq!(answer["error"], "ERR-SourceConsumed", "{answer}");
+    }
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE state <> 'Refused'")
+            .await,
         1
+    );
+    assert_eq!(bound_to(&w, id).await, (12, 2, "4990".into()));
+    assert_eq!(
+        w.count("SELECT count(*) FROM unassociated_arrivals").await,
+        0
+    );
+}
+
+/// `REQ-CV-6`, `REQ-RF-1`, `REQ-RV-1`: a deposit whose conversion's output is not named by its
+/// deadline (the route's, from the convertible arrival's finality, at a final block of the issuing
+/// network) goes to `Needs-Review`, keeping the condition. Nothing is refunded and nothing ordered;
+/// an output named afterwards is refused (`REQ-RV-2`: a review ends by evidence).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_cv_6_req_rf_1_past_its_deadline_the_deposit_goes_to_review_never_to_a_refund(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = awaiting(&w).await;
+    head(&w.admin, ISSUING, 14 + BUDGET).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-AwaitingConversion".into()))
+    );
+    head(&w.admin, ISSUING, 14 + BUDGET + 1).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Needs-Review".into(), Some("CND-AwaitingConversion".into()))
+    );
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+
+    let (_, output) = swap(&w.admin, 20, 5_000, 4_990).await;
+    decide(&w.admin, output, "final", 22).await;
+    let (_, answer) = conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(20, 2)).await;
+    assert_eq!(answer["error"], "ERR-SourceConsumed", "{answer}");
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+}
+
+/// `REQ-CV-6`: a conversion completes by its deadline when its output's block is at or before it.
+/// An output from a block past the deadline, named while the issuing network's final head has not
+/// passed the deadline yet, does not clear the condition; once the head passes it, the deposit goes
+/// to review with the output as its source, and nothing is minted or refunded.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_cv_6_an_output_after_the_deadline_does_not_complete_the_conversion(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = awaiting(&w).await;
+    let late = 14 + BUDGET + 10;
+    let (_, output) = swap(&w.admin, late, 5_000, 4_990).await;
+    decide(&w.admin, output, "final", late + 2).await;
+    let (_, answer) = conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(late, 2)).await;
+    assert_eq!(answer["state"], "Source-Final", "{answer}");
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-AwaitingConversion".into()))
+    );
+    head(&w.admin, ISSUING, 14 + BUDGET + 1).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Needs-Review".into(), Some("CND-AwaitingConversion".into()))
+    );
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
     );
 }
 
@@ -266,19 +671,17 @@ async fn req_cv_2_req_cv_5_the_store_refuses_a_deposit_of_any_amount_but_the_out
         .expect("a deposit for the output's amount");
 }
 
-/// The seam, `AC-A5.1` and `AC-A5.2` through the real ingress to the mint: a convertible arrival
-/// is not minted against and a request naming it is refused; a conversion's input is refused; the
-/// output is refused until final, then bound, and minted for exactly what the swap delivered.
+/// `AC-A5.2`, `REQ-CV-2`, `REQ-CV-5`, `INV-6`: an output named directly by a deposit request (the
+/// path that existed before amendment 0018, which the ruling did not remove) is bound once final
+/// and minted for exactly what the swap delivered; the swap's input is refused. Such a deposit
+/// records no convertible arrival; the convertible arrival nobody named stays unassociated.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn ac_a5_1_ac_a5_2_req_cv_1_req_cv_2_req_cv_5_inv_6_the_ingress_binds_the_output_and_the_core_mints_it(
+async fn ac_a5_2_req_cv_2_req_cv_5_inv_6_an_output_named_directly_is_bound_and_minted(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
     let router = ingress(&w).await;
-
-    // 5 000 of the convertible arrive (block 10); the swap spends 5 000 of it and delivers 4 990
-    // of the origin token (block 12), a price and a slippage that are the requester's (REQ-CV-5).
     let arrival = convertible_arrival(&w.admin, 10, 5_000).await;
     let (input, output) = swap(&w.admin, 12, 5_000, 4_990).await;
 
@@ -287,17 +690,12 @@ async fn ac_a5_1_ac_a5_2_req_cv_1_req_cv_2_req_cv_5_inv_6_the_ingress_binds_the_
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
     assert_eq!(w.count("SELECT count(*) FROM transfers").await, 0);
 
-    // Everything final. AC-A5.1: a request naming the convertible arrival is refused; it is not
-    // minted against and stays held.
     decide(&w.admin, arrival, "final", 14).await;
     decide(&w.admin, input, "final", 14).await;
-    let (status, answer) = request_deposit(&router, "r-conv", &coordinate(10, 0)).await;
-    assert_eq!(status, StatusCode::CREATED, "{answer}");
-    assert_eq!(answer["state"], "Refused", "{answer}");
-    assert_eq!(answer["error"], "ERR-SourceNotFound", "{answer}");
-    // Nor the conversion's input leg.
     let (_, answer) = request_deposit(&router, "r-in", &coordinate(12, 1)).await;
     assert_eq!(answer["error"], "ERR-SourceNotFound", "{answer}");
+    // The convertible arrival no deposit names is held as an unassociated arrival (REQ-CV-1,
+    // REQ-IN-6): not absorbed, not dropped, not minted.
     assert_eq!(
         w.count(&format!(
             "SELECT count(*) FROM unassociated_arrivals WHERE observation_id = {arrival}"
@@ -305,45 +703,24 @@ async fn ac_a5_1_ac_a5_2_req_cv_1_req_cv_2_req_cv_5_inv_6_the_ingress_binds_the_
         .await,
         1
     );
-    w.settle(t0()).await;
-    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
 
-    // The output is observed, not final yet at its own block: still nothing (INV-6).
-    let (status, _) = request_deposit(&router, "r-out", &coordinate(12, 2)).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(w.count("SELECT count(*) FROM transfers").await, 0);
-
-    // Final: the request is accepted, for the output's amount and nothing else.
     decide(&w.admin, output, "final", 14).await;
     let (status, answer) = request_deposit(&router, "r-out", &coordinate(12, 2)).await;
     assert_eq!(status, StatusCode::CREATED, "{answer}");
     assert_eq!(answer["state"], "Accepted", "{answer}");
-    let bridge = answer["bridge_reference"].as_str().unwrap().to_owned();
-    let (id, amount): (i64, String) =
-        sqlx::query_as("SELECT id, amount::text FROM transfers WHERE bridge_reference = $1")
-            .bind(&bridge)
-            .fetch_one(&w.admin)
-            .await
-            .unwrap();
-    assert_eq!(amount, "4990", "the output's, not the input's 5000");
+    assert!(answer.get("converted_arrival").is_none(), "{answer}");
+    let id = transfer_of(&w, &answer).await;
+    assert_eq!(bound_to(&w, id).await, (12, 2, "4990".into()));
 
-    // The core takes it to Source-Final and orders the mint: the output's amount, to the request's
-    // destination, under the arrival reference derived from the output's coordinate.
     w.cycle(t0()).await;
-    assert_eq!(w.state(id).await.0, "Source-Final");
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
     w.cycle(t0()).await;
     let (_, payload) = order(&w.admin, id, 1).await.expect("the mint order");
     assert_eq!(
         payload,
         json!({"order": {"asset": ISSUING_ASSET, "to": DESTINATION_ACCOUNT}, "amount": "4990"})
     );
-    assert_eq!(
-        w.count("SELECT count(*) FROM intents WHERE payload ? 'order'")
-            .await,
-        1
-    );
-
-    // The coordinate is consumed once (INV-2): a second request for the same output is refused.
+    // The coordinate is consumed once (INV-2).
     let (_, answer) = request_deposit(&router, "r-again", &coordinate(12, 2)).await;
     assert_eq!(answer["error"], "ERR-SourceConsumed", "{answer}");
 }

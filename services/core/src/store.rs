@@ -128,13 +128,16 @@ pub struct Observation {
     pub outcome: Option<String>,
     pub final_block_number: Option<i64>,
     pub final_block_hash: Option<Vec<u8>>,
+    /// What its endpoint classified it as (migration 0034): `arrival`, `convertible_arrival`,
+    /// `conversion_output`, …
+    pub kind: String,
 }
 
 /// The columns of [`Observation`] over `observations o LEFT JOIN observation_outcomes x`.
 pub const OBSERVATION: &str = "o.id, o.network, o.block_number, o.block_hash, o.block_time, \
     o.position_kind::text AS position_kind, o.position_index, o.token, o.amount::text AS amount, \
     o.sender, o.recipient, o.on_chain_reference, o.executed, o.detail, x.outcome, \
-    x.final_block_number, x.final_block_hash";
+    x.final_block_number, x.final_block_hash, o.kind::text AS kind";
 
 impl Observation {
     /// Its own coordinate, as a point.

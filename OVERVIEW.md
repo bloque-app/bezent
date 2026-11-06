@@ -490,12 +490,14 @@ sequenceDiagram
     participant B as bezent
     participant K as Bridge contract (Kreivo)
     F->>V: 100 USDT0
-    B->>B: observe at finality, hold it as awaiting conversion (not reserve)
+    B->>B: observe it at finality (not reserve)
+    S->>B: deposit request naming the USDT0 arrival
+    B->>B: hold the deposit as awaiting conversion; mint nothing
     S->>V: under its conversion role, swap 100 USDT0 with the output to this vault
     V->>U: 100 USDT0
     U->>V: 99.98 USDC
     B->>B: observe the conversion at its coordinate
-    S->>B: deposit request naming the conversion's output
+    S->>B: name the conversion's output, by the deposit's request reference
     B->>K: mint 99.98 bUSDC, reporting both amounts
 ```
 
@@ -580,7 +582,8 @@ ones that matter most here (`SPEC.md` §10):
 - `CND-ReserveShort`: the asset's reserve cannot yet cover a withdrawal.
 - `CND-MintWindow`: the mint window is spent; minting resumes when the window rolls over.
 - `CND-DestinationRefused`: Kreivo refused a mint because of its destination; nothing was minted.
-- `CND-AwaitingConversion`: a USDT0 arrival waiting for Swaps' conversion; it is never reserve.
+- `CND-AwaitingConversion`: a deposit naming a USDT0 arrival, waiting for Swaps to name its conversion's output; it is
+  never reserve and nothing is minted (amendment 0018).
 - `CND-CutOff`: the transfer's next step falls outside a time its route does not run; it resumes when the
   route reopens.
 - `CND-FeeShort`: an address lacks the network's native token to pay for its next transaction.

@@ -789,13 +789,20 @@ impl Core {
                 } else {
                     return Ok(Did::default());
                 };
+                // REQ-CV-1, AC-A5.1 (amendment 0018, A1b): a deposit that names a convertible
+                // arrival reaches Source-Final holding CND-AwaitingConversion, in the same
+                // transition, so no cycle sees it there without the condition.
+                let condition = (to == State::SourceFinal
+                    && t.kind == "deposit"
+                    && o.kind == "convertible_arrival")
+                    .then_some(Condition::AwaitingConversion);
                 store::append(
                     conn,
                     t.id,
                     &Move {
                         from,
                         to,
-                        condition: None,
+                        condition,
                         point: Some(&point),
                         attempt: None,
                         manual_action: None,
@@ -959,6 +966,9 @@ impl Core {
         t: &Transfer,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
+        if let Some(did) = self.conversion(conn, t, now).await? {
+            return Ok(did);
+        }
         if let Some(c) = t.condition().filter(|c| c.blocks_delivery()) {
             let start = t.source_final_block_time.unwrap_or(now);
             let deadline = self.deadline(conn, t, start).await?;
@@ -988,6 +998,70 @@ impl Core {
         }
         self.deliver(conn, t, State::SourceFinal, 1, None, None)
             .await
+    }
+
+    /// A deposit that named a convertible arrival (`REQ-CV-1`, `REQ-CV-2`, `REQ-CV-6`; amendment
+    /// 0018, A1b). While its source is the convertible arrival it holds `CND-AwaitingConversion`
+    /// and nothing is ordered: one found without the condition takes it again. Once its requester
+    /// named the conversion's output (the store moved its source there, `deposit_conversion_record`),
+    /// the conversion completed by its deadline when the output's block is at or before it: the
+    /// condition clears, resting on the output's final point, and the next cycle delivers against
+    /// the output. An output whose block is past the deadline did not complete by it, and the
+    /// deadline rule of [`Core::source_final`] sends the transfer to review, never to a refund
+    /// (`REQ-RF-1`). `None` for every other transfer.
+    async fn conversion(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        now: DateTime<Utc>,
+    ) -> sqlx::Result<Option<Did>> {
+        if t.kind != "deposit" {
+            return Ok(None);
+        }
+        let Some(source) = t.source() else {
+            return Ok(None);
+        };
+        let Some(o) = store::observation_at(conn, &source).await? else {
+            return Ok(None);
+        };
+        let awaiting = t.condition() == Some(Condition::AwaitingConversion);
+        match o.kind.as_str() {
+            "convertible_arrival" if !awaiting => {
+                tracing::error!(transfer = %t.bridge_reference, "REQ-CV-1: a deposit on a convertible arrival without CND-AwaitingConversion; held");
+                self.hold(conn, t, Some(Condition::AwaitingConversion))
+                    .await
+                    .map(Some)
+            }
+            "conversion_output" if awaiting => {
+                let start = t.source_final_block_time.unwrap_or(now);
+                let deadline = self.deadline(conn, t, start).await?;
+                if o.block_time > deadline {
+                    return Ok(None);
+                }
+                let (Some(n), Some(h)) = (o.final_block_number, o.final_block_hash.as_deref())
+                else {
+                    return Ok(None);
+                };
+                let Some(point) = store::final_point(conn, &o.network, n, h).await? else {
+                    return Ok(None);
+                };
+                store::append(
+                    conn,
+                    t.id,
+                    &Move {
+                        from: State::SourceFinal,
+                        to: State::SourceFinal,
+                        condition: None,
+                        point: Some(&point),
+                        attempt: None,
+                        manual_action: None,
+                    },
+                )
+                .await?;
+                Ok(Some(Did::moved()))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Why `t`'s destination cannot be delivered to (`REQ-IN-5`): it is on the declared list of
