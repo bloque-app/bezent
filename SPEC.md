@@ -15,7 +15,7 @@ It is normative and self-contained. It does not say how bezent is built, which t
 implement it, which networks it serves today, or why the project exists. `notes/` says why, and
 `notes/CONSTRAINTS-FOR-PLAN.md` says what the plan is expected to bind.
 
-Amendments 0001 to 0015, and 0018, are applied (see `amendments/`).
+Amendments 0001 to 0015, 0018, and 0020, are applied (see `amendments/`).
 
 ### Change history
 

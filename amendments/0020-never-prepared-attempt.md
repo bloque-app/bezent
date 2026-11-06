@@ -9,8 +9,8 @@ SPDX-License-Identifier: CC-BY-4.0
 goes to review at the route's deadline, counted from the order, from the state it is in; no refund, no retry, no new page.
 Applied to `SPEC.md` v0.5.6 (§5.2, §5.4, `REQ-RV-1`); built by issue #48 (PR #71). The two points under "A point for the
 owner" and "What the resolution of a review does" were not part of the ruling and stay **open**.
-**Target:** `SPEC.md` v0.5.5 (§5.4, §5.2, `REQ-RV-1`)
-**Date:** 2026-11-04
+**Target:** `SPEC.md` v0.5.6 (§5.4, §5.2, `REQ-RV-1`)
+**Date:** 2026-11-04; ruled and applied 2026-11-06
 **Rationale in one line:** amendment 0013 names one occasion for an attempt that cannot be delivered, "the delivery attempt's
 preparation was refused without a named condition and the route's deadline is past". An attempt whose preparation never
 happens at all (the endpoint is down, so no preparation, refused or not, is ever written) is not "refused", yet `REQ-EO-3`
