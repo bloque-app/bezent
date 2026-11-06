@@ -25,6 +25,7 @@ use alloy::primitives::{Address, B256, U256, keccak256};
 use alloy::rpc::client::{ClientBuilder, RpcClient};
 use alloy::sol;
 use alloy::sol_types::SolCall;
+use bezent_evm_endpoint::broadcast::Broadcast;
 use bezent_evm_endpoint::evm::{self, Contracts};
 use bezent_evm_endpoint::network::{self, Declarations, Identity, Token};
 use bezent_evm_endpoint::observe::{Follower, Step, Watch};
@@ -164,6 +165,25 @@ sol! {
     function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut);
 }
 
+/// What a hang costs: each test fails, naming itself, within `TEST_BOUND` (the slowest runs in
+/// about 40 s on a runner), where an unbounded one held the job until its 40-minute limit. A bound
+/// that is passed fails the test; it never skips it or lets it pass.
+const TEST_BOUND: Duration = Duration::from_secs(300);
+/// anvil must answer its first call within this, upstream state included.
+const ANVIL_START_BOUND: Duration = Duration::from_secs(90);
+/// One call to anvil: anvil itself gives up on its upstream after 60 s, and retries.
+const ANVIL_CALL_BOUND: Duration = Duration::from_secs(90);
+/// `forge script`'s deployment (a few seconds, up to 20 s against a slow upstream).
+const DEPLOY_BOUND: Duration = Duration::from_secs(180);
+
+/// Runs one test's body within `TEST_BOUND`, and fails the test, naming it, if it is not done.
+/// This ends a body that awaits; a blocking wait (the deployment) has its own bound.
+async fn bounded<F: std::future::Future<Output = ()>>(test: &str, body: F) {
+    if tokio::time::timeout(TEST_BOUND, body).await.is_err() {
+        panic!("{test} did not finish within {TEST_BOUND:?}: it is stuck, not slow");
+    }
+}
+
 const DEPOSITOR: &str = "0x976EA74026E726554dB657fA54763abd0C3a0aa9";
 fn upstream(net: &Net) -> Option<String> {
     let url = std::env::var(net.url_env).ok().filter(|u| !u.is_empty());
@@ -236,13 +256,26 @@ impl Anvil {
             upstream: upstream.to_owned(),
             net,
         };
-        for _ in 0..120 {
-            if anvil.call("eth_blockNumber", json!([])).await.is_ok() {
-                return anvil;
+        let ready = async {
+            while anvil.call("eth_blockNumber", json!([])).await.is_err() {
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
+        if tokio::time::timeout(ANVIL_START_BOUND, ready)
+            .await
+            .is_err()
+        {
+            let log = std::fs::read_to_string(&anvil.log)
+                .unwrap_or_default()
+                .replace(&anvil.upstream, "<upstream>");
+            let tail: Vec<&str> = log.lines().rev().take(20).collect();
+            panic!(
+                "anvil ({}) did not answer within {ANVIL_START_BOUND:?}; its last lines:\n{}",
+                net.name,
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            );
         }
-        panic!("anvil did not answer");
+        anvil
     }
 
     fn url(&self, host: &str) -> String {
@@ -250,10 +283,15 @@ impl Anvil {
     }
 
     async fn call(&self, method: &'static str, params: Value) -> Result<Value, String> {
-        self.rpc
-            .request::<Value, Value>(method, params)
-            .await
-            .map_err(|e| e.to_string())
+        match tokio::time::timeout(
+            ANVIL_CALL_BOUND,
+            self.rpc.request::<Value, Value>(method, params),
+        )
+        .await
+        {
+            Ok(answer) => answer.map_err(|e| e.to_string()),
+            Err(_) => Err(format!("no answer within {ANVIL_CALL_BOUND:?}")),
+        }
     }
 
     /// A call that must succeed. A transport error is tried again twice (a pooled connection
@@ -303,6 +341,12 @@ impl Anvil {
             a: Http::new("a", &self.url("127.0.0.1")).unwrap(),
             b: Http::new("b", &self.url("localhost")).unwrap(),
         }
+    }
+
+    /// The one broadcast node: this anvil, over plain loopback http (amendment 0023). The payouts
+    /// the suite sends go through here, not through the pair.
+    fn broadcast(&self) -> Broadcast<Http> {
+        Broadcast::new(vec![Http::new("anvil", &self.url("127.0.0.1")).unwrap()])
     }
 
     /// Mines `n` blocks.
@@ -409,12 +453,38 @@ fn deploy(anvil: &Anvil, lane: Address) -> Vault {
     if net.convertible {
         forge.env("CONVERSION_MEMBER", CONVERSION_MEMBER);
     }
-    let out = forge.output().expect("forge is on the PATH");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Run with its output in files and waited for up to DEPLOY_BOUND: `output()` waits for ever,
+    // and a forge that never returns held a job for 40 minutes.
+    let dir = common::temp_dir();
+    let (out_path, err_path) = (dir.join("forge.out"), dir.join("forge.err"));
+    let mut child = forge
+        .stdout(Stdio::from(std::fs::File::create(&out_path).unwrap()))
+        .stderr(Stdio::from(std::fs::File::create(&err_path).unwrap()))
+        .spawn()
+        .expect("forge is on the PATH");
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > DEPLOY_BOUND {
+            let _ = child.kill();
+            let _ = child.wait();
+            let log = std::fs::read_to_string(&err_path).unwrap_or_default();
+            let tail: Vec<&str> = log.lines().rev().take(20).collect();
+            panic!(
+                "DeployVault ({}) did not finish within {DEPLOY_BOUND:?}; forge's last lines:\n{}",
+                net.name,
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let stdout = std::fs::read_to_string(&out_path).unwrap_or_default();
     assert!(
-        out.status.success(),
+        status.success(),
         "DeployVault failed: {}",
-        String::from_utf8_lossy(&out.stderr)
+        std::fs::read_to_string(&err_path).unwrap_or_default()
     );
     let value = stdout
         .lines()
@@ -438,6 +508,7 @@ struct World {
     net: &'static Net,
     anvil: Anvil,
     pair: Pair<Http>,
+    broadcast: Broadcast<Http>,
     admin: PgPool,
     endpoint: PgPool,
     core: PgPool,
@@ -514,6 +585,7 @@ impl World {
         World {
             net,
             pair: anvil.pair(),
+            broadcast: anvil.broadcast(),
             anvil,
             endpoint: role_pool(&connect, "bezent_evm_endpoint").await,
             core: role_pool(&connect, "bezent_core").await,
@@ -549,6 +621,7 @@ impl World {
                 emitter: self.vault.emitter,
                 declarations: &self.declarations,
                 convertibles: &self.convertibles,
+                delivery: self.lane.address,
             },
             start_block: self.net.block + 1,
             max_range: 500,
@@ -558,6 +631,7 @@ impl World {
     fn submitter(&self) -> Submitter<'_, Http> {
         Submitter {
             pair: &self.pair,
+            broadcast: &self.broadcast,
             pool: &self.endpoint,
             network: self.net.name,
             chain_id: self.net.chain_id,
@@ -686,40 +760,46 @@ macro_rules! fork_tests {
         _pool: PgPoolOptions,
         _connect: PgConnectOptions,
     ) {
-        let Some(upstream) = upstream(&$net) else { return };
-        let anvil = Anvil::start(&$net, &upstream).await;
-        let pair = anvil.pair();
-        let polygon = Identity {
-            chain_id: $net.chain_id,
-            pinned_number: $net.block,
-            pinned_hash: $net.hash.parse().unwrap(),
-        };
-        // The finalized head is 64 blocks behind: below the pinned block until mined past it.
-        let e = network::check(&pair, &polygon).await.unwrap_err();
-        assert!(e.contains("below the pinned block"), "{e}");
-        anvil.finalize().await;
-        let head = network::check(&pair, &polygon).await.unwrap();
-        assert!(head.number > $net.block);
-        let base = Identity {
-            chain_id: $net.other_chain,
-            ..polygon
-        };
-        assert!(
-            network::check(&pair, &base)
-                .await
-                .unwrap_err()
-                .contains("AC-I4.1")
-        );
-        let other_hash = Identity {
-            pinned_hash: B256::repeat_byte(1),
-            ..polygon
-        };
-        assert!(
-            network::check(&pair, &other_hash)
-                .await
-                .unwrap_err()
-                .contains("not the pinned")
-        );
+        bounded(concat!(module_path!(), "::fork_ac_i4_1_the_pinned_block_starts_and_another_identity_is_refused"), async move {
+            let Some(upstream) = upstream(&$net) else { return };
+            let anvil = Anvil::start(&$net, &upstream).await;
+            let pair = anvil.pair();
+            // Amendment 0023: the broadcast node serves the declared chain, and not another.
+            anvil.broadcast().check_chain($net.chain_id).await.unwrap();
+            anvil.broadcast().check_chain($net.other_chain).await.unwrap_err();
+            let polygon = Identity {
+                chain_id: $net.chain_id,
+                pinned_number: $net.block,
+                pinned_hash: $net.hash.parse().unwrap(),
+            };
+            // The finalized head is 64 blocks behind: below the pinned block until mined past it.
+            let e = network::check(&pair, &polygon).await.unwrap_err();
+            assert!(e.contains("below the pinned block"), "{e}");
+            anvil.finalize().await;
+            let head = network::check(&pair, &polygon).await.unwrap();
+            assert!(head.number > $net.block);
+            let base = Identity {
+                chain_id: $net.other_chain,
+                ..polygon
+            };
+            assert!(
+                network::check(&pair, &base)
+                    .await
+                    .unwrap_err()
+                    .contains("AC-I4.1")
+            );
+            let other_hash = Identity {
+                pinned_hash: B256::repeat_byte(1),
+                ..polygon
+            };
+            assert!(
+                network::check(&pair, &other_hash)
+                    .await
+                    .unwrap_err()
+                    .contains("not the pinned")
+            );
+        })
+        .await;
     }
 
     /// PR #39 review S4 (`AC-I4.1`) and S5: F-008's deployed Roles modifier is the vault's (avatar,
@@ -730,30 +810,33 @@ macro_rules! fork_tests {
         pool: PgPoolOptions,
         connect: PgConnectOptions,
     ) {
-        let Some(upstream) = upstream(&$net) else { return };
-        let w = World::new(&$net, &upstream, pool, connect).await;
-        w.anvil.finalize().await;
-        let head = w.pair.final_point().await.unwrap();
-        let (roles, safe, lane) = (w.vault.roles, w.vault.safe, w.lane.address);
-        network::check_vault(&w.pair, &head, roles, safe, lane)
-            .await
-            .unwrap();
-        let e = network::check_vault(&w.pair, &head, roles, Address::repeat_byte(1), lane)
-            .await
-            .unwrap_err();
-        assert!(e.contains("avatar"), "{e}");
-        let e = network::check_vault(&w.pair, &head, safe, safe, lane)
-            .await
-            .unwrap_err();
-        assert!(e.contains("AC-I4.1"), "{e}");
-        let delegation = format!("0xef0100{}", hex::encode(Address::repeat_byte(0x77)));
-        w.anvil
-            .rpc("anvil_setCode", json!([lane, delegation]))
-            .await;
-        let e = network::check_vault(&w.pair, &head, roles, safe, lane)
-            .await
-            .unwrap_err();
-        assert!(e.contains("holds code"), "{e}");
+        bounded(concat!(module_path!(), "::fork_s4_ac_i4_1_the_deployed_roles_modifier_is_the_vaults"), async move {
+            let Some(upstream) = upstream(&$net) else { return };
+            let w = World::new(&$net, &upstream, pool, connect).await;
+            w.anvil.finalize().await;
+            let head = w.pair.final_point().await.unwrap();
+            let (roles, safe, lane) = (w.vault.roles, w.vault.safe, w.lane.address);
+            network::check_vault(&w.pair, &head, roles, safe, lane)
+                .await
+                .unwrap();
+            let e = network::check_vault(&w.pair, &head, roles, Address::repeat_byte(1), lane)
+                .await
+                .unwrap_err();
+            assert!(e.contains("avatar"), "{e}");
+            let e = network::check_vault(&w.pair, &head, safe, safe, lane)
+                .await
+                .unwrap_err();
+            assert!(e.contains("AC-I4.1"), "{e}");
+            let delegation = format!("0xef0100{}", hex::encode(Address::repeat_byte(0x77)));
+            w.anvil
+                .rpc("anvil_setCode", json!([lane, delegation]))
+                .await;
+            let e = network::check_vault(&w.pair, &head, roles, safe, lane)
+                .await
+                .unwrap_err();
+            assert!(e.contains("holds code"), "{e}");
+        })
+        .await;
     }
 
     #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -761,73 +844,76 @@ macro_rules! fork_tests {
         pool: PgPoolOptions,
         connect: PgConnectOptions,
     ) {
-        let Some(upstream) = upstream(&$net) else { return };
-        let w = World::new(&$net, &upstream, pool, connect).await;
-        let depositor: Address = DEPOSITOR.parse().unwrap();
-        w.anvil.fund_token(w.vault.safe, $net.fund_vault).await;
-        w.anvil.fund_token(depositor, $net.fund_depositor).await;
+        bounded(concat!(module_path!(), "::fork_ac_a2_1_inv_10_ac_c1_3_inv_14_an_arrival_and_a_payout_at_the_vault"), async move {
+            let Some(upstream) = upstream(&$net) else { return };
+            let w = World::new(&$net, &upstream, pool, connect).await;
+            let depositor: Address = DEPOSITOR.parse().unwrap();
+            w.anvil.fund_token(w.vault.safe, $net.fund_vault).await;
+            w.anvil.fund_token(depositor, $net.fund_depositor).await;
 
-        // An arrival: not recorded before it is final (AC-A2.1), then once (INV-10).
-        let transfer = evm::transferCall {
-            to: w.vault.safe,
-            amount: U256::from($net.arrival),
-        }
-        .abi_encode();
-        let arrival = w
-            .anvil
-            .send(json!({"from": depositor, "to": $net.token(), "data": format!("0x{}", hex::encode(transfer))}))
-            .await;
-        w.anvil.mine(1).await;
-        w.follow().await;
-        let arrivals = "SELECT count(*) FROM observations WHERE detail ->> 'event' = 'Arrival'";
-        assert_eq!(w.count(arrivals).await, 0);
-        w.anvil.finalize().await;
-        w.follow().await;
-        w.follow().await;
-        assert_eq!(w.count(arrivals).await, 1);
-        let (amount, sender, recipient, tx): (String, String, String, String) = sqlx::query_as(
-            "SELECT amount::text, sender, recipient, detail ->> 'tx_hash' FROM observations \
-             WHERE detail ->> 'event' = 'Arrival'",
-        )
-        .fetch_one(&w.admin)
-        .await
-        .unwrap();
-        assert_eq!(amount, $net.arrival.to_string());
-        assert_eq!(sender, depositor.to_string());
-        assert_eq!(recipient, format!("{:#x}", w.vault.safe));
-        assert_eq!(tx.parse::<B256>().unwrap(), arrival);
+            // An arrival: not recorded before it is final (AC-A2.1), then once (INV-10).
+            let transfer = evm::transferCall {
+                to: w.vault.safe,
+                amount: U256::from($net.arrival),
+            }
+            .abi_encode();
+            let arrival = w
+                .anvil
+                .send(json!({"from": depositor, "to": $net.token(), "data": format!("0x{}", hex::encode(transfer))}))
+                .await;
+            w.anvil.mine(1).await;
+            w.follow().await;
+            let arrivals = "SELECT count(*) FROM observations WHERE detail ->> 'event' = 'Arrival'";
+            assert_eq!(w.count(arrivals).await, 0);
+            w.anvil.finalize().await;
+            w.follow().await;
+            w.follow().await;
+            assert_eq!(w.count(arrivals).await, 1);
+            let (amount, sender, recipient, tx): (String, String, String, String) = sqlx::query_as(
+                "SELECT amount::text, sender, recipient, detail ->> 'tx_hash' FROM observations \
+                 WHERE detail ->> 'event' = 'Arrival'",
+            )
+            .fetch_one(&w.admin)
+            .await
+            .unwrap();
+            assert_eq!(amount, $net.arrival.to_string());
+            assert_eq!(sender, depositor.to_string());
+            assert_eq!(recipient, format!("{:#x}", w.vault.safe));
+            assert_eq!(tx.parse::<B256>().unwrap(), arrival);
 
-        // A payout through the delivery role: dry run, exact bytes, signature, submission.
-        let beneficiary = Address::repeat_byte(0xbe);
-        let reference = B256::repeat_byte(0x5c);
-        let signed = w.payout(reference, beneficiary, $net.payout).await;
-        assert_eq!(
-            w.anvil.token_balance(beneficiary).await,
-            U256::from($net.payout)
-        );
-        w.anvil.finalize().await;
-        let Outcome::Executed { block } = w.outcome(signed).await else {
-            panic!("the payout is not recorded executed");
-        };
-        // The payout leg: reference, token, amount, sender the vault, recipient (AC-C1.3, INV-14).
-        type Leg = (i64, String, String, String, String, Vec<u8>);
-        let (at, token, amount, sender, recipient, on_chain): Leg = sqlx::query_as(
-            "SELECT block_number, token, amount::text, sender, recipient, on_chain_reference \
-             FROM observations WHERE detail ->> 'event' = 'Payout'",
-        )
-        .fetch_one(&w.admin)
-        .await
-        .unwrap();
-        assert_eq!(u64::try_from(at).unwrap(), block);
-        assert_eq!(token, $net.token().to_string());
-        assert_eq!(amount, $net.payout.to_string());
-        assert_eq!(sender, format!("{:#x}", w.vault.safe));
-        assert_eq!(recipient, beneficiary.to_string());
-        assert_eq!(on_chain, reference.to_vec());
-        assert_eq!(
-            w.count("SELECT count(*) FROM non_execution_proofs").await,
-            0
-        );
+            // A payout through the delivery role: dry run, exact bytes, signature, submission.
+            let beneficiary = Address::repeat_byte(0xbe);
+            let reference = B256::repeat_byte(0x5c);
+            let signed = w.payout(reference, beneficiary, $net.payout).await;
+            assert_eq!(
+                w.anvil.token_balance(beneficiary).await,
+                U256::from($net.payout)
+            );
+            w.anvil.finalize().await;
+            let Outcome::Executed { block } = w.outcome(signed).await else {
+                panic!("the payout is not recorded executed");
+            };
+            // The payout leg: reference, token, amount, sender the vault, recipient (AC-C1.3, INV-14).
+            type Leg = (i64, String, String, String, String, Vec<u8>);
+            let (at, token, amount, sender, recipient, on_chain): Leg = sqlx::query_as(
+                "SELECT block_number, token, amount::text, sender, recipient, on_chain_reference \
+                 FROM observations WHERE detail ->> 'event' = 'Payout'",
+            )
+            .fetch_one(&w.admin)
+            .await
+            .unwrap();
+            assert_eq!(u64::try_from(at).unwrap(), block);
+            assert_eq!(token, $net.token().to_string());
+            assert_eq!(amount, $net.payout.to_string());
+            assert_eq!(sender, format!("{:#x}", w.vault.safe));
+            assert_eq!(recipient, beneficiary.to_string());
+            assert_eq!(on_chain, reference.to_vec());
+            assert_eq!(
+                w.count("SELECT count(*) FROM non_execution_proofs").await,
+                0
+            );
+        })
+        .await;
     }
 
     #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -835,102 +921,105 @@ macro_rules! fork_tests {
         pool: PgPoolOptions,
         connect: PgConnectOptions,
     ) {
-        let Some(upstream) = upstream(&$net) else { return };
-        let w = World::new(&$net, &upstream, pool, connect).await;
-        w.anvil.fund_token(w.vault.safe, $net.fund_vault).await;
-        w.anvil.finalize().await;
-        w.follow().await;
-        // Transactions wait in the pool until a block is mined.
-        w.anvil.rpc("evm_setAutomine", json!([false])).await;
-        let beneficiary = Address::repeat_byte(0xbe);
+        bounded(concat!(module_path!(), "::fork_ac_c2_1_req_nx_4_a_forced_non_execution_proves_and_a_wrapped_copy_never_does"), async move {
+            let Some(upstream) = upstream(&$net) else { return };
+            let w = World::new(&$net, &upstream, pool, connect).await;
+            w.anvil.fund_token(w.vault.safe, $net.fund_vault).await;
+            w.anvil.finalize().await;
+            w.follow().await;
+            // Transactions wait in the pool until a block is mined.
+            w.anvil.rpc("evm_setAutomine", json!([false])).await;
+            let beneficiary = Address::repeat_byte(0xbe);
 
-        // Forced non-execution: a payout signed and sent, then a cancel at its nonce that replaces it.
-        let signed = w
-            .payout(B256::repeat_byte(0x01), beneficiary, $net.nx_payout)
-            .await;
-        let cancel = w.pay("cancel", None, json!({"cancel": signed}), 0).await;
-        w.anvil.mine(1).await;
-        w.anvil.finalize().await;
-        assert_eq!(w.anvil.token_balance(beneficiary).await, U256::ZERO);
-        let outcomes = w.outcomes().await;
-        let of = |id: i64| {
-            outcomes
-                .iter()
-                .find(|(s, _)| *s == id)
-                .map(|(_, o)| o.clone())
-        };
-        let Some(Outcome::NotExecuted {
-            kind: "nonce-consumed-by-other",
-            block,
-        }) = of(signed)
-        else {
-            panic!("no proof of the forced non-execution: {outcomes:?}");
-        };
-        // The cancel itself executed, in that block.
-        assert_eq!(of(cancel), Some(Outcome::Executed { block }));
-        // The proof, checked against the chain alone (REQ-NX-2).
-        type Proof = (Vec<u8>, i64, i64, i64, i64);
-        let (signer, nonce, final_block, at, index): Proof = sqlx::query_as(
-            "SELECT signer, nonce, final_block_number, at_block_number, at_position_index \
-             FROM non_execution_proofs WHERE signed_transaction_id = $1",
-        )
-        .bind(signed)
-        .fetch_one(&w.admin)
-        .await
-        .unwrap();
-        assert_eq!(signer, w.lane.address.to_vec());
-        assert_eq!(u64::try_from(at).unwrap(), block);
-        let (_, txs) = w.pair.a.block_transactions(block).await.unwrap().unwrap();
-        let consumer = &txs[usize::try_from(index).unwrap()];
-        assert_eq!(consumer.from, w.lane.address);
-        assert_eq!(consumer.nonce, u64::try_from(nonce).unwrap());
-        assert!(consumer.input.is_empty() && consumer.value.is_zero());
-        let after = w
-            .pair
-            .a
-            .nonce(
-                w.lane.address,
-                bezent_evm_endpoint::rpc::At::Number(u64::try_from(final_block).unwrap()),
+            // Forced non-execution: a payout signed and sent, then a cancel at its nonce that replaces it.
+            let signed = w
+                .payout(B256::repeat_byte(0x01), beneficiary, $net.nx_payout)
+                .await;
+            let cancel = w.pay("cancel", None, json!({"cancel": signed}), 0).await;
+            w.anvil.mine(1).await;
+            w.anvil.finalize().await;
+            assert_eq!(w.anvil.token_balance(beneficiary).await, U256::ZERO);
+            let outcomes = w.outcomes().await;
+            let of = |id: i64| {
+                outcomes
+                    .iter()
+                    .find(|(s, _)| *s == id)
+                    .map(|(_, o)| o.clone())
+            };
+            let Some(Outcome::NotExecuted {
+                kind: "nonce-consumed-by-other",
+                block,
+            }) = of(signed)
+            else {
+                panic!("no proof of the forced non-execution: {outcomes:?}");
+            };
+            // The cancel itself executed, in that block.
+            assert_eq!(of(cancel), Some(Outcome::Executed { block }));
+            // The proof, checked against the chain alone (REQ-NX-2).
+            type Proof = (Vec<u8>, i64, i64, i64, i64);
+            let (signer, nonce, final_block, at, index): Proof = sqlx::query_as(
+                "SELECT signer, nonce, final_block_number, at_block_number, at_position_index \
+                 FROM non_execution_proofs WHERE signed_transaction_id = $1",
             )
+            .bind(signed)
+            .fetch_one(&w.admin)
             .await
             .unwrap();
-        assert!(after > u64::try_from(nonce).unwrap());
-
-        // A wrapped copy: the delivery key, at the next payout's nonce, calls the emitter with the
-        // payout's reference outside the vault. It never proves the payout not executed.
-        let reference = B256::repeat_byte(0x02);
-        let signed2 = w.payout(reference, beneficiary, $net.nx_payout).await;
-        let (payout2, _) = bezent_evm_endpoint::submit::decode_signed(
-            &sqlx::query_scalar::<_, Vec<u8>>("SELECT bytes FROM signed_transactions WHERE id = $1")
-                .bind(signed2)
-                .fetch_one(&w.admin)
+            assert_eq!(signer, w.lane.address.to_vec());
+            assert_eq!(u64::try_from(at).unwrap(), block);
+            let (_, txs) = w.pair.a.block_transactions(block).await.unwrap().unwrap();
+            let consumer = &txs[usize::try_from(index).unwrap()];
+            assert_eq!(consumer.from, w.lane.address);
+            assert_eq!(consumer.nonce, u64::try_from(nonce).unwrap());
+            assert!(consumer.input.is_empty() && consumer.value.is_zero());
+            let after = w
+                .pair
+                .a
+                .nonce(
+                    w.lane.address,
+                    bezent_evm_endpoint::rpc::At::Number(u64::try_from(final_block).unwrap()),
+                )
                 .await
-                .unwrap(),
-        )
-        .unwrap();
-        let emit = evm::emitReferenceCall { r#ref: reference }.abi_encode();
-        w.anvil
-            .send(json!({
-                "from": w.lane.address,
-                "to": w.vault.emitter,
-                "data": format!("0x{}", hex::encode(emit)),
-                "nonce": format!("0x{:x}", payout2.nonce),
-                "gas": "0x30000",
-                "maxFeePerGas": format!("0x{:x}", payout2.max_fee_per_gas * 2),
-                "maxPriorityFeePerGas": format!("0x{:x}", payout2.max_priority_fee_per_gas * 2),
-            }))
-            .await;
-        w.anvil.mine(1).await;
-        w.anvil.finalize().await;
-        let Outcome::Unknown(why) = w.outcome(signed2).await else {
-            panic!("a wrapped copy decided something");
-        };
-        assert!(why.contains("carries this reference"), "{why}");
-        assert_eq!(
-            w.count("SELECT count(*) FROM non_execution_proofs").await,
-            1
-        );
-        assert_eq!(w.anvil.token_balance(beneficiary).await, U256::ZERO);
+                .unwrap();
+            assert!(after > u64::try_from(nonce).unwrap());
+
+            // A wrapped copy: the delivery key, at the next payout's nonce, calls the emitter with the
+            // payout's reference outside the vault. It never proves the payout not executed.
+            let reference = B256::repeat_byte(0x02);
+            let signed2 = w.payout(reference, beneficiary, $net.nx_payout).await;
+            let (payout2, _) = bezent_evm_endpoint::submit::decode_signed(
+                &sqlx::query_scalar::<_, Vec<u8>>("SELECT bytes FROM signed_transactions WHERE id = $1")
+                    .bind(signed2)
+                    .fetch_one(&w.admin)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let emit = evm::emitReferenceCall { r#ref: reference }.abi_encode();
+            w.anvil
+                .send(json!({
+                    "from": w.lane.address,
+                    "to": w.vault.emitter,
+                    "data": format!("0x{}", hex::encode(emit)),
+                    "nonce": format!("0x{:x}", payout2.nonce),
+                    "gas": "0x30000",
+                    "maxFeePerGas": format!("0x{:x}", payout2.max_fee_per_gas * 2),
+                    "maxPriorityFeePerGas": format!("0x{:x}", payout2.max_priority_fee_per_gas * 2),
+                }))
+                .await;
+            w.anvil.mine(1).await;
+            w.anvil.finalize().await;
+            let Outcome::Unknown(why) = w.outcome(signed2).await else {
+                panic!("a wrapped copy decided something");
+            };
+            assert!(why.contains("carries this reference"), "{why}");
+            assert_eq!(
+                w.count("SELECT count(*) FROM non_execution_proofs").await,
+                1
+            );
+            assert_eq!(w.anvil.token_balance(beneficiary).await, U256::ZERO);
+        })
+        .await;
     }
     };
 }
@@ -960,143 +1049,146 @@ async fn fork_ac_a5_1_ac_a5_2_req_cv_2_a_real_swap_is_observed_with_both_amounts
     pool: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
-    let Some(upstream) = upstream(&POLYGON) else {
-        return;
-    };
-    let w = World::new(&POLYGON, &upstream, pool, connect).await;
-    let usdt0 = common::usdt0();
-    let depositor: Address = DEPOSITOR.parse().unwrap();
-    let member: Address = CONVERSION_MEMBER.parse().unwrap();
-    let router: Address = ROUTER.parse().unwrap();
-    let amount_in: u128 = 1_000_000_000;
+    bounded(concat!(module_path!(), "::fork_ac_a5_1_ac_a5_2_req_cv_2_a_real_swap_is_observed_with_both_amounts"), async move {
+        let Some(upstream) = upstream(&POLYGON) else {
+            return;
+        };
+        let w = World::new(&POLYGON, &upstream, pool, connect).await;
+        let usdt0 = common::usdt0();
+        let depositor: Address = DEPOSITOR.parse().unwrap();
+        let member: Address = CONVERSION_MEMBER.parse().unwrap();
+        let router: Address = ROUTER.parse().unwrap();
+        let amount_in: u128 = 1_000_000_000;
 
-    // 1 000 USDT0 arrive at the vault from a depositor.
-    w.anvil.fund_token_of(usdt0, depositor, amount_in).await;
-    let transfer = evm::transferCall {
-        to: w.vault.safe,
-        amount: U256::from(amount_in),
-    }
-    .abi_encode();
-    let arrival = w
-        .anvil
-        .send(
-            json!({"from": depositor, "to": usdt0, "data": format!("0x{}", hex::encode(transfer))}),
-        )
-        .await;
-
-    // Swaps' key converts it through the vault's conversion role: approve the router, then the swap.
-    let through_role = |to: Address, data: Vec<u8>| {
-        let call = evm::execTransactionWithRoleCall {
-            to,
-            value: U256::ZERO,
-            data: data.into(),
-            operation: 0,
-            roleKey: evm::role_key("bezent.conversion").unwrap(),
-            shouldRevert: true,
+        // 1 000 USDT0 arrive at the vault from a depositor.
+        w.anvil.fund_token_of(usdt0, depositor, amount_in).await;
+        let transfer = evm::transferCall {
+            to: w.vault.safe,
+            amount: U256::from(amount_in),
         }
         .abi_encode();
-        json!({"from": member, "to": w.vault.roles, "data": format!("0x{}", hex::encode(call)),
-               "gas": "0x7a120"})
-    };
-    let usdc_before = w.anvil.token_balance(w.vault.safe).await;
-    w.anvil
-        .send(through_role(
-            usdt0,
-            approveCall {
-                spender: router,
-                amount: U256::from(amount_in),
-            }
-            .abi_encode(),
-        ))
-        .await;
-    let swap = w
-        .anvil
-        .send(through_role(
-            router,
-            exactInputSingleCall {
-                params: ExactInputSingleParams {
-                    tokenIn: usdt0,
-                    tokenOut: POLYGON.token(),
-                    fee: alloy::primitives::aliases::U24::from(POOL_FEE),
-                    recipient: w.vault.safe,
-                    amountIn: U256::from(amount_in),
-                    amountOutMinimum: U256::ZERO,
-                    sqrtPriceLimitX96: alloy::primitives::aliases::U160::ZERO,
-                },
-            }
-            .abi_encode(),
-        ))
-        .await;
-    let delivered = w.anvil.token_balance(w.vault.safe).await - usdc_before;
-    assert!(delivered > U256::ZERO, "the swap delivered nothing");
-    w.anvil.finalize().await;
-    w.follow().await;
-    w.follow().await;
+        let arrival = w
+            .anvil
+            .send(
+                json!({"from": depositor, "to": usdt0, "data": format!("0x{}", hex::encode(transfer))}),
+            )
+            .await;
 
-    // The arrival is a convertible arrival: never an arrival, so nothing can mint against it (REQ-CV-1).
-    let (kind, amount, tx): (String, String, String) = sqlx::query_as(
-        "SELECT kind, amount::text, detail ->> 'tx_hash' FROM observations \
-         WHERE detail ->> 'event' = 'ConvertibleArrival'",
-    )
-    .fetch_one(&w.admin)
-    .await
-    .unwrap();
-    assert_eq!(kind, "convertible_arrival");
-    assert_eq!(amount, amount_in.to_string());
-    assert_eq!(tx.parse::<B256>().unwrap(), arrival);
-    assert_eq!(
-        w.count("SELECT count(*) FROM observations WHERE kind = 'arrival'")
-            .await,
-        0
-    );
+        // Swaps' key converts it through the vault's conversion role: approve the router, then the swap.
+        let through_role = |to: Address, data: Vec<u8>| {
+            let call = evm::execTransactionWithRoleCall {
+                to,
+                value: U256::ZERO,
+                data: data.into(),
+                operation: 0,
+                roleKey: evm::role_key("bezent.conversion").unwrap(),
+                shouldRevert: true,
+            }
+            .abi_encode();
+            json!({"from": member, "to": w.vault.roles, "data": format!("0x{}", hex::encode(call)),
+                   "gas": "0x7a120"})
+        };
+        let usdc_before = w.anvil.token_balance(w.vault.safe).await;
+        w.anvil
+            .send(through_role(
+                usdt0,
+                approveCall {
+                    spender: router,
+                    amount: U256::from(amount_in),
+                }
+                .abi_encode(),
+            ))
+            .await;
+        let swap = w
+            .anvil
+            .send(through_role(
+                router,
+                exactInputSingleCall {
+                    params: ExactInputSingleParams {
+                        tokenIn: usdt0,
+                        tokenOut: POLYGON.token(),
+                        fee: alloy::primitives::aliases::U24::from(POOL_FEE),
+                        recipient: w.vault.safe,
+                        amountIn: U256::from(amount_in),
+                        amountOutMinimum: U256::ZERO,
+                        sqrtPriceLimitX96: alloy::primitives::aliases::U160::ZERO,
+                    },
+                }
+                .abi_encode(),
+            ))
+            .await;
+        let delivered = w.anvil.token_balance(w.vault.safe).await - usdc_before;
+        assert!(delivered > U256::ZERO, "the swap delivered nothing");
+        w.anvil.finalize().await;
+        w.follow().await;
+        w.follow().await;
 
-    // The swap: the input leaves the vault for the declared pool; the output lands in the vault, from
-    // the pool, in the same transaction, in the amount the vault received (REQ-CV-2, REQ-CV-5).
-    let (input_kind, input_amount, input_to, input_tx): (String, String, String, String) =
-        sqlx::query_as(
-            "SELECT kind, amount::text, recipient, detail ->> 'tx_hash' FROM observations \
-             WHERE detail ->> 'event' = 'ConversionInput'",
+        // The arrival is a convertible arrival: never an arrival, so nothing can mint against it (REQ-CV-1).
+        let (kind, amount, tx): (String, String, String) = sqlx::query_as(
+            "SELECT kind, amount::text, detail ->> 'tx_hash' FROM observations \
+             WHERE detail ->> 'event' = 'ConvertibleArrival'",
         )
         .fetch_one(&w.admin)
         .await
         .unwrap();
-    assert_eq!(input_kind, "conversion_input");
-    assert_eq!(input_amount, amount_in.to_string());
-    assert_eq!(
-        input_to.to_lowercase(),
-        common::pool_address().to_string().to_lowercase()
-    );
-    assert_eq!(input_tx.parse::<B256>().unwrap(), swap);
+        assert_eq!(kind, "convertible_arrival");
+        assert_eq!(amount, amount_in.to_string());
+        assert_eq!(tx.parse::<B256>().unwrap(), arrival);
+        assert_eq!(
+            w.count("SELECT count(*) FROM observations WHERE kind = 'arrival'")
+                .await,
+            0
+        );
 
-    type Output = (String, String, String, String, String, Value);
-    let (kind, amount, sender, recipient, tx, detail): Output = sqlx::query_as(
-        "SELECT kind, amount::text, sender, recipient, detail ->> 'tx_hash', detail -> 'conversion' \
-         FROM observations WHERE detail ->> 'event' = 'Conversion'",
-    )
-    .fetch_one(&w.admin)
-    .await
-    .unwrap();
-    assert_eq!(kind, "conversion_output");
-    assert_eq!(
-        amount,
-        delivered.to_string(),
-        "the output is what the vault received"
-    );
-    assert_eq!(
-        sender.to_lowercase(),
-        common::pool_address().to_string().to_lowercase()
-    );
-    assert_eq!(recipient, format!("{:#x}", w.vault.safe));
-    assert_eq!(tx.parse::<B256>().unwrap(), swap);
-    // Both amounts, in the output's own record.
-    assert_eq!(detail["amount_in"], amount_in.to_string());
-    let lower = |v: &Value| v.as_str().unwrap().to_lowercase();
-    assert_eq!(lower(&detail["token_in"]), usdt0.to_string().to_lowercase());
-    assert_eq!(
-        lower(&detail["pool"]),
-        common::pool_address().to_string().to_lowercase()
-    );
-    // A stable pair at a 0.01 % tier: within one per cent of par, so this is a real swap's output.
-    assert!(delivered > U256::from(amount_in) * U256::from(99) / U256::from(100));
-    assert!(delivered < U256::from(amount_in) * U256::from(101) / U256::from(100));
+        // The swap: the input leaves the vault for the declared pool; the output lands in the vault, from
+        // the pool, in the same transaction, in the amount the vault received (REQ-CV-2, REQ-CV-5).
+        let (input_kind, input_amount, input_to, input_tx): (String, String, String, String) =
+            sqlx::query_as(
+                "SELECT kind, amount::text, recipient, detail ->> 'tx_hash' FROM observations \
+                 WHERE detail ->> 'event' = 'ConversionInput'",
+            )
+            .fetch_one(&w.admin)
+            .await
+            .unwrap();
+        assert_eq!(input_kind, "conversion_input");
+        assert_eq!(input_amount, amount_in.to_string());
+        assert_eq!(
+            input_to.to_lowercase(),
+            common::pool_address().to_string().to_lowercase()
+        );
+        assert_eq!(input_tx.parse::<B256>().unwrap(), swap);
+
+        type Output = (String, String, String, String, String, Value);
+        let (kind, amount, sender, recipient, tx, detail): Output = sqlx::query_as(
+            "SELECT kind, amount::text, sender, recipient, detail ->> 'tx_hash', detail -> 'conversion' \
+             FROM observations WHERE detail ->> 'event' = 'Conversion'",
+        )
+        .fetch_one(&w.admin)
+        .await
+        .unwrap();
+        assert_eq!(kind, "conversion_output");
+        assert_eq!(
+            amount,
+            delivered.to_string(),
+            "the output is what the vault received"
+        );
+        assert_eq!(
+            sender.to_lowercase(),
+            common::pool_address().to_string().to_lowercase()
+        );
+        assert_eq!(recipient, format!("{:#x}", w.vault.safe));
+        assert_eq!(tx.parse::<B256>().unwrap(), swap);
+        // Both amounts, in the output's own record.
+        assert_eq!(detail["amount_in"], amount_in.to_string());
+        let lower = |v: &Value| v.as_str().unwrap().to_lowercase();
+        assert_eq!(lower(&detail["token_in"]), usdt0.to_string().to_lowercase());
+        assert_eq!(
+            lower(&detail["pool"]),
+            common::pool_address().to_string().to_lowercase()
+        );
+        // A stable pair at a 0.01 % tier: within one per cent of par, so this is a real swap's output.
+        assert!(delivered > U256::from(amount_in) * U256::from(99) / U256::from(100));
+        assert!(delivered < U256::from(amount_in) * U256::from(101) / U256::from(100));
+    })
+    .await;
 }

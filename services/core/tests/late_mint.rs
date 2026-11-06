@@ -1402,3 +1402,239 @@ async fn ac_i1_2_a_marker_that_is_not_true_decides_like_no_marker_and_fails_noth
         0
     );
 }
+
+/// The anomaly the endpoint writes for a nonce taken by a recorded extrinsic nobody can read, with
+/// the `coordinate` of the block that holds that extrinsic (`proof.rs`, `consumer`).
+async fn prover_cannot_read_the_consumer(w: &World, signed: i64, coordinate: &str) {
+    prover_flags_with(
+        w,
+        signed,
+        &format!("\"recorded_undecodable\": true, \"coordinate\": {coordinate}"),
+    )
+    .await;
+}
+
+fn coordinate_at(block: i64) -> String {
+    coordinate_with(
+        block,
+        &format!("\"0x{}\"", hex::encode(hash(ISSUING, block))),
+    )
+}
+
+/// A coordinate at `block` whose `block_hash` is the JSON value `block_hash`, verbatim.
+fn coordinate_with(block: i64, block_hash: &str) -> String {
+    format!(
+        "{{\"network\": \"{ISSUING}\", \"block_number\": {block}, \"block_hash\": {block_hash}, \
+          \"position_kind\": \"transaction\", \"position_index\": 3}}"
+    )
+}
+
+/// A reference proven once, with a second attempt whose era covers a mint at block 105.
+async fn second_attempt_and_a_mint(w: &World) -> (i64, i64) {
+    let (id, reference) = proven_deposit(w, 100).await;
+    deliver(w, id, 2, now()).await;
+    let second = signed_of(&w.admin, id, 2).await;
+    set_era(w, id, 2, 90, 150).await;
+    let m = mint_final_at(&w.admin, 105, &reference, 152).await;
+    (second, m)
+}
+
+/// Review of PR #80 (item 2): the recorded extrinsic that took the nonce can have minted only in
+/// its own block. A mint in another block is not its, so the anomaly decides the attempt and the
+/// mint, after the first attempt's proof, is the late mint it is: the alert and the pause.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_a_mint_in_another_block_than_the_unreadable_consumers_is_not_its(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (second, m) = second_attempt_and_a_mint(&w).await;
+    prover_cannot_read_the_consumer(&w, second, &coordinate_at(104)).await;
+    w.cycle(now()).await;
+    w.cycle(now()).await;
+    assert_eq!((alerts(&w).await, pauses(&w).await), (1, 1));
+    assert_eq!(verdict(&w, m).await.as_deref(), Some("alerted"));
+}
+
+/// The guard against the false pause: the mint in the very block that holds the unreadable
+/// consumer may be that consumer's own (bezent's), so it holds and pages. An anomaly without a
+/// coordinate, or with one that cannot be read, cannot be compared, so it holds too.
+async fn holds_with_coordinate(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+    coordinate: String,
+) {
+    let w = World::new(options, connect).await;
+    let (second, m) = second_attempt_and_a_mint(&w).await;
+    let before = all_pauses(&w).await;
+    prover_cannot_read_the_consumer(&w, second, &coordinate).await;
+    for _ in 0..HELD_PAGE_AFTER_CYCLES + 1 {
+        w.cycle(now()).await;
+    }
+    assert_eq!(
+        (
+            alerts(&w).await,
+            all_pauses(&w).await,
+            silent_pages(&w).await
+        ),
+        (0, before, 1),
+        "{coordinate}"
+    );
+    assert_eq!(verdict(&w, m).await, None, "{coordinate}");
+    assert_eq!(
+        w.count("SELECT count(*) FROM event_log WHERE kind = 'late-mint-check-failed'")
+            .await,
+        0
+    );
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_a_mint_in_the_unreadable_consumers_own_block_holds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    holds_with_coordinate(options, connect, coordinate_at(105)).await;
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_the_block_hash_is_compared_whatever_its_case(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    holds_with_coordinate(
+        options,
+        connect,
+        // Only the hex is uppercased; the keys and the `0x` stay, so the path resolves and
+        // `lower()` is what makes it equal.
+        coordinate_with(
+            105,
+            &format!("\"0x{}\"", hex::encode_upper(hash(ISSUING, 105))),
+        ),
+    )
+    .await;
+}
+
+/// A `block_hash` that is not `0x` and hex of the mint's hash's length cannot be compared: the
+/// attempt is not decided, the mint at that very block holds, and no pause is raised.
+async fn holds_with_block_hash(options: PgPoolOptions, connect: PgConnectOptions, value: String) {
+    holds_with_coordinate(options, connect, coordinate_with(105, &value)).await;
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_a_numeric_block_hash_holds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    holds_with_block_hash(options, connect, "105".to_owned()).await;
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_a_block_hash_without_the_prefix_holds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let v = format!("\"{}\"", hex::encode(hash(ISSUING, 105)));
+    holds_with_block_hash(options, connect, v).await;
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_an_empty_block_hash_holds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    holds_with_block_hash(options, connect, "\"\"".to_owned()).await;
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_a_block_hash_of_the_wrong_length_holds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let v = format!("\"0x{}\"", &hex::encode(hash(ISSUING, 105))[..10]);
+    holds_with_block_hash(options, connect, v).await;
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_an_unreadable_consumer_with_no_coordinate_holds(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    holds_with_coordinate(options, connect, "{\"block_number\": 104}".to_owned()).await;
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_inv_8_an_unreadable_consumer_with_a_malformed_coordinate_holds_and_fails_nothing(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    holds_with_coordinate(options, connect, "\"105\"".to_owned()).await;
+}
+
+/// Review of PR #80 (item 1): the page's `meaning` is true of each attempt it names. An attempt
+/// the prover wrote an anomaly for is not one it "recorded nothing" for.
+async fn the_page_says(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+    extra: Option<String>,
+    record: &str,
+) -> Value {
+    let w = World::new(options, connect).await;
+    let (second, _) = second_attempt_and_a_mint(&w).await;
+    if let Some(extra) = extra {
+        prover_flags_with(&w, second, &extra).await;
+    }
+    for _ in 0..HELD_PAGE_AFTER_CYCLES + 1 {
+        w.cycle(now()).await;
+    }
+    let page: Value =
+        sqlx::query_scalar("SELECT payload FROM event_log WHERE kind = 'late-mint-prover-silent'")
+            .fetch_one(&w.admin)
+            .await
+            .unwrap();
+    assert_eq!(page["attempts"][0]["record"], json!(record));
+    page
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_the_page_of_an_attempt_with_no_record_says_the_prover_recorded_nothing(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let page = the_page_says(options, connect, None, "none").await;
+    let meaning = page["meaning"].as_str().unwrap();
+    assert!(meaning.contains("recorded nothing"), "{meaning}");
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_req_nx_3_the_page_of_an_attempt_taken_by_an_unreadable_extrinsic_does_not_say_nothing_was_recorded(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let extra = format!(
+        "\"recorded_undecodable\": true, \"coordinate\": {}",
+        coordinate_at(105)
+    );
+    let page = the_page_says(options, connect, Some(extra), "recorded-undecodable").await;
+    let meaning = page["meaning"].as_str().unwrap();
+    assert!(!meaning.contains("recorded nothing"), "{meaning}");
+    assert!(meaning.contains("recorded_undecodable"), "{meaning}");
+    assert!(meaning.contains("may have minted"), "{meaning}");
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_req_nx_3_the_page_of_an_attempt_with_unreadable_bytes_does_not_say_nothing_was_recorded(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let page = the_page_says(
+        options,
+        connect,
+        Some("\"bytes_unreadable\": true".to_owned()),
+        "bytes-unreadable",
+    )
+    .await;
+    let meaning = page["meaning"].as_str().unwrap();
+    assert!(!meaning.contains("recorded nothing"), "{meaning}");
+    assert!(meaning.contains("bytes_unreadable"), "{meaning}");
+    assert!(meaning.contains("never read the chain"), "{meaning}");
+}

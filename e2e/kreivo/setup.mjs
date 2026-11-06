@@ -11,7 +11,7 @@
 // (e2e/network/src/lib.rs); the account is derived from the id, so it holds those roles before the
 // community exists. //Alice is the community's first admin (dev chains only).
 
-import { COMMUNITY_ID, COMMUNITY_NAME, communityAccount, assertTestBed, connect, devAccount, env, log, send } from './lib.mjs';
+import { COMMUNITY_ID, COMMUNITY_NAME, COMMUNITY_TRACK, communityAccount, assertTestBed, connect, devAccount, env, log, send } from './lib.mjs';
 import { Binary } from 'polkadot-api';
 
 const { client, api, url } = connect();
@@ -27,7 +27,7 @@ try {
       name: Binary.fromText(COMMUNITY_NAME),
       first_admin: { type: 'Id', value: alice.address },
       maybe_decision_method: undefined,
-      maybe_track_info: undefined,
+      maybe_track_info: COMMUNITY_TRACK,
     });
     await send(tx, alice, `CommunitiesManager.register(${COMMUNITY_ID}, "${COMMUNITY_NAME}")`);
   }

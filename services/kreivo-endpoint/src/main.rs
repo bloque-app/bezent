@@ -149,12 +149,10 @@ mod run {
         let declared = config.declared_genesis()?;
         // One login to Vault for the secrets read at start (issue #64); `--check` never gets here.
         let resolver = config.resolver()?;
-        let pool = bezent_store::tls::connect(
-            bezent_store::login::pool_options().max_connections(config.max_connections),
-            &config.store_url(&resolver).await?,
-        )
-        .await
-        .map_err(|e| format!("the store: {e}"))?;
+        let pool =
+            bezent_store::tls::connect(config.pool_options(), &config.store_url(&resolver).await?)
+                .await
+                .map_err(|e| format!("the store: {e}"))?;
         // The login is a member of bezent_kreivo_endpoint and of nothing else, and holds exactly
         // its grants (#46, REQ-AR-3).
         bezent_store::login::check_login(&pool, bezent_store::KREIVO_ENDPOINT_ROLE)
@@ -173,6 +171,7 @@ mod run {
             config.light_client_depth,
             Duration::from_millis(config.archive_timeout_ms),
             config.archive_max_response_bytes,
+            Duration::from_millis(config.watch_silence_ms),
             // The light client's first sync can outlast any start period: it beats while the warp
             // sync advances, and goes stale when it stands still (issue #61).
             {

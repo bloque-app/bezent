@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use alloy::primitives::{Address, B256, Bytes, U256, keccak256};
+use bezent_evm_endpoint::broadcast::Broadcast;
 use bezent_evm_endpoint::evm::{self, Contracts, Delivery, Gas};
 use bezent_evm_endpoint::network::{Declarations, Token};
 use bezent_evm_endpoint::observe::{Follower, Watch};
@@ -345,6 +346,11 @@ pub struct Fixture {
     pub chain_b: MockChain,
     /// The two providers.
     pub pair: Pair<MockRpc>,
+    /// The chain the public broadcast nodes answer from: apart from the pair's, so a send the
+    /// pair never sees is a send to these alone (amendment 0023).
+    pub broadcast_chain: MockChain,
+    /// Two honest public broadcast nodes over `broadcast_chain`.
+    pub broadcast: Broadcast<MockRpc>,
     /// The lane.
     pub lane: Lane,
     /// The signer link.
@@ -373,6 +379,7 @@ impl Fixture {
         declare(&admin).await;
         let (link, lane) = start_signer(&connect).await;
         let address = lane.address;
+        let broadcast_chain = MockChain::new(CHAIN_ID, 1);
         chain.set_balance(address, U256::from(10u128.pow(21)));
         Fixture {
             endpoint: role_pool(&connect, "bezent_evm_endpoint").await,
@@ -382,6 +389,11 @@ impl Fixture {
                 a: MockRpc::new("a", &chain),
                 b: MockRpc::new("b", &chain_b),
             },
+            broadcast: Broadcast::new(vec![
+                MockRpc::new("p1", &broadcast_chain),
+                MockRpc::new("p2", &broadcast_chain),
+            ]),
+            broadcast_chain,
             chain,
             chain_b,
             lane,
@@ -402,6 +414,7 @@ impl Fixture {
                 emitter: contracts().emitter,
                 declarations: &self.declarations,
                 convertibles: &self.convertibles,
+                delivery: self.lane.address,
             },
             start_block: 1,
             max_range: 4,
@@ -410,8 +423,17 @@ impl Fixture {
 
     /// The submitter.
     pub fn submitter(&self) -> Submitter<'_, MockRpc> {
+        self.submitter_via(&self.broadcast)
+    }
+
+    /// The submitter sending through `broadcast` instead of the fixture's honest nodes.
+    pub fn submitter_via<'a>(
+        &'a self,
+        broadcast: &'a Broadcast<MockRpc>,
+    ) -> Submitter<'a, MockRpc> {
         Submitter {
             pair: &self.pair,
+            broadcast,
             pool: &self.endpoint,
             network: NETWORK,
             chain_id: CHAIN_ID,

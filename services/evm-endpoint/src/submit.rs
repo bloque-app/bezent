@@ -27,7 +27,7 @@
 //!    signature comes over the signer link, which checks it against the recorded bytes
 //!    (`Client::sign`); the endpoint checks it is the lane key's and recovers the lane's address,
 //!    persists the exact signed transaction in `signed_transactions` (`REQ-EO-1`, `INV-9`), and only
-//!    then sends it to both providers.
+//!    then sends it to every public broadcast node at once (amendment 0023).
 //! 5. **After a restart** ([`Submitter::resend`]): every signed transaction whose outcome is not
 //!    recorded is re-sent as the same bytes; nothing is signed twice for an intent (`AC-D2.1`).
 //!
@@ -43,6 +43,8 @@
 //! never signs holds the lane (an EVM transaction does not expire). Stated plainly: one unknown
 //! payout holds every later one until it executes or a cancel consumes its nonce.
 
+use std::time::Duration;
+
 use alloy::consensus::TxEip1559;
 use alloy::consensus::{Transaction as _, TxEnvelope};
 use alloy::eips::eip2718::Decodable2718;
@@ -51,6 +53,7 @@ use bezent_signer::link::{Dialer, LinkError, Response};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
+use crate::broadcast::Broadcast;
 use crate::evm::{self, Contracts, Delivery, Gas};
 use crate::network::Declarations;
 use crate::pair::{Pair, Read};
@@ -290,10 +293,19 @@ pub enum Submitted {
     Unavailable(String),
 }
 
+/// How long one [`Submitter::resend`] pass may spend sending. Unsettled rows go out one after
+/// another, in nonce order, and each can cost up to `BROADCAST_TIMEOUT` (10 s) when every
+/// broadcast node hangs. This bounds the re-send's share of a pass to 30 s, and nothing more:
+/// first sends, prepare and the prover are not bounded by it. What it leaves unsent waits for
+/// the next pass.
+pub const RESEND_BUDGET: Duration = Duration::from_secs(30);
+
 /// Builds, signs and submits the network's payouts. See the module documentation.
 pub struct Submitter<'a, R> {
-    /// The two providers.
+    /// The two providers: every read, never a send.
     pub pair: &'a Pair<R>,
+    /// The public nodes a signed transaction is sent to, and only they (amendment 0023).
+    pub broadcast: &'a Broadcast<R>,
     /// The store, as the EVM endpoint's role.
     pub pool: &'a PgPool,
     /// The network id.
@@ -1022,7 +1034,7 @@ impl<R: Rpc> Submitter<'_, R> {
         .fetch_one(self.pool)
         .await?;
         tracing::info!(network = self.network, intent = intent_id, signed = id, hash = %signed.hash, "REQ-EO-1: signed bytes persisted; submitting");
-        Ok(match self.pair.send_raw(&signed.bytes).await {
+        Ok(match self.broadcast.send_raw(&signed.bytes).await {
             Ok(_) => Submitted::Submitted {
                 id,
                 hash: signed.hash,
@@ -1032,8 +1044,19 @@ impl<R: Rpc> Submitter<'_, R> {
     }
 
     /// Re-sends every signed transaction of this lane whose outcome is not recorded: the same
-    /// bytes, never a new signature (`REQ-EO-1`, `AC-D2.1`). Returns how many a provider took.
+    /// bytes, never a new signature (`REQ-EO-1`, `AC-D2.1`), in nonce order, for at most
+    /// [`RESEND_BUDGET`]. Returns how many a broadcast node took.
     pub async fn resend(&self) -> Result<usize, sqlx::Error> {
+        self.resend_within(RESEND_BUDGET).await
+    }
+
+    /// [`resend`](Self::resend) with an explicit budget for the re-send. Once it is spent, no
+    /// more is sent: the rest stays stored and goes out on a later pass. Each pass starts again
+    /// from the lowest unsettled nonce, so rows the budget did not reach wait until the ones
+    /// before them are settled or answered quickly. That is harmless: a later nonce cannot
+    /// execute before an earlier one.
+    pub async fn resend_within(&self, budget: Duration) -> Result<usize, sqlx::Error> {
+        let deadline = tokio::time::Instant::now() + budget;
         let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
             "SELECT st.id, st.bytes FROM signed_transactions st \
              JOIN intents si ON si.id = st.intent_id \
@@ -1048,14 +1071,30 @@ impl<R: Rpc> Submitter<'_, R> {
         .bind(self.lane_bytes())
         .fetch_all(self.pool)
         .await?;
+        let total = rows.len();
+        let mut done = 0;
         let mut sent = 0;
         for (id, bytes) in rows {
-            match self.pair.send_raw(&bytes).await {
-                Ok(_) => sent += 1,
-                Err(e) => {
+            // The deadline also cuts a send in flight, so one hung node cannot run past it.
+            match tokio::time::timeout_at(deadline, self.broadcast.send_raw(&bytes)).await {
+                Ok(Ok(_)) => sent += 1,
+                Ok(Err(e)) => {
                     tracing::debug!(network = self.network, signed = id, error = %e, "a re-send was not taken")
                 }
+                Err(_) => break,
             }
+            done += 1;
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+        if done < total {
+            tracing::info!(
+                network = self.network,
+                deferred = total - done,
+                total,
+                "the re-send budget is spent; the rest goes out on the next pass"
+            );
         }
         Ok(sent)
     }

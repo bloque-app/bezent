@@ -188,7 +188,8 @@ pub(crate) async fn register_by_bridge(
         "SELECT t.id, t.bridge_reference, i.request_reference \
          FROM transfers t JOIN intake_answers a ON a.transfer_id = t.id \
          JOIN intake i ON i.id = a.intake_id \
-         WHERE t.bridge_reference = $2 AND i.requester = $1",
+         WHERE t.bridge_reference = $2 AND i.requester = $1 \
+         ORDER BY i.id LIMIT 1",
     )
     .bind(&who.name)
     .bind(&reference)

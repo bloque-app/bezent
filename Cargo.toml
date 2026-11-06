@@ -17,6 +17,7 @@
 #   services/signer          F-001   empty binary
 #   services/core            F-003   the core: state machine, conditions, review (DEC-3)
 #   services/migrate         prod  bezent-migrate: applies the store's migrations as the owner (the only production path that migrates)
+#   services/full-chain      F-013 the full-chain suite: the real services against an anvil fork and an in-memory issuing network (a test target behind the `fork` feature; TEST only)
 #   services/sidecar         e2e   ingress, core, a test signer and a chain-event driver in one process, for other repos' harnesses (TEST only)
 #
 # The ink! contract (contracts/bezent/) and the Foundry projects (contracts/evm/) are workspaces of
@@ -36,6 +37,7 @@ members = [
     "services/core",
     "services/sidecar",
     "services/migrate",
+    "services/full-chain",
 ]
 # Workspaces of their own (F-006 and later): never members of this one.
 exclude = ["contracts/bezent"]

@@ -53,6 +53,13 @@ pub struct Config {
     /// The largest number of store connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    /// The longest one statement may run on the store, in milliseconds (issue #84): 60 000 by
+    /// default. It also bounds a wait for a lock. An operator whose book has grown so that a
+    /// statement legitimately takes longer (the reserve check's evaluation of a large book) raises
+    /// it here; see the `reserve-check-failed` page. Past `PASS_ALLOWANCE` (120 s), one statement
+    /// can outlast the health window and the service is restarted.
+    #[serde(default = "default_statement_timeout_ms")]
+    pub statement_timeout_ms: u64,
     /// Seconds between cycles.
     #[serde(default = "default_cycle_seconds")]
     pub cycle_seconds: u64,
@@ -301,6 +308,9 @@ impl fmt::Debug for StatementConfig {
 fn default_max_connections() -> u32 {
     4
 }
+fn default_statement_timeout_ms() -> u64 {
+    bezent_store::login::STATEMENT_TIMEOUT_MS
+}
 fn default_cycle_seconds() -> u64 {
     5
 }
@@ -427,6 +437,8 @@ impl Config {
         {
             *p = path.parent().unwrap_or(Path::new(".")).join(&*p);
         }
+        bezent_store::login::statement_bound(config.statement_timeout_ms)
+            .map_err(|e| format!("invalid configuration {}: {e}", path.display()))?;
         if config.cycle_seconds == 0
             || config.retry_preparation_seconds < 0
             || config.default_deadline_seconds <= 0
@@ -438,6 +450,15 @@ impl Config {
             ));
         }
         Ok(config)
+    }
+
+    /// The options of the core's store pool: the store's bounds with the configured statement
+    /// bound (`statement_timeout_ms`).
+    pub fn pool_options(&self) -> sqlx::postgres::PgPoolOptions {
+        bezent_store::login::pool_options_bounded(
+            bezent_store::login::Bounds::DEFAULT.with_statement_ms(self.statement_timeout_ms),
+        )
+        .max_connections(self.max_connections)
     }
 
     /// The checks of the secrets' sources, which touch no network: exactly one of `database_url`
@@ -555,6 +576,7 @@ impl fmt::Debug for Config {
             .field("store", &self.store)
             .field("vault", &self.vault)
             .field("max_connections", &self.max_connections)
+            .field("statement_timeout_ms", &self.statement_timeout_ms)
             .field("cycle_seconds", &self.cycle_seconds)
             .field("retry_preparation_seconds", &self.retry_preparation_seconds)
             .field("default_deadline_seconds", &self.default_deadline_seconds)
@@ -580,6 +602,38 @@ mod tests {
         assert!(!format!("{config:?}").contains("hunter2"));
         assert_eq!(config.cycle_seconds, 5);
         assert_eq!(config.environment, Environment::Production);
+    }
+
+    /// Issue #84: the statement bound is a minute unless configured, and zero is refused (it would
+    /// be no bound), so no value turns the bound off.
+    #[test]
+    fn issue_84_the_statement_bound_defaults_to_a_minute_and_zero_is_refused() {
+        let dir = std::env::temp_dir().join(format!("bzc-config-84-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("core.toml");
+        let load = |extra: &str| {
+            std::fs::write(
+                &path,
+                format!(
+                    "database_url = \"postgres://core@db/bezent\"\nenvironment = \"test\"\n\
+                     statement = \"disabled-test-only\"\n{extra}"
+                ),
+            )
+            .unwrap();
+            Config::from_file(&path)
+        };
+        assert_eq!(load("").unwrap().statement_timeout_ms, 60_000);
+        assert_eq!(
+            load("statement_timeout_ms = 90000\n")
+                .unwrap()
+                .statement_timeout_ms,
+            90_000
+        );
+        let err = load("statement_timeout_ms = 0\n").unwrap_err();
+        assert!(
+            err.contains("statement_timeout_ms must be positive"),
+            "{err}"
+        );
     }
 
     /// PR #50 review M2: a deployment whose configuration drops `[statement]` does not run for

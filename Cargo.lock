@@ -1793,6 +1793,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bezent-e2e-full-chain"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "axum",
+ "bezent-core-service",
+ "bezent-evm-endpoint",
+ "bezent-ingress",
+ "bezent-kreivo-endpoint",
+ "bezent-signer",
+ "bezent-store",
+ "chrono",
+ "hex",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "bezent-evm-endpoint"
 version = "0.1.0"
 dependencies = [
@@ -1802,6 +1822,7 @@ dependencies = [
  "bezent-signer",
  "bezent-store",
  "bezent-vault",
+ "futures-util",
  "hex",
  "k256",
  "serde",

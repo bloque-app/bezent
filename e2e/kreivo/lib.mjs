@@ -20,6 +20,29 @@ export const text = (b) => (b ? Binary.toText(b) : '');
 export const COMMUNITY_ID = Number(env('COMMUNITY_ID', '4243'));
 export const COMMUNITY_NAME = env('COMMUNITY_NAME', 'bezent test');
 
+/// The dedicated community's voting policy (F-013, AC-I2.2): a referendum of its members passes when at least
+/// `COMMUNITY_SUPPORT_PERCENT` of them (50 by default: 3 of the 5 the check enrols) vote aye, whatever the time
+/// left, and when more than half of the votes cast are ayes. The curves are flat, so that one approver among
+/// several never passes by waiting. Decided blocks are the relay chain's (`BlockNumberProvider = RelaychainData`).
+/// `COMMUNITY_SUPPORT_PERCENT` and the check's `COMMUNITY_MEMBERS` exist for the mutation runs that show the
+/// check fails when one member is enough (ac-i2.2.community-vote.mjs); CI never sets them.
+export const COMMUNITY_SUPPORT_PERCENT = Number(env('COMMUNITY_SUPPORT_PERCENT', '50'));
+export const COMMUNITY_TRACK = {
+  // A fixed-size byte array (`[u8; 25]`) is a hex string in polkadot-api's unsafe API.
+  name: `0x${Buffer.from('bezent test'.padEnd(25, '\0')).toString('hex')}`,
+  max_deciding: 4,
+  decision_deposit: 0n,
+  prepare_period: 1,
+  decision_period: 30,
+  confirm_period: 1,
+  min_enactment_period: 1,
+  min_approval: { type: 'LinearDecreasing', value: { length: 1_000_000_000, floor: 500_000_000, ceil: 500_000_000 } },
+  min_support: {
+    type: 'LinearDecreasing',
+    value: { length: 1_000_000_000, floor: COMMUNITY_SUPPORT_PERCENT * 10_000_000, ceil: COMMUNITY_SUPPORT_PERCENT * 10_000_000 },
+  },
+};
+
 const LOOPBACK = /^wss?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/;
 
 /// Dev keys (`//Alice`, `//Bob`, ...) are publicly known, so these scripts act only on the bed they

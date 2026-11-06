@@ -31,6 +31,9 @@ struct State {
     sent: Vec<Vec<u8>>,
     fail_logs: Option<String>,
     fail_all: Option<String>,
+    fail_balance: Option<String>,
+    hang_balance: bool,
+    balance_reads: Vec<At>,
     salt: u8,
 }
 
@@ -176,6 +179,21 @@ impl MockChain {
         self.state().fail_logs = reason.map(str::to_owned);
     }
 
+    /// Every `eth_getBalance` fails with `reason` until cleared; no other read does.
+    pub fn fail_balance(&self, reason: Option<&str>) {
+        self.state().fail_balance = reason.map(str::to_owned);
+    }
+
+    /// Every `eth_getBalance` never answers while `hang` is set.
+    pub fn hang_balance(&self, hang: bool) {
+        self.state().hang_balance = hang;
+    }
+
+    /// The block of every `eth_getBalance` asked so far, in order.
+    pub fn balance_reads(&self) -> Vec<At> {
+        self.state().balance_reads.clone()
+    }
+
     /// Every read fails with `reason` until cleared.
     pub fn fail_all(&self, reason: Option<&str>) {
         self.state().fail_all = reason.map(str::to_owned);
@@ -246,6 +264,20 @@ impl MockChain {
     }
 }
 
+/// How a mock node answers `eth_sendRawTransaction`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Send {
+    /// It records the bytes and returns their hash.
+    #[default]
+    Honest,
+    /// It records the bytes and returns a hash that is not theirs.
+    WrongHash,
+    /// It fails, and records nothing.
+    Fail,
+    /// It never answers (a hung node).
+    Hang,
+}
+
 /// A provider answering from a [`MockChain`].
 #[derive(Clone, Debug)]
 pub struct MockRpc {
@@ -253,6 +285,8 @@ pub struct MockRpc {
     pub name: String,
     /// Its chain.
     pub chain: MockChain,
+    /// How it answers a send.
+    pub send: Send,
 }
 
 impl MockRpc {
@@ -261,7 +295,14 @@ impl MockRpc {
         Self {
             name: name.into(),
             chain: chain.clone(),
+            send: Send::Honest,
         }
+    }
+
+    /// This provider, answering sends as `send`.
+    pub fn sending(mut self, send: Send) -> Self {
+        self.send = send;
+        self
     }
 }
 
@@ -307,8 +348,19 @@ impl Rpc for MockRpc {
             .map_or(0, |(_, nonce)| *nonce))
     }
 
-    async fn balance(&self, address: Address, _at: At) -> Result<U256, RpcError> {
+    async fn balance(&self, address: Address, at: At) -> Result<U256, RpcError> {
         self.chain.check()?;
+        let hang = {
+            let mut s = self.chain.state();
+            s.balance_reads.push(at);
+            s.hang_balance
+        };
+        if hang {
+            std::future::pending::<()>().await;
+        }
+        if let Some(reason) = self.chain.state().fail_balance.clone() {
+            return Err(RpcError(reason));
+        }
         Ok(self
             .chain
             .state()
@@ -367,7 +419,17 @@ impl Rpc for MockRpc {
 
     async fn send_raw(&self, bytes: &[u8]) -> Result<B256, RpcError> {
         self.chain.check()?;
-        self.chain.state().sent.push(bytes.to_vec());
-        Ok(keccak256(bytes))
+        match self.send {
+            Send::Honest => {
+                self.chain.state().sent.push(bytes.to_vec());
+                Ok(keccak256(bytes))
+            }
+            Send::WrongHash => {
+                self.chain.state().sent.push(bytes.to_vec());
+                Ok(keccak256([bytes, b"other"].concat()))
+            }
+            Send::Fail => Err(RpcError(format!("{}: refused the send", self.name))),
+            Send::Hang => std::future::pending().await,
+        }
     }
 }

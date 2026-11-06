@@ -81,9 +81,11 @@ pub struct DepositRequest {
     /// The requester's reference, unique for this requester forever (`REQ-RQ-1`, `REQ-ID-1`).
     pub request_reference: String,
     /// The coordinate of the arrival at a reserve address: an observation its endpoint recorded
-    /// as kind `arrival`, or `conversion_output` (the output of a conversion into the reserve,
-    /// `REQ-CV-2`), final and not yet consumed; never a convertible arrival (`REQ-CV-1`), a payout
-    /// leg or any other kind (`REQ-RQ-3`, `REQ-IN-3`, `INV-2`). Otherwise `ERR-SourceNotFound`,
+    /// as kind `arrival`, `conversion_output` (the output of a conversion into the reserve,
+    /// `REQ-CV-2`) or `convertible_arrival` (held in `CND-AwaitingConversion` and never minted
+    /// against until its conversion's output is named, `POST /v0/deposits/conversion`;
+    /// `REQ-CV-1`), final and not yet consumed; never a payout leg or any other kind (`REQ-RQ-3`,
+    /// `REQ-IN-3`, `INV-2`). Otherwise `ERR-SourceNotFound`,
     /// recorded. An arrival of one of those kinds that is observed but not final yet is answered
     /// `not-final` (HTTP 503) and nothing is recorded: the same request, sent again once it is
     /// final, is taken in.
@@ -113,6 +115,39 @@ pub struct WithdrawalExtrasRequest {
     /// must equal the redemption's commitment (`REQ-RQ-9`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+}
+
+/// Name, by a deposit's request reference, the output of the conversion of the convertible arrival
+/// it named (`REQ-RQ-4`, `REQ-CV-2`; amendment 0018, A1b). Only the requester that made the deposit
+/// may, once, while the deposit is `Source-Final` holding `CND-AwaitingConversion`. The deposit's
+/// source then becomes the output: it is minted for the output's amount, and the convertible
+/// arrival is recorded against it with its own amount, consumed once (`INV-2`). That the arrival fed
+/// that conversion is the requester's word; bezent checks only that the output is a final
+/// conversion output at the same reserve, of the deposit's asset, not consumed.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DepositConversionRequest {
+    /// The requester's reference for this request, unique for this requester forever.
+    pub request_reference: String,
+    /// The request reference of the deposit that named the convertible arrival, this requester's.
+    pub deposit_reference: String,
+    /// The coordinate of the conversion's output into the reserve: an observation its endpoint
+    /// recorded as kind `conversion_output`, final and not yet consumed. One observed but not final
+    /// yet is answered `not-final` (HTTP 503), nothing recorded.
+    pub conversion_output: CoordinateBody,
+}
+
+/// What a deposit that named a convertible arrival records once its conversion's output is named
+/// (`REQ-CV-2`): the arrival, with its token and amount. The output is the deposit's `source`, and
+/// its amount the deposit's `amount`.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ConvertedArrival {
+    /// The convertible arrival's coordinate.
+    pub coordinate: CoordinateOut,
+    /// The convertible token.
+    pub token: String,
+    /// What arrived, in the convertible's minor units.
+    pub amount: String,
 }
 
 /// Request the refund of an unassociated arrival (`REQ-RQ-6`). It waits in `Received` for the
@@ -217,6 +252,11 @@ pub struct TransferStatus {
     /// The destination leg is final.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_final: Option<Milestone>,
+    /// For a deposit that named a convertible arrival, once its conversion's output is named: the
+    /// arrival it recorded (`REQ-CV-2`). Until then the `source` is the arrival and the `amount`
+    /// its own, in the convertible's minor units; nothing is minted (`CND-AwaitingConversion`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converted_arrival: Option<ConvertedArrival>,
 }
 
 /// The transfers bound to a coordinate that this requester may read.
@@ -482,6 +522,18 @@ impl RefundRequest {
         check_destination("destination", &self.destination)?;
         Ok(Self {
             coordinate: self.coordinate.canonical()?,
+            ..self.clone()
+        })
+    }
+}
+
+impl DepositConversionRequest {
+    /// The request checked for form and put in canonical form.
+    pub fn canonical(&self) -> Result<Self, ApiError> {
+        check_reference(&self.request_reference)?;
+        check_reference(&self.deposit_reference)?;
+        Ok(Self {
+            conversion_output: self.conversion_output.canonical()?,
             ..self.clone()
         })
     }

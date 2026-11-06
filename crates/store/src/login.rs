@@ -19,6 +19,7 @@
 //!   creates its logins the same way, as the migration owner (`crates/store/README.md`).
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -293,9 +294,150 @@ pub fn guard(options: PgPoolOptions) -> PgPoolOptions {
     })
 }
 
-/// [`PgPoolOptions`] with [`guard`]: how every service makes its pool, one per login.
+/// The longest one statement may run on a service's connection: a query that hangs, or waits for
+/// a lock that is never released, ends with SQLSTATE `57014` and frees its connection (issue #84).
+///
+/// One minute. It is the bound of a statement, not of a transaction or of a pass, and it covers the
+/// wait for a lock as well as the work (`pg_advisory_xact_lock` is a statement). Why this value:
+///
+/// - Well above what the services' queries are expected to need. The heaviest read a reserve's
+///   postings in full (`as_of`, `surplus_movements`); none is known to take more than seconds, but
+///   none has been measured on a large book. A query this slow is a defect to see (an error each
+///   pass, in the log), not a normal cost to wait for; if the owner finds one that is legitimate,
+///   this is the number to raise, per service, with `statement_timeout_ms` (no release needed).
+/// - Below `PASS_ALLOWANCE` (two minutes of silence before the health check restarts a service),
+///   so that one stuck statement ends, and its pass fails or carries on, before the container is
+///   restarted for it. That is the bound of one statement and no more: the health window covers a
+///   whole pass, and a pass that is slow in several statements in a row (each cut at this bound)
+///   can still outrun `PASS_ALLOWANCE` and be restarted. The outcome is the same as for a hang
+///   (a restart), only later; it is not "below two minutes, so never a restart".
+/// - A statement that times out is rolled back whole. What the services keep in the store is
+///   written by transactions that commit or do not (see [`pool_options`]); none depends on a
+///   statement outliving this.
+///
+/// The ingress keeps its own, shorter bound ([`Bounds::statement`] there). The migration runner does
+/// not use [`pool_options`] and is not bounded: a long migration is not an error.
+pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The largest `statement_timeout_ms` PostgreSQL takes: its setting is a 32-bit count of
+/// milliseconds (2 147 483 647, about 24.8 days). A larger value would fail when a connection opens,
+/// as a store error, so the configuration refuses it up front.
+pub const MAX_STATEMENT_TIMEOUT_MS: u64 = i32::MAX as u64;
+
+/// A service's configured `statement_timeout_ms` as a statement bound: the value in milliseconds, or
+/// an error that names the key when it is zero (zero would be no bound at all, which the services
+/// do not offer: a statement that hangs must end) or above [`MAX_STATEMENT_TIMEOUT_MS`]. Every
+/// service's `check` goes through this, so they refuse the same thing in the same words.
+///
+/// The key is how an operator raises [`STATEMENT_TIMEOUT`] without a release: a service whose
+/// evaluation of a large book legitimately takes longer than a minute is told so by configuration
+/// (see the `reserve-check-failed` page in the runbook).
+pub fn statement_bound(ms: u64) -> Result<Duration, String> {
+    if ms == 0 {
+        return Err("statement_timeout_ms must be positive".into());
+    }
+    if ms > MAX_STATEMENT_TIMEOUT_MS {
+        return Err(format!(
+            "statement_timeout_ms must be at most {MAX_STATEMENT_TIMEOUT_MS} (PostgreSQL's limit)"
+        ));
+    }
+    Ok(Duration::from_millis(ms))
+}
+
+/// [`STATEMENT_TIMEOUT`] in milliseconds: the default of the `statement_timeout_ms` key of every
+/// service but the ingress, which has a shorter one of its own.
+pub const STATEMENT_TIMEOUT_MS: u64 = STATEMENT_TIMEOUT.as_millis() as u64;
+
+/// The longest a session may sit idle inside a transaction before the server ends it: the tool for
+/// a holder of a lock that stopped answering (a process stuck between statements, a peer that is
+/// gone), which `statement_timeout` cannot reach because nothing is running (issue #84). The
+/// session is closed, the transaction rolled back and its locks released.
+///
+/// A minute and a half. Some transactions are open across an await that is not a query: the core's
+/// statement publish across S3 and the signer, which the core cuts off as a whole at its own
+/// `STATEMENT_BUDGET` of 60 s (`services/core/src/main.rs`; it is the core's budget, not the
+/// signer's), and the Kreivo endpoint's `prepare` and `record` across chain reads (no bound of their
+/// own, so this is theirs). The core's is cut off well inside 90 s, so the server only ever ends a
+/// transaction whose client is no longer making progress. One ended early rolls back whole and the
+/// caller sees an error, the same as for a lost connection. The signer's transaction is open across
+/// the key backend's `sign`, which can take longer (a Vault login and a sign, each retried, about
+/// 92 s together) and has no budget of that kind, so it has an idle bound of its own
+/// (`bezent_signer::signer::IDLE_IN_TRANSACTION_TIMEOUT`, 150 s). Not `transaction_timeout`
+/// (PostgreSQL 17 and later): that cuts a healthy transaction at a fixed age, whichever way it is
+/// going.
+pub const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// The server-side bounds a pool's connections are given when they open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bounds {
+    /// `statement_timeout`: see [`STATEMENT_TIMEOUT`]. Zero is no bound.
+    pub statement: Duration,
+    /// `idle_in_transaction_session_timeout`: see [`IDLE_IN_TRANSACTION_TIMEOUT`]. Zero is no bound.
+    pub idle_in_transaction: Duration,
+}
+
+impl Bounds {
+    /// What every service gets: [`STATEMENT_TIMEOUT`] and [`IDLE_IN_TRANSACTION_TIMEOUT`].
+    pub const DEFAULT: Bounds = Bounds {
+        statement: STATEMENT_TIMEOUT,
+        idle_in_transaction: IDLE_IN_TRANSACTION_TIMEOUT,
+    };
+
+    /// These bounds with the statement bound a service's `statement_timeout_ms` configures. The
+    /// services refuse zero when they read their configuration ([`statement_bound`]); a zero that
+    /// got here anyway leaves the bound as it was, so that no value turns the bound off.
+    pub fn with_statement_ms(self, ms: u64) -> Bounds {
+        Bounds {
+            statement: statement_bound(ms).unwrap_or(self.statement),
+            ..self
+        }
+    }
+}
+
+/// [`PgPoolOptions`] with [`guard`] and the server-side [`Bounds::DEFAULT`]: how every service makes
+/// its pool, one per login.
+///
+/// What a bound does to a write. A statement that times out, and a session ended for idling in a
+/// transaction, roll the transaction back: nothing it wrote remains, and the caller gets an error.
+/// So where a transaction writes a result after an effect that cannot be taken back (the signer
+/// inserts the signature after `backend.sign`, in one transaction under an advisory lock), the
+/// result is simply not delivered, as when the process dies there; the signature made is never
+/// returned, and nothing is concluded.
+///
+/// What a bound does to `COMMIT`: nothing. The server stops the statement timer before it does
+/// the commit proper (a deferred constraint is checked, the record made durable),
+/// so `statement_timeout` never turns a commit that has begun into a failure,
+/// and the idle-in-transaction timer does not run while the commit is. A commit has two
+/// outcomes the caller can tell apart from a timeout: it answers, or the connection is lost, and
+/// then it is unknown. That ambiguity exists with or without these bounds, and the services already
+/// treat it so: the caller sees "unavailable", not "failed", and a retry finds the row (the signer
+/// replays a signature it has). A statement bound and an idle bound end a transaction only before
+/// its `COMMIT` is sent.
 pub fn pool_options() -> PgPoolOptions {
-    guard(PgPoolOptions::new())
+    pool_options_bounded(Bounds::DEFAULT)
+}
+
+/// [`pool_options`] with other `bounds`: for a service that has a reason for a different bound
+/// (the ingress), and for tests that need one short.
+pub fn pool_options_bounded(bounds: Bounds) -> PgPoolOptions {
+    guard(PgPoolOptions::new()).after_connect(move |conn, _| {
+        Box::pin(async move {
+            for (name, bound) in [
+                ("statement_timeout", bounds.statement),
+                (
+                    "idle_in_transaction_session_timeout",
+                    bounds.idle_in_transaction,
+                ),
+            ] {
+                sqlx::query("SELECT set_config($1, $2, false)")
+                    .bind(name)
+                    .bind(bound.as_millis().to_string())
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            Ok(())
+        })
+    })
 }
 
 /// `base` as login `name`, with `password`.

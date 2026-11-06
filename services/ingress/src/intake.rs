@@ -20,8 +20,8 @@
 
 use crate::address::well_formed;
 use crate::api::{
-    DepositRequest, DestinationBody, RefundRequest, TransferStatus, WithdrawalExtrasRequest,
-    parse_hex,
+    DepositConversionRequest, DepositRequest, DestinationBody, RefundRequest, TransferStatus,
+    WithdrawalExtrasRequest, parse_hex,
 };
 use crate::app::{App, Body};
 use crate::auth::{Grant, Requester};
@@ -38,6 +38,7 @@ use sqlx::{PgConnection, Postgres, Transaction};
 
 const SOURCE_NOT_FOUND: &str = "ERR-SourceNotFound";
 const SOURCE_CONSUMED: &str = "ERR-SourceConsumed";
+const SOURCE_MISMATCH: &str = "ERR-SourceMismatch";
 const COMMITMENT_MISMATCH: &str = "ERR-CommitmentMismatch";
 const REFERENCE_CONFLICT: &str = "ERR-ReferenceConflict";
 const UNKNOWN_ROUTE: &str = "ERR-UnknownRoute";
@@ -57,6 +58,9 @@ enum Outcome {
     /// It made this transfer, in `Received`, within the route's rules: the answer and the
     /// transition to `Accepted` are recorded together.
     Accepted { id: i64, bridge_reference: String },
+    /// It named a deposit's conversion output, and the store recorded the conversion and moved the
+    /// deposit's source (`REQ-RQ-4`, `REQ-CV-2`): the answer names the deposit, once more.
+    Conversion { id: i64 },
     /// It was refused before it named anything bezent can bind.
     Refused(&'static str),
     /// It names an arrival bezent observed that is not final yet: nothing is recorded, and the
@@ -165,6 +169,16 @@ async fn finish(
             .execute(&mut *tx)
             .await?;
         }
+        Outcome::Conversion { id } => {
+            sqlx::query(
+                "INSERT INTO intake_answers (intake_id, transfer_id, bridge_reference, conversion) \
+                 SELECT $1, id, bridge_reference, TRUE FROM transfers WHERE id = $2",
+            )
+            .bind(intake_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        }
         Outcome::Refused(error) => {
             let bridge_reference = refs::refused(requester, reference);
             sqlx::query(
@@ -230,13 +244,15 @@ struct Arrival {
     token: String,
     amount: String,
     recipient: String,
+    /// The kind its endpoint wrote (migration 0034).
+    kind: String,
 }
 
 /// What a request may name, by its kind (`source_bindable()`, migration 0034).
 #[derive(Clone, Copy)]
 enum Purpose {
-    /// A deposit: an `arrival` or a `conversion_output` at a reserve (`REQ-RQ-3`, `REQ-IN-3`,
-    /// `REQ-CV-2`); never a `convertible_arrival` (`REQ-CV-1`).
+    /// A deposit: an `arrival`, a `convertible_arrival` (held, never minted against, `REQ-CV-1`)
+    /// or a `conversion_output` at a reserve (`REQ-RQ-3`, `REQ-IN-3`, `REQ-CV-2`).
     Deposit,
     /// The refund of an unassociated arrival: any arrival at a reserve (`REQ-RQ-6`, `REQ-IN-6`).
     Refund,
@@ -263,13 +279,14 @@ enum Source {
 }
 
 /// An observation at a coordinate: token, amount, recipient, its outcome (`final` or `withdrawn`;
-/// none while it is open) and whether its kind is one the request may name.
+/// none while it is open), whether its kind is one the request may name, and the kind.
 type ObservedRow = (
     Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
     bool,
+    String,
 );
 
 /// The source at `c` for a request of `purpose`: an observation whose kind the endpoint wrote and
@@ -286,7 +303,7 @@ async fn source(
     let row: Option<ObservedRow> = sqlx::query_as(
         "SELECT o.token, o.amount::text, o.recipient, oo.outcome, \
                     source_bindable($6, o.network, o.block_number, o.block_hash, \
-                                    o.position_kind, o.position_index) \
+                                    o.position_kind, o.position_index), o.kind::text \
              FROM observations o \
              LEFT JOIN observation_outcomes oo ON oo.observation_id = o.id \
              WHERE o.network = $1 AND o.block_number = $2 AND o.block_hash = $3 \
@@ -301,16 +318,17 @@ async fn source(
     .fetch_optional(conn)
     .await?;
     Ok(match row {
-        Some((Some(token), Some(amount), Some(recipient), Some(outcome), true))
+        Some((Some(token), Some(amount), Some(recipient), Some(outcome), true, kind))
             if outcome == "final" =>
         {
             Source::Final(Arrival {
                 token,
                 amount,
                 recipient,
+                kind,
             })
         }
-        Some((_, _, _, None, true)) => Source::NotFinal,
+        Some((_, _, _, None, true, _)) => Source::NotFinal,
         _ => Source::None,
     })
 }
@@ -408,14 +426,16 @@ async fn issuing_network(conn: &mut PgConnection) -> Result<String, ApiError> {
     })
 }
 
-/// Whether a transfer that has not ended with nothing moved binds `c` (`INV-2`).
+/// Whether a transfer that has not ended with nothing moved binds `c`, or a deposit recorded it as
+/// the convertible arrival its conversion's output replaced (`INV-2`, `REQ-CV-2`).
 async fn consumed(conn: &mut PgConnection, c: &Coordinate) -> Result<bool, ApiError> {
     let (kind, index) = position(c);
     Ok(sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM transfers \
            WHERE source_network = $1 AND source_block_number = $2 AND source_block_hash = $3 \
              AND source_position_kind = $4::position_kind AND source_position_index = $5 \
-             AND refund_of IS NULL AND state NOT IN ('Refused', 'Expired', 'Withdrawn'))",
+             AND refund_of IS NULL AND state NOT IN ('Refused', 'Expired', 'Withdrawn')) \
+         OR coordinate_recorded_converted($1, $2, $3, $4::position_kind, $5)",
     )
     .bind(c.network.as_str())
     .bind(block_number(c)?)
@@ -658,7 +678,18 @@ async fn decide_deposit(
         Source::NotFinal => return Ok(Outcome::NotFinal),
         Source::None => return Ok(Outcome::Refused(SOURCE_NOT_FOUND)),
     };
-    let Some(asset) = admitted_asset(conn, network, &arrival.token).await? else {
+    // A convertible is admitted for no asset: a deposit naming one is of the asset whose reserve it
+    // arrived at, held until its conversion's output is named (REQ-CV-1, REQ-CV-2; amendment 0018).
+    let asset = if arrival.kind == "convertible_arrival" {
+        sqlx::query_scalar("SELECT asset FROM reserves WHERE network = $1 AND address = $2")
+            .bind(network)
+            .bind(&arrival.recipient)
+            .fetch_optional(&mut *conn)
+            .await?
+    } else {
+        admitted_asset(conn, network, &arrival.token).await?
+    };
+    let Some(asset) = asset else {
         return Ok(Outcome::Refused(UNKNOWN_ROUTE));
     };
     // An arrival a deposit binds is one at the asset's reserve address (§5.5).
@@ -730,6 +761,165 @@ async fn decide_deposit(
             bridge_reference,
         }),
         Err(refused) => Ok(refused),
+    }
+}
+
+/// Name a deposit's conversion output by the deposit's request reference (`REQ-RQ-4`, `REQ-CV-2`;
+/// amendment 0018, A1b).
+#[utoipa::path(
+    post, path = "/v0/deposits/conversion", tag = "requests",
+    request_body = DepositConversionRequest,
+    security(("bearer" = [])),
+    responses(
+        (status = 201, description = "Taken in now: the deposit's status, its source now the output and its `converted_arrival` recorded; or `Refused` with its named error (ERR-SourceNotFound: no deposit of yours by that reference naming a convertible arrival, or no conversion output at the coordinate; ERR-SourceMismatch: an output of another network, reserve or asset; ERR-SourceConsumed: the output is bound already, or the deposit no longer awaits its conversion; ERR-ReferenceConflict: its output is named already)", body = TransferStatus),
+        (status = 200, description = "A repeat: the original's status (REQ-ID-1)", body = TransferStatus),
+        (status = 202, description = "taken-in: taken in, but the status could not be read back; read it by request reference", body = ErrorBody),
+        (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody), (status = 409, body = ErrorBody),
+        (status = 503, description = "ERR-Overloaded: nothing recorded; retry. not-final: the output is observed but not final yet, or the deposit has not reached Source-Final yet; nothing recorded: send the same request again. outcome-unknown: repeat the same request", body = ErrorBody),
+    )
+)]
+pub(crate) async fn deposit_conversion(
+    State(app): State<App>,
+    who: Requester,
+    Body(request): Body<DepositConversionRequest>,
+) -> Answer {
+    who.require(Grant::Deposit)?;
+    let request = request.canonical()?;
+    let c = request.conversion_output.parse()?;
+    let _permit = app.permit()?;
+    let mut tx = app.pool().begin().await?;
+    let reference = request.request_reference.as_str();
+    let intake_id = match record(&mut tx, &who.name, "deposit", reference, &request).await? {
+        Recorded::New(id) => id,
+        Recorded::Repeat(id) => return replay(&app, tx, id).await,
+    };
+    let outcome = decide_conversion(&mut tx, &who.name, intake_id, &request, &c).await?;
+    finish(
+        &app, tx, &who.name, "deposit", reference, intake_id, outcome,
+    )
+    .await
+}
+
+/// The deposit a conversion request names, as it stands under its lock.
+#[derive(sqlx::FromRow)]
+struct Awaiting {
+    state: String,
+    condition: Option<String>,
+    asset: Option<String>,
+    converted: bool,
+    source_kind: Option<String>,
+    source_network: Option<String>,
+    source_recipient: Option<String>,
+}
+
+async fn decide_conversion(
+    conn: &mut PgConnection,
+    requester: &str,
+    intake_id: i64,
+    request: &DepositConversionRequest,
+    c: &Coordinate,
+) -> Result<Outcome, ApiError> {
+    // The deposit, by this requester's own request reference (REQ-RQ-4): another requester's
+    // deposit is not found by this one.
+    let id: Option<i64> = sqlx::query_scalar(
+        "SELECT a.transfer_id FROM intake i JOIN intake_answers a ON a.intake_id = i.id \
+         WHERE i.requester = $1 AND i.request_reference = $2 AND i.kind = 'deposit' \
+           AND a.transfer_id IS NOT NULL AND NOT a.conversion",
+    )
+    .bind(requester)
+    .bind(&request.deposit_reference)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(id) = id else {
+        return Ok(Outcome::Refused(SOURCE_NOT_FOUND));
+    };
+    // Locked first, as a withdrawal's extras are: the core's deadline and this request do not pass
+    // each other (REQ-CV-6), and what is checked is read once the lock is held.
+    sqlx::query("SELECT 1 FROM transfers WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+    let d: Awaiting = sqlx::query_as(
+        "SELECT t.state::text AS state, t.condition::text AS condition, t.asset, \
+                EXISTS (SELECT 1 FROM deposit_conversions c WHERE c.transfer_id = t.id) AS converted, \
+                o.kind::text AS source_kind, o.network AS source_network, \
+                o.recipient AS source_recipient \
+         FROM transfers t \
+         LEFT JOIN observations o ON o.network = t.source_network \
+           AND o.block_number = t.source_block_number AND o.block_hash = t.source_block_hash \
+           AND o.position_kind = t.source_position_kind \
+           AND o.position_index = t.source_position_index \
+         WHERE t.id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    // Written once (REQ-RQ-4): a later request for the same deposit is a different body.
+    if d.converted {
+        return Ok(Outcome::Refused(REFERENCE_CONFLICT));
+    }
+    if d.source_kind.as_deref() != Some("convertible_arrival") {
+        return Ok(Outcome::Refused(SOURCE_NOT_FOUND));
+    }
+    match (d.state.as_str(), d.condition.as_deref()) {
+        ("Source-Final", Some("CND-AwaitingConversion")) => {}
+        // The core has not taken it to Source-Final yet: nothing is recorded; send it again.
+        ("Received" | "Accepted", _) => return Ok(Outcome::NotFinal),
+        // In review past its deadline, or anywhere else: it no longer awaits its output (REQ-CV-6,
+        // REQ-RV-2).
+        _ => return Ok(Outcome::Refused(SOURCE_CONSUMED)),
+    }
+
+    let output = match source(conn, c, Purpose::Deposit).await? {
+        Source::Final(o) if o.kind == "conversion_output" => o,
+        Source::NotFinal => return Ok(Outcome::NotFinal),
+        _ => return Ok(Outcome::Refused(SOURCE_NOT_FOUND)),
+    };
+    let family = admitted_asset(conn, c.network.as_str(), &output.token).await?;
+    if d.source_network.as_deref() != Some(c.network.as_str())
+        || d.source_recipient.as_deref() != Some(output.recipient.as_str())
+        || family.is_none()
+        || family != d.asset
+    {
+        return Ok(Outcome::Refused(SOURCE_MISMATCH));
+    }
+    if consumed(conn, c).await? {
+        return Ok(Outcome::Refused(SOURCE_CONSUMED));
+    }
+
+    // The store records the conversion and moves the source, or refuses (INV-2). An output bound by
+    // a request that committed after the read above is caught by the source's unique index: that
+    // is ERR-SourceConsumed, and the savepoint keeps this transaction for the refusal's answer.
+    let (kind, index) = position(c);
+    sqlx::query("SAVEPOINT conversion")
+        .execute(&mut *conn)
+        .await?;
+    let moved =
+        sqlx::query("SELECT deposit_conversion_record($1, $2, $3, $4, $5, $6::position_kind, $7)")
+            .bind(id)
+            .bind(intake_id)
+            .bind(c.network.as_str())
+            .bind(block_number(c)?)
+            .bind(c.block_hash.as_bytes())
+            .bind(kind)
+            .bind(index)
+            .execute(&mut *conn)
+            .await;
+    match moved {
+        Ok(_) => {
+            sqlx::query("RELEASE SAVEPOINT conversion")
+                .execute(&mut *conn)
+                .await?;
+            Ok(Outcome::Conversion { id })
+        }
+        Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("23505") => {
+            sqlx::query("ROLLBACK TO SAVEPOINT conversion")
+                .execute(&mut *conn)
+                .await?;
+            Ok(Outcome::Refused(SOURCE_CONSUMED))
+        }
+        Err(e) => Err(e.into()),
     }
 }
 

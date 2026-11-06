@@ -23,6 +23,12 @@
 //! start_block = 95400000
 //! database_url_file = "/run/secrets/…"
 //!
+//! # Signed transactions are sent here and nowhere else (amendment 0023, `d-evm-submit-public`).
+//! # Public nodes, no key in the URL, so the list is written in the file. At least one, `https://`
+//! # (`http://` only for a loopback address: a test, anvil), no duplicates. Name two or three
+//! # independent operators, so one node dropping a transaction does not hold it back.
+//! broadcast = ["https://polygon-rpc.com", "https://polygon-bor-rpc.publicnode.com", "https://polygon.drpc.org"]
+//!
 //! [[providers]]            # exactly two, independent (DEC-12)
 //! name = "a"
 //! url_file = "/run/secrets/…"
@@ -180,7 +186,10 @@ pub struct Config {
     pub delivery_role: String,
     /// The first block to read.
     pub start_block: u64,
-    /// The most blocks one `eth_getLogs` range covers.
+    /// The most blocks one `eth_getLogs` range covers. The range is this size every time (default
+    /// 500) and does not shrink when a read fails, and a request to a provider ends after 30 s
+    /// (`rpc::REQUEST_TIMEOUT`): a range the provider always takes longer than that to answer is
+    /// retried as a gap for good, so choose a value the provider answers well within 30 s.
     #[serde(default = "default_range")]
     pub max_range: u64,
     /// How often the endpoint looks, in milliseconds.
@@ -198,9 +207,19 @@ pub struct Config {
     /// is the Safe's address.
     #[serde(default)]
     pub vault_login: Option<VaultConfig>,
+    /// The longest one statement may run on the store, in milliseconds (issue #84): 60 000 by
+    /// default. It also bounds a wait for a lock. Raise it only if a statement legitimately takes
+    /// longer; see the runbook's `reserve-check-failed` page. Past `PASS_ALLOWANCE` (120 s), one
+    /// statement can outlast the health window and the service is restarted.
+    #[serde(default = "default_statement_timeout_ms")]
+    pub statement_timeout_ms: u64,
     /// The pool size.
     #[serde(default = "default_connections")]
     pub max_connections: u32,
+    /// The public nodes signed transactions are sent to, and the only ones (amendment 0023): at
+    /// least one, each `https://` (`http://` only for a loopback address), no two the same. Not
+    /// secret, so written here; the paid `providers` are never sent to. Every read stays on them.
+    pub broadcast: Vec<String>,
     /// The two providers.
     pub providers: Vec<Provider>,
     /// The convertibles.
@@ -227,6 +246,9 @@ fn default_range() -> u64 {
 }
 fn default_poll() -> u64 {
     2_000
+}
+fn default_statement_timeout_ms() -> u64 {
+    bezent_store::login::STATEMENT_TIMEOUT_MS
 }
 fn default_connections() -> u32 {
     4
@@ -305,9 +327,19 @@ impl Config {
         Ok(c)
     }
 
+    /// The options of the service's store pool: the store's bounds with the configured statement
+    /// bound (`statement_timeout_ms`).
+    pub fn pool_options(&self) -> sqlx::postgres::PgPoolOptions {
+        bezent_store::login::pool_options_bounded(
+            bezent_store::login::Bounds::DEFAULT.with_statement_ms(self.statement_timeout_ms),
+        )
+        .max_connections(self.max_connections)
+    }
+
     /// The checks that need no network (`T-009-01`): two independent providers, every address
     /// well formed, the lane's key a secp256k1 key.
     pub fn check(&self) -> Result<Checked, String> {
+        bezent_store::login::statement_bound(self.statement_timeout_ms)?;
         if self.network.is_empty() {
             return Err("network: empty".into());
         }
@@ -341,6 +373,7 @@ impl Config {
                 "DEC-12: the two providers must be independent: distinct names and URLs".into(),
             );
         }
+        self.broadcast_nodes()?;
         self.check_secrets()?;
         if self.max_range == 0 {
             return Err("max_range: at least 1".into());
@@ -402,6 +435,49 @@ impl Config {
             convertibles,
             max_fee_per_gas,
         })
+    }
+
+    /// The broadcast nodes, checked: each with a name for logs (its position and host) and its
+    /// URL. At least one; `https://`, or `http://` to a loopback host; no duplicates (amendment
+    /// 0023). The URLs are public by definition, but an error names the position, not the URL.
+    pub fn broadcast_nodes(&self) -> Result<Vec<(String, String)>, String> {
+        if self.broadcast.is_empty() {
+            return Err("broadcast: at least one public node is needed (amendment 0023)".into());
+        }
+        let mut nodes: Vec<(String, String)> = Vec::new();
+        for (i, raw) in self.broadcast.iter().enumerate() {
+            let n = i + 1;
+            let url =
+                url::Url::parse(raw).map_err(|e| format!("broadcast #{n}: a bad URL ({e})"))?;
+            let loopback = match url.host() {
+                Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+                Some(url::Host::Ipv4(a)) => a.is_loopback(),
+                Some(url::Host::Ipv6(a)) => a.is_loopback(),
+                None => false,
+            };
+            match url.scheme() {
+                "https" => {}
+                "http" if loopback => {}
+                _ => {
+                    return Err(format!(
+                        "broadcast #{n}: the URL must be https:// (http:// only for a loopback address)"
+                    ));
+                }
+            }
+            if !url.username().is_empty() || url.password().is_some() {
+                return Err(format!("broadcast #{n}: no credentials in the URL"));
+            }
+            let url = url.to_string();
+            if nodes.iter().any(|(_, u)| *u == url) {
+                return Err(format!("broadcast #{n}: the same node is listed twice"));
+            }
+            let host = url::Url::parse(&url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned))
+                .unwrap_or_default();
+            nodes.push((format!("broadcast-{n} ({host})"), url));
+        }
+        Ok(nodes)
     }
 
     /// A provider's URL: written in the file, or read from its file or from Vault.
@@ -533,6 +609,18 @@ mod tests {
     }
 
     #[test]
+    fn issue_84_the_statement_bound_defaults_to_a_minute_and_zero_is_refused() {
+        let c = Config::parse(FIXTURE).unwrap();
+        assert_eq!(c.statement_timeout_ms, 60_000);
+        let zero = format!("statement_timeout_ms = 0\n{FIXTURE}");
+        assert!(
+            Config::parse(&zero)
+                .unwrap_err()
+                .contains("statement_timeout_ms")
+        );
+    }
+
+    #[test]
     fn dec_12_one_provider_or_the_same_one_twice_is_refused() {
         let one = FIXTURE.replace(
             "[[providers]]\nname = \"b\"\nurl_file = \"/run/secrets/bezent-evm-polygon-rpc-b\"\n",
@@ -544,6 +632,60 @@ mod tests {
             "/run/secrets/bezent-evm-polygon-rpc-a",
         );
         assert!(Config::parse(&twice).unwrap_err().contains("DEC-12"));
+    }
+
+    /// Amendment 0023: sending goes to a list of public nodes, which must be there, safe to reach
+    /// and distinct.
+    #[test]
+    fn req_eo_1_amendment_0023_the_broadcast_list_is_required_https_and_without_duplicates() {
+        let line = FIXTURE
+            .lines()
+            .find(|l| l.starts_with("broadcast = "))
+            .unwrap();
+        let with = |list: &str| FIXTURE.replace(line, &format!("broadcast = {list}"));
+        let c = Config::parse(FIXTURE).unwrap();
+        assert!(c.broadcast.len() >= 2);
+        assert_eq!(c.broadcast_nodes().unwrap().len(), c.broadcast.len());
+        // Empty, and absent.
+        assert!(
+            Config::parse(&with("[]"))
+                .unwrap_err()
+                .contains("broadcast")
+        );
+        assert!(Config::parse(&FIXTURE.replace(line, "")).is_err());
+        // Plain http to a public host, or to anything that is not loopback.
+        for bad in [
+            "http://rpc.example",
+            "http://10.0.0.1:8545",
+            "http://localhost.example",
+            "ws://rpc.example",
+            "rpc.example",
+        ] {
+            let err = Config::parse(&with(&format!("[\"{bad}\"]"))).unwrap_err();
+            assert!(err.contains("broadcast #1"), "{bad}: {err}");
+        }
+        // Loopback may be plain http (anvil, tests).
+        for ok in [
+            "http://127.0.0.1:8545",
+            "http://localhost:8545",
+            "http://[::1]:8545",
+        ] {
+            Config::parse(&with(&format!("[\"{ok}\"]"))).unwrap();
+        }
+        // The same node twice, however it is spelled.
+        for dup in [
+            "[\"https://a.example\", \"https://a.example\"]",
+            "[\"https://a.example\", \"https://A.example/\"]",
+        ] {
+            let err = Config::parse(&with(dup)).unwrap_err();
+            assert!(err.contains("twice"), "{err}");
+        }
+        // A key in the URL is for the paid providers, not here.
+        assert!(
+            Config::parse(&with("[\"https://user:pw@a.example\"]"))
+                .unwrap_err()
+                .contains("credentials")
+        );
     }
 
     #[test]

@@ -49,6 +49,7 @@
 //! signer keeps nothing in memory between requests: its only state is the store's.
 
 use std::fmt;
+use std::time::Duration;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -397,9 +398,37 @@ impl From<KeyError> for Failure {
 /// and of nothing else, acting as itself through the role's privileges. It never switches roles
 /// (#27); a connection that comes back acting as another role is closed
 /// ([`bezent_store::login::guard`]).
+///
+/// It carries the store's server-side bounds (issue #84): [`bezent_store::login::STATEMENT_TIMEOUT`]
+/// (by default; `statement_timeout_ms`) for a statement, which also ends a wait for the signing lock, and
+/// [`IDLE_IN_TRANSACTION_TIMEOUT`] for a holder of that lock that stopped answering. A transaction
+/// the server ends rolls back whole: the signature the backend made is dropped with it, nothing is
+/// recorded, and the caller sees "unavailable" and asks again.
 pub fn pool_options() -> PgPoolOptions {
-    bezent_store::login::pool_options().max_connections(4)
+    pool_options_with_statement_ms(bezent_store::login::STATEMENT_TIMEOUT_MS)
 }
+
+/// [`pool_options`] with the statement bound the signer's `statement_timeout_ms` configures
+/// ([`crate::config::Config::pool_options`] is how the signer's process gets it).
+pub fn pool_options_with_statement_ms(statement_ms: u64) -> PgPoolOptions {
+    bezent_store::login::pool_options_bounded(
+        bezent_store::login::Bounds {
+            idle_in_transaction: IDLE_IN_TRANSACTION_TIMEOUT,
+            ..bezent_store::login::Bounds::DEFAULT
+        }
+        .with_statement_ms(statement_ms),
+    )
+    .max_connections(4)
+}
+
+/// How long the signer's session may sit idle inside its signing transaction before the server ends
+/// it. The transaction is open across the key backend's `sign`, whose worst case is a Vault login
+/// and a Vault sign, each of up to three 15 s attempts with backoff (about 46 s each, about 92 s
+/// together), so the store's default of 90 s could end a transaction that was about to finish.
+/// Two and a half minutes is that, with a margin; a signer that is hung holds the signing lock for
+/// no longer. A transaction ended early is safe, only wasted (see [`pool_options`]); the owner may
+/// change this.
+pub const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(150);
 
 /// Proves, before the signer serves, that `pool` logs in as a member of `bezent_signer` and of
 /// nothing else, and can act as nothing else (`REQ-AR-3`; review S3; #46): the store's shared check

@@ -300,20 +300,31 @@ const LOGIN_PASSWORD: &str = "test-only-signer-tests-login";
 /// A pool on `connect`'s database logged in as `name`, made a member of `role` and of nothing
 /// else: one pool, one login, never a switched role (#27, #46).
 pub async fn login_pool(connect: &PgConnectOptions, name: &str, role: &str, max: u32) -> PgPool {
+    login_pool_with(
+        connect,
+        name,
+        role,
+        PgPoolOptions::new().max_connections(max),
+    )
+    .await
+}
+
+/// [`login_pool`] over `options` of the caller's: the pool a signer is given, made as production
+/// makes it.
+pub async fn login_pool_with(
+    connect: &PgConnectOptions,
+    name: &str,
+    role: &str,
+    options: PgPoolOptions,
+) -> PgPool {
     let owner = PgPoolOptions::new()
         .max_connections(1)
         .connect_with(connect.clone())
         .await
         .unwrap();
-    let pool = bezent_store::login::connect_login(
-        &owner,
-        name,
-        role,
-        LOGIN_PASSWORD,
-        PgPoolOptions::new().max_connections(max),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("{e}"));
+    let pool = bezent_store::login::connect_login(&owner, name, role, LOGIN_PASSWORD, options)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
     owner.close().await;
     pool
 }

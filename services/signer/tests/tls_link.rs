@@ -434,3 +434,35 @@ fn req_ar_3_a_caller_is_known_by_the_one_dns_name_of_its_certificate() {
         .unwrap();
     assert_eq!(peer_name(Some(&[two.der().clone()])), None);
 }
+
+/// The TLS end of the dial's bound (`dial_timeout.rs` has the socket's): a server that accepts the
+/// connection and says nothing is an error within the bound, not a caller held for good.
+#[tokio::test]
+async fn a_server_that_never_answers_the_handshake_is_an_error_within_the_bound() {
+    let authority = Arc::new(Authority::new());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().flatten() {
+            held.push(stream);
+        }
+    });
+    let core = dial(addr, &authority, CORE, SIGNER).await;
+
+    let started = std::time::Instant::now();
+    let answer = tokio::time::timeout(
+        Duration::from_secs(10),
+        Client::connect_tls_within(&core, TOKEN, Duration::from_millis(300)),
+    )
+    .await
+    .expect("the dial's own bound ended it: it is not left waiting");
+    let error = answer.expect_err("a silent server does not welcome");
+    assert!(
+        matches!(&error, LinkError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut),
+        "{error:?}"
+    );
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(280), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+}

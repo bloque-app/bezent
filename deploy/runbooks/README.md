@@ -64,7 +64,7 @@ Each row: the page that sends you to the runbook, the observable that shows the 
 | Condition | Page | Observable | Runbook | A test |
 |---|---|---|---|---|
 | `CND-AmountMismatch` | none | `reviews_open`, `reviews_oldest_age_seconds` | [CND-AmountMismatch](conditions/CND-AmountMismatch.md) | `req_tr_5_a_delivery_of_another_amount_goes_to_review_reporting_both` (+2) |
-| `CND-AwaitingConversion` | none | `reviews_open`, `reviews_oldest_age_seconds`, `unassociated_arrivals`, `unassociated_arrivals_oldest_age_seconds` | [CND-AwaitingConversion](conditions/CND-AwaitingConversion.md) | `cnd_awaiting_conversion_mints_nothing_and_goes_to_review_past_its_deadline` (+2) |
+| `CND-AwaitingConversion` | none | `reviews_open`, `reviews_oldest_age_seconds`, `unassociated_arrivals`, `unassociated_arrivals_oldest_age_seconds` | [CND-AwaitingConversion](conditions/CND-AwaitingConversion.md) | `cnd_awaiting_conversion_mints_nothing_and_goes_to_review_past_its_deadline` (+3) |
 | `CND-CutOff` | none | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | [CND-CutOff](conditions/CND-CutOff.md) | `cnd_cutoff_a_step_past_the_route_cut_off_holds_until_it_reopens` (+3) |
 | `CND-DestinationRefused` | none | `reviews_open`, `reviews_oldest_age_seconds`, `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | [CND-DestinationRefused](conditions/CND-DestinationRefused.md) | `cnd_destination_refused_mints_nothing_and_resumes_when_the_mint_applies` (+4) |
 | `CND-FeeShort` | none | `fee_short_transfers`, `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | [CND-FeeShort](conditions/CND-FeeShort.md) | `cnd_fee_short_holds_until_the_fee_position_can_pay` |

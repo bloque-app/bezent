@@ -387,7 +387,16 @@ fn f_014_every_runbook_has_its_sections_and_an_honest_exercise_status() {
 
 #[test]
 fn f_014_a_runbook_names_only_tests_and_observables_that_exist() {
-    let observables_sql = read(&root().join("crates/store/migrations/0090_ops_observables.up.sql"));
+    // The function is defined in 0090 and replaced, with its additions, by each later migration
+    // that adds a metric (0110: fee positions).
+    let observables_sql = [
+        "0090_ops_observables.up.sql",
+        "0110_fee_position_readings.up.sql",
+    ]
+    .iter()
+    .map(|f| read(&root().join("crates/store/migrations").join(f)))
+    .collect::<Vec<_>>()
+    .join("\n");
     for r in runbooks() {
         for o in &r.observables {
             assert!(
