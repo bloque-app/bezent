@@ -14,6 +14,9 @@
 //! - a storage value is read with `state_getReadProof` and verified against the state root of the
 //!   verified header of its block: a value that is not proven, or a node left out, is `Invalid`,
 //!   never "absent";
+//! - the hash of `:code` is read from `:code`'s own trie node, in a proof of `:code ‖ 0x00` verified
+//!   the same way: the node holds the hash, and the code (about 2 MB) is not sent
+//!   ([`CODE_PROBE`]);
 //! - a block body is kept only if its extrinsics root is the verified header's.
 //!
 //! No runtime call is ever made on a source: a call's result carries no proof. A source that does
@@ -29,7 +32,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use parity_scale_codec::Encode;
 use smoldot::trie::{self, TrieEntryVersion, proof_decode};
 
-use super::{BlockRef, ChainError, ChainResult, Header};
+use super::{BlockRef, ChainError, ChainResult, Header, Values};
 use crate::kreivo::blake2_256;
 
 /// Kreivo's block numbers are `u32`.
@@ -97,24 +100,31 @@ pub fn verify_header(hash: &[u8; 32], bytes: &[u8]) -> Result<Verified, String> 
                 hash: *hash,
             },
             parent: *h.parent_hash,
-            code_updated: h.digest.has_runtime_environment_updated(),
         },
         state_root: *h.state_root,
         extrinsics_root: *h.extrinsics_root,
     })
 }
 
-/// The values of `keys` under `state_root`, from the proof's `nodes`: each proven present or
-/// proven absent, or an error.
-pub fn verify_storage(
-    state_root: &[u8; 32],
-    nodes: Vec<Vec<u8>>,
-    keys: &[Vec<u8>],
-) -> Result<Vec<Option<Vec<u8>>>, String> {
-    let proof = proof_decode::decode_and_verify_proof(proof_decode::Config {
+/// The key asked for to prove `:code`'s hash: `:code ‖ 0x00`. No such key exists, and its lookup
+/// ends at `:code`'s own trie node, so a node's `state_getReadProof` of it carries the path to that
+/// node (under 1 KB on Kreivo) and not the code: asked for `:code` itself, it also sends the value
+/// (about 2 MB), since it reads it.
+pub const CODE_PROBE: &[u8] = b":code\0";
+
+/// A proof's nodes, decoded and checked to be a trie.
+fn decode_proof(nodes: Vec<Vec<u8>>) -> Result<proof_decode::DecodedTrieProof<Vec<u8>>, String> {
+    proof_decode::decode_and_verify_proof(proof_decode::Config {
         proof: nodes.encode(),
     })
-    .map_err(|e| format!("the storage proof does not verify: {e}"))?;
+    .map_err(|e| format!("the storage proof does not verify: {e}"))
+}
+
+fn values_of(
+    proof: &proof_decode::DecodedTrieProof<Vec<u8>>,
+    state_root: &[u8; 32],
+    keys: &[Vec<u8>],
+) -> Result<Vec<Option<Vec<u8>>>, String> {
     keys.iter()
         .map(|key| match proof.storage_value(state_root, key) {
             Ok(v) => Ok(v.map(|(value, _)| value.to_vec())),
@@ -124,6 +134,51 @@ pub fn verify_storage(
             )),
         })
         .collect()
+}
+
+/// BLAKE2b-256 of `:code` under `state_root`, from `:code`'s trie node in the proof. Under state
+/// version 1 the node holds that hash itself (the value is hashed), and the code need not be in the
+/// proof; a value in the proof, inline (version 0) or hashed and present, is hashed here. Absent, or
+/// not covered by the proof, is an error: never a guess.
+fn code_hash_of(
+    proof: &proof_decode::DecodedTrieProof<Vec<u8>>,
+    state_root: &[u8; 32],
+) -> Result<[u8; 32], String> {
+    let node = proof
+        .trie_node_info(
+            state_root,
+            trie::bytes_to_nibbles(crate::chain::runtime::CODE.iter().copied()),
+        )
+        .map_err(|_| "the storage proof does not cover :code under the block's state root")?;
+    match node.storage_value {
+        proof_decode::StorageValue::HashKnownValueMissing(hash) => Ok(*hash),
+        proof_decode::StorageValue::Known { value, .. } => Ok(blake2_256(value)),
+        proof_decode::StorageValue::None => Err("the storage proof proves no :code".into()),
+    }
+}
+
+/// The values of `keys` under `state_root`, from the proof's `nodes`: each proven present or
+/// proven absent, or an error.
+pub fn verify_storage(
+    state_root: &[u8; 32],
+    nodes: Vec<Vec<u8>>,
+    keys: &[Vec<u8>],
+) -> Result<Vec<Option<Vec<u8>>>, String> {
+    values_of(&decode_proof(nodes)?, state_root, keys)
+}
+
+/// The values of `keys` and the hash of `:code` under `state_root`, from one proof's `nodes` (of
+/// `keys` and [`CODE_PROBE`]): see the module documentation.
+pub fn verify_storage_and_code_hash(
+    state_root: &[u8; 32],
+    nodes: Vec<Vec<u8>>,
+    keys: &[Vec<u8>],
+) -> Result<(Values, [u8; 32]), String> {
+    let proof = decode_proof(nodes)?;
+    Ok((
+        values_of(&proof, state_root, keys)?,
+        code_hash_of(&proof, state_root)?,
+    ))
 }
 
 /// Whether `extrinsics` are the block body whose extrinsics root is `root`.
@@ -288,6 +343,19 @@ impl<S: Source> Archive<S> {
         verify_storage(&root, s.read_proof(at, keys).await?, keys).map_err(Fail::Lied)
     }
 
+    async fn storage_and_code_hash_from(
+        &self,
+        s: &S,
+        at: &[u8; 32],
+        keys: &[Vec<u8>],
+    ) -> Result<(Values, [u8; 32]), Fail> {
+        let root = self.header_from(s, at).await?.state_root;
+        let mut asked = keys.to_vec();
+        asked.push(CODE_PROBE.to_vec());
+        verify_storage_and_code_hash(&root, s.read_proof(at, &asked).await?, keys)
+            .map_err(Fail::Lied)
+    }
+
     /// The verified header of block `hash`.
     pub async fn header(&self, hash: &[u8; 32]) -> ChainResult<Verified> {
         self.each("a header", |s| self.header_from(s, hash)).await
@@ -301,6 +369,23 @@ impl<S: Source> Archive<S> {
     ) -> ChainResult<Vec<Option<Vec<u8>>>> {
         self.each("a storage proof", |s| self.storage_from(s, at, keys))
             .await
+    }
+
+    /// The values of `keys` and the hash of `:code` at block `at`, from one proof.
+    pub async fn storage_and_code_hash(
+        &self,
+        at: &[u8; 32],
+        keys: &[Vec<u8>],
+    ) -> ChainResult<(Values, [u8; 32])> {
+        self.each("a storage proof", |s| {
+            self.storage_and_code_hash_from(s, at, keys)
+        })
+        .await
+    }
+
+    /// The hash of `:code` at block `at`, proven from `:code`'s trie node, without the code.
+    pub async fn code_hash(&self, at: &[u8; 32]) -> ChainResult<[u8; 32]> {
+        Ok(self.storage_and_code_hash(at, &[]).await?.1)
     }
 
     /// The extrinsics of block `at`, proven by its extrinsics root.
@@ -738,5 +823,156 @@ mod tests {
         assert_eq!((counts[1].lied, counts[1].failed), (0, 1));
         assert_eq!((counts[2].lied, counts[2].failed), (0, 0));
         assert!(log_this(1) && !log_this(2) && log_this(1_000) && !log_this(1_001));
+    }
+
+    // ------------------------------------------------------------- the proven hash of `:code`
+
+    /// Kreivo block 40,004,556 (`fixtures/kreivo-40004557.json`): its SCALE header and the proof
+    /// a node served for [`CODE_PROBE`] there, and the code it proves.
+    struct Probe {
+        header: Vec<u8>,
+        proof: Vec<Vec<u8>>,
+    }
+
+    fn probe() -> (Probe, [u8; 32]) {
+        let f: Value =
+            serde_json::from_str(include_str!("../../fixtures/kreivo-40004557.json")).unwrap();
+        (
+            Probe {
+                header: bytes(&f["parent_header"]),
+                proof: list(&f["parent_code_proof"]),
+            },
+            h(&f["parent_hash"]),
+        )
+    }
+
+    const CODE_134: &[u8] = include_bytes!("../../fixtures/kreivo-spec-134.wasm");
+
+    impl Source for Probe {
+        fn name(&self) -> &str {
+            "probe"
+        }
+
+        async fn block_hash(&self, _: u64) -> Result<Option<[u8; 32]>, Fail> {
+            Ok(None)
+        }
+
+        async fn header(&self, _: &[u8; 32]) -> Result<Vec<u8>, Fail> {
+            Ok(self.header.clone())
+        }
+
+        async fn read_proof(&self, _: &[u8; 32], keys: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, Fail> {
+            assert_eq!(keys.last().map(Vec::as_slice), Some(CODE_PROBE));
+            Ok(self.proof.clone())
+        }
+
+        async fn body(&self, _: &[u8; 32]) -> Result<Vec<Vec<u8>>, Fail> {
+            Err(Fail::Missing("no body".into()))
+        }
+    }
+
+    /// A trie of one leaf at `:code`, and its root. With `inline`, the leaf holds `value`
+    /// (state version 0, or a value under 33 bytes); otherwise its hash, and `value` follows as
+    /// its own node when `with_value`.
+    fn one_leaf(value: &[u8], inline: bool, with_value: bool) -> ([u8; 32], Vec<Vec<u8>>) {
+        // `:code` is ten nibbles, packed as its five bytes.
+        let mut leaf = vec![if inline { 0x40 } else { 0x20 } | 10];
+        leaf.extend_from_slice(crate::chain::runtime::CODE);
+        if inline {
+            parity_scale_codec::Compact(u32::try_from(value.len()).unwrap()).encode_to(&mut leaf);
+            leaf.extend_from_slice(value);
+        } else {
+            leaf.extend_from_slice(&blake2_256(value));
+        }
+        let mut nodes = vec![leaf];
+        if with_value {
+            nodes.push(value.to_vec());
+        }
+        (blake2_256(&nodes[0]), nodes)
+    }
+
+    #[test]
+    fn walk_40004557_the_hash_of_code_is_proven_from_a_hashed_value_leaf() {
+        // What the node served: under 1 KB, without the code, yet it proves spec 134's code.
+        let (p, parent) = probe();
+        let root = verify_header(&parent, &p.header).unwrap().state_root;
+        assert!(p.proof.iter().map(Vec::len).sum::<usize>() < 1_024);
+        assert!(p.proof.iter().all(|n| n.len() < CODE_134.len()));
+        let (values, hash) = verify_storage_and_code_hash(&root, p.proof, &[]).unwrap();
+        assert!(values.is_empty());
+        assert_eq!(hash, blake2_256(CODE_134));
+    }
+
+    #[test]
+    fn walk_40004557_the_hash_of_code_is_proven_from_a_value_in_the_proof() {
+        let code = b"a short runtime, inline in its leaf";
+        for (inline, with_value) in [(true, false), (false, true)] {
+            let (root, nodes) = one_leaf(code, inline, with_value);
+            let (_, hash) = verify_storage_and_code_hash(&root, nodes, &[]).unwrap();
+            assert_eq!(hash, blake2_256(code), "inline {inline}");
+        }
+        // The same leaf, hashed and without its value: the hash, as with Kreivo's.
+        let (root, nodes) = one_leaf(code, false, false);
+        let (_, hash) = verify_storage_and_code_hash(&root, nodes, &[]).unwrap();
+        assert_eq!(hash, blake2_256(code));
+    }
+
+    #[test]
+    fn walk_40004557_no_code_or_another_root_proves_no_hash() {
+        // A trie with no `:code`: proven absent, refused.
+        let mut leaf = vec![0x40 | 10];
+        leaf.extend_from_slice(b":cod\xff");
+        leaf.push(4);
+        leaf.push(0);
+        let root = blake2_256(&leaf);
+        let err = verify_storage_and_code_hash(&root, vec![leaf], &[]).unwrap_err();
+        assert!(err.contains("proves no :code"), "{err}");
+        // A proof of another state than the root asked for.
+        let (_, nodes) = one_leaf(b"code", true, false);
+        let err = verify_storage_and_code_hash(&[3; 32], nodes, &[]).unwrap_err();
+        assert!(err.contains("does not cover :code"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn req_rq_7_a_tampered_proof_of_the_code_hash_is_refused() {
+        let (p, parent) = probe();
+        assert_eq!(
+            Archive::new(vec![p]).code_hash(&parent).await,
+            Ok(blake2_256(CODE_134))
+        );
+        let leaf = {
+            let (p, _) = probe();
+            let hash = blake2_256(CODE_134);
+            p.proof
+                .iter()
+                .position(|n| n.windows(32).any(|w| w == hash))
+                .unwrap()
+        };
+        type Tamper = fn(&mut Probe, usize);
+        let tampers: [(&str, Tamper); 4] = [
+            ("another code's hash in the leaf", |p, leaf| {
+                let last = p.proof[leaf].len() - 1;
+                p.proof[leaf][last] ^= 1;
+            }),
+            ("the leaf left out", |p, leaf| {
+                p.proof.remove(leaf);
+            }),
+            ("the root left out", |p, _| {
+                let root = verify_header(&probe().1, &p.header).unwrap().state_root;
+                p.proof.retain(|n| blake2_256(n) != root);
+            }),
+            ("a proof of another trie", |p, _| {
+                p.proof = one_leaf(CODE_134, false, false).1;
+            }),
+        ];
+        for (what, tamper) in tampers {
+            let (mut p, parent) = probe();
+            tamper(&mut p, leaf);
+            let got = Archive::new(vec![p]).code_hash(&parent).await;
+            assert!(
+                matches!(got, Err(ChainError::Invalid(_))),
+                "{what}: {got:?}"
+            );
+        }
     }
 }

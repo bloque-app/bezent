@@ -45,9 +45,6 @@ pub struct Header {
     pub block: BlockRef,
     /// Its parent's hash.
     pub parent: [u8; 32],
-    /// Whether its digest carries `RuntimeEnvironmentUpdated`: the block stored a runtime's code
-    /// (`:code` or `:pending_code`), or its heap pages.
-    pub code_updated: bool,
 }
 
 /// The runtime's version, at a block.
@@ -116,6 +113,9 @@ impl std::error::Error for ChainError {}
 
 /// A result from the chain.
 pub type ChainResult<T> = Result<T, ChainError>;
+
+/// Values of storage keys, in the order asked for: `None` is proven absent.
+pub type Values = Vec<Option<Vec<u8>>>;
 
 /// Kreivo. See the module documentation.
 pub trait Chain: Send + Sync {

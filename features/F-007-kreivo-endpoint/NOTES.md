@@ -288,8 +288,8 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
     ([`chain::runtime`](../../services/kreivo-endpoint/src/chain/runtime.rs)):
     - `System::LastRuntimeUpgrade` is read with `Timestamp::Now` and `System::Events`, in the same proof from a history
       source, and decoded by hand (`Compact<u32>`, `String`). It names the runtime that executed the block.
-    - On a spec version not yet met, `:code` and `:heappages` are read, proven like any other value, **at the block's
-      parent**. In the block that applies an upgrade, the block's own `:code` is already the next runtime. The code's
+    - For a code not yet met (by its proven hash, below), `:code` and `:heappages` are read, proven like any other value,
+      **at the block's parent**. In the block that applies an upgrade, the block's own `:code` is already the next runtime. The code's
       embedded runtime version (spec name and version) must be the one named, or the block is a gap.
     - The metadata is `Metadata_metadata_at_version(15)`, run in smoldot's executor (already in the tree) over an
       **empty state**: every storage read is answered "absent". Kreivo's call reads state for constants
@@ -297,14 +297,25 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
       history source is not something `chain::archive` does. Types are the code's whatever the state. The test checks
       that the resulting type registry is exactly spec 134's own. So **constants in it are not the chain's, and none
       is read**.
-    - The result is kept by the hash of the proven `:code`, not by spec version: a code swap that keeps the version
+    - The result is kept by the hash of `:code`, not by spec version: a code swap that keeps the version
       (`set_code_without_checks`, `authorize_upgrade` without the version check) does not touch
-      `System::LastRuntimeUpgrade`. A block's code is carried from its parent's while no header says code was stored
-      (`RuntimeEnvironmentUpdated`, deposited by frame-system wherever it writes `:code`, `:pending_code` or the heap
-      pages; from system version 3 `:code` is replaced two blocks later, so the code is read again for three
-      blocks after one). Otherwise `:code` is read at the parent and hashed. The spec name and version are checked
-      on every use, cached or not. A raw `set_storage` of `:code` leaves no digest and is not covered. Nothing is
+      `System::LastRuntimeUpgrade`. That hash is **proven at every block**, in its parent's state, and nothing is carried
+      on the word of a digest: a raw `set_storage` or `kill_storage` of `:code`, or a migration that writes it, deposits
+      no `RuntimeEnvironmentUpdated`. Kreivo's state is version 1, so `:code`'s trie node holds BLAKE2b-256 of the code.
+      A history source is asked for `:code ‖ 0x00` (asked for `:code` itself, a node also sends the 2 MB value), whose
+      proof is the path to that node, about 800 bytes, and `chain::archive` reads the hash from the node against the
+      verified state root (a value in the proof, inline or not, is hashed instead). The hash proven in a block's own
+      state is its children's key, so the same key rides in each block's events proof: in a replay the next block needs
+      no extra request. It is asked alone only for a block whose parent's events were not read that way (the first
+      after a start, or after a read from the light client). The code itself (about 2 MB) is read only for a hash not
+      met, and must hash to the proven one. The spec name and version are checked on every use; a known code under
+      another runtime's name is `Invalid` at once, since reading the proven code again changes nothing. Nothing is
       seeded: the first block of a process reads and runs its code.
+    - The light client answers values, not their hashes, so it cannot prove `:code`'s hash short of the whole code. The
+      hash is read from `archive_rpc` only, and each block's events go there first at any age (the light client stays
+      the fallback for the events, which then carry no hash). The header of the block is still read once per block, for
+      its parent's hash and so its parent's state root; in a replay it is the one the walk's ancestry just verified,
+      served from the verified-header cache, not asked again.
     - Decoding now happens after the read. A proven answer that does not decode is `Invalid` and no longer falls back to
       the other side.
 
@@ -313,14 +324,18 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
     `ExtrinsicSuccess` and `ExtrinsicFailed` are the same shape at both too, so observations recorded before 40,004,557
     stand. Tests use block 40,004,557 as recorded (`fixtures/kreivo-40004557.json`), spec 134's code, and both
     metadata. Spec 136's metadata fails with variant 227. The walk decodes the block through spec 134's code read at the
-    parent, never at the block. A parent whose code is another runtime is refused.
+    parent, never at the block. A parent whose code is another runtime is refused. The proof a node served for
+    `:code ‖ 0x00` at 40,004,556 proves the hash of spec 134's code from the hashed-value leaf; an inline value and a
+    value in the proof are hashed; a tampered leaf, a missing node or root, another trie, or no `:code` is refused. Another
+    code under the same spec version is read again, and a full `:code` that is not the proven one is never run.
 
 **Runbook** (first start on Kreivo mainnet): `start_block = 39867043`, `first_seq = 0`, `archive_max_response_bytes` left at
 its default or at least 8 MiB (the proof of a `:code` of about 2 MB is about 4 MB as hex; a lower value is refused at
 `--check` and at start, because a source could never serve a new runtime and the walk would stall), `archive_rpc` with the
 archive node first, `max_walk` above the blocks from `start_block` to the head (a smaller value records the backlog as a gap that never
 fills; the walk itself is kept in rungs, item 37). The replay is sequential: a header and a
-proof per block, about 0.19 s per block from a client about 95 ms from the node, so about 4 to 5 hours for the
+proof per block, about 0.19 s per block from a client about 95 ms from the node (the proven key of item 41 rides in the
+same proof: under 1 KB and about 5 ms more per block, measured on 2026-11-06), so about 4 to 5 hours for the
 backlog of 2026-10-22, during which nothing else in the loop runs and `NFR-6` alerts fire; it is shorter close to the
 node. `wss://` verifies with the system's roots (`rustls-platform-verifier`); the distroless runtime image carries
 them. A failed start-up check names the source and why. `T-013-05` (zombienet) now needs `archive_rpc` too: a
@@ -329,11 +344,14 @@ zombienet node run as an archive, back to `start_block` and its parent.
 ## Limits stated plainly
 
 - **History**: verified from `archive_rpc` (items 32 to 35). Its availability is the archive nodes': with one node, an
-  outage longer than `light_client_depth` leaves new blocks a visible gap until it is back, and a restart refuses to
-  start while no source passes the check. A second archive node is an owner decision.
+  outage leaves new blocks a visible gap until it is back (at once, not after `light_client_depth`: a block's runtime is
+  told from a hash only a history source proves, item 41), and a restart refuses to start while no source passes the
+  check. The reads at the head that decode events (the supply check's time, the prover's) need it too, so an archive
+  that is down, or behind the head, makes them unknown. A second archive node is an owner decision, and so is a
+  light-client fallback for the hash, which would read the whole `:code` (about 2 MB) at every block of an outage.
 - **The replay is sequential** (one request at a time per block). Pipelining the header walk and the proofs would cut
   the first start from hours to minutes; not done here.
 - **Runtime upgrades**: events are decoded with the metadata of the block's own runtime (item 41). The first block of
-  each runtime not yet met reads and runs its code (about 2 MB) once per process, and the code is read again for three
-  blocks after any header that stores code.
+  each code not yet met reads and runs it (about 2 MB) once per process; every other block proves only its code's
+  hash.
 - **The light-client code path is compiled in CI but exercised only by `T-013-05`** (zombienet).
