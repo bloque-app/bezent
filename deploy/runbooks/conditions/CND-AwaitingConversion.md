@@ -5,10 +5,10 @@ SPDX-License-Identifier: CC-BY-4.0
 ---
 id: CND-AwaitingConversion
 kind: condition
-covers: [REQ-CV-1, REQ-CV-2, REQ-CV-4, REQ-CV-6, REQ-RQ-4, REQ-RV-1]
+covers: [REQ-CV-1, REQ-CV-2, REQ-CV-4, REQ-CV-6, REQ-GV-5, REQ-RQ-4, REQ-RV-1, REQ-RV-2]
 pages: []
 observables: [reviews_open, reviews_oldest_age_seconds, unassociated_arrivals, unassociated_arrivals_oldest_age_seconds]
-tests: [services/core/tests/conditions.rs::cnd_awaiting_conversion_mints_nothing_and_goes_to_review_past_its_deadline, services/core/tests/conversions.rs::ac_a5_1_req_cv_1_inv_6_a_deposit_naming_a_convertible_arrival_holds_cnd_awaiting_conversion_and_mints_nothing, services/core/tests/conversions.rs::ac_a5_2_req_cv_2_req_cv_5_req_rq_4_inv_2_inv_6_the_request_comes_first_then_the_output_then_the_mint, services/core/tests/conversions.rs::req_cv_6_req_rf_1_past_its_deadline_the_deposit_goes_to_review_never_to_a_refund]
+tests: [services/core/tests/conditions.rs::cnd_awaiting_conversion_mints_nothing_and_goes_to_review_past_its_deadline, services/core/tests/conversions.rs::ac_a5_1_req_cv_1_inv_6_a_deposit_naming_a_convertible_arrival_holds_cnd_awaiting_conversion_and_mints_nothing, services/core/tests/conversions.rs::ac_a5_2_req_cv_2_req_cv_5_req_rq_4_inv_2_inv_6_the_request_comes_first_then_the_output_then_the_mint, services/core/tests/conversions.rs::req_cv_6_req_rf_1_past_its_deadline_the_deposit_goes_to_review_never_to_a_refund, services/core/tests/conversions.rs::ac_a5_4_req_cv_2_req_rv_2_req_gv_5_inv_6_an_output_named_in_review_mints_once_after_a_two_person_resolution]
 exercised: no
 ---
 # CND-AwaitingConversion
@@ -23,7 +23,9 @@ request reference (`POST /v0/deposits/conversion`, `REQ-RQ-4`). The store moves 
 records the arrival with both amounts (`deposit_conversions`); the core clears the condition and mints at the output's
 amount. Past the route's completion budget, counted from the arrival's finality, with no output named from a block at or
 before it, the deposit goes to `Needs-Review` with the condition kept, and is never refunded on a timer (`REQ-CV-6`,
-`REQ-RF-1`). A convertible arrival that no deposit names is not this condition: it is an unassociated arrival
+`REQ-RF-1`). Its requester may still name the output while no refund of the deposit is recorded (a resolution into `Refunding` recorded and not refused, `REQ-CV-6`; amendment
+0018, Open 6): the deposit stays in review with its source and amount at the output, and the review ends by a resolution
+(below). A convertible arrival that no deposit names is not this condition: it is an unassociated arrival
 (`CND-Unassociated.md`).
 
 That the arrival fed that conversion is the requester's word: bezent checks only that the output is a final conversion
@@ -56,7 +58,14 @@ Convertible holdings are itemised per token and network in the published stateme
    request reference), and the core mints at the output's amount. Only the requester that made the deposit can.
 2. In review: end it only by evidence (`REQ-RV-2`), recorded as your own login with `manual_actions`
    (`review-resolution`, `to_state`, and the coordinate columns `network, block_number, block_hash, block_time`), and
-   for a resolution into `Source-Final`, `Delivering` or `Refunding` the second login's `manual_approvals` row.
+   for a resolution into `Source-Final`, `Delivering` or `Refunding` the second login's `manual_approvals` row. When the
+   requester has named the output (a `deposit_conversions` row; the deposit's source is the output), the resolution is
+   into `Delivering`: the core orders the mint once, at the output's amount. Approve it only after the output is named:
+   the approval names the output you reviewed (network, block, hash, position and amount; all or none), and one that names
+   none, or another output than the deposit's, is refused
+   (`review-evidence-refused`) and must be approved again. Do not
+   record a resolution into `Refunding` for a deposit whose conversion may still be named unless you mean to refund: once
+   one is recorded and not refused, naming is refused.
 3. Convertible holdings are never written off and never counted as reserve (REQ-CV-6). Moving them is the requester's.
 
 ## Never

@@ -42,6 +42,14 @@ why = "REQ-CV-2, REQ-CV-5: the core mints the output's amount and reports both"
 layers = ["service"]
 why = "REQ-CV-4: the statement is the service's"
 
+[layer."AC-A5.4"]
+layers = ["service"]
+why = "REQ-CV-2, REQ-RV-2, REQ-GV-5: the ingress names the output in review and the core runs the approved resolution"
+
+[layer."AC-A5.5"]
+layers = ["service"]
+why = "REQ-CV-2, REQ-LM-1: the ingress checks the output against the route"
+
 [layer."AC-B1.1"]
 layers = ["service"]
 why = "INV-7 is the service's (SPEC 9)"

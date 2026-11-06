@@ -28,6 +28,7 @@ mod common;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use chrono::Duration;
 use common::*;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -675,10 +676,12 @@ async fn inv_2_an_arrival_named_twice_is_refused(
     );
 }
 
-/// `REQ-CV-6`, `REQ-RF-1`, `REQ-RV-1`: a deposit whose conversion's output is not named by its
-/// deadline (the route's, from the convertible arrival's finality, at a final block of the issuing
-/// network) goes to `Needs-Review`, keeping the condition. Nothing is refunded and nothing ordered;
-/// an output named afterwards is refused (`REQ-RV-2`: a review ends by evidence).
+/// `REQ-CV-6`, `REQ-RF-1`, `REQ-RV-1`, `REQ-CV-2`: a deposit whose conversion's output is not named by
+/// its deadline (the route's, from the convertible arrival's finality, at a final block of the issuing
+/// network) goes to `Needs-Review`, keeping the condition. Nothing is refunded and nothing ordered.
+/// An output named afterwards is recorded (amendment 0018, Open 6, ruled `d-cv-open-choices` (a)):
+/// the deposit's source and amount move to it, and the deposit stays in review, still unminted and
+/// unrefunded. How the review then ends is the next test.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_cv_6_req_rf_1_past_its_deadline_the_deposit_goes_to_review_never_to_a_refund(
     options: PgPoolOptions,
@@ -705,17 +708,550 @@ async fn req_cv_6_req_rf_1_past_its_deadline_the_deposit_goes_to_review_never_to
     );
     assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
 
+    // Open 6, ruled: the output is named while the deposit is in review. The source and the amount
+    // move, both amounts are reported, and the deposit stays where it is.
     let (_, output) = swap(&w.admin, 20, 5_000, 4_990).await;
     decide(&w.admin, output, "final", 22).await;
-    let (_, answer) = conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(20, 2)).await;
-    assert_eq!(answer["error"], "ERR-SourceConsumed", "{answer}");
+    let (status, answer) =
+        conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(20, 2)).await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["state"], "Needs-Review", "{answer}");
+    assert_eq!(answer["amount"], "4990", "{answer}");
+    assert_eq!(answer["converted_arrival"]["amount"], "5000", "{answer}");
+    assert_eq!(bound_to(&w, id).await, (20, 2, "4990".into()));
     w.settle(t0()).await;
-    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(
+        w.state(id).await,
+        ("Needs-Review".into(), Some("CND-AwaitingConversion".into()))
+    );
     assert_eq!(
         w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
             .await,
         0
     );
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+    // Written once (REQ-RQ-4): a second output for the deposit is a conflict, in review too.
+    let (_, other) = swap(&w.admin, 24, 1, 1).await;
+    decide(&w.admin, other, "final", 26).await;
+    let (_, answer) = conversion_as(&router, CREDENTIAL, "conv-2", "dep", &coordinate(24, 2)).await;
+    assert_eq!(answer["error"], "ERR-ReferenceConflict", "{answer}");
+}
+
+/// Operator `by` (an index into `World::ops`) records, as their own login, a resolution of transfer
+/// `id` into `to` resting on the issuing network's final head at `block` (the head is recorded).
+async fn resolution(w: &World, id: i64, to: &str, block: i64, by: usize) -> i64 {
+    head(&w.admin, ISSUING, block).await;
+    sqlx::query_scalar(
+        "INSERT INTO manual_actions (kind, transfer_id, to_state, network, block_number, \
+             block_hash, block_time, justification) \
+         VALUES ('review-resolution', $1, $2::transfer_state, $3, $4, $5, $6, 'see the block') \
+         RETURNING id",
+    )
+    .bind(id)
+    .bind(to)
+    .bind(ISSUING)
+    .bind(block)
+    .bind(hash(ISSUING, block))
+    .bind(t0() + Duration::seconds(block))
+    .fetch_one(&w.ops[by])
+    .await
+    .unwrap()
+}
+
+/// A deposit awaiting its output whose deadline passed: in review, holding the condition.
+async fn in_review(w: &World) -> (Router, i64) {
+    let (router, id) = awaiting(w).await;
+    head(&w.admin, ISSUING, 14 + BUDGET + 1).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Needs-Review".into(), Some("CND-AwaitingConversion".into()))
+    );
+    (router, id)
+}
+
+/// `REQ-CV-2`, `REQ-CV-5`, `REQ-RV-2`, `REQ-GV-5`, `INV-2`, `INV-6`, amendment 0018 Open 6 (ruled
+/// `d-cv-open-choices` (a)): an output named for a deposit in review is minted exactly once, at the
+/// output's amount, after the review ends as every review ends: a resolution into `Delivering` (one
+/// ordinary edge from `Source-Final`, the state held before review) recorded by one operator and
+/// approved by a second. Naming moves nothing out of review, neither does a resolution before the
+/// approval, and one approved before the output was named never runs.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a5_4_req_cv_2_req_rv_2_req_gv_5_inv_6_an_output_named_in_review_mints_once_after_a_two_person_resolution(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = in_review(&w).await;
+
+    // A resolution into Delivering while the source is still the convertible arrival, approved by
+    // both: nothing is minted against the arrival (INV-6), and the evidence is refused, so it does
+    // not run later at an amount its approvers never saw (the store's order guard stands behind
+    // it too).
+    let early = resolution(&w, id, "Delivering", 7_000, 0).await;
+    approve_as(&w, 1, early).await.unwrap();
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM event_log WHERE kind = 'review-evidence-refused' \
+               AND payload ->> 'manual_action_id' = '{early}'"
+        ))
+        .await,
+        1
+    );
+
+    // One recorded and approved, then the output named before the core looks at it: it was approved
+    // with no amount to mint, so it is refused too (REQ-GV-5), whenever the core sees it.
+    let racy = resolution(&w, id, "Delivering", 7_050, 0).await;
+    approve_as(&w, 1, racy).await.unwrap();
+    let (_, output) = swap(&w.admin, 20, 5_000, 4_990).await;
+    decide(&w.admin, output, "final", 22).await;
+    let (status, answer) =
+        conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(20, 2)).await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(bound_to(&w, id).await, (20, 2, "4990".into()));
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM event_log WHERE kind = 'review-evidence-refused' \
+               AND payload ->> 'manual_action_id' = '{racy}'"
+        ))
+        .await,
+        1
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM event_log WHERE kind = 'review-evidence-refused' \
+               AND payload ->> 'manual_action_id' = '{racy}' \
+               AND payload ->> 'reason' LIKE '%recorded no output%'"
+        ))
+        .await,
+        1
+    );
+
+    // A new resolution, recorded and not yet approved: nothing moves (REQ-GV-5).
+    let action = resolution(&w, id, "Delivering", 7_100, 0).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+
+    // Approved by the second operator: the deposit leaves review for Delivering, the condition
+    // cleared, and the mint is ordered once, for the output's amount, under the reference derived
+    // from the output.
+    approve_output(&w, 1, action, Some((20, 2, 4_990)))
+        .await
+        .unwrap();
+    // The approval recorded the output it approved (chat ruling of 2026-11-06 by @pandres95).
+    let recorded: (i64, String) = sqlx::query_as(
+        "SELECT approved_output_block_number, approved_output_amount::text \
+         FROM manual_approvals WHERE action_id = $1",
+    )
+    .bind(action)
+    .fetch_one(&w.admin)
+    .await
+    .unwrap();
+    assert_eq!(recorded, (20, "4990".into()));
+    w.settle(t0()).await;
+    let (_, payload) = order(&w.admin, id, 1).await.expect("the mint order");
+    assert_eq!(
+        payload,
+        json!({"order": {"asset": ISSUING_ASSET, "to": DESTINATION_ACCOUNT}, "amount": "4990"})
+    );
+    let source = bezent_core_service::refs::Coordinate {
+        network: ORIGIN.into(),
+        block_number: 20,
+        block_hash: hash(ORIGIN, 20),
+        position_kind: "log".into(),
+        position_index: 2,
+    };
+    assert_eq!(
+        reference_of(&w.admin, id).await,
+        bezent_core_service::refs::mint_reference(&source).to_vec()
+    );
+    assert_eq!(
+        w.count("SELECT count(*) FROM intents WHERE payload ? 'order'")
+            .await,
+        1
+    );
+
+    // Prepared and signed: the deposit leaves review for Delivering, the condition cleared, on the
+    // recorded action (REQ-RV-2), and the order is still the only one.
+    let now = t0();
+    w.cycle(now).await;
+    let (o, _) = order(&w.admin, id, 1).await.unwrap();
+    prepare(&w.admin, o, None).await;
+    w.cycle(now).await;
+    let (s, _) = signing_intent(&w.admin, id, 1)
+        .await
+        .expect("a signing intent");
+    sign(&w, s).await;
+    w.cycle(now).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM transitions WHERE transfer_id = {id} \
+               AND from_state = 'Needs-Review' AND to_state = 'Delivering' \
+               AND manual_action_id = {action}"
+        ))
+        .await,
+        1
+    );
+
+    // Minted, included and final: Completed, with one order and one mint, and no way back into
+    // review on the arrival's old deadline.
+    let reference = reference_of(&w.admin, id).await;
+    let minted = observe(
+        &w.admin,
+        ISSUING,
+        40,
+        0,
+        ISSUING_ASSET,
+        4_990,
+        None,
+        Some(DESTINATION_ACCOUNT),
+        Some(&reference),
+        true,
+        json!({"event": "Minted"}),
+    )
+    .await;
+    w.cycle(now).await;
+    assert_eq!(w.state(id).await.0, "Delivered");
+    decide(&w.admin, minted, "final", 45).await;
+    w.settle(now).await;
+    assert_eq!(w.state(id).await, ("Completed".into(), None));
+    assert_eq!(
+        w.count("SELECT count(*) FROM intents WHERE payload ? 'order'")
+            .await,
+        1
+    );
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+}
+
+/// Operator `by` approves `action` naming the output they reviewed: `output` is its block, its
+/// position and its amount at the origin network, or `None` for an approval that names none.
+async fn approve_output(
+    w: &World,
+    by: usize,
+    action: i64,
+    output: Option<(i64, i64, u128)>,
+) -> Result<(), sqlx::Error> {
+    match output {
+        None => approve_as(w, by, action).await,
+        Some((block, index, amount)) => sqlx::query(
+            "INSERT INTO manual_approvals (action_id, justification, approved_output_network, \
+                 approved_output_block_number, approved_output_block_hash, \
+                 approved_output_position_kind, approved_output_position_index, \
+                 approved_output_amount) \
+             VALUES ($1, 'checked', $2, $3, $4, 'log', $5, $6::numeric)",
+        )
+        .bind(action)
+        .bind(ORIGIN)
+        .bind(block)
+        .bind(hash(ORIGIN, block))
+        .bind(index)
+        .bind(amount.to_string())
+        .execute(&w.ops[by])
+        .await
+        .map(|_| ()),
+    }
+}
+
+/// Names the 5 000 deposit's output (4 990 at block 20) through the ingress and returns nothing.
+async fn name_output(w: &World, router: &Router, id: i64) {
+    let (_, output) = swap(&w.admin, 20, 5_000, 4_990).await;
+    decide(&w.admin, output, "final", 22).await;
+    let (status, answer) =
+        conversion_as(router, CREDENTIAL, "conv", "dep", &coordinate(20, 2)).await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(bound_to(w, id).await, (20, 2, "4990".into()));
+}
+
+/// How many resolutions the core refused with a reason that contains `part`.
+async fn refused_for(w: &World, action: i64, part: &str) -> i64 {
+    w.count(&format!(
+        "SELECT count(*) FROM event_log WHERE kind = 'review-evidence-refused' \
+           AND payload ->> 'manual_action_id' = '{action}' AND payload ->> 'reason' LIKE '%{part}%'"
+    ))
+    .await
+}
+
+/// `REQ-GV-5`, `REQ-CV-2`, `INV-6`, amendment 0018 Open 6 (chat ruling of 2026-11-06 by @pandres95):
+/// the approval records the exact output it approved, and the mint goes ahead only if that is the
+/// deposit's output. The deposit holds 4 990 at block 20: an approval naming another amount or
+/// another block is refused with its reason and nothing is ordered; a half-named output is not
+/// recorded at all; one naming the deposit's output mints.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_gv_5_req_cv_2_an_approval_for_one_output_does_not_mint_another(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = in_review(&w).await;
+    name_output(&w, &router, id).await;
+
+    let other_amount = resolution(&w, id, "Delivering", 7_100, 0).await;
+    approve_output(&w, 1, other_amount, Some((20, 2, 4_900)))
+        .await
+        .unwrap();
+    let other_block = resolution(&w, id, "Delivering", 7_200, 0).await;
+    approve_output(&w, 1, other_block, Some((30, 2, 4_990)))
+        .await
+        .unwrap();
+    // The core refuses one resolution a cycle.
+    for _ in 0..3 {
+        w.cycle(t0()).await;
+    }
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+    assert_eq!(refused_for(&w, other_amount, "another output").await, 1);
+    assert_eq!(refused_for(&w, other_block, "another output").await, 1);
+
+    // The approval that names the deposit's output runs.
+    let right = resolution(&w, id, "Delivering", 7_400, 0).await;
+    approve_output(&w, 1, right, Some((20, 2, 4_990)))
+        .await
+        .unwrap();
+    w.settle(t0()).await;
+    assert!(order(&w.admin, id, 1).await.is_some());
+
+    // Only part of an output is no output: the store records all of it or none.
+    let partial = resolution(&w, id, "Delivering", 7_500, 0).await;
+    let half = sqlx::query(
+        "INSERT INTO manual_approvals (action_id, justification, approved_output_network) \
+         VALUES ($1, 'checked', $2)",
+    )
+    .bind(partial)
+    .bind(ORIGIN)
+    .execute(&w.ops[1])
+    .await;
+    assert!(half.is_err(), "a half-named output was recorded");
+}
+
+/// `REQ-GV-5`, `REQ-CV-2`, amendment 0018 Open 6: the output an approval names is the output's whole
+/// coordinate. The deposit holds block 20, position 2, 4 990. An approval naming block 20 with another
+/// hash (the block was reorganised) or the same block at another position is refused, as is one
+/// naming the same amount; and an approval of the exact coordinate mints.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_gv_5_req_cv_2_an_approval_for_a_reorganised_block_or_another_position_is_refused(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = in_review(&w).await;
+    name_output(&w, &router, id).await;
+
+    let approve = |action: i64, block_hash: Vec<u8>, index: i64| {
+        let pool = w.ops[1].clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO manual_approvals (action_id, justification, approved_output_network, \
+                     approved_output_block_number, approved_output_block_hash, \
+                     approved_output_position_kind, approved_output_position_index, \
+                     approved_output_amount) \
+                 VALUES ($1, 'checked', $2, 20, $3, 'log', $4, 4990::numeric)",
+            )
+            .bind(action)
+            .bind(ORIGIN)
+            .bind(block_hash)
+            .bind(index)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    // Same block number, a different hash: the block the approver saw is not the deposit's.
+    let reorg = resolution(&w, id, "Delivering", 7_100, 0).await;
+    approve(reorg, hash(ORIGIN, 21), 2).await;
+    // Same block, same hash, another position in it.
+    let position = resolution(&w, id, "Delivering", 7_200, 0).await;
+    approve(position, hash(ORIGIN, 20), 3).await;
+    for _ in 0..3 {
+        w.cycle(t0()).await;
+    }
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+    assert_eq!(refused_for(&w, reorg, "another output").await, 1);
+    assert_eq!(refused_for(&w, position, "another output").await, 1);
+
+    let right = resolution(&w, id, "Delivering", 7_400, 0).await;
+    approve(right, hash(ORIGIN, 20), 2).await;
+    w.settle(t0()).await;
+    assert!(order(&w.admin, id, 1).await.is_some());
+}
+
+/// `REQ-GV-5`, `REQ-CV-2`: an approval that names no output (the approver looked before the
+/// output was named) is refused for it, whatever the output the deposit holds by then. This one
+/// is approved first, and its clock is then set later than the output's
+/// own (the case the old `approved_at < recorded_at` comparison let through, as two `now()` can be
+/// equal or out of order); the identity of the output, not time, decides.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_gv_5_an_approval_before_the_output_is_refused_whatever_the_clocks_say(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = in_review(&w).await;
+    let action = resolution(&w, id, "Delivering", 7_100, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    name_output(&w, &router, id).await;
+
+    let mut tx = w.admin.begin().await.unwrap();
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE manual_approvals SET approved_at = \
+           (SELECT recorded_at FROM deposit_conversions WHERE transfer_id = $1) + interval '1 hour' \
+         WHERE action_id = $2",
+    )
+    .bind(id)
+    .bind(action)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+    assert_eq!(refused_for(&w, action, "recorded no output").await, 1);
+
+    // A new approval, after the output, mints.
+    let again = resolution(&w, id, "Delivering", 7_200, 0).await;
+    approve_output(&w, 1, again, Some((20, 2, 4_990)))
+        .await
+        .unwrap();
+    w.settle(t0()).await;
+    assert!(order(&w.admin, id, 1).await.is_some());
+}
+
+/// `REQ-LM-1`, `REQ-LM-2`, `REQ-CV-2`, amendment 0018 Open 3 (ruled `d-cv-open-choices` (b)): the
+/// output's amount is checked against the deposit route's limits, not only the convertible arrival's
+/// at the deposit request, with the route's own errors and before anything is recorded. Nothing is
+/// matched by amount: the output is the one the request names. The route here takes 4 000 to 6 000
+/// per transfer and 9 000 per window; another deposit of 4 000 is in the window beside the awaiting
+/// 5 000. An output of 3 999 is below the minimum, 6 001 above the maximum, and 5 001 would take the
+/// window to 9 001; 5 000 passes, which also shows the deposit's own arrival counted once, not twice
+/// (4 000 + 5 000 + 5 000 would be past the window).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a5_5_req_lm_1_req_lm_2_req_cv_2_the_output_is_checked_against_the_routes_limits(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = awaiting(&w).await;
+    let beside = observe(
+        &w.admin,
+        ORIGIN,
+        30,
+        0,
+        TOKEN,
+        4_000,
+        Some(FUNDER),
+        Some(RESERVE),
+        None,
+        true,
+        json!({}),
+    )
+    .await;
+    decide(&w.admin, beside, "final", 31).await;
+    let (_, answer) = deposit_as(&router, CREDENTIAL, "beside", &coordinate(30, 0)).await;
+    assert_eq!(answer["state"], "Accepted", "{answer}");
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET minimum = 4000, maximum = 6000, window_limit = 9000 \
+             WHERE asset = '{ASSET}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+
+    for (block, amount, error) in [
+        (40, 3_999, "ERR-BelowMinimum"),
+        (42, 6_001, "ERR-AboveMaximum"),
+        (44, 5_001, "ERR-WindowExceeded"),
+    ] {
+        let (_, output) = swap(&w.admin, block, 5_000, amount).await;
+        decide(&w.admin, output, "final", block + 1).await;
+        let (status, answer) = conversion_as(
+            &router,
+            CREDENTIAL,
+            &format!("conv-{block}"),
+            "dep",
+            &coordinate(block, 2),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{answer}");
+        assert_eq!(answer["error"], error, "{answer}");
+        // Nothing recorded and nothing consumed: the deposit still awaits, on its arrival.
+        assert_eq!(w.count("SELECT count(*) FROM deposit_conversions").await, 0);
+        assert_eq!(bound_to(&w, id).await, (10, 0, "5000".into()));
+    }
+
+    let (_, output) = swap(&w.admin, 46, 5_000, 5_000).await;
+    decide(&w.admin, output, "final", 47).await;
+    let (status, answer) =
+        conversion_as(&router, CREDENTIAL, "conv-ok", "dep", &coordinate(46, 2)).await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["state"], "Source-Final", "{answer}");
+    assert_eq!(answer["amount"], "5000", "{answer}");
+    assert_eq!(bound_to(&w, id).await, (46, 2, "5000".into()));
+}
+
+/// `REQ-CV-2`, `REQ-RF-1`, `REQ-RV-2`, amendment 0018 Open 6 (`d-cv-open-choices` (a)): an output is
+/// not named for a deposit once a refund of it is recorded (a resolution into `Refunding` recorded
+/// and not refused). A review resolution into
+/// `Refunding` is recorded by an operator; until the core refuses its evidence (a deposit sent to
+/// review from `Source-Final` has no edge to `Refunding`, so it is refused on the first cycle), naming
+/// is refused (`ERR-SourceConsumed`), with nothing recorded and nothing minted. Once the core has
+/// refused it, it starts no refund, and the output is named.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a5_4_req_cv_2_req_rf_1_req_rv_2_an_output_is_not_named_once_a_refund_is_recorded_and_not_refused(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = in_review(&w).await;
+    let (_, output) = swap(&w.admin, 20, 5_000, 4_990).await;
+    decide(&w.admin, output, "final", 22).await;
+
+    let refund = resolution(&w, id, "Refunding", 7_000, 0).await;
+    let (status, answer) =
+        conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(20, 2)).await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["error"], "ERR-SourceConsumed", "{answer}");
+    assert_eq!(w.count("SELECT count(*) FROM deposit_conversions").await, 0);
+    assert_eq!(bound_to(&w, id).await, (10, 0, "5000".into()));
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+
+    // The core refuses that evidence (there is no such edge): no refund started, so nothing stops
+    // the output being named, and a new request for it is not held up by the refused one.
+    w.settle(t0()).await;
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM event_log WHERE kind = 'review-evidence-refused' \
+               AND payload ->> 'manual_action_id' = '{refund}'"
+        ))
+        .await,
+        1
+    );
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+    let (_, answer) = conversion_as(&router, CREDENTIAL, "conv-2", "dep", &coordinate(20, 2)).await;
+    assert_eq!(answer["amount"], "4990", "{answer}");
+    assert_eq!(bound_to(&w, id).await, (20, 2, "4990".into()));
     assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
 }
 

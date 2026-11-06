@@ -2982,6 +2982,55 @@ impl Core {
             // Waits for the second approver (REQ-GV-5).
             return Ok(Did::default());
         }
+        // REQ-GV-5, amendment 0018 Open 6 (chat ruling of 2026-11-06 by @pandres95): the approval
+        // records the exact output it approved. A resolution into Delivering for a deposit whose
+        // conversion output is named runs only if its approval recorded that output (coordinate and
+        // amount); one approved before the output was named recorded none, and one approved for
+        // another output does not match. Either is refused, and a new approval is needed. The
+        // comparison is on the output's identity, never on two timestamps.
+        if before == State::SourceFinal && to == State::Delivering && t.kind == "deposit" {
+            let judged: Option<(bool, bool)> = sqlx::query_as(
+                "SELECT p.approved_output_network IS NOT NULL, \
+                        COALESCE(ROW(p.approved_output_network, p.approved_output_block_number, \
+                                     p.approved_output_block_hash, p.approved_output_position_kind, \
+                                     p.approved_output_position_index, p.approved_output_amount) \
+                                 IS NOT DISTINCT FROM \
+                                 ROW(x.source_network, x.source_block_number, x.source_block_hash, \
+                                     x.source_position_kind, x.source_position_index, x.amount), FALSE) \
+                 FROM transfers x \
+                 JOIN deposit_conversions c ON c.transfer_id = x.id \
+                 JOIN manual_approvals p ON p.action_id = $2 \
+                 WHERE x.id = $1",
+            )
+            .bind(t.id)
+            .bind(action)
+            .fetch_optional(&mut *conn)
+            .await?;
+            // No row: the deposit has no conversion (an ordinary deposit in review), so there is no
+            // output to compare.
+            if let Some((recorded, same)) = judged {
+                if !recorded {
+                    return self
+                        .refuse_evidence(
+                            conn,
+                            t,
+                            action,
+                            "approved before the conversion's output was named: the approval recorded no output",
+                        )
+                        .await;
+                }
+                if !same {
+                    return self
+                        .refuse_evidence(
+                            conn,
+                            t,
+                            action,
+                            "approved for another output than the deposit's: a new approval is needed",
+                        )
+                        .await;
+                }
+            }
+        }
         let verified = self
             .evidence_holds(conn, t, before, to, attempt, &evidence)
             .await?;
@@ -3127,7 +3176,19 @@ impl Core {
                 }
                 _ => false,
             },
-            (State::SourceFinal, State::Delivering) => evidence.network == t.destination_network,
+            (State::SourceFinal, State::Delivering) => {
+                // A deposit still on its convertible arrival has no output to mint against, and a
+                // resolution approved before the output is named would otherwise run later, at an
+                // amount its approvers never saw (REQ-CV-1, REQ-CV-2, REQ-GV-5; amendment 0018,
+                // Open 6): it is refused, and a new one is recorded once the output is named.
+                let on_arrival = match t.source() {
+                    Some(c) if t.kind == "deposit" => store::observation_at(conn, &c)
+                        .await?
+                        .is_some_and(|o| o.kind == "convertible_arrival"),
+                    _ => false,
+                };
+                evidence.network == t.destination_network && !on_arrival
+            }
             (State::Delivering | State::Delivered, State::Delivering | State::Refunding) => {
                 let proven = matches!(store::proof_of(conn, t.id, attempt).await?,
                          Some(ProofPoint::Final(p)) if p.network == evidence.network

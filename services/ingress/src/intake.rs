@@ -802,7 +802,7 @@ async fn decide_deposit(
     request_body = DepositConversionRequest,
     security(("bearer" = [])),
     responses(
-        (status = 201, description = "Taken in now: the deposit's status, its source now the output and its `converted_arrival` recorded; or `Refused` with its named error (ERR-SourceNotFound: no deposit of yours by that reference naming a convertible arrival, or no conversion output at the coordinate; ERR-SourceMismatch: an output of another network, reserve or asset; ERR-SourceConsumed: the output is bound already, or the deposit no longer awaits its conversion; ERR-ReferenceConflict: its output is named already)", body = TransferStatus),
+        (status = 201, description = "Taken in now: the deposit's status, its source now the output and its `converted_arrival` recorded; or `Refused` with its named error (ERR-SourceNotFound: no deposit of yours by that reference naming a convertible arrival, or no conversion output at the coordinate; ERR-SourceMismatch: an output of another network, reserve or asset; ERR-SourceConsumed: the output is bound already, or the deposit no longer awaits its conversion (it is past its review, or a refund of it is recorded); ERR-BelowMinimum, ERR-AboveMaximum, ERR-WindowExceeded: the output's amount is outside the deposit route's minimum or maximum, or over what its window has left; ERR-ReferenceConflict: its output is named already)", body = TransferStatus),
         (status = 200, description = "A repeat: the original's status (REQ-ID-1)", body = TransferStatus),
         (status = 202, description = "taken-in: taken in, but the status could not be read back; read it by request reference", body = ErrorBody),
         (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
@@ -842,6 +842,10 @@ struct Awaiting {
     source_kind: Option<String>,
     source_network: Option<String>,
     source_recipient: Option<String>,
+    /// The state it held before its review, when it is in one (migration 0140).
+    review_from: Option<String>,
+    /// A refund of it is recorded (migration 0140).
+    refunded: bool,
 }
 
 async fn decide_conversion(
@@ -875,7 +879,10 @@ async fn decide_conversion(
         "SELECT t.state::text AS state, t.condition::text AS condition, t.asset, \
                 EXISTS (SELECT 1 FROM deposit_conversions c WHERE c.transfer_id = t.id) AS converted, \
                 o.kind::text AS source_kind, o.network AS source_network, \
-                o.recipient AS source_recipient \
+                o.recipient AS source_recipient, \
+                CASE WHEN t.state = 'Needs-Review' THEN review_entered_from(t.id)::text END \
+                    AS review_from, \
+                deposit_refund_recorded(t.id) AS refunded \
          FROM transfers t \
          LEFT JOIN observations o ON o.network = t.source_network \
            AND o.block_number = t.source_block_number AND o.block_hash = t.source_block_hash \
@@ -895,10 +902,16 @@ async fn decide_conversion(
     }
     match (d.state.as_str(), d.condition.as_deref()) {
         ("Source-Final", Some("CND-AwaitingConversion")) => {}
+        // In review past its deadline, sent there from Source-Final holding the condition: the
+        // output may still be named while no refund of the deposit is recorded
+        // (REQ-CV-2, REQ-RV-2; amendment 0018, Open 6, `d-cv-open-choices`). The deposit stays in
+        // review: it ends as every review does, by a resolution with a second approver.
+        ("Needs-Review", Some("CND-AwaitingConversion"))
+            if d.review_from.as_deref() == Some("Source-Final") && !d.refunded => {}
         // The core has not taken it to Source-Final yet: nothing is recorded; send it again.
         ("Received" | "Accepted", _) => return Ok(Outcome::NotFinal),
-        // In review past its deadline, or anywhere else: it no longer awaits its output (REQ-CV-6,
-        // REQ-RV-2).
+        // In review for another reason, after a refund, or anywhere else: it no longer awaits its
+        // output (REQ-CV-6, REQ-RF-1, REQ-RV-2).
         _ => return Ok(Outcome::Refused(SOURCE_CONSUMED)),
     }
 
@@ -917,6 +930,50 @@ async fn decide_conversion(
     }
     if consumed(conn, c).await? {
         return Ok(Outcome::Refused(SOURCE_CONSUMED));
+    }
+
+    // The route's limits on the output's amount (REQ-LM-1, REQ-LM-2; amendment 0018, Open 3,
+    // `d-cv-open-choices` (b)), with the route's own errors: below its minimum, above its maximum,
+    // or past what its window has left. Never matched by amount: the output is the one named. The
+    // arrival's own check at the deposit request (in the convertible's units) stands; this is the
+    // output's, in the origin token's. The deposit is already in flight, so no capacity check.
+    let Some(asset) = d.asset.as_deref() else {
+        return Ok(Outcome::Refused(UNKNOWN_ROUTE));
+    };
+    let Some(route) = route_limits(conn, asset, c.network.as_str(), "deposit").await? else {
+        return Ok(Outcome::Refused(UNKNOWN_ROUTE));
+    };
+    let Some(amount) = amount_of(&output.amount) else {
+        return Ok(Outcome::Refused(ABOVE_MAXIMUM));
+    };
+    if let Some(error) = per_transfer_limits(&route, amount) {
+        return Ok(Outcome::Refused(error));
+    }
+    // The route is locked from here to the commit, as at a deposit request. The window counts the
+    // deposit's own amount once: it stands in `used` as the arrival's, and is replaced by the
+    // output's.
+    let (used, _) = lock_route_usage(
+        conn,
+        asset,
+        c.network.as_str(),
+        "deposit",
+        route.window_seconds,
+    )
+    .await?;
+    let own: String = sqlx::query_scalar(
+        "SELECT COALESCE(sum(t.amount), 0)::text FROM transfers t \
+         WHERE t.id = $1 AND t.created_at > now() - make_interval(secs => $2::bigint) \
+           AND t.state NOT IN ('Refused', 'Expired', 'Withdrawn')",
+    )
+    .bind(id)
+    .bind(route.window_seconds)
+    .fetch_one(&mut *conn)
+    .await?;
+    let others = amount_of(&used)
+        .zip(amount_of(&own))
+        .and_then(|(used, own)| used.checked_sub(own));
+    if !others.is_some_and(|others| within_window(&route, &others.to_string(), amount)) {
+        return Ok(Outcome::Refused(WINDOW_EXCEEDED));
     }
 
     // The store records the conversion and moves the source, or refuses (INV-2). An output bound by
