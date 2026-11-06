@@ -21,6 +21,8 @@ pub mod fake;
 #[cfg(feature = "light-client")]
 pub mod light;
 #[cfg(feature = "light-client")]
+pub mod runtime;
+#[cfg(feature = "light-client")]
 pub mod watch;
 
 use std::future::Future;
@@ -111,6 +113,9 @@ impl std::error::Error for ChainError {}
 
 /// A result from the chain.
 pub type ChainResult<T> = Result<T, ChainError>;
+
+/// Values of storage keys, in the order asked for: `None` is proven absent.
+pub type Values = Vec<Option<Vec<u8>>>;
 
 /// Kreivo. See the module documentation.
 pub trait Chain: Send + Sync {

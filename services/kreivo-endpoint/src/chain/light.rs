@@ -17,16 +17,18 @@
 //! endpoint reads at named blocks only, and reaches blocks by parent hash from the finalized head:
 //! the light client answers no lookup by number.
 //!
-//! **What is read**: `System::Events` at a block (decoded with the runtime's metadata: the
-//! contract's `ContractEmitted` with their topics, and every extrinsic's result),
-//! `Timestamp::Now`, `System::Account` (the nonce), the block body, and `ContractsApi_call` for dry
-//! runs. A runtime upgrade between the metadata subxt holds and an old block's events can make
-//! that block's events fail to decode: the block is then a visible gap, never a guess.
+//! **What is read**: `System::Events` at a block (the contract's `ContractEmitted` with their
+//! topics, and every extrinsic's result), `Timestamp::Now`, `System::Account` (the nonce), the
+//! block body, and `ContractsApi_call` for dry runs. A block's events and time are decoded with the
+//! metadata of the runtime that produced that block, not the one subxt holds ([`super::runtime`]):
+//! a block that cannot be decoded with it is a visible gap, never a guess.
 //!
 //! **History** (issue #49): reads at blocks more than `light_client_depth` behind the finalized
-//! head (the events, a nonce, a body) go to the archive sources, verified ([`super::archive`]);
-//! a header known to be that old too. Each falls back to the other side when its first one
-//! fails. Everything at the finalized head, runtime calls included, stays on the light client.
+//! head (a nonce, a body) go to the archive sources, verified ([`super::archive`]); a header known
+//! to be that old too. Each falls back to the other side when its first one fails. A block's events
+//! go to the archive sources first at any age, and the hash of the code that ran it to them only:
+//! only their proofs carry a value's hash without the value ([`super::runtime`]). Everything at the
+//! finalized head, runtime calls included, stays on the light client.
 
 use std::collections::HashMap;
 use std::num::NonZero;
@@ -49,6 +51,7 @@ use subxt::{OnlineClient, PolkadotConfig};
 use tokio::sync::{mpsc, oneshot};
 
 use super::archive::{Archive, Fail, Source, StartCheck};
+use super::runtime::{self, History, Runtimes};
 use super::watch::Watches;
 use super::{
     BlockEvents, BlockRef, Chain, ChainError, ChainResult, Emitted, ExtrinsicResult, Header,
@@ -645,6 +648,8 @@ pub struct LightChain {
     finalized: AtomicU64,
     /// Block numbers by hash, of each header read and its parent: how old a header asked for is.
     numbers: Mutex<HashMap<[u8; 32], u64>>,
+    /// Each runtime's metadata, for the events of the blocks it produced.
+    runtimes: Runtimes,
 }
 
 /// Block numbers remembered by hash, at most.
@@ -739,6 +744,7 @@ impl LightChain {
         // dropped, here or if this future is).
         drop(watchers);
         let client = client.map_err(unavailable)?;
+        let runtimes = Runtimes::new();
         Ok(LightChain {
             client,
             rpc: LegacyRpcMethods::<PolkadotConfig>::new(rpc_client),
@@ -752,6 +758,7 @@ impl LightChain {
             depth,
             finalized: AtomicU64::new(0),
             numbers: Mutex::default(),
+            runtimes,
         })
     }
 
@@ -846,49 +853,29 @@ impl LightChain {
         })
     }
 
-    async fn light_events(
-        &self,
-        at: &BlockRef,
-        contract: &AccountId32,
-    ) -> ChainResult<BlockEvents> {
-        let time_ms = self
-            .fetch(at, "Timestamp", "Now", Vec::new())
-            .await?
-            .as_ref()
-            .and_then(number)
-            .and_then(|n| u64::try_from(n).ok())
-            .ok_or_else(|| invalid(format!("block {} has no Timestamp::Now", at.number)))?;
-        let events = self
-            .client
-            .events()
-            .at(H256(at.hash))
-            .await
-            .map_err(unavailable)?;
-        block_events(time_ms, &events, contract)
+    /// `keys` at `at`, raw: from the archive (proven) for an old block, else from the light client
+    /// (which proves them); each side falls back to the other.
+    async fn raw(&self, at: &BlockRef, keys: &[Vec<u8>]) -> ChainResult<Vec<Option<Vec<u8>>>> {
+        routed(
+            self.old(at.number),
+            self.archived(at, keys),
+            self.light_raw(at, keys),
+        )
+        .await
     }
 
-    /// `Timestamp::Now` and `System::Events` in one proof.
-    async fn archive_events(
+    /// `keys` at `at`, raw, from the light client (which proves them).
+    async fn light_raw(
         &self,
         at: &BlockRef,
-        contract: &AccountId32,
-    ) -> ChainResult<BlockEvents> {
-        let keys = [
-            self.key("Timestamp", "Now", Vec::new())?,
-            self.key("System", "Events", Vec::new())?,
-        ];
-        let mut values = self.archived(at, &keys).await?;
-        let time_ms = values[0]
-            .as_deref()
-            .and_then(|b| self.decode("Timestamp", "Now", b).ok())
-            .as_ref()
-            .and_then(number)
-            .and_then(|n| u64::try_from(n).ok())
-            .ok_or_else(|| invalid(format!("block {} has no Timestamp::Now", at.number)))?;
-        // No `System::Events` at all is no events: an empty list.
-        let bytes = values[1].take().unwrap_or_else(|| vec![0]);
-        let events = subxt::events::Events::decode_from(bytes, self.client.metadata());
-        block_events(time_ms, &events, contract)
+        keys: &[Vec<u8>],
+    ) -> ChainResult<Vec<Option<Vec<u8>>>> {
+        let storage = self.client.storage().at(H256(at.hash));
+        let mut values = Vec::with_capacity(keys.len());
+        for key in keys {
+            values.push(storage.fetch_raw(key.clone()).await.map_err(unavailable)?);
+        }
+        Ok(values)
     }
 
     /// The start-up check of the history sources (issue #49; see [`Archive::check`]), at the
@@ -927,6 +914,96 @@ impl LightChain {
             })
             .await
     }
+}
+
+impl History for LightChain {
+    async fn storage(&self, at: &BlockRef, keys: &[Vec<u8>]) -> ChainResult<Vec<Option<Vec<u8>>>> {
+        self.raw(at, keys).await
+    }
+
+    /// From a history source first, at any age: only its proof can carry `:code`'s hash. The light
+    /// client's answer, when the history source fails, carries none.
+    async fn storage_and_code_hash(
+        &self,
+        at: &BlockRef,
+        keys: &[Vec<u8>],
+    ) -> ChainResult<(crate::chain::Values, Option<runtime::CodeHash>)> {
+        let archive = async {
+            let (values, hash) = self.archive.storage_and_code_hash(&at.hash, keys).await?;
+            if values.len() != keys.len() {
+                return Err(invalid("a storage proof answered another number of keys"));
+            }
+            Ok((values, Some(hash)))
+        };
+        let light = async { Ok((self.light_raw(at, keys).await?, None)) };
+        either(archive, light).await
+    }
+
+    /// From a history source only: the light client answers values, not their hashes, and the
+    /// code itself is about 2 MB.
+    async fn code_hash(&self, at: &BlockRef) -> ChainResult<runtime::CodeHash> {
+        self.archive.code_hash(&at.hash).await
+    }
+
+    async fn block_header(&self, at: &BlockRef) -> ChainResult<Header> {
+        own_header(at, self.header(&at.hash).await?)
+    }
+}
+
+/// `header`, asked for by `at`'s hash, as `at`'s own: its number must be `at`'s, so that the parent
+/// it names is block `at.number - 1`.
+fn own_header(at: &BlockRef, header: Header) -> ChainResult<Header> {
+    if header.block != *at {
+        return Err(invalid(format!(
+            "the header served for block {} is block {}'s",
+            at.number, header.block.number
+        )));
+    }
+    Ok(header)
+}
+
+/// A block's `Timestamp::Now` and `System::Events`, read together (one proof from a history
+/// source) with its `System::LastRuntimeUpgrade` and the hash of its `:code` (its children's key),
+/// and decoded with the metadata of the runtime that `System::LastRuntimeUpgrade` names
+/// ([`runtime`]). A read that fails falls back to the other side; an answer that does not decode
+/// does not, since the bytes were proven: it is `Invalid`.
+async fn events_at(
+    history: &impl History,
+    runtimes: &Runtimes,
+    at: &BlockRef,
+    contract: &AccountId32,
+) -> ChainResult<BlockEvents> {
+    let keys = [
+        runtime::TIMESTAMP_NOW.to_vec(),
+        runtime::SYSTEM_EVENTS.to_vec(),
+        runtime::LAST_RUNTIME_UPGRADE.to_vec(),
+    ];
+    let (mut values, code) = history.storage_and_code_hash(at, &keys).await?;
+    if values.len() != keys.len() {
+        return Err(invalid("a storage read answered another number of keys"));
+    }
+    if let Some(code) = code {
+        runtimes.proven(at, code);
+    }
+    let id = runtime::runtime_id(values[2].as_deref())?;
+    let metadata = runtimes.metadata(history, at, &id).await?;
+    let time_ms = values[0]
+        .as_deref()
+        .and_then(|b| {
+            let address = subxt::dynamic::storage("Timestamp", "Now", Vec::<Value<()>>::new());
+            subxt::ext::subxt_core::storage::decode_value(&mut &b[..], &address, &metadata)
+                .ok()?
+                .to_value()
+                .ok()
+        })
+        .as_ref()
+        .and_then(number)
+        .and_then(|n| u64::try_from(n).ok())
+        .ok_or_else(|| invalid(format!("block {} has no Timestamp::Now", at.number)))?;
+    // No `System::Events` at all is no events: an empty list.
+    let bytes = values[1].take().unwrap_or_else(|| vec![0]);
+    let events = subxt::events::Events::decode_from(bytes, metadata);
+    block_events(time_ms, &events, contract)
 }
 
 /// What the endpoint reads of a block's events. See [`Chain::events`].
@@ -1020,12 +1097,7 @@ impl Chain for LightChain {
     }
 
     async fn events(&self, at: &BlockRef, contract: &AccountId32) -> ChainResult<BlockEvents> {
-        routed(
-            self.old(at.number),
-            self.archive_events(at, contract),
-            self.light_events(at, contract),
-        )
-        .await
+        events_at(self, &self.runtimes, at, contract).await
     }
 
     async fn extrinsics(&self, at: &BlockRef) -> ChainResult<Vec<Vec<u8>>> {
@@ -1641,5 +1713,504 @@ mod warm_up_tests {
         assert!(!w.advanced(&state(Phase::Connecting, Health::Ok)));
         assert!(w.advanced(&state(Phase::Ready, Health::Ok)));
         assert!(!w.advanced(&state(Phase::Ready, Health::Ok)));
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    //! Events decoded with the metadata of the runtime that produced their block (`REQ-OB-3`):
+    //! Kreivo block 40,004,557, recorded read-only (`fixtures/kreivo-40004557.json`), with the
+    //! metadata of spec 134 (its runtime) and of spec 136 (the runtime at the head when the walk
+    //! stopped there), and the code of spec 134 from its parent's state.
+
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use parity_scale_codec::Decode;
+    use serde_json::Value as Json;
+    use subxt::Metadata;
+
+    use super::runtime::{self, History, RuntimeId, Runtimes};
+    use super::*;
+
+    const META_134: &[u8] = include_bytes!("../../fixtures/kreivo-spec-134.metadata");
+    const META_136: &[u8] = include_bytes!("../../fixtures/kreivo-spec-136.metadata");
+    const CODE_134: &[u8] = include_bytes!("../../fixtures/kreivo-spec-134.wasm");
+
+    fn fixture() -> Json {
+        serde_json::from_str(include_str!("../../fixtures/kreivo-40004557.json")).unwrap()
+    }
+
+    fn bytes(v: &Json) -> Vec<u8> {
+        hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap()
+    }
+
+    fn hash(v: &Json) -> [u8; 32] {
+        bytes(v).try_into().unwrap()
+    }
+
+    fn metadata(b: &[u8]) -> Metadata {
+        Metadata::decode(&mut &b[..]).unwrap()
+    }
+
+    /// The block, and its parent.
+    fn blocks() -> (BlockRef, BlockRef) {
+        let f = fixture();
+        let n = f["number"].as_u64().unwrap();
+        (
+            BlockRef {
+                number: n,
+                hash: hash(&f["hash"]),
+            },
+            BlockRef {
+                number: n - 1,
+                hash: hash(&f["parent_hash"]),
+            },
+        )
+    }
+
+    /// A key in the state of a block, by the block's hash.
+    type Slot = ([u8; 32], Vec<u8>);
+
+    /// State by block hash and key, proven as far as the endpoint is concerned. `:code`'s hash at
+    /// a block is its value's, as a proof of that state would show it, unless `hashes` says
+    /// otherwise. Counts each full read of a key at a block, and each proof of `:code`'s hash
+    /// alone.
+    struct FakeHistory {
+        state: HashMap<Slot, Vec<u8>>,
+        headers: HashMap<[u8; 32], Header>,
+        /// A proven `:code` hash that is not its value's (a full read that is not the code
+        /// proven).
+        hashes: HashMap<[u8; 32], runtime::CodeHash>,
+        /// Whether a read of the events carries `:code`'s hash (a history source's proof), or not
+        /// (the light client).
+        carries: bool,
+        reads: Mutex<HashMap<Slot, usize>>,
+        probes: Mutex<HashMap<[u8; 32], usize>>,
+    }
+
+    impl FakeHistory {
+        /// Block 40,004,557 as recorded. Its own state holds a `:code` that is not a runtime: in
+        /// the block that applies an upgrade, its own `:code` is already the next runtime, never
+        /// the one that wrote its events, so it must not be run. Its parent holds `parent_code`.
+        fn recorded(last_runtime_upgrade: Vec<u8>, parent_code: &[u8]) -> FakeHistory {
+            let f = fixture();
+            let (block, parent) = blocks();
+            let mut state = HashMap::new();
+            state.insert(
+                (block.hash, runtime::TIMESTAMP_NOW.to_vec()),
+                bytes(&f["timestamp_now"]),
+            );
+            state.insert(
+                (block.hash, runtime::SYSTEM_EVENTS.to_vec()),
+                bytes(&f["system_events"]),
+            );
+            state.insert(
+                (block.hash, runtime::LAST_RUNTIME_UPGRADE.to_vec()),
+                last_runtime_upgrade,
+            );
+            state.insert(
+                (block.hash, runtime::CODE.to_vec()),
+                b"the next runtime, not this block's".to_vec(),
+            );
+            state.insert((parent.hash, runtime::CODE.to_vec()), parent_code.to_vec());
+            FakeHistory {
+                state,
+                headers: HashMap::from([(
+                    block.hash,
+                    Header {
+                        block,
+                        parent: parent.hash,
+                    },
+                )]),
+                hashes: HashMap::new(),
+                carries: true,
+                reads: Mutex::default(),
+                probes: Mutex::default(),
+            }
+        }
+
+        /// The block's child, which has the block's events, time and runtime, and `lru` for its
+        /// `System::LastRuntimeUpgrade` if given. The block's own `:code`, and the child's, is now
+        /// `code`.
+        fn with_child(mut self, code: &[u8], lru: Option<Vec<u8>>) -> (FakeHistory, BlockRef) {
+            let (block, _) = blocks();
+            let child = BlockRef {
+                number: block.number + 1,
+                hash: [0xb2; 32],
+            };
+            for key in [
+                runtime::TIMESTAMP_NOW,
+                runtime::SYSTEM_EVENTS,
+                runtime::LAST_RUNTIME_UPGRADE,
+            ] {
+                let v = self.state[&(block.hash, key.to_vec())].clone();
+                self.state.insert((child.hash, key.to_vec()), v);
+            }
+            if let Some(lru) = lru {
+                self.state
+                    .insert((child.hash, runtime::LAST_RUNTIME_UPGRADE.to_vec()), lru);
+            }
+            for at in [block.hash, child.hash] {
+                self.state
+                    .insert((at, runtime::CODE.to_vec()), code.to_vec());
+            }
+            self.headers.insert(
+                child.hash,
+                Header {
+                    block: child,
+                    parent: block.hash,
+                },
+            );
+            (self, child)
+        }
+
+        fn proven_code(&self, at: &BlockRef) -> ChainResult<runtime::CodeHash> {
+            if let Some(h) = self.hashes.get(&at.hash) {
+                return Ok(*h);
+            }
+            self.state
+                .get(&(at.hash, runtime::CODE.to_vec()))
+                .map(|c| blake2_256(c))
+                .ok_or_else(|| ChainError::Invalid("the storage proof proves no :code".into()))
+        }
+
+        fn reads(&self, at: &BlockRef, key: &[u8]) -> usize {
+            self.reads
+                .lock()
+                .unwrap()
+                .get(&(at.hash, key.to_vec()))
+                .copied()
+                .unwrap_or(0)
+        }
+
+        fn probes(&self, at: &BlockRef) -> usize {
+            self.probes
+                .lock()
+                .unwrap()
+                .get(&at.hash)
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
+    impl History for FakeHistory {
+        async fn storage(
+            &self,
+            at: &BlockRef,
+            keys: &[Vec<u8>],
+        ) -> ChainResult<Vec<Option<Vec<u8>>>> {
+            let mut reads = self.reads.lock().unwrap();
+            Ok(keys
+                .iter()
+                .map(|k| {
+                    *reads.entry((at.hash, k.clone())).or_default() += 1;
+                    self.state.get(&(at.hash, k.clone())).cloned()
+                })
+                .collect())
+        }
+
+        async fn storage_and_code_hash(
+            &self,
+            at: &BlockRef,
+            keys: &[Vec<u8>],
+        ) -> ChainResult<(crate::chain::Values, Option<runtime::CodeHash>)> {
+            let values = self.storage(at, keys).await?;
+            let hash = if self.carries {
+                Some(self.proven_code(at)?)
+            } else {
+                None
+            };
+            Ok((values, hash))
+        }
+
+        async fn code_hash(&self, at: &BlockRef) -> ChainResult<runtime::CodeHash> {
+            *self.probes.lock().unwrap().entry(at.hash).or_default() += 1;
+            self.proven_code(at)
+        }
+
+        async fn block_header(&self, at: &BlockRef) -> ChainResult<Header> {
+            let header = self
+                .headers
+                .get(&at.hash)
+                .copied()
+                .ok_or_else(|| ChainError::Unavailable("no such header".into()))?;
+            own_header(at, header)
+        }
+    }
+
+    fn contract() -> AccountId32 {
+        [7; 32]
+    }
+
+    fn lru(spec_version: u32, spec_name: &str) -> Vec<u8> {
+        parity_scale_codec::Encode::encode(&(
+            parity_scale_codec::Compact(spec_version),
+            spec_name.to_string(),
+        ))
+    }
+
+    #[test]
+    fn walk_40004557_its_events_do_not_decode_with_spec_136s_metadata() {
+        // What the walk did: the head's metadata (spec 136) over spec 134's events.
+        let events = subxt::events::Events::<PolkadotConfig>::decode_from(
+            bytes(&fixture()["system_events"]),
+            metadata(META_136),
+        );
+        let Err(ChainError::Invalid(why)) = block_events(0, &events, &contract()) else {
+            panic!("spec 136's metadata decoded spec 134's events");
+        };
+        assert!(
+            why.contains("Could not find variant with index 227"),
+            "{why}"
+        );
+    }
+
+    #[tokio::test]
+    async fn walk_40004557_decodes_with_the_metadata_of_its_own_runtime() {
+        let (block, parent) = blocks();
+        let history = FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134);
+        // As in production: no runtime is known at start.
+        let runtimes = Runtimes::new();
+        let read = events_at(&history, &runtimes, &block, &contract())
+            .await
+            .unwrap();
+        // Eight events: three extrinsics' results, nothing from the contract.
+        assert_eq!(read.time_ms, 1_792_756_752_000);
+        assert!(read.emitted.is_empty());
+        assert_eq!(
+            read.results
+                .iter()
+                .map(|r| (r.index, r.success))
+                .collect::<Vec<_>>(),
+            [(0, true), (1, true), (2, true)]
+        );
+        // The key is the hash proven at the parent; the code came from the parent's state, never
+        // the block's own (whose hash the events' proof carried, for the block's children).
+        assert_eq!(history.probes(&parent), 1);
+        assert_eq!(history.reads(&parent, runtime::CODE), 1);
+        assert_eq!(history.reads(&block, runtime::CODE), 0);
+        // Spec 134's code is now known: the block again runs and reads no code.
+        events_at(&history, &runtimes, &block, &contract())
+            .await
+            .unwrap();
+        assert_eq!(history.probes(&parent), 1);
+        assert_eq!(history.reads(&parent, runtime::CODE), 1);
+    }
+
+    #[tokio::test]
+    async fn walk_40004557_the_childs_key_is_proven_in_the_blocks_own_read() {
+        // The block's state holds the same code: its child is decoded with the code's metadata,
+        // from the hash its parent's events proof carried. No code is read, no hash asked alone.
+        let (block, parent) = blocks();
+        let (history, child) =
+            FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134)
+                .with_child(CODE_134, None);
+        let runtimes = Runtimes::new();
+        events_at(&history, &runtimes, &block, &contract())
+            .await
+            .unwrap();
+        events_at(&history, &runtimes, &child, &contract())
+            .await
+            .unwrap();
+        assert_eq!(history.probes(&block), 0);
+        assert_eq!(history.reads(&block, runtime::CODE), 0);
+        assert_eq!(history.reads(&parent, runtime::CODE), 1);
+        // Read from the light client, the events carry no hash: the child's key is proven alone.
+        let (mut history, child) =
+            FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134)
+                .with_child(CODE_134, None);
+        history.carries = false;
+        let runtimes = Runtimes::new();
+        events_at(&history, &runtimes, &block, &contract())
+            .await
+            .unwrap();
+        events_at(&history, &runtimes, &child, &contract())
+            .await
+            .unwrap();
+        assert_eq!(history.probes(&block), 1);
+        assert_eq!(history.reads(&block, runtime::CODE), 0);
+    }
+
+    #[tokio::test]
+    async fn walk_40004557_another_code_with_the_same_spec_version_is_read_again() {
+        // Spec 134 stays the spec version and no digest says so, but the block's state holds
+        // another code: its proven hash is not met, so the child's code is read (here it is not a
+        // runtime). Keyed by spec version, or carried from the parent, the child would be decoded
+        // with the metadata of the code before.
+        let (block, _) = blocks();
+        let (history, child) =
+            FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134)
+                .with_child(b"another code, still named spec 134", None);
+        let runtimes = Runtimes::new();
+        events_at(&history, &runtimes, &block, &contract())
+            .await
+            .unwrap();
+        let second = events_at(&history, &runtimes, &child, &contract()).await;
+        let Err(ChainError::Invalid(why)) = second else {
+            panic!("{second:?}");
+        };
+        assert!(why.contains("does not load"), "{why}");
+        assert_eq!(history.reads(&block, runtime::CODE), 1);
+    }
+
+    #[tokio::test]
+    async fn walk_40004557_code_that_is_not_the_one_proven_is_never_run() {
+        // The full read of `:code` at the parent is spec 134's, but the hash proven there is
+        // another code's: nothing is run, nothing decoded.
+        let (block, parent) = blocks();
+        let mut history =
+            FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134);
+        history.hashes.insert(parent.hash, [0x5a; 32]);
+        let got = events_at(&history, &Runtimes::new(), &block, &contract()).await;
+        let Err(ChainError::Invalid(why)) = got else {
+            panic!("{got:?}");
+        };
+        assert!(why.contains("not the code its state proves"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn walk_40004557_a_known_code_under_another_runtimes_name_decodes_nothing() {
+        // The child names spec 136 while its parent's state proves spec 134's code, already run:
+        // the proven code is the code in force, so reading it again would change nothing. Invalid,
+        // and no code is read.
+        let (block, _) = blocks();
+        let (history, child) =
+            FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134)
+                .with_child(CODE_134, Some(lru(136, "kreivo-parachain")));
+        let runtimes = Runtimes::new();
+        events_at(&history, &runtimes, &block, &contract())
+            .await
+            .unwrap();
+        let second = events_at(&history, &runtimes, &child, &contract()).await;
+        let Err(ChainError::Invalid(why)) = second else {
+            panic!("{second:?}");
+        };
+        assert!(
+            why.contains("the parent's code is kreivo-parachain 134"),
+            "{why}"
+        );
+        assert_eq!(history.reads(&block, runtime::CODE), 0);
+    }
+
+    #[tokio::test]
+    async fn a_parent_whose_code_is_not_the_runtime_the_block_names_decodes_nothing() {
+        let (block, _) = blocks();
+        for (spec_version, spec_name) in [(136u32, "kreivo-parachain"), (134, "another-chain")] {
+            let history = FakeHistory::recorded(lru(spec_version, spec_name), CODE_134);
+            let runtimes = Runtimes::new();
+            let Err(ChainError::Invalid(why)) =
+                events_at(&history, &runtimes, &block, &contract()).await
+            else {
+                panic!("decoded with a runtime the block does not name");
+            };
+            assert!(
+                why.contains("the parent's code is kreivo-parachain 134"),
+                "{why}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_header_of_another_number_is_not_the_blocks() {
+        let (block, parent) = blocks();
+        let header = Header {
+            block,
+            parent: parent.hash,
+        };
+        assert_eq!(own_header(&block, header), Ok(header));
+        // The hash asked for, but another number: its parent would be taken for another block's.
+        let other = Header {
+            block: BlockRef {
+                number: block.number + 1,
+                ..block
+            },
+            ..header
+        };
+        assert!(matches!(
+            own_header(&block, other),
+            Err(ChainError::Invalid(_))
+        ));
+        // Another hash at the same number, too.
+        let forked = Header {
+            block: BlockRef {
+                hash: [0x11; 32],
+                ..block
+            },
+            ..header
+        };
+        assert!(matches!(
+            own_header(&block, forked),
+            Err(ChainError::Invalid(_))
+        ));
+        // Nor is a block decoded through it: its parent's key is never read.
+        let mut history =
+            FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134);
+        history.headers.insert(block.hash, other);
+        let got = events_at(&history, &Runtimes::new(), &block, &contract()).await;
+        assert!(matches!(got, Err(ChainError::Invalid(_))), "{got:?}");
+        assert_eq!(history.probes(&parent), 0);
+    }
+
+    #[test]
+    fn spec_134s_code_run_here_gives_spec_134s_types() {
+        let id = runtime::runtime_id(Some(&bytes(&fixture()["last_runtime_upgrade"]))).unwrap();
+        assert_eq!(
+            id,
+            RuntimeId {
+                spec_version: 134,
+                spec_name: "kreivo-parachain".into()
+            }
+        );
+        let run = runtime::metadata_from_code(CODE_134, None, &id).unwrap();
+        // Every type is the chain's own metadata's, at the same id; only constants' values (fed
+        // by state, which the call does not get) may differ.
+        assert!(run.types() == metadata(META_134).types());
+        assert!(run.types() != metadata(META_136).types());
+        let names = |m: &Metadata| {
+            m.pallets()
+                .map(|p| (p.index(), p.name().to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&run), names(&metadata(META_134)));
+        // Code that is not a runtime is refused, and so is a runtime that is not the one named.
+        assert!(matches!(
+            runtime::metadata_from_code(b"not wasm", None, &id),
+            Err(ChainError::Invalid(_))
+        ));
+        let other = RuntimeId {
+            spec_version: 136,
+            ..id
+        };
+        assert!(matches!(
+            runtime::metadata_from_code(CODE_134, None, &other),
+            Err(ChainError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn the_runtime_is_told_from_last_runtime_upgrade_alone() {
+        assert!(runtime::runtime_id(None).is_err());
+        let mut b = bytes(&fixture()["last_runtime_upgrade"]);
+        b.push(0);
+        assert!(runtime::runtime_id(Some(&b)).is_err());
+        // The keys read are the ones both runtimes' metadata name.
+        for m in [metadata(META_134), metadata(META_136)] {
+            for (pallet, entry, key) in [
+                ("Timestamp", "Now", runtime::TIMESTAMP_NOW),
+                ("System", "Events", runtime::SYSTEM_EVENTS),
+                (
+                    "System",
+                    "LastRuntimeUpgrade",
+                    runtime::LAST_RUNTIME_UPGRADE,
+                ),
+            ] {
+                let address = subxt::dynamic::storage(pallet, entry, Vec::<Value<()>>::new());
+                assert_eq!(
+                    subxt::ext::subxt_core::storage::get_address_bytes(&address, &m).unwrap(),
+                    key
+                );
+            }
+        }
     }
 }

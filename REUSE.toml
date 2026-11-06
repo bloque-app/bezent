@@ -44,6 +44,13 @@ precedence = "override"
 SPDX-FileCopyrightText = "Copyright (c) Virto Network"
 SPDX-License-Identifier = "GPL-3.0-only"
 
+# Kreivo's runtime code and metadata, read from Kreivo mainnet for the endpoint's tests (issue #102).
+[[annotations]]
+path = ["services/kreivo-endpoint/fixtures/kreivo-spec-*.wasm", "services/kreivo-endpoint/fixtures/kreivo-spec-*.metadata"]
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright (c) Virto Network"
+SPDX-License-Identifier = "GPL-3.0-only"
+
 # The specification, the plan and the overview: their YAML front matter opens the file (tools/md2artifact.py
 # reads it), so they carry no header. Pages rendered from Markdown are prose too.
 [[annotations]]
