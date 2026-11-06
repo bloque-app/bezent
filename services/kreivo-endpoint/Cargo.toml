@@ -39,6 +39,10 @@ bezent-vault = { path = "../../crates/vault" }
 # endpoint holds no key: it never builds a key backend (REQ-AR-3).
 bezent-signer = { path = "../signer" }
 blake2 = "0.10"
+# The runtime's metadata, read to check its transaction format before anything is built (issue #104).
+# Both are already in the tree under subxt.
+frame-metadata = { version = "23", default-features = false, features = ["current", "decode"] }
+scale-info = { version = "2", default-features = false, features = ["decode"] }
 hex = "0.4"
 parity-scale-codec = { version = "3", default-features = false, features = ["derive", "std"] }
 serde = { version = "1", features = ["derive"] }

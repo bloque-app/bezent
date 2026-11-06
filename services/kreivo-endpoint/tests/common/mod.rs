@@ -12,11 +12,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bezent_kreivo_endpoint::chain::fake::FakeChain;
-use bezent_kreivo_endpoint::kreivo::{AccountId32, Scheme};
+use bezent_kreivo_endpoint::kreivo::{AccountId32, Roles, Scheme};
 use bezent_kreivo_endpoint::observe::Follower;
 use bezent_kreivo_endpoint::proof::Prover;
 use bezent_kreivo_endpoint::submit::{
-    Lane, Prepared, SignerLink, Submitter, signing_intent_payload,
+    Gate, Lane, Prepared, SignerLink, Submitter, signing_intent_payload,
 };
 use bezent_signer::config::{Caller, Config};
 use bezent_signer::keys::{FileBackend, SigningEngine};
@@ -184,6 +184,13 @@ impl Fixture {
         let public_key = backend.public_key("kreivo-mint").unwrap();
         let chain = FakeChain::new(GENESIS, CONTRACT);
         let account = chain.register_key(Scheme::Sr25519, &public_key);
+        // Issue #104: spec 134's own metadata, and the lane holding the contract's delivery role.
+        chain.set_metadata(metadata(134));
+        chain.set_roles(Roles {
+            delivery: account,
+            pause: [0xee; 32],
+            governance: [0xef; 32],
+        });
         chain.advance(3);
         Fixture {
             endpoint: role_pool(&admin, bezent_store::KREIVO_ENDPOINT_ROLE).await,
@@ -231,6 +238,7 @@ impl Fixture {
             contract: CONTRACT,
             lane: &self.lane,
             signer: &self.link,
+            gate: Gate::default(),
         }
     }
 
@@ -406,4 +414,13 @@ impl Fixture {
         assert_eq!(paused, alerts, "AC-I1.2: an alert with no pause");
         alerts
     }
+}
+
+/// The metadata of Kreivo's spec `spec`, as its code returns it (`fixtures/`, issue #104).
+pub fn metadata(spec: u32) -> Vec<u8> {
+    std::fs::read(format!(
+        "{}/fixtures/kreivo-spec-{spec}.metadata",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
 }

@@ -127,15 +127,28 @@ fn main() -> ExitCode {
 
 #[cfg(feature = "light-client")]
 mod run {
-    use std::time::Duration;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use bezent_kreivo_endpoint::chain::light::LightChain;
     use bezent_kreivo_endpoint::config::Config;
+    use bezent_kreivo_endpoint::metric;
     use bezent_kreivo_endpoint::network;
     use bezent_kreivo_endpoint::observe::{Follower, Step, WALK_RUNG};
     use bezent_kreivo_endpoint::proof::Prover;
-    use bezent_kreivo_endpoint::submit::{Lane, SignerLink, Submitter};
+    use bezent_kreivo_endpoint::submit::{GateState, Lane, SignerLink, Submitter};
     use bezent_kreivo_endpoint::supply::{Recorded, Supplies};
+
+    /// Writes the gate's state as a metric line (`bezent_kreivo_endpoint::metric`); `None` is a gate
+    /// that could not be judged.
+    fn gate_state_line(network: &str, state: Option<&GateState>) {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+        println!(
+            "{}",
+            metric::emf_line(network, metric::value(state), now_ms)
+        );
+    }
 
     pub async fn run(config: Config, spec: String, relay: Option<String>) -> Result<(), String> {
         // An earlier run's liveness file never passes for this run's (issue #61): removed before any
@@ -260,7 +273,13 @@ mod run {
             contract,
             lane: &lane,
             signer: &signer,
+            gate: bezent_kreivo_endpoint::submit::Gate::default(),
         };
+        // Issue #104: whether submissions are open, judged and logged at start-up. A closed gate
+        // stops no part of the endpoint but building and signing.
+        if let Ok(finalized) = bezent_kreivo_endpoint::chain::Chain::finalized(&chain).await {
+            submitter.watch(&finalized).await;
+        }
         let prover = Prover {
             chain: &chain,
             pool: &pool,
@@ -271,6 +290,8 @@ mod run {
         };
 
         let mut lied_seen = 0u64;
+        // Issue #104: the gate's state, once a minute, for an alarm. Not a liveness matter.
+        let mut gate_metric = bezent_kreivo_endpoint::metric::Emitter::new();
         // Whether the pass before failed (the store, the prover): while it did, a walk's progress is
         // not health. False at start, so a first backlog walk beats.
         let mut last_pass_failed = false;
@@ -320,6 +341,14 @@ mod run {
                 }
                 if let Ok(finalized) = bezent_kreivo_endpoint::chain::Chain::finalized(&chain).await
                 {
+                    // Issue #104: a runtime upgrade is judged when it happens.
+                    submitter.watch(&finalized).await;
+                    if gate_metric.due(Instant::now()) {
+                        // Judged afresh (once per block): a role moved by governance, with no
+                        // upgrade and no order, would otherwise leave the metric wrong.
+                        let state = submitter.gate(&finalized).await;
+                        gate_state_line(&config.network, Some(&state));
+                    }
                     for id in submitter.orders_to_prepare(&finalized).await? {
                         let outcome = submitter.prepare(id).await?;
                         tracing::info!(order = id, ?outcome, "prepared");
@@ -335,6 +364,9 @@ mod run {
                             bezent_kreivo_endpoint::health::beat(&heartbeat);
                         }
                     }
+                } else if gate_metric.due(Instant::now()) {
+                    // No head to judge the gate at: not known, which an alarm on missing data sees.
+                    gate_state_line(&config.network, None);
                 }
                 submitter.resend().await?;
                 prover.step().await?;
