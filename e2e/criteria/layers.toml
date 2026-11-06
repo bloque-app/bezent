@@ -18,6 +18,10 @@ why = "REQ-IN-3 and REQ-IN-4 are the core's binding and mint order; INV-6 is the
 layers = ["service"]
 why = "REQ-IN-7: the observer and the core withdraw an observation that stops matching"
 
+[layer."AC-A2.5"]
+layers = ["service"]
+why = "REQ-PN-3 and REQ-IN-3: the ingress refuses a deposit of an arrival from a sender its requester did not declare; the store backs it on the answer (0135)"
+
 [layer."AC-A4.1"]
 layers = ["service"]
 why = "REQ-IN-6: the core classifies an arrival as unassociated, with an owner"
