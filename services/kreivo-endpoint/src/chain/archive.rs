@@ -191,11 +191,20 @@ pub fn verify_body(root: &[u8; 32], extrinsics: &[Vec<u8>]) -> Result<(), String
     Err("the block body served does not match its header's extrinsics root".into())
 }
 
+/// How long a source whose last request failed is tried only after the others.
+const RESTING_MS: u64 = 30_000;
+
 /// The configured sources, in order. See the module documentation.
 pub struct Archive<S> {
     sources: Vec<S>,
-    /// The source that answered last: tried first.
-    current: AtomicUsize,
+    /// Turns: each request is asked first of the next source in turn that is not resting, so a
+    /// walk's reads in flight are spread over every source (all are verified alike).
+    turn: AtomicUsize,
+    /// Per source, when its last request failed (milliseconds since `epoch`, plus one; zero: it
+    /// did not). A source that failed rests for [`RESTING_MS`]: tried after the others, so a
+    /// source that is down does not hold one read in every few up for its timeout.
+    failed_at: Vec<AtomicU64>,
+    epoch: std::time::Instant,
     headers: Mutex<HashMap<[u8; 32], Verified>>,
     /// Per source, how often it answered what does not verify, and how often it failed.
     counts: Vec<Counts>,
@@ -255,8 +264,10 @@ impl<S: Source> Archive<S> {
     pub fn new(sources: Vec<S>) -> Archive<S> {
         Archive {
             counts: sources.iter().map(|_| Counts::default()).collect(),
+            failed_at: sources.iter().map(|_| AtomicU64::new(0)).collect(),
             sources,
-            current: AtomicUsize::new(0),
+            turn: AtomicUsize::new(0),
+            epoch: std::time::Instant::now(),
             headers: Mutex::default(),
         }
     }
@@ -274,21 +285,48 @@ impl<S: Source> Archive<S> {
             .collect()
     }
 
-    /// Asks each source in turn, from the one that answered last, until one answers what
-    /// verifies.
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The source asked first: the next in turn that is not resting, or the next in turn.
+    fn first(&self) -> usize {
+        let n = self.sources.len().max(1);
+        let turn = self.turn.fetch_add(1, Ordering::Relaxed);
+        let now = self.now_ms();
+        (0..n)
+            .map(|k| (turn + k) % n)
+            .find(|i| match self.failed_at[*i].load(Ordering::Relaxed) {
+                0 => true,
+                at => now.saturating_sub(at - 1) >= RESTING_MS,
+            })
+            .unwrap_or(turn % n)
+    }
+
+    fn failed(&self, i: usize) {
+        self.failed_at[i].store(self.now_ms().saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// Asks each source in turn, from the next in turn that is not resting ([`Archive::first`]),
+    /// until one answers what verifies.
     async fn each<'a, T, F, Fut>(&'a self, what: &str, f: F) -> ChainResult<T>
     where
         F: Fn(&'a S) -> Fut,
         Fut: Future<Output = Result<T, Fail>> + 'a,
     {
         let n = self.sources.len();
-        let first = self.current.load(Ordering::Relaxed);
+        let first = self.first();
         let (mut failures, mut lied) = (Vec::new(), false);
         for i in (0..n).map(|k| (first + k) % n) {
             let s = &self.sources[i];
-            match f(s).await {
+            let answer = f(s).await;
+            if answer.is_err() {
+                self.failed(i);
+            } else {
+                self.failed_at[i].store(0, Ordering::Relaxed);
+            }
+            match answer {
                 Ok(v) => {
-                    self.current.store(i, Ordering::Relaxed);
                     return Ok(v);
                 }
                 Err(Fail::Lied(e)) => {
@@ -359,6 +397,27 @@ impl<S: Source> Archive<S> {
     /// The verified header of block `hash`.
     pub async fn header(&self, hash: &[u8; 32]) -> ChainResult<Verified> {
         self.each("a header", |s| self.header_from(s, hash)).await
+    }
+
+    /// The header a source names as block `number`'s (`chain_getBlockHash`), verified to hash
+    /// to that hash and to be of that number: **not** known to be of the finalized chain (a
+    /// source's word names the hash). See [`crate::chain::Descent`].
+    pub async fn header_at(&self, number: u64) -> ChainResult<Verified> {
+        self.each("a header by number", |s| async move {
+            let hash = s
+                .block_hash(number)
+                .await?
+                .ok_or_else(|| Fail::Missing(format!("no block {number}")))?;
+            let v = self.header_from(s, &hash).await?;
+            if v.header.block.number != number {
+                return Err(Fail::Lied(format!(
+                    "the header named block {number} is block {}",
+                    v.header.block.number
+                )));
+            }
+            Ok(v)
+        })
+        .await
     }
 
     /// The values of `keys` at block `at`, each proven.
@@ -728,9 +787,18 @@ mod tests {
             let archive = Archive::new(vec![fake(first), fake(Does::Honest)]);
             let values = archive.storage(&at, &keys(&f)).await.unwrap();
             assert_eq!(values[0], Some(bytes(&f["values"]["now"])));
-            // The one that answered is asked first from then on.
-            assert_eq!(archive.current.load(Ordering::Relaxed), 1);
+            // The one that failed rests: the one that answered is asked first meanwhile.
+            assert_eq!((archive.first(), archive.first()), (1, 1));
         }
+        // Sources that answer take turns being asked first, so a walk's reads are spread.
+        let archive = Archive::new(vec![fake(Does::Honest), fake(Does::Honest)]);
+        archive.storage(&at, &keys(&f)).await.unwrap();
+        archive.storage(&at, &keys(&f)).await.unwrap();
+        assert_eq!((archive.first(), archive.first()), (0, 1));
+        // When every source rests, they still take turns.
+        let archive = Archive::new(vec![fake(Does::Down), fake(Does::Down)]);
+        assert!(archive.storage(&at, &keys(&f)).await.is_err());
+        assert_eq!((archive.first(), archive.first()), (1, 0));
         let archive = Archive::new(vec![fake(Does::Down), fake(Does::Down)]);
         assert!(matches!(
             archive.storage(&at, &keys(&f)).await,

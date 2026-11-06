@@ -355,6 +355,31 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
     value in the proof are hashed; a tampered leaf, a missing node or root, another trie, or no `:code` is refused. Another
     code under the same spec version is read again, and a full `:code` that is not the proven one is never run.
 
+42. **The walk reads blocks concurrently** (`walk_concurrency`, 32 by default, 1 to 64). The replay was one round trip per
+    header and one per events proof, so its speed was the archive node's latency. Now a step keeps up to
+    `walk_concurrency` reads in flight and takes their answers in block order:
+    - **Headers.** `chain::Descent` walks down by parent hash, as `ancestry` and the anchor walk did. Ahead of it, it asks
+      a history source for the headers of the next blocks by number (`chain_getBlockHash`, then the header, kept only if
+      its bytes hash to that hash). Block n's hint is taken only if it is exactly the header whose hash block n+1 names.
+      Any other hint, or none, and that hash is asked for, as before. Hints are asked only for blocks older than
+      `light_client_depth`; the live chain's headers stay the light client's.
+    - **Events.** `Chain::events` is split in two. `read_events` is the proven read (`Timestamp::Now`, `System::Events`,
+      `System::LastRuntimeUpgrade` and the `:code` probe, against the block's verified header) and keeps nothing.
+      `decode_events` runs in block order: it remembers the proven `:code` hash for the block's children, tells the
+      block's runtime from its parent's, reads a new runtime's code (one at a time) and decodes. So a window of reads
+      that spans an upgrade asks no extra `:code` probe, and reads the new code once.
+    - **Failures.** The follower records ranges as before. The first block whose read or decode fails stops the step
+      there: the gap starts at that block, and the reads still in flight are dropped.
+    - **Sources.** Each request is asked first of the next `archive_rpc` source in turn, so the reads are spread over
+      every source; all are verified alike. A source whose last request failed rests for 30 s, tried after the others,
+      so a source that is down does not hold up every few reads for its timeout.
+    - **Memory.** At most `walk_concurrency` events proofs or headers are held. The metadata cache is unchanged.
+    - **Tests.** The follower at concurrency 1 and 32 records the same ranges and observations, with reads that finish
+      out of order and two lying hints, which are not taken. A read that fails inside a window is a gap at that block,
+      with nothing after it recorded. In `chain::light`, a block and its child read out of order and decoded in order
+      give what reading one at a time gives, with no extra probe; an upgrade inside a window is told from the parent's
+      read.
+
 **Runbook** (first start on Kreivo mainnet): `start_block = 39867043`, `first_seq = 0`, `archive_max_response_bytes` left at
 its default or at least 8 MiB (the proof of a `:code` of about 2 MB is about 4 MB as hex; a lower value is refused at
 `--check` and at start, because a source could never serve a new runtime and the walk would stall), `archive_rpc` with the
@@ -375,8 +400,8 @@ zombienet node run as an archive, back to `start_block` and its parent.
   check. The reads at the head that decode events (the supply check's time, the prover's) need it too, so an archive
   that is down, or behind the head, makes them unknown. A second archive node is an owner decision, and so is a
   light-client fallback for the hash, which would read the whole `:code` (about 2 MB) at every block of an outage.
-- **The replay is sequential** (one request at a time per block). Pipelining the header walk and the proofs would cut
-  the first start from hours to minutes; not done here.
+- **The replay reads up to `walk_concurrency` blocks at once** (item 42). Its speed is now bounded by the archive
+  node's throughput and the in-order decoding, not by the node's latency.
 - **Runtime upgrades**: events are decoded with the metadata of the block's own runtime (item 41). The first block of
   each code not yet met reads and runs it (about 2 MB) once per process; every other block proves only its code's
   hash.
