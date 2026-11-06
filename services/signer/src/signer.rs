@@ -922,6 +922,18 @@ impl<B: SigningEngine> Signer<B> {
         }
         let signature = self.backend.sign(&binding.key, &intent.message).await?;
 
+        // The pause is read again, in this transaction, immediately before the signature is
+        // recorded: signing can take a while (a key service), and a pause committed since the read
+        // above must hold this one. A signature that is not recorded is dropped with the
+        // transaction, and the intent stays unsigned and is asked for again once the pause lifts.
+        let held: bool = sqlx::query_scalar("SELECT pause_holds_intent($1)")
+            .bind(intent_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if held {
+            return Ok(Err(Refusal::Paused));
+        }
+
         sqlx::query(
             "INSERT INTO signatures (intent_id, key_id, scheme, public_key, signature, nonce, asset) \
              VALUES ($1, $2, $3, $4, $5, $6::numeric, $7)",

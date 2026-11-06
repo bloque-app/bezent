@@ -71,29 +71,32 @@ looks; but this is a ruling about what the completion budget means, so it is not
 
 ## Ruling
 
-`d-payout-late-signing`, @pandres95 on the decision form, 2026-11-06: **"Leave pause time out"**, A1d. Time a transfer spends
+`d-payout-late-signing`, @pandres95 on the decision form, 2026-11-06: **"Leave pause time out"**, A1d. Time a payout spends
 under a pause (`CND-Paused`) or a cut-off (`CND-CutOff`), from when it takes the condition to when it leaves it, is not
-counted toward its delivery attempt's deadline. Time under a gate, in a refused preparation, or under any other condition
+counted toward its attempt's deadline. Time under a gate, in a refused preparation, or under any other condition
 counts as before; `CND-PayoutWindow` is left out as before (point 4).
 
 ## Applied text (`SPEC.md` v0.5.7)
 
-- **§5.4**, after the transition table, a paragraph that subtracts from whatever the deadline of a delivery attempt counts
+- **§5.4**, after the transition table, a paragraph that subtracts from whatever the deadline of a payout attempt counts
   (the `Delivering`, `Delivered` -> `Needs-Review` edge's "unknown past its deadline", and `REQ-EO-3`'s refused
   preparation): the time held under `CND-Paused` or `CND-CutOff`, taken and left, does not count, so a delivery that waited
   out a pause or a cut-off is neither reviewed nor forced out for that time and its deadline moves by it. It does not
   define the rest of the clock, so it leaves point 4 (`CND-PayoutWindow`) as built and unruled.
-- **`REQ-GV-1`**, appended: "The time a transfer waits under a pause does not count toward its deadline (§5.4)."
+- **`REQ-GV-1`**, appended: "The time a payout waits under a pause does not count toward its deadline (§5.4); that does not cover a mint or the choice of a refund or a new attempt after a proof of non-execution."
 - **`REQ-LM-1`**, the cut-off sentence: "…holds `CND-CutOff` until the route reopens, then resumes by itself; the time held
-  does not count toward its deadline (§5.4)."
-- **§10** `CND-Paused` and `CND-CutOff`: the time held does not count toward the transfer's deadline (§5.4).
+  does not count toward a payout's deadline (§5.4)."
+- **§10** `CND-Paused` and `CND-CutOff`: the time held does not count toward a payout's deadline (§5.4).
 
 `NFR-2` and `NFR-3` are unchanged: latency is still measured end to end, from chain milestones, and a transfer held by a
 pause still counts its whole time there. The deadline, not the completion budget's measurement, is what A1d changes.
 
-The text says "delivery attempt", not "payout": the core's clock is one for a mint and a payout (`deadline_held`), and
-A1d's reason (`REQ-GV-1` forbids failing a transfer because of the pause) holds for both. A mint on the issuing network
-gets the same treatment.
+The text says "payout" (a withdrawal's, and a refund's of an arrival no deposit claimed, both paid out on an origin
+network; `purpose` in the core), because the ruling is about the payout clock. A mint (a deposit's, or a refund mint)
+keeps the clock it had before A1d: the core measures a pause or a cut-off only for a payout (`Core::hold`,
+`Core::deadline_held`). Whether a mint's deadline should leave out the time under a pause is **open, not applied**: the
+reason (`REQ-GV-1` forbids failing a transfer because of the pause) may hold for it as well, and it is the owner's to
+say. The same for the refund-or-retry choice after a proof (below).
 
 ## Built
 
@@ -127,10 +130,15 @@ gets the same treatment.
 ## Open after the ruling
 
 - **Point 4** is confirmed as built, not ruled: it changes when the owner rules it.
+- **Mints.** A mint's deadline still counts the time under a pause or a cut-off. Applying A1d to mints is a question for the
+  owner, not built (a test pins that a mint under a pause keeps its old behaviour:
+  `cancel.rs::req_gv_1_a1d_a_mint_under_a_pause_keeps_the_deadline_it_had`).
 - **The refund-or-retry choice after a proof** (`after_proof`) still compares the proof with the plain deadline from the
   source leg's finality, with no hold left out, window or pause. A withdrawal paused past its deadline whose payout is then
   proven not executed is refunded, not retried. A1d names the review deadline (`delivering_deadline`,
-  `unprepared_deadline`), not this one, so it is left as built.
+  `unprepared_deadline`), not this one, so it is left as built, and `SPEC.md` says so (§5.4, `REQ-GV-1`). Not a `REQ-RF-1`
+  issue: the proof shows the attempt did not execute, so nothing is refunded for value that moved. Whether the choice
+  should leave the pause out is for the owner.
 
 ## A point for the owner: a final inclusion that is not what was ordered
 

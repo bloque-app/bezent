@@ -102,6 +102,84 @@ async fn ac_i2_1_inv_15_a1b_an_intent_recorded_before_the_pause_is_not_signed_un
     assert_eq!(w.state(id).await, ("Delivering".into(), None));
 }
 
+/// A key backend that commits a pause while it signs: the moment between the signer's first read
+/// of the pause and the record of the signature.
+struct PausesWhileSigning {
+    inner: bezent_signer::keys::FileBackend,
+    admin: sqlx::PgPool,
+}
+
+impl bezent_signer::engine::SigningEngine for PausesWhileSigning {
+    fn kind(&self) -> bezent_signer::engine::EngineKind {
+        self.inner.kind()
+    }
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+    fn environment(&self) -> bezent_signer::keys::Environment {
+        self.inner.environment()
+    }
+    fn key_ids(&self) -> Vec<String> {
+        self.inner.key_ids()
+    }
+    fn scheme(
+        &self,
+        id: &str,
+    ) -> Result<bezent_signer::keys::Scheme, bezent_signer::keys::KeyError> {
+        self.inner.scheme(id)
+    }
+    fn public_key(&self, id: &str) -> Result<Vec<u8>, bezent_signer::keys::KeyError> {
+        self.inner.public_key(id)
+    }
+    async fn sign_prepared(
+        &self,
+        id: &str,
+        scheme: bezent_signer::keys::Scheme,
+        input: bezent_signer::engine::Signable<'_>,
+    ) -> Result<Vec<u8>, bezent_signer::keys::KeyError> {
+        sqlx::query("INSERT INTO pauses (asset) VALUES (NULL)")
+            .execute(&self.admin)
+            .await
+            .expect("the pause commits while the key signs");
+        self.inner.sign_prepared(id, scheme, input).await
+    }
+}
+
+/// `AC-I2.1`, `INV-15`, `REQ-GV-1`, `NFR-8` (amendment 0022, A1b): a pause committed after the signer
+/// first read the pause and before it records the signature holds that signature. The key backend
+/// signs, the signer reads the pause again in its transaction before the INSERT, refuses, and nothing
+/// is recorded; once the pause is lifted the same intent is signed.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_inv_15_a1b_a_pause_committed_while_the_key_signs_holds_the_signature(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let id = source_final_deposit(&w).await;
+    w.cycle(t0()).await;
+    let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, o, None).await;
+    w.cycle(t0()).await;
+    let (s, _) = signing_intent(&w.admin, id, 1)
+        .await
+        .expect("the signing intent");
+
+    let admin = w.admin.clone();
+    let racing = w
+        .signer_over(|inner| PausesWhileSigning { inner, admin })
+        .await;
+    let refused = racing.sign(s).await;
+    assert!(
+        matches!(refused, Outcome::Refused(Refusal::Paused)),
+        "recorded a signature under a pause that committed while the key signed: {refused:?}"
+    );
+    assert_eq!(w.count("SELECT count(*) FROM signatures").await, 0);
+
+    exec(&w.admin, "DELETE FROM pauses").await;
+    sign(&w, s).await;
+    assert_eq!(w.count("SELECT count(*) FROM signatures").await, 1);
+}
+
 /// `AC-I2.1`, `REQ-GV-1`: a global pause stops new work only; a transfer in flight is still observed and completed.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn cnd_paused_work_in_flight_continues(options: PgPoolOptions, connect: PgConnectOptions) {

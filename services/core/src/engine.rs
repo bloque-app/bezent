@@ -694,7 +694,11 @@ impl Core {
     /// left out as well (amendment 0019, A1d, ruled `d-payout-late-signing`, 2026-11-06;
     /// `REQ-GV-1`): a delivery released from a pause after its nominal deadline is neither reviewed
     /// nor cancelled for the time it waited, and its deadline moves by that time
-    /// ([`store::held_under_pause_or_cutoff`]). Time under any other condition counts.
+    /// ([`store::held_under_pause_or_cutoff`]). This is for a **payout** (a withdrawal's, and a refund
+    /// of an unassociated arrival, both on an origin network; [`purpose`]) only: the ruling is about
+    /// the payout clock, so a mint (a deposit's or a refund mint) keeps the clock it had, and time
+    /// under a pause counts toward its deadline (amendment 0019, open question). Time under any
+    /// other condition counts.
     async fn deadline_held(
         &self,
         conn: &mut PgConnection,
@@ -702,7 +706,12 @@ impl Core {
         attempt: i32,
         start: DateTime<Utc>,
     ) -> sqlx::Result<DateTime<Utc>> {
-        let gated = store::held_under_pause_or_cutoff(conn, t.id, attempt - 1).await?;
+        // Payouts only (`d-payout-late-signing`): a mint's clock is what it was before A1d.
+        let gated = if purpose(t).0 == "payout" {
+            store::held_under_pause_or_cutoff(conn, t.id, attempt - 1).await?
+        } else {
+            chrono::Duration::zero()
+        };
         let deadline = match store::held_under_window(conn, t.id, attempt - 1, Some(start)).await? {
             Some((first, held)) => self.deadline(conn, t, first.max(start)).await? + held,
             None => self.deadline(conn, t, start).await?,
@@ -849,11 +858,12 @@ impl Core {
             return Ok(Did::default());
         }
         let state = t.state();
-        let measured = [t.condition(), c].iter().any(|x| {
-            matches!(
-                x,
-                Some(Condition::PayoutWindow | Condition::Paused | Condition::CutOff)
-            )
+        // A pause or a cut-off is measured for a payout only: the mint keeps the clock it had.
+        let payout = purpose(t).0 == "payout";
+        let measured = [t.condition(), c].iter().any(|x| match x {
+            Some(Condition::PayoutWindow) => true,
+            Some(Condition::Paused | Condition::CutOff) => payout,
+            _ => false,
         });
         let head = if measured {
             store::latest_head(conn, &t.destination_network).await?

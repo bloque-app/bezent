@@ -275,13 +275,13 @@ it.
     stalls.
 27. **A payout signed after its deadline** (point 2 of the issue): **amendment 0019, ruled 2026-11-06
     (`d-payout-late-signing`, A1d, "Leave pause time out"), `SPEC.md` v0.5.7 §5.4.** The time a transfer is held under
-    `CND-Paused` or `CND-CutOff`, taken and left, does not count toward its delivery attempt's deadline: a delivery a
+    `CND-Paused` or `CND-CutOff`, taken and left, does not count toward a payout attempt's deadline: a payout a
     pause or a cut-off held past its nominal deadline is neither reviewed nor cancelled on the cycles after its release,
     and its deadline moves by the time held (`Core::deadline_held`, `store::held_under_pause_or_cutoff`). Taking and
     leaving either condition now rests on the destination's final head (`Core::hold`), as `CND-PayoutWindow` did, so
     the time is measured on the deadline's clock; the holds are chosen by `id` after the attempt's entry transition, as
-    item 26's, and one recorded before the first `CND-PayoutWindow` hold is not left out twice. It is one clock for a
-    mint and a payout. Time under a gate, a refused preparation or any other condition counts as before. **A new
+    item 26's, and one recorded before the first `CND-PayoutWindow` hold is not left out twice. It is for a payout only (`purpose`): a mint's deadline is counted
+    as before, and applying A1d to mints is open (amendment 0019). Time under a gate, a refused preparation or any other condition counts as before. **A new
     attempt under a pause**: after a proof of non-execution, `after_proof` asks the gate for attempt n+1, which a pause
     holds as `CND-Paused` in `Delivering` or `Delivered`, ordering nothing; the new attempt's clock starts at the proof and
     leaves out the time it was paused. The refund-or-retry choice after the proof still compares the proof with the

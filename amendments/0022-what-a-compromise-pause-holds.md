@@ -131,7 +131,10 @@ text: A2a and P1 are what `REQ-IC-4` and §7.F already allow, and P2 is about pr
   is the signer's only read of `pauses` and `transfers`: it says whether a mint or payout of a deposit or withdrawal is
   held, that is, a row of `pauses` covers its route (as the core's `gate` reads it: a row silent on a dimension matches
   every value, the global row included) and no intent of its transfer and attempt has a signature. The signer asks it
-  last, after every guard that raises, inside its signing transaction and lock, and refuses with `REQ-GV-1`. A replay of a
+  last, after every guard that raises, inside its signing transaction and lock, and refuses with `REQ-GV-1`. It asks again
+  immediately before the signature is recorded, in the same transaction, because the key backend's `sign` sits between the
+  two reads and a pause may commit meanwhile; the signature is then dropped with the transaction and nothing is recorded
+  (test `conditions.rs::ac_i2_1_inv_15_a1b_a_pause_committed_while_the_key_signs_holds_the_signature`). A replay of a
   recorded signature (returned before it asks), a refund mint, a refund's payout, a cancel and a statement are not held.
   The endpoints already treat a signer's refusal as "not signed": the intent stays, and is asked again on the next pass,
   and signed once the pause is lifted. The core already held the transfer in `Source-Final` as `CND-Paused`
@@ -158,4 +161,7 @@ text: A2a and P1 are what `REQ-IC-4` and §7.F already allow, and P2 is about pr
   the surplus fell is still signed. A1b speaks of a pause of a route; whether it reaches this one is not ruled, so it is
   left as built.
 - **The EVM consumer raiser** (`proof.rs`, not exactly one lane transaction at a consumed nonce, flagged in
-  `features/F-005-signer/NOTES.md`) still reads the block once; P2 named the lane detectors only.
+  `features/F-005-signer/NOTES.md`) is not changed; P2 named the lane detectors only. It already needs both providers:
+  `block_transactions` and `nonce_at` (`pair.rs`) answer only when the two agree, so a disagreement or an error there is
+  `Outcome::Pending`, with no page today. A proof that stays pending that way without a page is open, not changed by
+  this change.
