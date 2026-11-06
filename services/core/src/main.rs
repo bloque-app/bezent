@@ -159,6 +159,8 @@ async fn main() -> ExitCode {
     let core = bezent_core_service::Core::new(pool, config.settings());
     let mut tick = tokio::time::interval(Duration::from_secs(config.cycle_seconds));
     let mut observables = bezent_core_service::observe::Emitter::new();
+    // The floors were checked when the configuration was read (`Config::from_file`).
+    let mut fees = bezent_core_service::fees::Watch::new(config.fee_floors().unwrap_or_default());
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
@@ -214,6 +216,8 @@ async fn main() -> ExitCode {
                 observables
                     .tick(&check_pool, std::time::Instant::now(), chrono::Utc::now().timestamp_millis())
                     .await;
+                // A fee position below its floor is a page (REQ-ST-6, DEC-18; amendment 0025).
+                fees.tick(&check_pool, std::time::Instant::now(), chrono::Utc::now()).await;
                 if let Some(statements) = &statements {
                     // Bounded: a signer or a store that never answers does not freeze the cycle
                     // and the reserve check; a statement it keeps from being published is paged

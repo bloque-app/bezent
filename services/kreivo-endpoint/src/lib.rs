@@ -14,12 +14,14 @@
 //! | [`submit`] | `T-007-03` | Mints and refund mints: era born at the finalized head, dry run, recorded bytes, the signer link and its check, persisted before submission, one declared lane (`REQ-EO-1`, `REQ-EO-4`, `REQ-HN-3`, `AC-I1.2`) |
 //! | [`proof`] | `T-007-04` | Inclusion, refusal and non-execution, from chain data anyone can check (`REQ-NX-1`, `REQ-NX-2`, `AC-C2.1`) |
 //! | [`supply`] | issue #42 | Each bridged asset's supply at each recorded final head, the component's count and the issuance, for the reserve check (`REQ-BK-8`, `NFR-5`) |
+//! | [`fee`] | issue #14 | The delivery account's fee position (free balance less frozen) at each recorded final head, recorded with the supply (`REQ-ST-6`, `AC-H3.1`) |
 //! | [`signal`] | | Compromise and anomaly signals, written to the store once and never dropped (`AC-I1.2`) |
 //! | [`kreivo`] | | Kreivo's and the contract's encoding |
 //! | [`chain`] | | The chain interface; an in-memory chain for tests; the light client (feature `light-client`) |
 
 pub mod chain;
 pub mod config;
+pub mod fee;
 pub mod health;
 pub mod kreivo;
 pub mod network;

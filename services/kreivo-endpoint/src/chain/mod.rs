@@ -112,6 +112,18 @@ impl std::error::Error for ChainError {}
 /// A result from the chain.
 pub type ChainResult<T> = Result<T, ChainError>;
 
+/// An account's balances, as `System::Account` holds them (`pallet-balances`' `AccountData`), in the native
+/// token's smallest unit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Balances {
+    /// `free`: what the account holds, including what is frozen.
+    pub free: u128,
+    /// `reserved`: held from the account, as a storage deposit is; not spendable.
+    pub reserved: u128,
+    /// `frozen`: the part of `free` that cannot pay (locks and freezes).
+    pub frozen: u128,
+}
+
 /// Kreivo. See the module documentation.
 pub trait Chain: Send + Sync {
     /// The genesis hash of the chain the client follows (`AC-I4.1`).
@@ -146,6 +158,14 @@ pub trait Chain: Send + Sync {
         at: &BlockRef,
         account: &AccountId32,
     ) -> impl Future<Output = ChainResult<u64>> + Send;
+
+    /// `account`'s balances at `at` (`System::Account`'s `data`); an account the chain holds no entry for has
+    /// none, and reads as all zero (issue #14, `REQ-ST-6`).
+    fn account_balances(
+        &self,
+        at: &BlockRef,
+        account: &AccountId32,
+    ) -> impl Future<Output = ChainResult<Balances>> + Send;
 
     /// The issuance (`pallet-assets`' `Asset::supply`) of local asset `Here(asset)` at `at`;
     /// `None` when no such asset exists there (issue #42, `REQ-BK-8`).

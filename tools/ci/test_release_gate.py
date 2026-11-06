@@ -37,9 +37,7 @@ GATE = tomllib.loads((rg.ROOT / "release/gate.toml").read_text())
 
 
 def complete_gate():
-    g = copy.deepcopy(GATE)
-    g.setdefault("exit", {})["sustained_divergence_free_hours"] = 48
-    return g
+    return copy.deepcopy(GATE)  # the committed gate.toml: 24 hours (amendment 0021), two classes (amendment 0024)
 
 
 def complete_evidence():
@@ -47,6 +45,7 @@ def complete_evidence():
     items = rg.named_conditions() + rg.incident_classes()
     return {
         "release_commit": SHA,
+        "class": rg.VALUE_MOVING,
         "runbook": {i: dict(ok) for i in items},
         "exit": {"divergence": {"window_hours": 48, "divergences": 0, "evidence": "https://example.test/d", "by": "someone"},
                  "legs": {"unresolved": 0, "evidence": "https://example.test/l", "by": "someone"}},
@@ -69,8 +68,24 @@ class Gate(unittest.TestCase):
     def test_complete_evidence_passes(self):
         self.assertEqual(human(), [])
 
-    def test_the_committed_gate_fails_until_the_window_is_ruled(self):
-        self.assertTrue(any("sustained_divergence_free_hours" in e for e in human(gate=GATE)))
+    def test_the_committed_gate_says_24_hours_and_23_fails(self):
+        # amendment 0021, `d-gate-sustained`: "24 hours".
+        self.assertEqual(GATE["exit"]["sustained_divergence_free_hours"], 24)
+        self.assertEqual(human(gate=GATE), [])
+        ev = complete_evidence()
+        ev["exit"]["divergence"]["window_hours"] = 23
+        self.assertTrue(any("23 h measured, 24 h required" in e for e in human(ev=ev)))
+        ev["exit"]["divergence"]["window_hours"] = 24
+        self.assertEqual(human(ev=ev), [])
+
+    def test_an_unset_or_mistyped_window_fails(self):
+        for bad in (None, 0, -1, True, "24", 24.0):
+            g = complete_gate()
+            if bad is None:
+                del g["exit"]["sustained_divergence_free_hours"]
+            else:
+                g["exit"]["sustained_divergence_free_hours"] = bad
+            self.assertTrue(any("sustained_divergence_free_hours" in e for e in human(gate=g)), bad)
 
     def test_no_evidence_fails_with_every_item_named(self):
         errors = human(ev={})
@@ -102,8 +117,8 @@ class Gate(unittest.TestCase):
 
     def test_a_short_window_or_a_divergence_fails(self):
         ev = complete_evidence()
-        ev["exit"]["divergence"]["window_hours"] = 47
-        self.assertTrue(any("47 h" in e for e in human(ev=ev)))
+        ev["exit"]["divergence"]["window_hours"] = 23
+        self.assertTrue(any("23 h" in e for e in human(ev=ev)))
         ev = complete_evidence()
         ev["exit"]["divergence"]["divergences"] = 1
         self.assertTrue(any("exactly 0" in e for e in human(ev=ev)))
@@ -127,9 +142,14 @@ class Gate(unittest.TestCase):
         self.assertTrue(any("signoff maintainer" in e for e in human(ev=ev)))
 
     def test_a_gate_file_without_signoffs_fails(self):
-        g = complete_gate()
-        g["signoff"]["required"] = []
-        self.assertTrue(any("no required sign-off" in e for e in human(gate=g)))
+        for cls in rg.CLASSES:
+            g = complete_gate()
+            g["class"][cls]["signoff"] = []
+            self.assertTrue(any("non-empty list of role names" in e for e in human(gate=g, ev=dict(complete_evidence(), **{"class": cls}))), cls)
+            g = complete_gate()
+            del g["class"][cls]
+            self.assertTrue(any("must be a table" in e or "non-empty list" in e
+                                for e in human(gate=g, ev=dict(complete_evidence(), **{"class": cls}))), cls)
 
     # The online half, with a fake of the GitHub API that pages like the real one (100 to a page).
     def api(self, runs, reviews=None, merged=True, files=("release/evidence.toml",), pr=None):
@@ -338,7 +358,7 @@ class Gate(unittest.TestCase):
             errors = human(ev=ev)  # no traceback, and an error naming the table
             self.assertTrue(any("must be a table" in e for e in errors), (path, errors))
         g = complete_gate()
-        g["signoff"]["required"] = "spec-owner"
+        g["class"][rg.VALUE_MOVING]["signoff"] = "spec-owner"
         self.assertTrue(any("list of role names" in e for e in human(gate=g)))
 
     def test_a_roles_list_that_is_a_string_does_not_make_everyone_a_member(self):
@@ -379,8 +399,7 @@ class Gate(unittest.TestCase):
         # Everything satisfied, with the repository's own gate.toml plus the ruled window: the one path to a pass.
         import tempfile
         from unittest import mock
-        gate_text = (rg.ROOT / "release/gate.toml").read_text().replace(
-            "[exit]\n", "[exit]\nsustained_divergence_free_hours = 48\n")
+        gate_text = (rg.ROOT / "release/gate.toml").read_text()
         runs = [{"name": c["name"], "conclusion": "success"} for c in GATE["check"]]
         approved = self.APPROVED
         with tempfile.TemporaryDirectory() as d:
@@ -394,7 +413,7 @@ class Gate(unittest.TestCase):
             git = lambda *a: (0, "release/evidence.toml") if a[0] == "diff" else (  # noqa: E731
                 (0, "") if a[:2] == ("merge-base", "--is-ancestor") and a[2] == SHA and a[3] == "HEAD" else inner(*a))
             with mock.patch.object(rg, "GATE_PATH", gate_file), mock.patch.object(rg, "ROLES_PATH", roles_file), \
-                    mock.patch.object(rg, "mechanical_map", lambda: []):
+                    mock.patch.object(rg, "mechanical_map", lambda cls=None: []):
                 errors, _ = rg.run("", str(ev), True, "o/r", api=self.api(runs, approved), git_fn=git)
                 self.assertEqual(errors, [])
                 runs[0]["conclusion"] = "failure"
@@ -436,6 +455,144 @@ class Gate(unittest.TestCase):
             return cfg
         with mock.patch.object(rg.criteria_map, "load_config", emptied):
             self.assertEqual(rg.mechanical_map(), [])
+
+    # Release classes (amendment 0024, `d-gate-scope`).
+    @staticmethod
+    def ordinary_evidence(**extra):
+        """An ordinary release's evidence: its class, its commit and one spec owner's sign-off. Nothing else."""
+        return dict({"release_commit": SHA, "class": rg.ORDINARY,
+                     "signoff": {"spec-owner": {"by": "a", "pr": 1, "on": "2026-11-02"}}}, **extra)
+
+    def test_a_value_moving_release_fails_on_a_missing_soak_and_on_missing_signoffs(self):
+        ev = complete_evidence()
+        self.assertEqual(human(ev=ev), [])
+        gone = {k: v for k, v in ev.items() if k != "soak"}
+        errors = human(ev=gone)
+        self.assertTrue(any(e.startswith("soak") for e in errors), errors)
+        gone = {k: v for k, v in ev.items() if k != "signoff"}
+        errors = human(ev=gone)
+        self.assertTrue(any("signoff spec-owner" in e for e in errors) and any("signoff maintainer" in e for e in errors), errors)
+        # One of the two sign-offs is not enough, in either direction.
+        for role in ("spec-owner", "maintainer"):
+            partial = copy.deepcopy(ev)
+            del partial["signoff"][role]
+            self.assertTrue(any(f"signoff {role}" in e for e in human(ev=partial)), role)
+        # Nor are the runbooks, the window and the legs optional for it.
+        for table in ("runbook", "exit"):
+            self.assertTrue(human(ev={k: v for k, v in ev.items() if k != table}), table)
+
+    def test_an_ordinary_release_passes_with_its_commit_and_one_spec_owner_signoff(self):
+        # No runbook, no exit criteria, no soak, no maintainer: CI green and one spec owner is all it needs.
+        self.assertEqual(human(ev=self.ordinary_evidence()), [])
+        # ...and the same evidence as a value-moving release is nowhere near enough.
+        self.assertGreater(len(human(ev=dict(self.ordinary_evidence(), **{"class": rg.VALUE_MOVING}))), 30)
+
+    def test_an_ordinary_release_still_needs_its_commit_and_a_spec_owner_signoff(self):
+        ev = self.ordinary_evidence(release_commit="b" * 40)
+        self.assertTrue(any("release_commit" in e for e in human(ev=ev)))
+        ev = self.ordinary_evidence()
+        del ev["signoff"]
+        self.assertTrue(any("signoff spec-owner" in e for e in human(ev=ev)))
+        # A maintainer's sign-off is not a spec owner's.
+        ev = self.ordinary_evidence(signoff={"maintainer": {"by": "b", "pr": 1, "on": "2026-11-02"}})
+        self.assertTrue(any("signoff spec-owner" in e for e in human(ev=ev)))
+
+    def test_an_ordinary_release_is_held_to_the_checks_and_the_signers_online(self):
+        runs = [{"name": c["name"], "conclusion": "success"} for c in GATE["check"]]
+        self.assertEqual(rg.online_checks(GATE, SHA, "o/r", self.api(runs)), [])
+        runs[3]["conclusion"] = "failure"  # CI is not green: an ordinary release does not pass
+        self.assertEqual(len(rg.online_checks(GATE, SHA, "o/r", self.api(runs))), 1)
+        ev = self.ordinary_evidence()
+        self.assertEqual(self.signoffs(ev=ev), [])  # `a` is a spec owner who approved the final commit
+        ev["signoff"]["spec-owner"]["by"] = "b"  # approved, but only in the maintainer's list
+        self.assertTrue(any("not in the role's list" in e for e in self.signoffs(ev=ev)))
+        ev["signoff"]["spec-owner"]["by"] = "a"
+        self.assertTrue(any("no standing approval" in e for e in self.signoffs(ev=ev, reviews=[])))
+        self.assertTrue(any("not merged" in e for e in self.signoffs(ev=ev, merged=False)))
+
+    def test_a_missing_class_is_refused_and_never_read_as_ordinary(self):
+        for bad in ("missing", None, "", "Ordinary", "ordinary ", "value_moving", True, 1, ["ordinary"]):
+            ev = self.ordinary_evidence()
+            if bad == "missing":
+                del ev["class"]
+            else:
+                ev["class"] = bad
+            errors = human(ev=ev)
+            self.assertTrue(any(e.startswith("class:") for e in errors), (bad, errors))
+            # It is held to everything a value-moving release is, so no lighter path is open to it.
+            self.assertTrue(any("runbook" in e for e in errors) and any(e.startswith("soak") for e in errors), bad)
+            self.assertTrue(any("no valid class" in e for e in self.signoffs(ev=ev)), bad)
+        # Complete value-moving evidence with its class removed is refused as well.
+        ev = complete_evidence()
+        del ev["class"]
+        self.assertTrue(any(e.startswith("class:") for e in human(ev=ev)))
+
+    def test_a_class_needs_a_spec_owner_whatever_gate_toml_says(self):
+        g = complete_gate()
+        g["class"][rg.ORDINARY]["signoff"] = ["maintainer"]
+        self.assertTrue(any("must include 'spec-owner'" in e for e in human(gate=g, ev=self.ordinary_evidence())))
+        g = complete_gate()
+        g["class"][rg.VALUE_MOVING]["signoff"] = ["spec-owner"]
+        self.assertTrue(any("two different roles" in e for e in human(gate=g)))
+        self.assertTrue(any("must include" in e for e in self.online_roles_errors(g)))
+
+    def online_roles_errors(self, gate):
+        g = copy.deepcopy(gate)
+        g["class"][rg.ORDINARY]["signoff"] = ["maintainer"]
+        return rg.online_signoffs(g, self.ordinary_evidence(), "o/r", self.api([], self.APPROVED), self.ROLES, SHA, self.git())
+
+    def test_an_ordinary_release_does_not_need_the_criteria_map_free_of_known_unmet_entries(self):
+        # The committed map has known-unmet entries (and the gate refuses a value-moving release for them); an
+        # ordinary release needs the map itself to hold, which it does.
+        self.assertTrue(any("known not met" in e for e in rg.mechanical_map(rg.VALUE_MOVING)))
+        self.assertEqual(rg.mechanical_map(rg.ORDINARY), [])
+        # No class is held to the stricter map.
+        self.assertTrue(any("known not met" in e for e in rg.mechanical_map(None)))
+
+    def test_the_committed_roles_name_the_spec_owners_and_no_maintainer_yet(self):
+        roles = tomllib.loads((rg.ROOT / "release/roles.toml").read_text())["role"]
+        self.assertEqual(sorted(roles["spec-owner"]["members"]), ["S0c5", "pandres95"])
+        self.assertEqual(roles["maintainer"]["members"], [])  # so a value-moving release cannot pass yet
+        # With the real list: pandres95 signs an ordinary release, and no one can sign as a maintainer.
+        ev = self.ordinary_evidence()
+        ev["signoff"]["spec-owner"]["by"] = "PandRes95"
+        approved = [{"user": {"login": "pandres95"}, "state": "APPROVED", "commit_id": HEADSHA, "submitted_at": "2026-11-02T10:00:00Z"}]
+        errors = rg.online_signoffs(GATE, ev, "o/r", self.api([], approved), roles={"role": roles}, release=SHA, git_fn=self.git())
+        self.assertEqual(errors, [])
+        both = complete_evidence()
+        both["signoff"]["spec-owner"]["by"] = "S0c5"
+        both["signoff"]["maintainer"]["by"] = "pandres95"
+        approved.append({"user": {"login": "S0c5"}, "state": "APPROVED", "commit_id": HEADSHA, "submitted_at": "2026-11-02T10:00:00Z"})
+        errors = rg.online_signoffs(GATE, both, "o/r", self.api([], approved), roles={"role": roles}, release=SHA, git_fn=self.git())
+        self.assertTrue(any("lists no member for the role" in e for e in errors), errors)
+
+    def test_an_ordinary_release_passes_end_to_end_and_a_failed_check_stops_it(self):
+        import tempfile
+        from unittest import mock
+        runs = [{"name": c["name"], "conclusion": "success"} for c in GATE["check"]]
+        with tempfile.TemporaryDirectory() as d:
+            roles_file = Path(d) / "roles.toml"
+            roles_file.write_text('[role.spec-owner]\nmembers = ["a"]\n[role.maintainer]\nmembers = []\n')
+            ev = Path(d) / "evidence.toml"
+            ev.write_text(_dump(self.ordinary_evidence()))
+            inner = self.git()
+            git = lambda *a: (0, "release/evidence.toml") if a[0] == "diff" else (  # noqa: E731
+                (0, "") if a[:2] == ("merge-base", "--is-ancestor") and a[2] == SHA and a[3] == "HEAD" else inner(*a))
+            # The repository's own gate.toml and criteria map, unmocked: only the roles file is the test's.
+            with mock.patch.object(rg, "ROLES_PATH", roles_file):
+                errors, _ = rg.run("", str(ev), True, "o/r", api=self.api(runs, self.APPROVED[:1]), git_fn=git)
+                self.assertEqual(errors, [])
+                runs[0]["conclusion"] = "failure"
+                errors, _ = rg.run("", str(ev), True, "o/r", api=self.api(runs, self.APPROVED[:1]), git_fn=git)
+                self.assertEqual(len(errors), 1)
+                self.assertIn("check", errors[0])
+                # The same evidence without its class is refused outright.
+                runs[0]["conclusion"] = "success"
+                text = _dump(self.ordinary_evidence()).replace('class = "ordinary"\n', "")
+                self.assertNotIn("class", text)
+                ev.write_text(text)
+                errors, _ = rg.run("", str(ev), True, "o/r", api=self.api(runs, self.APPROVED[:1]), git_fn=git)
+                self.assertTrue(any(e.startswith("class:") for e in errors), errors)
 
     def test_no_release_commit_anywhere_fails(self):
         errors, _ = rg.run("", "/nonexistent/evidence.toml", online=False, repo="o/r")

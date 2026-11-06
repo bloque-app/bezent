@@ -3,3 +3,11 @@
 #
 # The human evidence the release gate demands (see release/README.md). Empty on purpose: until the entries exist,
 # the gate fails. A release commit and the entries are added together, in a reviewed pull request.
+
+# An evidence file names its class in a top-level key, and the key is required (amendment 0024; release/README.md):
+#
+#   class = "value-moving"   # the first release of bUSDC, and each release that adds an asset or a network
+#   class = "ordinary"       # every other release
+#
+# It is left out of this file on purpose: a file without it is refused, and so no release passes until its evidence
+# says which kind it is, in a pull request the spec owner approves.

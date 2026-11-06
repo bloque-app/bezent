@@ -4,6 +4,9 @@
 # F-013: what the release gate (tools/ci/release_gate.py, .github/workflows/release-gate.yml) requires. Reviewed by
 # the spec owner (CODEOWNERS). Read the header of release_gate.py first.
 
+# One list serves both release classes, as built and pending the owner's ruling (amendment 0024, open): an ordinary
+# release is held to it too, so it cannot pass until the self-hosted pool exists.
+#
 # Each check below must have succeeded on the release commit itself. A squash merge carries none of its pull
 # request's runs, and a workflow filtered by path does not run on a commit that touches none of them, so the
 # release procedure dispatches those workflows (contracts, evm-contracts, e2e-evm, e2e-zombienet) on the release
@@ -59,18 +62,33 @@ name = "bezent contract (cargo contract build)"
 [[check]]
 name = "Kreivo test bed"
 
-# Exit criteria of SPEC section 15, measured on the test bed (not on mainnet).
+# Exit criteria of SPEC section 15, measured on the test bed (not on mainnet). Needed by a value-moving release only.
 [exit]
-# sustained_divergence_free_hours = ?
-#
-# UNSET ON PURPOSE. SPEC section 15 asks for "the reserve equation at exactly zero divergence, sustained" and gives
-# no duration (DEC-19's 48 hours is the mainnet soak). Amendment 0021 proposes one; applying an unruled value
-# is not allowed. Until the owner rules, the gate fails on this line.
+# "Sustained" is 24 consecutive hours of the reserve equation's evaluations at exactly zero divergence, a divergence
+# restarting the window (ruled by @pandres95, 2026-11-06, `d-gate-sustained`, "24 hours"; amendment 0021; SPEC section 15).
+sustained_divergence_free_hours = 24
 
-# The soak of DEC-19 (ruled 2026-10-15, option A of 2026-10-22): on mainnet, before bUSDC goes live.
+# The soak of DEC-19 (ruled 2026-10-15, option A of 2026-10-22): on mainnet, before bUSDC goes live. Needed by a
+# value-moving release only.
 [soak]
 hours = 48
 statements_per_day = 2
 
-[signoff]
-required = ["spec-owner", "maintainer"]
+# Which releases the full gate applies to (ruled by @pandres95, 2026-11-06, `d-gate-scope`, "As recommended"; amendment
+# 0024; SPEC section 15). release/evidence.toml names the release's class in its top-level `class`, and nothing else
+# does; a missing or unknown class is refused, and never read as ordinary.
+#
+#   value-moving  the first release of bUSDC, and each release that adds an asset or a network. Everything in this
+#                 file and in release_gate.py: the checks above, every runbook exercised, the exit criteria, the soak,
+#                 a criteria map with no exception and no known-unmet entry, and two sign-offs.
+#   ordinary      every other release: the checks above on the release commit, and one spec owner's sign-off. It
+#                 skips what is proven before value moves (runbooks, exit criteria, soak, the map's exceptions).
+#
+# `signoff` lists the roles of release/roles.toml that must sign the evidence's pull request, each a different person.
+# The gate refuses a list without `spec-owner`, and a value-moving list with fewer than two roles, whatever this file
+# says. Changing this file is a pull request the spec owner approves (CODEOWNERS).
+[class.value-moving]
+signoff = ["spec-owner", "maintainer"]
+
+[class.ordinary]
+signoff = ["spec-owner"]

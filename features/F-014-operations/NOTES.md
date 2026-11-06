@@ -56,7 +56,7 @@ The criteria map's exceptions for `AC-H3.1` and `AC-I3.1` (F-013, PR #75) are re
 
 | Criterion | Layer (SPEC §9) | State here |
 |---|---|---|
-| `AC-H3.1` | Service, over the store | **partial**: every `REQ-ST-6` item is one read, tested; fee positions are observable for EVM networks and not for Kreivo (Open 2) |
+| `AC-H3.1` | Service, over the store | **met at the service layer** (2026-11-06; not yet shown on the test bed): every `REQ-ST-6` item is one read, tested, and fee positions are observable on both networks (EVM: the native balance; Kreivo: free less frozen, amendment 0025), with a floor and a page. Its `known_unmet.toml` entry is **not removed here**: that is the spec owner's review (Open 2) |
 | `AC-I1.2` | Custody + service | **Pause applied (issue #77, migration 0095); still listed `known unmet`.** The signer and the core detect a signature bezent did not record, refuse it and raise `key-compromise`, and the store pauses the bridge in the same transaction. The two gaps the entry named are ruled (amendment 0022, 2026-11-06): a signing intent recorded before the pause and not yet signed is new work and the signer refuses it (A1b, migration 0125), and the on-chain pause stays a person's act (A2a), from a page nobody receives yet (`alerts.md`). The entry stays in `e2e/criteria/known_unmet.toml` until the spec owner reviews it. Open 1 |
 | `REQ-IC-2` | (requirement) | Met for "a signature it did not record" (and a late mint) by the store's pause on the alert (issue #77), with the bound of a signing intent recorded before the pause closed by amendment 0022 A1b (Open 1). The reserve-equation divergence, a stall that outlasts the route's budget and an unevaluable reserve are paused by the reserve check (`reserve_check.rs::req_ic_2_nfr_5_m2_*`, `ac_e2_1_*`), and a supply mismatch pauses the asset under `INV-4`. A deeper-than-expected reorganisation and an observation gap are not assessed by this change |
 | `AC-I2.1` | Service + chain | service half passes (global, asset, network, direction and route; in flight continues; a second login lifts); the chain half is `F-006`'s, `contracts/bezent` |
@@ -94,18 +94,23 @@ channel. `deploy/runbooks/alerts.md` has the table, the three kinds no filter co
    needs the store to let the core insert a global pause for that cause (the pause guard of migration 0031 admits only an
    asset's routes on a reserve cause) and a test. Not done here: it widens what the core may do to a pause and deserves its
    own review. The same applies to a late mint (PR #72, merged), which raises the same request.
-2. **Fee positions** (`REQ-ST-6`). **Half built (issue #14).** The EVM endpoint reads its delivery account's native
-   balance at each final head it records, from both providers, and records it with the head (`fee_position_readings`,
-   migration 0110; `ops_observables()` rows `fee_position_amount` and `fee_position_age_seconds`, one per network; NULL
-   is unknown, never zero). Not built, and waiting on the spec owner, because the spec and the plan do not decide it:
-   (a) **which amount of a Substrate account is the Kreivo delivery account's fee position**: its free balance, its free
-   balance less what is frozen, or another; a storage deposit is reserved from the account, so free and spendable differ,
-   and this is the account `DEC-18` names (the KSM float); the Kreivo endpoint therefore reads and records nothing, and
-   the issuing network's row stays NULL; (b) **where the alert floor lives**, `DEC-18` says "in configuration" and not
-   whose: the core's (a floor beside a page kind, with a cadence and a runbook), an endpoint's, or the infrastructure's
-   alarm threshold on `fee_position_amount`; no floor and no page kind is added; (c) whether any key other than the
-   delivery keys has a fee position (none was found that pays a network cost). `AC-H3.1` therefore stays in
-   `e2e/criteria/known_unmet.toml`.
+2. **Fee positions** (`REQ-ST-6`). **Built, on both networks (issue #14); the `AC-H3.1` entry stays for the spec owner.** The
+   EVM endpoint reads its delivery account's native balance at each final head it records, from both providers
+   (`fee_position_readings`, migration 0110), and **the Kreivo endpoint reads the delivery account's free balance less its
+   frozen balance** at the same head as its supply readings, through the light client, bounded at five seconds, in a
+   savepoint, NULL on any failure (migration 0130, `services/kreivo-endpoint/src/fee.rs`, amendment 0025,
+   `d-fee-position-scope`, "As recommended", 2026-11-06). `ops_observables()` has the rows `fee_position_amount` and
+   `fee_position_age_seconds` per network; NULL is unknown, never zero. **The floor is in the core's own configuration**
+   (`fee_floors`, per network, the network's smallest unit as a string), and the core pages `fee-position-low` once on
+   crossing and then daily, from the log, with a recovery entry that re-arms it (`services/core/src/fees.rs`, runbook
+   `pages/float-top-up.md`, `alerts.md`). Left as it was, and said so: (a) an **unknown or stale reading raises no page of
+   its own**; the missing-data alarm on `fee_position_amount` and the growing age are its signals; (b) a **network with no
+   floor** is warned about once and never paged on, and the core still starts, so a deployment's configuration can follow
+   the release; (c) frozen above free reads as zero, with all three figures in the reading's `detail`; (d) the holder is
+   spelled `0x` and hex, as the endpoint's own lane declaration spells it, not SS58; (e) no key other than the delivery keys
+   has a fee position (none was found that pays a network cost). The owner expects usage subscriptions to replace the float
+   soon; this is the stopgap. **`AC-H3.1` is met at the service layer and not yet shown on the test bed; its entry in
+   `e2e/criteria/known_unmet.toml` is unchanged, because removing it is the spec owner's review.**
 3. **Administrative acts the store does not perform** (key rotation, raising a bound, route admission, credentials,
    surplus movements) are recorded by `operator_record` when the operator does it; nothing forces it. The schema owner can
    still change declarations directly; that login is for migrations and restores, held outside the operators.

@@ -25,9 +25,10 @@ of a delivery (`REQ-TR-5`): the cost is the deployment's, against surplus.
 
 ## Pages
 
-No page. The signal is the metric `fee_short_transfers` (transfers held, per asset, network and direction), which is the
-only signal of a short fee position the store has: no service reads a delivery account's balance yet (migration 0090).
-Watch it with `oldest_nonfinal_transfer_age_seconds` on the same route.
+No page of its own, and it is the late signal: the metric `fee_short_transfers` (transfers held, per asset, network and
+direction) says a delivery already could not pay. The early one is the delivery account's fee position, recorded by each
+endpoint (migrations 0110 and 0130) and paged on when it falls below its floor, `fee-position-low`
+(`../pages/float-top-up.md`). Watch `fee_short_transfers` with `oldest_nonfinal_transfer_age_seconds` on the same route.
 
 ## Confirm
 
