@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Kreivo, as the endpoint speaks to it: plain SCALE, written from Kreivo's source at the pin of
 //! `DEC-5` and `DEC-6` (Kreivo `0.17.1`, `87f8728`, the merge of kreivo#512; spec 134, transaction
-//! version 13), and from bezent's contract (`contracts/bezent`, F-006).
+//! version 13), and from bezent's contract (`contracts/bezent`, F-006). Kreivo `0.18.1` (spec 136,
+//! transaction version 14) writes the same format (issue #104): the version moved because two
+//! `CommunitiesManager` calls were removed. Which runtimes the endpoint builds for is decided by
+//! [`TRANSACTION_VERSIONS`] and the runtime's own metadata ([`crate::format`]), never by spec version.
 //!
 //! - **The contract's messages** the endpoint sends (`mint`, `refund_mint`), by their ink! 5
 //!   selectors, and **its events**, by their signature topics. Every event's first field is the
@@ -12,8 +15,10 @@
 //! - **The transaction**: a signed v4 extrinsic from the delivery key's own account, with Kreivo's
 //!   extensions: `PassAuthenticate` (none: the account signs for itself), `CheckNonZeroSender`,
 //!   `CheckSpecVersion`, `CheckTxVersion`, `CheckGenesis`, `CheckEra` (mortal), `CheckNonce`,
-//!   `CheckWeight` and `SkipCheckIfFeeless<ChargeGasTxPayment<ChargeAssetTxPayment>>`, all wrapped in
-//!   `DynamicMaxBlockWeight`, which adds no data:
+//!   `CheckWeight` and the fee extension, all wrapped in `DynamicMaxBlockWeight`, which adds no data.
+//!   The fee extension is `SkipCheckIfFeeless<ChargeGasTxPayment<ChargeAssetTxPayment>>` at spec 134
+//!   and `SkipCheckIfFeeless<ChargeUsageSubscription<ChargeAssetTxPayment>>` at spec 136; both wrappers
+//!   add no data, so its data is `ChargeAssetTxPayment`'s, identified as such in the metadata:
 //!
 //! ```text
 //! extrinsic = compact(len) ‖ 0x84 ‖ MultiAddress::Id(account) ‖ MultiSignature ‖ extra ‖ call
@@ -49,19 +54,16 @@ pub const ADDRESS_ID: u8 = 0;
 /// A signed payload longer than this is signed as its BLAKE2b-256 (`sp_runtime::generic::SignedPayload`).
 pub const MAX_UNHASHED_PAYLOAD: usize = 256;
 
-/// The runtime version the endpoint's transaction format is written for (Kreivo `0.17.1`). A
-/// runtime of another `spec_version` is refused, not guessed at.
-pub const SPEC_VERSIONS: &[u32] = &[134];
+/// The `transaction_version`s whose format the endpoint writes (issue #104): 13 (Kreivo `0.17.1`,
+/// spec 134) and 14 (Kreivo `0.18.1`, spec 136), checked to be the same format against both
+/// runtimes' metadata. Any `spec_version` with one of these may be built for, and only once its
+/// metadata matches too ([`crate::format::check`]): the number is a convention, not enforced. Any
+/// other `transaction_version` is refused, not guessed at.
+pub const TRANSACTION_VERSIONS: &[u32] = &[13, 14];
 
-/// The `transaction_version` of each spec in [`SPEC_VERSIONS`] (Kreivo `0.17.1`: 13).
-pub const RUNTIME_VERSIONS: &[(u32, u32)] = &[(134, 13)];
-
-/// The `transaction_version` the endpoint knows for `spec_version`, if it has a format for it.
-pub fn known_transaction_version(spec_version: u32) -> Option<u32> {
-    RUNTIME_VERSIONS
-        .iter()
-        .find(|(spec, _)| *spec == spec_version)
-        .map(|(_, tx)| *tx)
+/// Whether the endpoint writes the format of `transaction_version`.
+pub fn known_transaction_version(transaction_version: u32) -> bool {
+    TRANSACTION_VERSIONS.contains(&transaction_version)
 }
 
 /// BLAKE2b-256: Kreivo's hash.
@@ -840,6 +842,22 @@ pub fn supply_data(asset: AssetId) -> Vec<u8> {
     out
 }
 
+/// The input of the contract's `roles()` (issue #104).
+pub fn roles_data() -> Vec<u8> {
+    selector("roles").to_vec()
+}
+
+/// The contract's roles, as `roles()` returns them (`contracts/bezent/src/types.rs`, `Roles`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Roles {
+    /// Mints and refund-mints: the lane's account must be this one.
+    pub delivery: AccountId32,
+    /// Pauses and lowers bounds.
+    pub pause: AccountId32,
+    /// Governs the contract.
+    pub governance: AccountId32,
+}
+
 /// The input of the contract's `redemption(redeemer, reference)`.
 pub fn redemption_data(redeemer: &AccountId32, reference: &Reference) -> Vec<u8> {
     let mut out = selector("redemption").to_vec();
@@ -1051,7 +1069,8 @@ pub fn extra(p: &TxParams) -> Vec<u8> {
     // CheckNonZeroSender, CheckSpecVersion, CheckTxVersion, CheckGenesis: ().
     out.extend_from_slice(&p.era.bytes());
     Compact(p.nonce).encode_to(&mut out);
-    // CheckWeight: (). SkipCheckIfFeeless<ChargeGasTxPayment<ChargeAssetTxPayment>>:
+    // CheckWeight: (). The fee extension (`ChargeGasTxPayment` at spec 134, `ChargeUsageSubscription`
+    // at 136, both inside `SkipCheckIfFeeless` and adding nothing): ChargeAssetTxPayment's
     // `{ #[codec(compact)] tip, asset_id: Option<_> }`, with no fee asset.
     Compact(p.tip).encode_to(&mut out);
     out.push(0);
@@ -1535,5 +1554,76 @@ mod tests {
         immortal.extend_from_slice(&[0, 0, 0, 0, 0]);
         immortal.extend_from_slice(&implicit(&p));
         assert_eq!(decode_signing_payload(&immortal), None);
+    }
+
+    /// Issue #104: the bytes of a mint's signing payload and extrinsic, pinned for each
+    /// transaction version the endpoint writes. Only the implicit versions differ between them;
+    /// spec 136's were accepted by Kreivo mainnet's `TaggedTransactionQueue_validate_transaction`
+    /// up to the fee (an unfunded account), and the same payload with transaction version 13 was
+    /// refused as `BadProof` (read-only, 2026-11-06).
+    #[test]
+    fn issue_104_a_mint_is_encoded_the_same_at_transaction_versions_13_and_14() {
+        let genesis = hex32("c710a5f16adc17bcd212cff0aedcbf1c1212a043cdc0fb2dcba861efe5305b01");
+        let contract = hex32("361d9535ca78edf68a88c7abd44cdec7086f8e85bcb8aedb724462eb3f2e5821");
+        let data = mint_data(AssetId::Here(101), &[0x77; 32], 1_000_000, &[1; 32]);
+        assert_eq!(data.len(), 89);
+        let limits = CallLimits {
+            gas_limit: Weight {
+                ref_time: 1_000_000_000,
+                proof_size: 100_000,
+            },
+            storage_deposit_limit: Some(0),
+        };
+        let call = contracts_call(&contract, &limits, &data);
+        // Contracts (80), call (6), MultiAddress::Id, value 0, the weight's two compacts, Some(0),
+        // then the data with its compact length (89).
+        let head = format!(
+            "5006 00{} 00 02286bee 821a0600 0100 6501",
+            hex::encode(contract)
+        )
+        .replace(' ', "");
+        assert_eq!(hex::encode(&call), format!("{head}{}", hex::encode(&data)));
+        for (spec_version, transaction_version, versions) in
+            [(134, 13, "860000000d000000"), (136, 14, "880000000e000000")]
+        {
+            let p = TxParams {
+                genesis,
+                spec_version,
+                transaction_version,
+                era: Mortality::born_at(40_600_010),
+                birth_hash: [2; 32],
+                nonce: 7,
+                tip: 0,
+            };
+            // PassAuthenticate None, the era (64 blocks, phase 10), nonce 7, tip 0, no fee asset.
+            let extra = "00a5001c0000";
+            assert_eq!(hex::encode(super::extra(&p)), extra);
+            assert_eq!(
+                hex::encode(implicit(&p)),
+                format!("{versions}{}{}", hex::encode(genesis), hex::encode([2; 32]))
+            );
+            let payload = signing_payload(&call, &p);
+            assert_eq!(
+                hex::encode(&payload),
+                format!("{}{extra}{}", hex::encode(&call), hex::encode(implicit(&p)))
+            );
+            // 215 bytes, not longer than 256: the key signs the payload itself.
+            assert_eq!(payload.len(), 215);
+            assert_eq!(message_to_sign(&payload), payload);
+            let xt = extrinsic(&[3; 32], Scheme::Sr25519, &[9; 64], &p, &call);
+            let body = format!(
+                "8400{}01{}{extra}{}",
+                hex::encode([3; 32]),
+                hex::encode([9; 64]),
+                hex::encode(&call)
+            );
+            // compact(len) of the 242-byte body.
+            assert_eq!(hex::encode(&xt), format!("c903{body}"));
+            assert_eq!(xt.len(), 2 + body.len() / 2);
+        }
+    }
+
+    fn hex32(s: &str) -> [u8; 32] {
+        hex::decode(s).unwrap().try_into().unwrap()
     }
 }

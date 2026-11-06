@@ -28,9 +28,27 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
 3. **The endpoint hashes payloads over 256 bytes** (F-005 NOTES, N7): `message` is the BLAKE2b-256 of the
    signing payload when the payload is longer, as `sp_runtime` signs. A mint's payload is near that length.
 4. **The transaction is a signed v4 extrinsic from the delivery key's own account**, with Kreivo 0.17.1's
-   extensions (`PassAuthenticate: None` first; spec 134, transaction version 13, read from the runtime at
-   `87f8728`). A runtime of another `spec_version` is refused at preparation, not guessed at. The format is
-   written from Kreivo's source; it is first exercised against a real node in `T-013-05`.
+   extensions (`PassAuthenticate: None` first; read from the runtime at `87f8728`). The format is written from
+   Kreivo's source; it is first exercised against a real node in `T-013-05`. **Which runtimes it is built for**
+   (issue #104; this replaces "a runtime of another `spec_version` is refused"): not a list of spec versions, since
+   Kreivo keeps upgrading and most upgrades leave the format alone, but a `transaction_version` in
+   `kreivo::TRANSACTION_VERSIONS` (13, spec 134; 14, spec 136, Kreivo 0.18.1, where two `CommunitiesManager` calls
+   were removed), **and** the runtime's own metadata (V15, the light client's proven runtime call at the finalized
+   head) matching item by item what the endpoint writes and reads by position (`format::check`): extrinsic version 4;
+   `MultiAddress::Id`; `MultiSignature`'s first three variants; the ten extensions, in order, with each one's
+   explicit and implicit data; `Contracts` at 80, `call` at 6 and its five arguments; `ContractsApi_call`'s inputs and
+   the part of its result that is read. The `Some` arms the endpoint never writes are not compared. Spec 136's fee
+   wrapper is `ChargeUsageSubscription` where 134's was `ChargeGasTxPayment`; both add no data. Spec 136's format
+   was checked against Kreivo mainnet (read-only, 2026-11-06): a mint signed by a throwaway account at (136, 14) is
+   refused by `TaggedTransactionQueue_validate_transaction` only for its fee, and at (136, 13) as `BadProof`. The
+   **gate** (`submit::Gate`) also requires the contract's `roles().delivery` to be the lane's account, so a key
+   rotated before governance moves the role spends no order's dry run on `Unauthorised` (item 5). Any other answer,
+   or none, closes the gate before anything is read for an order or recorded, and before a signature: the order
+   waits, observation, supply readings and proofs go on, and each change of state is logged once (an error while
+   closed). It is judged again whenever the runtime's version changes, and before each preparation and signature,
+   once per block. A payload prepared under one runtime and signed under another is stale, as before (item 14).
+   Limits: the metadata is read whole (about 450 KB) once per finalized block that has work; a change of the
+   delivery role is logged at the next order, not when it happens.
 5. **One attempt per order, plus fresh eras.** A failed dry run is recorded and the order is not prepared again:
    retrying is the core's (a new order). An order whose prepared transaction expired *unsigned* is prepared
    again (attempt n+1); nothing could have executed. A signed one blocks every new attempt for its reference

@@ -194,7 +194,8 @@ own: nothing is proven (`REQ-NX-3`), and nothing is raised. An unrecorded one st
 `PassAuthenticate` of `None`, no fee asset) and reads nothing from the chain. A runtime upgrade does not change the bytes of
 a transaction already on chain. One bezent signed before an upgrade carries the old `spec_version` and `transaction_version`
 in what it signed, so the chain refuses it afterwards and it never lands. After an upgrade bezent builds and signs nothing
-for a `spec_version` it has no format for (`SPEC_VERSIONS`; the payload check in `submit.rs`), until a build that knows
+for a runtime whose format it does not write (a `transaction_version` outside `TRANSACTION_VERSIONS`, or metadata that
+does not match it: F-007 NOTES, item 4; the gate and the payload check in `submit.rs`), until a build that knows
 that format, and the same build decodes it. So an extrinsic of the lane's account that this decoder rejects, in a block
 after an upgrade, is one bezent did not sign. What can make a recorded one undecodable is a code deploy that changes the
 decoder, and the hash match covers that. The earlier reading of this table, and of the runbook, was wrong.

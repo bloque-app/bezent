@@ -260,7 +260,13 @@ mod run {
             contract,
             lane: &lane,
             signer: &signer,
+            gate: bezent_kreivo_endpoint::submit::Gate::default(),
         };
+        // Issue #104: whether submissions are open, judged and logged at start-up. A closed gate
+        // stops no part of the endpoint but building and signing.
+        if let Ok(finalized) = bezent_kreivo_endpoint::chain::Chain::finalized(&chain).await {
+            submitter.watch(&finalized).await;
+        }
         let prover = Prover {
             chain: &chain,
             pool: &pool,
@@ -320,6 +326,8 @@ mod run {
                 }
                 if let Ok(finalized) = bezent_kreivo_endpoint::chain::Chain::finalized(&chain).await
                 {
+                    // Issue #104: a runtime upgrade is judged when it happens.
+                    submitter.watch(&finalized).await;
                     for id in submitter.orders_to_prepare(&finalized).await? {
                         let outcome = submitter.prepare(id).await?;
                         tracing::info!(order = id, ?outcome, "prepared");

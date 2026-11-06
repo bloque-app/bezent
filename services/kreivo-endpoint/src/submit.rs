@@ -32,6 +32,14 @@
 //!    whose outcome is not known yet is re-sent as the same bytes; nothing is signed again for an
 //!    intent that has a signed transaction (`REQ-EO-1`, `AC-D2.1`).
 //!
+//! **The gate** (issue #104, [`Gate`]): nothing is prepared or signed unless, at the finalized
+//! head, the runtime's `transaction_version` is one in [`kreivo::TRANSACTION_VERSIONS`], the
+//! runtime's own metadata matches the format the endpoint writes ([`crate::format::check`]), and the
+//! contract's delivery role is the lane's account. Any other answer, or none, closes the gate: an
+//! order waits, unprepared, and nothing about it is recorded, so no dry run is spent on a runtime or
+//! a role that cannot take it. Observation, the supply readings and the prover do not pass through
+//! it. Each change of the gate's state is logged once, an error while it is closed.
+//!
 //! **Exactly once** (`REQ-EO-1`): a new attempt for an order is prepared only while every earlier
 //! one for the same reference is dead without a signature (its era passed unsigned). A signed one
 //! blocks every new attempt until its non-execution is proven ([`crate::proof`]); a retry after that
@@ -49,10 +57,12 @@ use bezent_signer::link::Dialer;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use crate::chain::{BlockRef, Chain, ancestry};
+use std::sync::{Mutex, PoisonError};
+
+use crate::chain::{BlockRef, Chain, RuntimeVersion, ancestry};
 use crate::kreivo::{
-    self, AccountId32, AssetId, MAX_ERA, Message, Mortality, Reference, SPEC_VERSIONS, Scheme,
-    TxParams, blake2_256,
+    self, AccountId32, AssetId, MAX_ERA, Message, Mortality, Reference, Scheme,
+    TRANSACTION_VERSIONS, TxParams, blake2_256,
 };
 use crate::signal;
 
@@ -221,7 +231,8 @@ pub enum Prepared {
     },
     /// An earlier attempt for the same reference is still open: nothing new (`REQ-EO-1`).
     Open,
-    /// The order cannot be prepared: malformed, or a runtime the endpoint has no format for.
+    /// The order cannot be prepared: malformed; or, with nothing recorded, the gate is closed (a
+    /// runtime the endpoint has no format for, or a lane the contract does not deliver from).
     Refused(String),
     /// The chain did not answer; try again.
     Unavailable(String),
@@ -267,6 +278,32 @@ pub struct Submitter<'a, C> {
     pub lane: &'a Lane,
     /// The signer link.
     pub signer: &'a SignerLink,
+    /// The gate: whether the runtime and the contract take what the endpoint builds (issue #104).
+    pub gate: Gate,
+}
+
+/// Whether the endpoint may build and sign at a block (issue #104). See the module documentation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GateState {
+    /// The runtime takes the endpoint's format and the lane holds the delivery role.
+    Open(RuntimeVersion),
+    /// It does not, and why: nothing is built or signed.
+    Closed(String),
+    /// The chain did not answer: nothing is built or signed; asked again next time.
+    Unavailable(String),
+}
+
+/// The gate's memory: its last answer (by block, since a block's runtime and state never change),
+/// the last runtime version seen, and the last state logged.
+#[derive(Debug, Default)]
+pub struct Gate {
+    at: Mutex<Option<([u8; 32], GateState)>>,
+    version: Mutex<Option<RuntimeVersion>>,
+    logged: Mutex<Option<String>>,
+}
+
+fn held<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn i64_of(n: u64) -> Result<i64, sqlx::Error> {
@@ -300,6 +337,116 @@ impl<C: Chain> Submitter<'_, C> {
         .await
     }
 
+    /// The gate at block `at` (issue #104): the runtime's transaction version and metadata, and the
+    /// contract's delivery role, all read at `at`. Answered once per block; a change of state is
+    /// logged once.
+    pub async fn gate(&self, at: &BlockRef) -> GateState {
+        if let Some((hash, state)) = held(&self.gate.at).as_ref()
+            && *hash == at.hash
+        {
+            return state.clone();
+        }
+        let state = self.gate_at(at).await;
+        if !matches!(state, GateState::Unavailable(_)) {
+            *held(&self.gate.at) = Some((at.hash, state.clone()));
+        }
+        let line = match &state {
+            GateState::Open(v) => format!(
+                "open: spec_version {} (transaction_version {}) takes the endpoint's transaction format, and the lane's account holds the contract's delivery role",
+                v.spec_version, v.transaction_version
+            ),
+            GateState::Closed(why) => format!("closed: {why}"),
+            GateState::Unavailable(_) => return state,
+        };
+        let mut logged = held(&self.gate.logged);
+        if logged.as_deref() != Some(line.as_str()) {
+            match &state {
+                GateState::Open(_) => {
+                    tracing::info!(
+                        network = self.network,
+                        block = at.number,
+                        "issue #104: submissions {line}"
+                    );
+                }
+                _ => tracing::error!(
+                    network = self.network,
+                    block = at.number,
+                    "issue #104: submissions {line}; nothing is built or signed until it opens; observation continues"
+                ),
+            }
+            *logged = Some(line);
+        }
+        state
+    }
+
+    /// The gate answered again whenever the runtime's version at `at` is not the one seen last, so
+    /// a runtime upgrade is judged (and logged) when it happens, not at the next delivery. Called
+    /// every pass.
+    pub async fn watch(&self, at: &BlockRef) {
+        let Ok(version) = self.chain.runtime_version(at).await else {
+            return;
+        };
+        if *held(&self.gate.version) == Some(version) {
+            return;
+        }
+        // Kept only once judged: an unanswered gate is asked again next pass.
+        if !matches!(self.gate(at).await, GateState::Unavailable(_)) {
+            *held(&self.gate.version) = Some(version);
+        }
+    }
+
+    async fn gate_at(&self, at: &BlockRef) -> GateState {
+        let version = match self.chain.runtime_version(at).await {
+            Ok(v) => v,
+            Err(e) => return GateState::Unavailable(e.to_string()),
+        };
+        if !kreivo::known_transaction_version(version.transaction_version) {
+            return GateState::Closed(format!(
+                "Kreivo spec_version {} has transaction_version {}, not one whose format the endpoint writes ({TRANSACTION_VERSIONS:?})",
+                version.spec_version, version.transaction_version
+            ));
+        }
+        // The cheap check before the metadata (about 450 KB): a lane without the role waits
+        // for governance, and should not read the metadata at every block meanwhile.
+        let args = kreivo::contracts_api_call_args(
+            &self.lane.account,
+            &self.contract,
+            &kreivo::roles_data(),
+        );
+        let roles = match self.chain.contracts_api_call(at, &args).await {
+            Ok(bytes) => kreivo::decode_getter(&bytes)
+                .ok()
+                .and_then(|v| kreivo::decode_exact::<kreivo::Roles>(&v)),
+            Err(e) => return GateState::Unavailable(format!("the contract's roles: {e}")),
+        };
+        let Some(roles) = roles else {
+            return GateState::Unavailable(
+                "the contract's roles() does not answer or decode".into(),
+            );
+        };
+        if roles.delivery != self.lane.account {
+            return GateState::Closed(format!(
+                "the contract's delivery role is 0x{}, not the lane's account 0x{} (key {}): its mints would be refused as Unauthorised",
+                hex::encode(roles.delivery),
+                hex::encode(self.lane.account),
+                self.lane.key
+            ));
+        }
+        let metadata = match self.chain.runtime_metadata(at).await {
+            Ok(m) => m,
+            Err(e) => return GateState::Unavailable(format!("the runtime's metadata: {e}")),
+        };
+        if let Err(items) = crate::format::check(&metadata) {
+            return GateState::Closed(format!(
+                "Kreivo spec_version {} (transaction_version {}) does not take the transaction format the endpoint writes: {}",
+                version.spec_version,
+                version.transaction_version,
+                items.join("; ")
+            ));
+        }
+        GateState::Open(version)
+    }
+
     /// Prepares order `order_intent_id` at the finalized head. See the module documentation.
     pub async fn prepare(&self, order_intent_id: i64) -> Result<Prepared, sqlx::Error> {
         let row: Option<(String, String, Option<Vec<u8>>, String)> = sqlx::query_as(
@@ -328,16 +475,16 @@ impl<C: Chain> Submitter<'_, C> {
             Ok(f) => f,
             Err(e) => return Ok(Prepared::Unavailable(e.to_string())),
         };
-        let version = match self.chain.runtime_version(&finalized).await {
-            Ok(v) => v,
-            Err(e) => return Ok(Prepared::Unavailable(e.to_string())),
+        // Issue #104: before anything is read for the order or recorded.
+        let version = match self.gate(&finalized).await {
+            GateState::Open(v) => v,
+            GateState::Closed(why) => {
+                return Ok(Prepared::Refused(format!(
+                    "issue #104: the gate is closed ({why}); nothing is built"
+                )));
+            }
+            GateState::Unavailable(e) => return Ok(Prepared::Unavailable(e)),
         };
-        if !SPEC_VERSIONS.contains(&version.spec_version) {
-            return Ok(Prepared::Refused(format!(
-                "Kreivo spec_version {} has no transaction format here (known: {SPEC_VERSIONS:?}); nothing is built for it",
-                version.spec_version
-            )));
-        }
 
         let mut tx = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -628,6 +775,16 @@ impl<C: Chain> Submitter<'_, C> {
                 "REQ-HN-3: prepared transaction {prepared_id}'s era ended at block {valid_until}; nothing is signed"
             )));
         }
+        // Issue #104: the runtime takes the format and the lane delivers, at the finalized head.
+        match self.gate(&finalized).await {
+            GateState::Open(_) => {}
+            GateState::Closed(why) => {
+                return Ok(Submitted::Refused(format!(
+                    "issue #104: the gate is closed ({why}); nothing is signed"
+                )));
+            }
+            GateState::Unavailable(e) => return Ok(Submitted::NotSigned(e)),
+        }
         // Review M2: the whole signed payload, decoded, against the order, the lane and the chain.
         match self
             .check_payload(prepared_id, &order, &signing_payload, &finalized)
@@ -813,10 +970,8 @@ impl<C: Chain> Submitter<'_, C> {
         if d.genesis != self.genesis {
             return mismatch("is for another network's genesis");
         }
-        if !SPEC_VERSIONS.contains(&d.spec_version)
-            || kreivo::known_transaction_version(d.spec_version) != Some(d.transaction_version)
-        {
-            return mismatch("is for a runtime the endpoint has no format for");
+        if !kreivo::known_transaction_version(d.transaction_version) {
+            return mismatch("is for a transaction version the endpoint has no format for");
         }
         if d.contract != self.contract
             || d.value != 0
