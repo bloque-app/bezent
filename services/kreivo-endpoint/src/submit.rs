@@ -32,6 +32,24 @@
 //!    whose outcome is not known yet is re-sent as the same bytes; nothing is signed again for an
 //!    intent that has a signed transaction (`REQ-EO-1`, `AC-D2.1`).
 //!
+//! **The gate** (issue #104, [`Gate`]): nothing is prepared or signed unless, at the finalized
+//! head, the runtime's `transaction_version` is one in [`kreivo::TRANSACTION_VERSIONS`], the
+//! runtime's own metadata matches the format the endpoint writes ([`crate::format::check`]), and the
+//! contract's delivery role is the lane's account. The three are read independently, so each is
+//! judged live whatever the others say, and every one that fails is named in the reason. An order
+//! waits, unprepared, and nothing about it is recorded, so no dry run is spent on a runtime or a
+//! role that cannot take it. Observation, the supply readings and the prover do not pass through
+//! it.
+//!
+//! *Closed or unavailable.* A chain that answers what the endpoint cannot use (`ChainError::Invalid`:
+//! a `roles()` that does not decode, a runtime with no V15 metadata) has answered, and the gate is
+//! closed with that reason. Only a chain that does not answer (`ChainError::Unavailable`) leaves it
+//! [`GateState::Unavailable`], which is asked again and is not remembered. Each change of a
+//! settled state is logged once, an error while it is closed; an unavailable gate is logged at warn
+//! level once it has stayed so for [`UNAVAILABLE_WARN_AFTER`] (five minutes), and again for each
+//! further such interval. The state is also a metric ([`crate::metric`]), which is no liveness
+//! matter: a closed gate leaves the endpoint healthy.
+//!
 //! **Exactly once** (`REQ-EO-1`): a new attempt for an order is prepared only while every earlier
 //! one for the same reference is dead without a signature (its era passed unsigned). A signed one
 //! blocks every new attempt until its non-execution is proven ([`crate::proof`]); a retry after that
@@ -49,10 +67,13 @@ use bezent_signer::link::Dialer;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use crate::chain::{BlockRef, Chain, ancestry};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+use crate::chain::{BlockRef, Chain, ChainError, RuntimeVersion, ancestry};
 use crate::kreivo::{
-    self, AccountId32, AssetId, MAX_ERA, Message, Mortality, Reference, SPEC_VERSIONS, Scheme,
-    TxParams, blake2_256,
+    self, AccountId32, AssetId, MAX_ERA, Message, Mortality, Reference, Scheme,
+    TRANSACTION_VERSIONS, TxParams, blake2_256,
 };
 use crate::signal;
 
@@ -221,7 +242,8 @@ pub enum Prepared {
     },
     /// An earlier attempt for the same reference is still open: nothing new (`REQ-EO-1`).
     Open,
-    /// The order cannot be prepared: malformed, or a runtime the endpoint has no format for.
+    /// The order cannot be prepared: malformed; or, with nothing recorded, the gate is closed (a
+    /// runtime the endpoint has no format for, or a lane the contract does not deliver from).
     Refused(String),
     /// The chain did not answer; try again.
     Unavailable(String),
@@ -267,6 +289,114 @@ pub struct Submitter<'a, C> {
     pub lane: &'a Lane,
     /// The signer link.
     pub signer: &'a SignerLink,
+    /// The gate: whether the runtime and the contract take what the endpoint builds (issue #104).
+    pub gate: Gate,
+}
+
+/// Whether the endpoint may build and sign at a block (issue #104). See the module documentation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GateState {
+    /// The runtime takes the endpoint's format and the lane holds the delivery role.
+    Open(RuntimeVersion),
+    /// It does not, and why: nothing is built or signed.
+    Closed(String),
+    /// The chain did not answer: nothing is built or signed; asked again next time.
+    Unavailable(String),
+}
+
+/// How long the gate may go unanswered (the chain could not be reached) before each further
+/// minute of it is logged at warn level: five minutes, about twenty-five Kreivo blocks. A light
+/// client that is resyncing, or a provider that is slow for a moment, is shorter than that; one
+/// that stays away is not a transient failure any more, and the gate is shut meanwhile.
+pub const UNAVAILABLE_WARN_AFTER: Duration = Duration::from_secs(300);
+
+/// The gate's memory: its last answer (by block, since a block's runtime and state never change),
+/// the last runtime version seen, the last state logged, and how long it has gone unanswered.
+#[derive(Debug)]
+pub struct Gate {
+    at: Mutex<Option<([u8; 32], GateState)>>,
+    version: Mutex<Option<RuntimeVersion>>,
+    logged: Mutex<Option<String>>,
+    unanswered: Mutex<Option<Unanswered>>,
+    warn_after: Duration,
+}
+
+/// A stretch of unanswered gates: when it began and when it was last logged.
+#[derive(Clone, Copy, Debug)]
+struct Unanswered {
+    since: Instant,
+    warned: Option<Instant>,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Self::with_warn_after(UNAVAILABLE_WARN_AFTER)
+    }
+}
+
+impl Gate {
+    /// A gate that logs at warn level once it has gone `warn_after` unanswered.
+    pub fn with_warn_after(warn_after: Duration) -> Self {
+        Self {
+            at: Mutex::new(None),
+            version: Mutex::new(None),
+            logged: Mutex::new(None),
+            unanswered: Mutex::new(None),
+            warn_after,
+        }
+    }
+
+    /// Records the answer `state` given at `now`. When the gate has gone unanswered for the bound
+    /// (and again for each further bound while it still does), says how long, so the caller logs
+    /// it at warn level; any other answer ends the stretch, and says so if the stretch was logged.
+    fn note(&self, state: &GateState, now: Instant) -> Note {
+        let mut unanswered = held(&self.unanswered);
+        if !matches!(state, GateState::Unavailable(_)) {
+            return match unanswered.take() {
+                Some(Unanswered {
+                    warned: Some(_), ..
+                }) => Note::Recovered,
+                _ => Note::Nothing,
+            };
+        }
+        let u = unanswered.get_or_insert(Unanswered {
+            since: now,
+            warned: None,
+        });
+        let elapsed = now.saturating_duration_since(u.since);
+        let due = u
+            .warned
+            .is_none_or(|w| now.saturating_duration_since(w) >= self.warn_after);
+        if elapsed >= self.warn_after && due {
+            u.warned = Some(now);
+            Note::Unanswered(elapsed)
+        } else {
+            Note::Nothing
+        }
+    }
+}
+
+/// What [`Gate::note`] says to log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Note {
+    Nothing,
+    /// The gate has gone this long without an answer.
+    Unanswered(Duration),
+    /// An answer came after a stretch that was logged.
+    Recovered,
+}
+
+/// What a read that failed says: not an answer (`unanswered`), or an answer that cannot be used
+/// (`closed`).
+fn failed(what: &str, e: ChainError, closed: &mut Vec<String>, unanswered: &mut Vec<String>) {
+    match e {
+        ChainError::Unavailable(e) => unanswered.push(format!("{what}: {e}")),
+        ChainError::Invalid(e) => closed.push(format!("{what} cannot be used: {e}")),
+    }
+}
+
+fn held<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn i64_of(n: u64) -> Result<i64, sqlx::Error> {
@@ -300,6 +430,166 @@ impl<C: Chain> Submitter<'_, C> {
         .await
     }
 
+    /// The gate at block `at` (issue #104): the runtime's transaction version and metadata, and the
+    /// contract's delivery role, all read at `at`. Answered once per block, except when the chain
+    /// did not answer ([`GateState::Unavailable`]), which is asked again; a change of state is
+    /// logged once, and an unanswered gate is logged at warn level once it has stayed so past
+    /// [`UNAVAILABLE_WARN_AFTER`].
+    pub async fn gate(&self, at: &BlockRef) -> GateState {
+        if let Some((hash, state)) = held(&self.gate.at).as_ref()
+            && *hash == at.hash
+        {
+            return state.clone();
+        }
+        let state = self.gate_at(at).await;
+        match self.gate.note(&state, Instant::now()) {
+            Note::Nothing => {}
+            Note::Unanswered(elapsed) => {
+                if let GateState::Unavailable(why) = &state {
+                    tracing::warn!(
+                        network = self.network,
+                        block = at.number,
+                        unanswered_seconds = elapsed.as_secs(),
+                        "issue #104: submissions are shut because the gate cannot be judged: {why}; nothing is built or signed; observation continues"
+                    );
+                }
+            }
+            Note::Recovered => tracing::info!(
+                network = self.network,
+                block = at.number,
+                "issue #104: the gate can be judged again"
+            ),
+        }
+        if !matches!(state, GateState::Unavailable(_)) {
+            *held(&self.gate.at) = Some((at.hash, state.clone()));
+        }
+        let line = match &state {
+            GateState::Open(v) => format!(
+                "open: spec_version {} (transaction_version {}) takes the endpoint's transaction format, and the lane's account holds the contract's delivery role",
+                v.spec_version, v.transaction_version
+            ),
+            GateState::Closed(why) => format!("closed: {why}"),
+            GateState::Unavailable(_) => return state,
+        };
+        let mut logged = held(&self.gate.logged);
+        if logged.as_deref() != Some(line.as_str()) {
+            match &state {
+                GateState::Open(_) => {
+                    tracing::info!(
+                        network = self.network,
+                        block = at.number,
+                        "issue #104: submissions {line}"
+                    );
+                }
+                _ => tracing::error!(
+                    network = self.network,
+                    block = at.number,
+                    "issue #104: submissions {line}; nothing is built or signed until it opens; observation continues"
+                ),
+            }
+            *logged = Some(line);
+        }
+        state
+    }
+
+    /// The gate answered again whenever the runtime's version at `at` is not the one seen last, so
+    /// a runtime upgrade is judged (and logged) when it happens, not at the next delivery. Called
+    /// every pass.
+    pub async fn watch(&self, at: &BlockRef) {
+        let Ok(version) = self.chain.runtime_version(at).await else {
+            return;
+        };
+        if *held(&self.gate.version) == Some(version) {
+            return;
+        }
+        // Kept only once judged: an unanswered gate is asked again next pass.
+        if !matches!(self.gate(at).await, GateState::Unavailable(_)) {
+            *held(&self.gate.version) = Some(version);
+        }
+    }
+
+    /// The three conditions, read independently, so that each is judged live whatever the others
+    /// say. A chain that answers what cannot be used (`ChainError::Invalid`: a getter that does
+    /// not decode, a runtime with no V15 metadata) is an answer, and closes the gate with its
+    /// reason; only a chain that does not answer leaves it [`GateState::Unavailable`]. Every
+    /// reason that closes it is reported, and a closed condition outweighs one not answered.
+    async fn gate_at(&self, at: &BlockRef) -> GateState {
+        let mut closed: Vec<String> = Vec::new();
+        let mut unanswered: Vec<String> = Vec::new();
+        let version = match self.chain.runtime_version(at).await {
+            Ok(v) => Some(v),
+            Err(e) => {
+                failed("the runtime's version", e, &mut closed, &mut unanswered);
+                None
+            }
+        };
+        if let Some(v) = version
+            && !kreivo::known_transaction_version(v.transaction_version)
+        {
+            closed.push(format!(
+                "Kreivo spec_version {} has transaction_version {}, not one whose format the endpoint writes ({TRANSACTION_VERSIONS:?})",
+                v.spec_version, v.transaction_version
+            ));
+        }
+
+        let args = kreivo::contracts_api_call_args(
+            &self.lane.account,
+            &self.contract,
+            &kreivo::roles_data(),
+        );
+        match self.chain.contracts_api_call(at, &args).await {
+            Ok(bytes) => {
+                match kreivo::decode_getter(&bytes).and_then(|v| {
+                    kreivo::decode_exact::<kreivo::Roles>(&v)
+                        .ok_or_else(|| "its answer is not the three roles".to_owned())
+                }) {
+                    Ok(roles) if roles.delivery == self.lane.account => {}
+                    Ok(roles) => closed.push(format!(
+                        "the contract's delivery role is 0x{}, not the lane's account 0x{} (key {}): its mints would be refused as Unauthorised",
+                        hex::encode(roles.delivery),
+                        hex::encode(self.lane.account),
+                        self.lane.key
+                    )),
+                    Err(e) => closed.push(format!(
+                        "the contract's roles() cannot be read, so the delivery role is unknown: {e}"
+                    )),
+                }
+            }
+            Err(e) => failed("the contract's roles", e, &mut closed, &mut unanswered),
+        }
+
+        // About 450 KB, read at every block this is judged: the cost of checking the format live
+        // whatever the role says.
+        match self.chain.runtime_metadata(at).await {
+            Ok(metadata) => {
+                if let Err(items) = crate::format::check(&metadata) {
+                    let runtime = version.map_or_else(
+                        || "the runtime".to_owned(),
+                        |v| {
+                            format!(
+                                "Kreivo spec_version {} (transaction_version {})",
+                                v.spec_version, v.transaction_version
+                            )
+                        },
+                    );
+                    closed.push(format!(
+                        "{runtime} does not take the transaction format the endpoint writes: {}",
+                        items.join("; ")
+                    ));
+                }
+            }
+            Err(e) => failed("the runtime's metadata", e, &mut closed, &mut unanswered),
+        }
+
+        if !closed.is_empty() {
+            return GateState::Closed(closed.join("; and "));
+        }
+        match (unanswered.is_empty(), version) {
+            (true, Some(v)) => GateState::Open(v),
+            _ => GateState::Unavailable(unanswered.join("; ")),
+        }
+    }
+
     /// Prepares order `order_intent_id` at the finalized head. See the module documentation.
     pub async fn prepare(&self, order_intent_id: i64) -> Result<Prepared, sqlx::Error> {
         let row: Option<(String, String, Option<Vec<u8>>, String)> = sqlx::query_as(
@@ -328,16 +618,16 @@ impl<C: Chain> Submitter<'_, C> {
             Ok(f) => f,
             Err(e) => return Ok(Prepared::Unavailable(e.to_string())),
         };
-        let version = match self.chain.runtime_version(&finalized).await {
-            Ok(v) => v,
-            Err(e) => return Ok(Prepared::Unavailable(e.to_string())),
+        // Issue #104: before anything is read for the order or recorded.
+        let version = match self.gate(&finalized).await {
+            GateState::Open(v) => v,
+            GateState::Closed(why) => {
+                return Ok(Prepared::Refused(format!(
+                    "issue #104: the gate is closed ({why}); nothing is built"
+                )));
+            }
+            GateState::Unavailable(e) => return Ok(Prepared::Unavailable(e)),
         };
-        if !SPEC_VERSIONS.contains(&version.spec_version) {
-            return Ok(Prepared::Refused(format!(
-                "Kreivo spec_version {} has no transaction format here (known: {SPEC_VERSIONS:?}); nothing is built for it",
-                version.spec_version
-            )));
-        }
 
         let mut tx = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -628,6 +918,16 @@ impl<C: Chain> Submitter<'_, C> {
                 "REQ-HN-3: prepared transaction {prepared_id}'s era ended at block {valid_until}; nothing is signed"
             )));
         }
+        // Issue #104: the runtime takes the format and the lane delivers, at the finalized head.
+        match self.gate(&finalized).await {
+            GateState::Open(_) => {}
+            GateState::Closed(why) => {
+                return Ok(Submitted::Refused(format!(
+                    "issue #104: the gate is closed ({why}); nothing is signed"
+                )));
+            }
+            GateState::Unavailable(e) => return Ok(Submitted::NotSigned(e)),
+        }
         // Review M2: the whole signed payload, decoded, against the order, the lane and the chain.
         match self
             .check_payload(prepared_id, &order, &signing_payload, &finalized)
@@ -813,10 +1113,8 @@ impl<C: Chain> Submitter<'_, C> {
         if d.genesis != self.genesis {
             return mismatch("is for another network's genesis");
         }
-        if !SPEC_VERSIONS.contains(&d.spec_version)
-            || kreivo::known_transaction_version(d.spec_version) != Some(d.transaction_version)
-        {
-            return mismatch("is for a runtime the endpoint has no format for");
+        if !kreivo::known_transaction_version(d.transaction_version) {
+            return mismatch("is for a transaction version the endpoint has no format for");
         }
         if d.contract != self.contract
             || d.value != 0
@@ -1112,5 +1410,63 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod gate_notes {
+    use super::*;
+
+    fn unavailable() -> GateState {
+        GateState::Unavailable("no peer".into())
+    }
+
+    #[test]
+    fn issue_104_a_gate_unanswered_past_the_bound_is_logged_and_again_each_bound() {
+        let gate = Gate::with_warn_after(Duration::from_secs(300));
+        let t = Instant::now();
+        let at = |s: u64| t + Duration::from_secs(s);
+        // A transient failure shorter than the bound is not logged.
+        assert_eq!(gate.note(&unavailable(), at(0)), Note::Nothing);
+        assert_eq!(gate.note(&unavailable(), at(299)), Note::Nothing);
+        // Past it: once, saying how long.
+        assert_eq!(
+            gate.note(&unavailable(), at(300)),
+            Note::Unanswered(Duration::from_secs(300))
+        );
+        assert_eq!(gate.note(&unavailable(), at(450)), Note::Nothing);
+        // And again for each further bound it persists.
+        assert_eq!(
+            gate.note(&unavailable(), at(600)),
+            Note::Unanswered(Duration::from_secs(600))
+        );
+        // An answer ends the stretch, and says so, since it was logged.
+        assert_eq!(
+            gate.note(&GateState::Closed("why".into()), at(610)),
+            Note::Recovered
+        );
+        assert_eq!(
+            gate.note(&GateState::Closed("why".into()), at(620)),
+            Note::Nothing
+        );
+        // A new stretch counts from its own start.
+        assert_eq!(gate.note(&unavailable(), at(700)), Note::Nothing);
+        assert_eq!(gate.note(&unavailable(), at(900)), Note::Nothing);
+        assert!(matches!(
+            gate.note(&unavailable(), at(1000)),
+            Note::Unanswered(_)
+        ));
+    }
+
+    #[test]
+    fn issue_104_a_short_failure_that_heals_is_never_logged() {
+        let gate = Gate::with_warn_after(UNAVAILABLE_WARN_AFTER);
+        let t = Instant::now();
+        assert_eq!(gate.note(&unavailable(), t), Note::Nothing);
+        let open = GateState::Open(RuntimeVersion {
+            spec_version: 136,
+            transaction_version: 14,
+        });
+        assert_eq!(gate.note(&open, t + Duration::from_secs(20)), Note::Nothing);
     }
 }
