@@ -15,14 +15,15 @@ It is normative and self-contained. It does not say how bezent is built, which t
 implement it, which networks it serves today, or why the project exists. `notes/` says why, and
 `notes/CONSTRAINTS-FOR-PLAN.md` says what the plan is expected to bind.
 
-Amendments 0001 to 0015, 0018, 0019 (A1d), 0020, 0022 (A1b and A2a; A3 and A4 are not ruled) and 0026 are applied
-(see `amendments/`).
+Amendments 0001 to 0015, 0018, 0019 (A1d), 0020, 0021 (A1b), 0022 (A1b and A2a; A3 and A4 are not ruled), 0024 and 0026 are
+applied (see `amendments/`).
 
 ### Change history
 
 | Version | Date | Change |
 |---|---|---|
 | 0.5.9 | 2026-11-06 | Amendment 0026 (decision item `d-requester-arrivals`, ruled by @pandres95 on the decision form: "Bind by sender"): each requester has declared senders, recorded by the operator, per origin network (`REQ-PN-3`, §2 "Declared sender"); a deposit binds only an arrival whose funder is one of the requesting requester's declared senders (`REQ-IN-3`, `REQ-RQ-3`), and is refused otherwise (`ERR-SenderNotDeclared`, `AC-A2.5`); an arrival no requester may bind stays an unassociated arrival (`REQ-IN-6`). A deposit naming a convertible arrival is checked on that arrival, and its conversion's output is bound through it (`REQ-CV-2`). Partly closes the exposure recorded in amendment 0018; what stays open is in amendment 0026. |
+| 0.5.8 | 2026-11-06 | Amendment 0021 (decision item `d-gate-sustained`, ruled by @pandres95 on the decision form: "24 hours"): "sustained" in V0's exit criteria is 24 consecutive hours of the reserve equation's evaluations at exactly zero divergence, a divergence restarting the window (§15). Amendment 0024 (`d-gate-scope`, ruled the same day: "As recommended"): the exit criteria gate only a release that moves value, the first release that lets a bridged asset carry value and each that adds an asset or a network to it; every other release needs its automated checks and the approval of one owner of the specification; a release declares which it is, and one that does not is refused (§15). No `REQ-*` changes. |
 | 0.5.7 | 2026-11-06 | Amendment 0022 (decision item `d-pause-0022`, ruled by @pandres95 on the decision form: "As recommended"): new work is everything before an attempt's first recorded signature, and an attempt with a recorded signature is in flight (`REQ-GV-1`, A1b), so a pause holds an attempt recorded before it that has no signature (§10 `CND-Paused`); the on-chain pause stays a person's act (A2a, no text). Amendment 0019 (decision item `d-payout-late-signing`, ruled the same day: "Leave pause time out", A1d): the time a payout is held under a pause or a cut-off, taken and left, does not count toward its attempt's deadline (§5.4, `REQ-GV-1`, `REQ-LM-1`, §10 `CND-Paused`, `CND-CutOff`). `NFR-2` and `NFR-3` are unchanged: latency is still measured end to end. |
 | 0.5.6 | 2026-11-06 | Amendment 0020 (decision item `d-never-prepared`, ruled by @pandres95 in the decision form, Yes): a delivery attempt whose preparation never happened (the endpoint is down, so no preparation row, refused or not, is written) goes to `Needs-Review` at the route's deadline, counted from the later of the attempt's own clock and the first final head of the destination network seen at or after the attempt was ordered, from the state it is in. No refund, no retry (`REQ-EO-3`, `REQ-RF-1`, `REQ-RV-1`). §5.2's `Needs-Review` row, §5.4's `Source-Final` and `Delivering`, `Delivered` rows and `REQ-RV-1` follow. |
 | 0.5.5 | 2026-11-05 | Amendment 0018 (decision item `d-cv-conversion-link`, ruled by @pandres95 in chat: A1b, the request comes first; A1d not taken): a deposit may name a final convertible arrival (`REQ-RQ-3`) and begins at `Source-Final` holding `CND-AwaitingConversion`; its requester names the conversion's output by the deposit's request reference (`REQ-RQ-4`); the deposit's source then becomes the output, which is minted against, and the convertible arrival is recorded with both amounts, each consumed once (`REQ-CV-1`, `REQ-CV-2`); past its deadline the deposit goes to `Needs-Review`, never to a refund (`REQ-CV-6`). §5.4's `Source-Final` row, §10's `CND-AwaitingConversion` and `AC-A5.1`, `AC-A5.2` follow. That the arrival fed that conversion, and that the requester is the one the value belongs to, stay the requester's word: recorded as open in the amendment. |
@@ -301,8 +302,8 @@ authenticated MUST NOT be accepted.
 (withdrawals, `REQ-RQ-4`), requesting refunds of unassociated arrivals (`REQ-RQ-6`), and attesting for an attested
 backend are separate grants.
 
-**`REQ-PN-3`** Each requester MUST have a recorded declaration of its senders, per origin network, made by the
-operator: the accounts that requester's value is sent from (§2, "Declared sender"). A requester's authority to request
+**`REQ-PN-3`** Each requester MUST declare its senders, per origin network, and the operator records the declaration:
+the accounts that requester's value is sent from (§2, "Declared sender"). A requester's authority to request
 deposits extends only to arrivals whose funder, as the backend reports it, is one of its declared senders
 (`REQ-IN-3`). No request declares, adds or asserts a sender (`REQ-RQ-7`).
 
@@ -834,8 +835,7 @@ arrival and the output are each consumed once (`INV-2`). Such a deposit records 
 converted output, with both amounts. bezent MUST verify that the output is a final conversion output at the
 reserve address the convertible arrived at, in a token admitted for the deposit's asset, and not consumed; that
 the arrival fed that conversion is the requester's word, as its price and slippage are (`REQ-CV-5`). The declared
-sender of `REQ-PN-3` is checked on the convertible arrival, when the deposit binds it; the output named for it,
-whose funder is the venue, is bound through that deposit, by its requester, and is not checked again.
+sender of `REQ-PN-3` is checked on the convertible arrival, when the deposit binds it.
 
 **`REQ-CV-3`** *Withdrawn by amendment 0007 (A2), with `AC-B4.1` and `AC-B4.2`: every payout is in the
 origin token; a requester that wants another token converts what it receives.*
@@ -883,8 +883,8 @@ deposit request names once it cannot be taken back, and not before.
   minted (`REQ-IN-7`).
 - `AC-A2.4` *Withdrawn by amendment 0007 (A1).*
 - `AC-A2.5` Given a final arrival whose funder is not one of my declared senders on its network, Then my
-  deposit request naming it is refused (`ERR-SenderNotDeclared`), binds nothing, and the requester whose declared
-  sender it is may still bind it; an arrival no requester declared stays an unassociated arrival (`REQ-PN-3`,
+  deposit request naming it is refused (`ERR-SenderNotDeclared`), and binds nothing;
+  an arrival no requester declared stays an unassociated arrival (`REQ-PN-3`,
   `REQ-IN-3`, `REQ-IN-6`).
 
 **`US-A3`** *Withdrawn by amendment 0001 (A9), with `AC-A3.1` and `AC-A3.2`.*
@@ -1515,6 +1515,16 @@ backend (`REQ-AS-8`), protocol venues only (`DEF-8`), no fast path.**
 | I — Custody, governance, incidents | `US-I1`–`US-I4` | — |
 
 **V0 is first proven on a test network that reproduces the issuing network, before any value. Its exit
-criteria are the reserve equation at exactly zero divergence, sustained; every final source leg delivered,
-refunded or held in a named condition with an owner; and every runbook exercised.** Nothing else in this
+criteria are the reserve equation at exactly zero divergence for 24 consecutive hours; every final source leg
+delivered, refunded or held in a named condition with an owner; and every runbook exercised.** Nothing else in this
 document may be traded against them.
+
+"For 24 consecutive hours" means that every evaluation of the reserve equation in that time (`NFR-5`) is at exactly
+zero divergence. A divergence restarts the window.
+
+**Which releases these criteria gate.** A release that moves value is the first release that lets a bridged asset carry
+value, and each release that adds a bridged asset or a network to what carries value. It MUST meet the exit criteria
+above and every other condition of its release gate. Every other release is ordinary: its automated checks MUST pass
+and one owner of this specification (`GOVERNANCE.md` names them) MUST approve it. A release MUST declare which of the
+two it is, in a record that an owner of this specification reviews, and a release that does not declare it MUST be
+refused, not treated as ordinary.

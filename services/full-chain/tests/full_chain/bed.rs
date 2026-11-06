@@ -987,6 +987,7 @@ impl Bed {
             pool: &self.kreivo_pool,
             network: KREIVO,
             contract: CONTRACT,
+            delivery: self.signing.kreivo_lane.account,
         };
         supplies.record().await.expect("the store");
         let finalized = Chain::finalized(&self.chain).await.expect("the model");

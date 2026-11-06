@@ -86,17 +86,16 @@ unchanged). The refund path is not a deposit, and this ruling does not touch it.
 - **§2** "Declared sender": an account the operator records, for one requester and one origin network, as one that
   requester's value is sent from.
 - **§3** Requester: requests deposits of arrivals from its declared senders.
-- **`REQ-PN-3`** (new): each requester has a recorded declaration of its senders per origin network, made by the
-  operator; its deposit authority extends only to arrivals whose funder is one of them; no request declares, adds or
+- **`REQ-PN-3`** (new): each requester declares its senders per origin network and the operator records the
+  declaration; its deposit authority extends only to arrivals whose funder is one of them; no request declares, adds or
   asserts a sender (`REQ-RQ-7`).
 - **`REQ-IN-3`**: only a requester one of whose declared senders is the arrival's funder may bind it; any other request
   is refused (`ERR-SenderNotDeclared`) and binds nothing.
 - **`REQ-IN-6`**: value from a funder no requester declared is among the arrivals that cannot become a deposit.
-- **`REQ-CV-2`**: the declared sender is checked on the convertible arrival; the output named for it is bound through
-  that deposit, by its requester, and is not checked again.
+- **`REQ-CV-2`**: the declared sender is checked on the convertible arrival, when the deposit binds it. Nothing is
+  said of the output (open choice 1).
 - **`REQ-RQ-3`**: the arrival's funder must be one of the requester's declared senders; otherwise `ERR-SenderNotDeclared`.
-- **`AC-A2.5`** (new, layer service): refused, binds nothing, the rightful requester may still bind it; an arrival no
-  requester declared stays unassociated.
+- **`AC-A2.5`** (new, layer service): refused and binds nothing; an arrival no requester declared stays unassociated.
 - **§10** `ERR-SenderNotDeclared` (new): the arrival's funder is not one of the requester's declared senders on its
   network.
 
@@ -124,6 +123,8 @@ None of these is applied; each is the owner's.
    conversion member per vault nothing on chain says whose swap made it. The ruling narrows it to requesters with a
    convertible arrival of their own awaiting, from a sender of their own, and leaves it open on every route that admits a
    convertible. So Bloque Test's credential is still production deposit authority over conversion outputs.
+   The exposure of conversion outputs (a requester naming another party's swap output) is outside this ruling and needs
+   its own decision.
 2. **A sender shared by two requesters.** Nothing refuses declaring one address for two requesters; for that address
    the old exposure returns between them (whoever names the arrival first binds it). Whether the store should refuse
    it is not ruled; the deploy note tells operators to keep each requester's senders disjoint.

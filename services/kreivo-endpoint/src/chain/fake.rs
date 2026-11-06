@@ -20,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{
-    BlockEvents, BlockRef, Chain, ChainError, ChainResult, Emitted, ExtrinsicResult, Header,
-    RuntimeVersion,
+    Balances, BlockEvents, BlockRef, Chain, ChainError, ChainResult, Emitted, ExtrinsicResult,
+    Header, RuntimeVersion,
 };
 use parity_scale_codec::{Decode, Encode};
 
@@ -42,6 +42,8 @@ struct Block {
     redeemed: HashMap<(AccountId32, [u8; 32]), kreivo::Redemption>,
     /// Per local asset: the contract's own supply count, and the asset's issuance (issue #42).
     supply: HashMap<u32, (u128, u128)>,
+    /// Each account's balances at this block (issue #14); an account not listed holds nothing.
+    balances: HashMap<AccountId32, Balances>,
 }
 
 /// What a dry run answers.
@@ -83,6 +85,14 @@ struct State {
     code_hash: Option<[u8; 32]>,
     /// What blocks produced from now on hold of each local asset: (contract count, issuance).
     supply: HashMap<u32, (u128, u128)>,
+    /// What blocks produced from now on hold of each account's balances (issue #14).
+    balances: HashMap<AccountId32, Balances>,
+    /// A balance read fails, as if `System::Account` could not be read, while every other read answers.
+    balance_unavailable: bool,
+    /// A balance read never answers.
+    balance_hangs: bool,
+    /// The number of every block a balance was asked at, in order (issue #14).
+    balance_log: Vec<u64>,
 }
 
 /// Kreivo in memory. See the module documentation.
@@ -130,6 +140,7 @@ impl FakeChain {
                     used: HashSet::new(),
                     redeemed: HashMap::new(),
                     supply: HashMap::new(),
+                    balances: HashMap::new(),
                 }],
                 finalized: 0,
                 pool: Vec::new(),
@@ -151,6 +162,10 @@ impl FakeChain {
                 unavailable: false,
                 code_hash: None,
                 supply: HashMap::new(),
+                balances: HashMap::new(),
+                balance_unavailable: false,
+                balance_hangs: false,
+                balance_log: Vec::new(),
             }),
         }
     }
@@ -298,6 +313,23 @@ impl FakeChain {
         self.lock().supply.insert(asset, (contract, issuance));
     }
 
+    /// From the next block on, `account` holds `balances` (issue #14).
+    pub fn set_balances(&self, account: AccountId32, balances: Balances) {
+        self.lock().balances.insert(account, balances);
+    }
+
+    /// Reading a balance fails (`unavailable`), or never answers (`hangs`), while every other read answers.
+    pub fn set_balance_fault(&self, unavailable: bool, hangs: bool) {
+        let mut s = self.lock();
+        s.balance_unavailable = unavailable;
+        s.balance_hangs = hangs;
+    }
+
+    /// The number of every block a balance was read at, in order.
+    pub fn balance_reads(&self) -> Vec<u64> {
+        self.lock().balance_log.clone()
+    }
+
     /// Produces `count` blocks and finalizes them all.
     pub fn advance(&self, count: u64) {
         for _ in 0..count {
@@ -336,6 +368,7 @@ impl FakeChain {
             used: parent.used.clone(),
             redeemed: parent.redeemed.clone(),
             supply: s.supply.clone(),
+            balances: s.balances.clone(),
         };
         for reference in std::mem::take(&mut s.outside_uses) {
             block.used.insert(reference);
@@ -717,6 +750,33 @@ impl Chain for FakeChain {
                 .get(account)
                 .copied()
                 .unwrap_or(0))
+        })
+    }
+
+    async fn account_balances(
+        &self,
+        at: &BlockRef,
+        account: &AccountId32,
+    ) -> ChainResult<Balances> {
+        let hangs = {
+            let mut s = self.lock();
+            s.balance_log.push(at.number);
+            if s.balance_unavailable {
+                return Err(ChainError::Unavailable(
+                    "the balance of the account cannot be read".into(),
+                ));
+            }
+            s.balance_hangs
+        };
+        if hangs {
+            std::future::pending::<()>().await;
+        }
+        self.answer(|s| {
+            Ok(Self::block_at(s, at)?
+                .balances
+                .get(account)
+                .copied()
+                .unwrap_or_default())
         })
     }
 

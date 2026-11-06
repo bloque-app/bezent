@@ -101,7 +101,7 @@ Each row: the page that sends you to the runbook, the observable that shows the 
 | Runbook | Page kinds | Observable | A test |
 |---|---|---|---|
 | [attested](pages/attested.md) | `attested-withdrawal-unrelayed`, `attested-withdrawal-awaiting-head`, `attested-report-refused`, `attested-instructions-refused` | `oldest_nonfinal_transfer_age_seconds`, `nonfinal_transfers` | none (not on this base) |
-| [float-top-up](pages/float-top-up.md) | none | `fee_short_transfers` | `cnd_fee_short_holds_until_the_fee_position_can_pay` |
+| [float-top-up](pages/float-top-up.md) | `fee-position-low` | `fee_short_transfers`, `fee_position_amount`, `fee_position_age_seconds` | `cnd_fee_short_holds_until_the_fee_position_can_pay` |
 | [key-compromise](pages/key-compromise.md) | `key-compromise` | `pauses_in_force` | `req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted` (+3) |
 | [late-mint](pages/late-mint.md) | `late-mint-prover-silent`, `late-mint-watch-failed`, `late-mint-check-failed` | `pauses_in_force` | `services/core/tests/late_mint.rs` |
 | [payout](pages/payout.md) | `payout-window-alert`, `payout-refusal-alert`, `resolution-blocked-by-inclusion`, `resolution-unprepared-alert` | `oldest_nonfinal_transfer_age_seconds`, `nonfinal_transfers`, `reviews_open`, `reviews_oldest_age_seconds` | `req_rv_1_issue_35_a_repeated_refusal_pages_once_and_reaches_review_at_the_deadline` (+2) |

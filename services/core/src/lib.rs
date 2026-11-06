@@ -18,12 +18,14 @@
 //! - [`reserve`] (`F-004`): the reserve book, the one-minute reserve check and the daily signed
 //!   statement.
 //! - [`signals`] (`F-014`): a key-compromise alert raised by the signer or an endpoint, put in front of a human.
+//! - [`fees`] (`F-014`): the floor of each network's fee position, in this configuration, and the page when a position is below it.
 //! - [`observe`] (`F-014`): the observables of `REQ-ST-6`, written once a minute for the alarms.
 //! - [`config`]: the configuration file.
 
 pub mod config;
 pub mod cutoff;
 pub mod engine;
+pub mod fees;
 pub mod health;
 pub mod late_mint;
 pub mod observe;

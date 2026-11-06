@@ -12,7 +12,7 @@
 # claim that the criterion is now met.
 
 [known_unmet."AC-H3.1"]
-missing = "fee positions (REQ-ST-6) are observable for EVM networks only: no service reads the Kreivo delivery account's balance, and which amount of a Substrate account is its fee position is not decided (F-014 notes, Open 2)"
+missing = "fee positions (REQ-ST-6) are shown at the service layer on both networks (amendment 0025), not yet on the test bed; an unknown reading raises no page from the core and relies on the infrastructure alarm on fee_position_age_seconds listed in deploy/runbooks/alerts.md"
 closed_by = "#14 (F-014 notes, Open 2)"
 
 [known_unmet."AC-I3.1"]

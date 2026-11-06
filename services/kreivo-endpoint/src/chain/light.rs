@@ -51,8 +51,8 @@ use tokio::sync::{mpsc, oneshot};
 use super::archive::{Archive, Fail, Source, StartCheck};
 use super::watch::Watches;
 use super::{
-    BlockEvents, BlockRef, Chain, ChainError, ChainResult, Emitted, ExtrinsicResult, Header,
-    RuntimeVersion,
+    Balances, BlockEvents, BlockRef, Chain, ChainError, ChainResult, Emitted, ExtrinsicResult,
+    Header, RuntimeVersion,
 };
 use crate::kreivo::{AccountId32, blake2_256};
 
@@ -1054,6 +1054,33 @@ impl Chain for LightChain {
             .and_then(|n| u64::try_from(n).ok())
             .ok_or_else(|| invalid("an account without a nonce"))
     }
+    async fn account_balances(
+        &self,
+        at: &BlockRef,
+        account: &AccountId32,
+    ) -> ChainResult<Balances> {
+        // `AccountInfo { nonce, consumers, providers, sufficients, data: AccountData { free, reserved,
+        // frozen, flags } }`, read by field name: a layout without the three figures is refused, not
+        // guessed at (`REQ-NX-3`). An account with no entry holds nothing.
+        let Some(v) = self
+            .fetch(at, "System", "Account", vec![Value::from_bytes(account)])
+            .await?
+        else {
+            return Ok(Balances::default());
+        };
+        let data = field(&v, "data").ok_or_else(|| invalid("an account without its balances"))?;
+        let read = |name: &str| {
+            field(data, name)
+                .and_then(number)
+                .ok_or_else(|| invalid(format!("an account's balances without `{name}`")))
+        };
+        Ok(Balances {
+            free: read("free")?,
+            reserved: read("reserved")?,
+            frozen: read("frozen")?,
+        })
+    }
+
     async fn asset_issuance(&self, at: &BlockRef, asset: u32) -> ChainResult<Option<u128>> {
         // Kreivo's `pallet_assets::Config::AssetId` is `FungibleAssetLocation`; a bridged asset is
         // `Here(index)` (kreivo `common/src/multilocation_asset_id.rs`).

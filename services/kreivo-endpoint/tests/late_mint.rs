@@ -145,6 +145,7 @@ async fn record_head(f: &Fixture) {
         pool: &f.endpoint,
         network: NETWORK,
         contract: CONTRACT,
+        delivery: f.lane.account,
     };
     supplies.record().await.unwrap();
 }

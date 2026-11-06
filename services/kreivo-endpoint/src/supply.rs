@@ -19,12 +19,15 @@
 //! a guess, and the check takes the evaluation as incomplete.
 //!
 //! The head is recorded in `final_heads` in the same transaction as its readings, so a final point
-//! the check picks has its supply readings with it.
+//! the check picks has its supply readings with it. The delivery account's fee position is read at the same
+//! head and recorded in that transaction too ([`crate::fee`], issue #14), but it is not a supply reading: a
+//! savepoint keeps a refused write of it from taking the head and the supply with it.
 
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use crate::chain::{BlockRef, Chain};
+use crate::fee;
 use crate::kreivo::{self, AccountId32, AssetId};
 
 /// Records supply at final heads. See the module documentation.
@@ -37,6 +40,9 @@ pub struct Supplies<'a, C> {
     pub network: &'a str,
     /// The on-chain component.
     pub contract: AccountId32,
+    /// The delivery account (the lane's), whose free balance less frozen is the network's fee position
+    /// (`REQ-ST-6`, [`crate::fee`]).
+    pub delivery: AccountId32,
 }
 
 /// What one recording did.
@@ -113,6 +119,10 @@ impl<C: Chain> Supplies<'_, C> {
             readings.push(self.read(head, asset, subject).await);
         }
 
+        // Issue #14: the delivery account's fee position, at the same final head. A read that fails or is slow is
+        // an unknown reading, never an error and never zero.
+        let fee = fee::read(self.chain, &self.delivery, head).await;
+
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO final_heads (network, block_number, block_hash, block_time) \
@@ -153,7 +163,34 @@ impl<C: Chain> Supplies<'_, C> {
             .execute(&mut *tx)
             .await?;
         }
+        {
+            // A fee position is not the head: if it cannot be written (a table not yet migrated, a grant or a guard
+            // that drifted), a savepoint takes back only it, and the head and the supply commit. Only a failure of
+            // the savepoint itself, the connection, is the step's.
+            let mut sp = sqlx::Acquire::begin(&mut *tx).await?;
+            match record_fee_position(&mut sp, self.network, head, &fee).await {
+                Ok(()) => sp.commit().await?,
+                Err(e) => {
+                    sp.rollback().await?;
+                    tracing::error!(
+                        network = self.network,
+                        block = head.number,
+                        error = %e,
+                        "REQ-ST-6: the delivery account's fee position could not be recorded; the head and \
+                         the supply readings are recorded without it, and fee_position_age_seconds grows until it can be"
+                    );
+                }
+            }
+        }
         tx.commit().await?;
+        if fee.amount.is_none() {
+            tracing::warn!(
+                network = self.network,
+                block = head.number,
+                reason = fee.unknown_reason.as_deref().unwrap_or_default(),
+                "REQ-ST-6: the delivery account's fee position is unknown at this final head"
+            );
+        }
 
         // INV-4 (PLAN DEC-16, 2026-10-15; PR #50 review M1): the flag is durable in the store,
         // committed with the head, and the core raises key-compromise and pauses the asset from
@@ -224,6 +261,32 @@ impl<C: Chain> Supplies<'_, C> {
             (_, Err(e)) => unknown(format!("the asset's issuance: {e}"), json!({})),
         }
     }
+}
+
+/// Records the delivery account's fee position, read at `head`, a recorded final head of `network`. A reading
+/// already recorded is not recorded again.
+async fn record_fee_position(
+    conn: &mut sqlx::PgConnection,
+    network: &str,
+    head: &BlockRef,
+    r: &fee::Reading,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO fee_position_readings (network, block_number, block_hash, holder, amount, \
+             unknown_reason, detail) \
+         VALUES ($1, $2, $3, $4, $5::numeric, $6, $7::text::jsonb) \
+         ON CONFLICT ON CONSTRAINT fee_position_readings_once DO NOTHING",
+    )
+    .bind(network)
+    .bind(i64_of(head.number)?)
+    .bind(head.hash.as_slice())
+    .bind(&r.holder)
+    .bind(r.amount.map(|a| a.to_string()))
+    .bind(&r.unknown_reason)
+    .bind(r.detail.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 fn i64_of(n: u64) -> Result<i64, sqlx::Error> {
