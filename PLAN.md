@@ -1,9 +1,9 @@
 ---
 name: bezent
-plan_version: 0.6.5
-status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first); v0.6.5 binds SPEC.md v0.5.6 (amendment 0020: an attempt never prepared goes to review at the route's deadline)
+plan_version: 0.6.6
+status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first); v0.6.5 binds SPEC.md v0.5.6 (amendment 0020: an attempt never prepared goes to review at the route's deadline); v0.6.6 binds SPEC.md v0.5.7 (amendments 0022, A1b, and 0019, A1d: a pause holds an unsigned attempt, and its time is left out of the deadline)
 date: 2026-11-06
-binds: SPEC.md v0.5.6
+binds: SPEC.md v0.5.7
 ---
 
 # bezent — Implementation Plan
@@ -21,7 +21,7 @@ that serves nothing in the spec is not in this plan.
 | `M-*` | A milestone: a set of features that together make a stated claim true, with exit criteria |
 | `RISK-*` | A risk to the plan, with its mitigation |
 
-1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.6. If a technical fact makes a requirement
+1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.7. If a technical fact makes a requirement
    impossible to meet, that becomes a spec amendment first (`amendments/`), and the plan follows it. A gap in the spec
    is handled the same way: we stop, propose an amendment, and do not fill the gap in code.
 2. **Facts come from the notes.** Numbers and properties of Kreivo, the EVM networks, CCTP, evmhot and Swaps come from
@@ -36,6 +36,7 @@ that serves nothing in the spec is not in this plan.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.6.6 | 2026-11-06 | The plan binds `SPEC.md` v0.5.7. @pandres95's rulings on the decision form, 2026-11-06. `d-pause-0022` ("As recommended"; amendment 0022): a signing intent recorded before a pause and not yet signed is new work, and the signer refuses it (`REQ-GV-1`, A1b; `F-005`); the on-chain pause stays a person's act (A2a); every detector login keeps its power to pause globally, for now (P1); and an EVM lane detector raises the compromise path only on both providers' word, one provider's being unknown and paged (P2; `DEC-12`, `F-009`). `d-payout-late-signing` ("Leave pause time out"; amendment 0019, A1d): the time held under a pause or a cut-off does not count toward a delivery attempt's deadline (`F-003`). Nothing else changes |
 | 0.6.5 | 2026-11-06 | The plan binds `SPEC.md` v0.5.6. Amendment 0020 (`d-never-prepared`, ruled Yes by @pandres95 in the decision form, 2026-11-06): a delivery attempt whose preparation never happened (the endpoint is down) goes to `Needs-Review` at the route's deadline, counted from the order, from the state it is in; never a refund or a retry (`REQ-EO-3`, `REQ-RF-1`, `REQ-RV-1`). Nothing else changes |
 | 0.6.4 | 2026-11-06 | The plan binds `SPEC.md` v0.5.5, as the owner asked in chat on 2026-11-06. Amendment 0018 (A1b, ruled `d-cv-conversion-link`, 2026-11-05) makes a convertible deposit begin with its request: the request names the final convertible arrival (`REQ-RQ-3`) and the deposit holds `CND-AwaitingConversion` until its requester names the conversion's output by the request reference (`REQ-RQ-4`, `REQ-CV-2`). `DEC-9`, `DEC-13` and `F-010` are worded to match. Nothing else changes |
 | 0.6.3 | 2026-10-30 | @pandres95's ruling `d-polygon-central-signer` (2026-10-30): there is no Polygon signer sidecar. The central signer, which has its own task role, signs Polygon through the Vault signing plugin, and the EVM endpoint reaches it over the mTLS signer link (`PUB-1b`) like every other caller. Containers in one task share one cloud IAM role, so a sidecar would let the EVM endpoint authenticate as the plugin role and sign arbitrary hashes, bypassing the signer's intent check (`REQ-AR-3`). `DEC-11` and `F-005` follow; `PUB-1b` becomes a prerequisite of Polygon delivery (`F-009`, `M-1`). `SPEC.md` is unchanged |
@@ -387,6 +388,11 @@ disagree, the disposition is unknown, never a mint.** Ruled by @pandres95 (`pl-r
   the fee and gas estimates, the dry run, receipts, logs and headers, stays on the paid pair, cross-checked. A public
   node cannot forge a signed transaction, only drop it, and the endpoint sends the same bytes again until the pair
   shows the outcome. There is no fallback to the paid pair.
+- An alarm rests on both providers too (@pandres95, `d-pause-0022`, 2026-11-06; amendment 0022, P2). The reads that
+  would raise the compromise path from a lane (its nonce past every nonce bezent signed, or code at it) read each
+  provider on its own, and raise only when both report it. One provider's report, or one that fails, is unknown: it
+  pages and pauses nothing, and the lane prepares and signs nothing until they agree. Choosing a nonce still takes the
+  higher of the two, which is right for that and wrong for an alarm.
 - Alternatives: one provider, or our own nodes.
 
 *Serves:* finality with the hash re-checked (`REQ-OB-2`), decisions only at final blocks (`REQ-OB-5`), unknown rather

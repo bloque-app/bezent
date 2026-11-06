@@ -1,7 +1,7 @@
 ---
 name: bezent
 summary: A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger's contract.
-spec_version: 0.5.6
+spec_version: 0.5.7
 status: draft
 date: 2026-11-06
 ---
@@ -15,12 +15,14 @@ It is normative and self-contained. It does not say how bezent is built, which t
 implement it, which networks it serves today, or why the project exists. `notes/` says why, and
 `notes/CONSTRAINTS-FOR-PLAN.md` says what the plan is expected to bind.
 
-Amendments 0001 to 0015, 0018, and 0020, are applied (see `amendments/`).
+Amendments 0001 to 0015, 0018, 0019 (A1d), 0020 and 0022 (A1b and A2a; A3 and A4 are not ruled) are applied (see
+`amendments/`).
 
 ### Change history
 
 | Version | Date | Change |
 |---|---|---|
+| 0.5.7 | 2026-11-06 | Amendment 0022 (decision item `d-pause-0022`, ruled by @pandres95 on the decision form: "As recommended"): new work is everything before an attempt's first recorded signature, and an attempt with a recorded signature is in flight (`REQ-GV-1`, A1b), so a pause holds an attempt recorded before it that has no signature (§10 `CND-Paused`); the on-chain pause stays a person's act (A2a, no text). Amendment 0019 (decision item `d-payout-late-signing`, ruled the same day: "Leave pause time out", A1d): the time a transfer is held under a pause or a cut-off, taken and left, does not count toward its delivery attempt's deadline (§5.4, `REQ-GV-1`, `REQ-LM-1`, §10 `CND-Paused`, `CND-CutOff`). `NFR-2` and `NFR-3` are unchanged: latency is still measured end to end. |
 | 0.5.6 | 2026-11-06 | Amendment 0020 (decision item `d-never-prepared`, ruled by @pandres95 in the decision form, Yes): a delivery attempt whose preparation never happened (the endpoint is down, so no preparation row, refused or not, is written) goes to `Needs-Review` at the route's deadline, counted from the later of the attempt's own clock and the first final head of the destination network seen at or after the attempt was ordered, from the state it is in. No refund, no retry (`REQ-EO-3`, `REQ-RF-1`, `REQ-RV-1`). §5.2's `Needs-Review` row, §5.4's `Source-Final` and `Delivering`, `Delivered` rows and `REQ-RV-1` follow. |
 | 0.5.5 | 2026-11-05 | Amendment 0018 (decision item `d-cv-conversion-link`, ruled by @pandres95 in chat: A1b, the request comes first; A1d not taken): a deposit may name a final convertible arrival (`REQ-RQ-3`) and begins at `Source-Final` holding `CND-AwaitingConversion`; its requester names the conversion's output by the deposit's request reference (`REQ-RQ-4`); the deposit's source then becomes the output, which is minted against, and the convertible arrival is recorded with both amounts, each consumed once (`REQ-CV-1`, `REQ-CV-2`); past its deadline the deposit goes to `Needs-Review`, never to a refund (`REQ-CV-6`). §5.4's `Source-Final` row, §10's `CND-AwaitingConversion` and `AC-A5.1`, `AC-A5.2` follow. That the arrival fed that conversion, and that the requester is the one the value belongs to, stay the requester's word: recorded as open in the amendment. |
 | 0.5.4 | 2026-10-29 | Amendment 0015 (decision item `sp-custody-boundary`, ruled by @pandres95 in chat): `REQ-CU-1` names a boundary and its properties, not a store. Key material is never readable outside the component that signs with it, which is separate from the state and auditable on its own; the sentences naming a key-management service, a hardware security module and a secrets vault are removed. |
@@ -698,6 +700,12 @@ leg that executed (`INV-2`), and the previous attempt is proven not executed bef
 transaction is signed per (reference, attempt), and attempt *n*+1 only once the proof of non-execution of
 attempt *n* is recorded (`REQ-EO-6`).
 
+**A pause or a cut-off and a delivery attempt's deadline.** Of the time counted toward a delivery attempt's deadline
+("unknown past its deadline" and "the route's deadline" in the table above; `REQ-RV-1`, `REQ-EO-3`), the time the transfer
+is held under `CND-Paused` or `CND-CutOff`, from when it takes the condition to when it leaves it, does not count: a
+delivery that waited out a pause or a cut-off is neither sent to `Needs-Review` nor forced out (`REQ-NX-4`) for that
+time, and its deadline moves by it.
+
 **`REQ-TR-6`** A transfer MUST change state only along the edges of the §5.4 transition table.
 
 ### 5.5 Deposits (origin network → issuing network)
@@ -1210,7 +1218,8 @@ attempt is proven not executed at finality.
 transfer, window limits, cut-offs, current capacity, any minimum a venue imposes, the venue addresses for
 venue routes, and the route's completion budget. A route's minimum is at least one minor unit of the bridged
 asset, expressed in the origin token. A transfer whose next step falls outside its route's declared cut-off
-holds `CND-CutOff` until the route reopens, then resumes by itself. No request is refused for a cut-off.
+holds `CND-CutOff` until the route reopens, then resumes by itself; the time held does not count toward its deadline
+(§5.4). No request is refused for a cut-off.
 
 **`REQ-LM-2`** bezent MUST refuse at request time, with a named error and before any value moves,
 anything it can already tell will not execute.
@@ -1263,7 +1272,8 @@ addresses or components, and production keys MUST NOT sign on test networks.
 
 **`REQ-GV-1`** bezent MUST be pausable per route, per asset, per direction and globally. A pause MUST
 stop new work only. Transfers in flight MUST keep being observed and completed, never failed or refunded
-because of the pause.
+because of the pause. New work is everything before an attempt's first recorded signature. An attempt with a
+recorded signature is in flight. The time a transfer waits under a pause does not count toward its deadline (§5.4).
 
 **`REQ-GV-2`** Pausing SHOULD need one authorised party. Unpausing and raising a bound SHOULD need several.
 
@@ -1366,9 +1376,9 @@ The layers are:
 | `CND-DestinationRefused` | The issuing network refused a mint because of its destination; nothing was minted |
 | `CND-AmountMismatch` | A delivery moved a different amount; both are reported |
 | `CND-Withdrawn` | An observation stopped matching the chain before finality |
-| `CND-Paused` | Work in flight continues; new work for this route waits |
+| `CND-Paused` | Work in flight continues; new work for this route waits, including an attempt recorded before the pause that has no recorded signature (`REQ-GV-1`). The time held does not count toward the transfer's deadline (§5.4) |
 | `CND-AwaitingConversion` | A deposit at `Source-Final` whose source is a convertible-token arrival, waiting for its requester to name the conversion's output; nothing is minted, and the arrival is never reserve (`REQ-CV-1`, `REQ-CV-2`, `REQ-CV-6`) |
-| `CND-CutOff` | The transfer's next step falls outside its route's declared cut-off; resumes by itself when the route reopens (`REQ-LM-1`) |
+| `CND-CutOff` | The transfer's next step falls outside its route's declared cut-off; resumes by itself when the route reopens (`REQ-LM-1`). The time held does not count toward the transfer's deadline (§5.4) |
 | `CND-PayoutWindow` | The reserve's outflow allowance for the current window is spent; the withdrawal waits and resumes by itself when the allowance refills. Nothing is refunded or failed because of it (`REQ-RN-4`, `REQ-KY-3`) |
 
 ---

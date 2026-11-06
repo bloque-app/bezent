@@ -55,6 +55,7 @@ kind exists on `develop` at this commit.
 | `reserve-check-incomplete` | reserve check | `pages/reserve.md` | yes | yes (ObserverLagPages) |
 | `reserve-check-failed` | reserve check | `pages/reserve.md` | yes | yes (ObserverLagPages) |
 | `key-compromise` | reserve check (supply mismatch); the core's signals step (every other alert) | `pages/key-compromise.md` | yes | yes (KeyCompromisePages), but before `F-014` only the supply-mismatch case ever logged it |
+| `lane-use-unknown` | EVM endpoint (the lane detectors, amendment 0022 P2); a log line only, once an hour per lane and read | `pages/key-compromise.md` | yes | **no** |
 | `statement-overdue` | statements | `pages/statements.md` | yes | yes (StatementPages) |
 | `statement-stuck` | statements | `pages/statements.md` | yes | yes (StatementPages) |
 | `statement-abandoned` | statements | `pages/statements.md` | yes | yes (StatementPages) |
@@ -139,7 +140,8 @@ Stated as needs; this repository changes none of it.
    actions on.
 2. Add filters for `"kind=statement-publish-failed"`, `"kind=payout-refusal-alert"`,
    `"kind=resolution-blocked-by-inclusion"`, `"kind=resolution-unprepared-alert"`, `"kind=late-mint-"` (a prefix pattern; the late-mint pages of PR #72 are on
-   `develop`) and, when its pull request merges, `"kind=attested-"` (also a prefix).
+   `develop`), `"kind=lane-use-unknown"` (on the EVM endpoint's log group) and, when its pull request merges,
+   `"kind=attested-"` (also a prefix).
 3. Alarm on the metrics above, with missing data treated as breaching.
 4. Give the alarm topic a destination that reaches a person: an on-call service with acknowledgement and escalation, or at
    least a phone-reaching subscription, chosen by the owner. A chat post is not a page.

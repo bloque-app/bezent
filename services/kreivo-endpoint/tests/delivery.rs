@@ -407,8 +407,8 @@ async fn ac_i1_2_the_core_down_at_detection_the_pause_holds_when_it_returns(
 /// key's transaction bezent already signed is not unsigned by a pause; only the on-chain pause
 /// refuses it.
 ///
-/// A signing intent recorded before the pause and not yet signed is signed here too: `SPEC.md`
-/// does not say whether that is new work (amendment 0022, proposed). Change this test with it.
+/// A signing intent recorded before the pause and not yet signed is new work, held by the pause
+/// (amendment 0022, A1b): the next test.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn ac_i2_1_an_attempt_signed_before_the_pause_is_in_flight_and_moves_on(
     pool: PgPoolOptions,
@@ -430,18 +430,73 @@ async fn ac_i2_1_an_attempt_signed_before_the_pause_is_in_flight_and_moves_on(
     let (signing, _) = intent_with(&f, id, "prepared")
         .await
         .expect("the signing intent");
-
-    assert_eq!(detect(&f, 3).await, Seen::Compromise);
-    assert_eq!(f.count(COMPROMISE_PAUSES).await, 1, "no pause applied");
-
     assert!(matches!(
         s.sign_and_submit(signing).await.unwrap(),
         Submitted::Submitted { .. }
     ));
     assert_eq!(f.signatures().await, 1);
+
+    assert_eq!(detect(&f, 3).await, Seen::Compromise);
+    assert_eq!(f.count(COMPROMISE_PAUSES).await, 1, "no pause applied");
     cycle(&core, now).await;
     assert_eq!(state(&f, id).await, ("Delivering".into(), None));
     assert_eq!(f.count(COMPROMISE_PAUSES).await, 1, "the pause stands");
+}
+
+/// `AC-I2.1`, `INV-15`, `REQ-GV-1`, `NFR-8` (amendment 0022, A1b, ruled `d-pause-0022`, 2026-11-06),
+/// end to end on each process's own role: the core records a signing intent, and a moment later a
+/// detection pauses the bridge before the endpoint asks for the signature. The intent is new work:
+/// the signer refuses it, the endpoint keeps it and signs nothing, the core holds the transfer in
+/// `Source-Final` as `CND-Paused`, on every later cycle. Once the pause is lifted (by the owner
+/// here: the two-login path is `CTR-OPS`), the same intent is signed and submitted, within its era.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_a1b_an_intent_recorded_a_moment_before_the_pause_is_not_signed_until_it_is_lifted(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect.clone()).await;
+    let core = core(&f, &connect).await;
+    let now: DateTime<Utc> = "2026-10-13T01:00:00Z".parse().unwrap();
+    let id = deposit(&f).await;
+    let s = f.submitter();
+    cycle(&core, now).await;
+    cycle(&core, now).await;
+    let (order, _) = intent_with(&f, id, "order").await.expect("the order");
+    assert!(matches!(
+        s.prepare(order).await.unwrap(),
+        Prepared::Ready { .. }
+    ));
+    cycle(&core, now).await;
+    let (signing, _) = intent_with(&f, id, "prepared")
+        .await
+        .expect("the signing intent, recorded before the pause");
+
+    assert_eq!(detect(&f, 3).await, Seen::Compromise);
+    assert_eq!(f.count(COMPROMISE_PAUSES).await, 1, "no pause applied");
+    for _ in 0..3 {
+        let Submitted::NotSigned(why) = s.sign_and_submit(signing).await.unwrap() else {
+            panic!("an intent recorded before the pause was signed under it");
+        };
+        assert!(why.contains("REQ-GV-1"), "{why}");
+        cycle(&core, now).await;
+    }
+    assert_eq!(f.signatures().await, 0);
+    assert_eq!(f.count("SELECT count(*) FROM signed_transactions").await, 0);
+    assert_eq!(
+        state(&f, id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+
+    exec(&f.admin, "DELETE FROM pauses").await;
+    assert!(matches!(
+        s.sign_and_submit(signing).await.unwrap(),
+        Submitted::Submitted { .. }
+    ));
+    assert_eq!(f.signatures().await, 1);
+    for _ in 0..2 {
+        cycle(&core, now).await;
+    }
+    assert_eq!(state(&f, id).await, ("Delivering".into(), None));
 }
 
 /// `INV-15`, `REQ-GV-1`, issue #77 review: an attempt whose signature is recorded passes the pause

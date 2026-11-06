@@ -902,6 +902,199 @@ async fn req_rv_1_issue_35_a_flapping_refusal_does_not_restart_the_deadline_each
     assert_eq!(refunds(&w).await, 0, "REQ-RF-1: no refund on unknown");
 }
 
+/// CND-PayoutWindow, issue #35 point 4 (built by pull request #70; amendment 0019 asks the owner
+/// to rule it): of an attempt that takes and leaves the hold more than once, the time *between*
+/// two holds counts toward its deadline, the time *before* the first hold does not (the clock
+/// restarts where the first hold was taken), and the time held is left out. Each of the three is
+/// what decides here: had the time before the first hold counted, the transfer would be in review
+/// ~1 000 s earlier; had the gap between the holds been left out, ~1 000 s later.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn cnd_payout_window_issue_35_time_between_holds_counts_and_time_before_the_first_does_not(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [62; 32], 700).await; // the clock starts at 22
+    w.cycle(t0()).await;
+    head(&w.admin, ORIGIN, 1_000).await;
+    spend(&w, id).await; // held at 1 000: the 978 s before it are dropped
+    head(&w.admin, ORIGIN, 1_500).await;
+    refuse(&w, id, &disagreed()).await; // left at 1 500: held 500 s
+    head(&w.admin, ORIGIN, 2_500).await;
+    spend(&w, id).await; // held again at 2 500: the 1 000 s between the holds count
+    head(&w.admin, ORIGIN, 3_000).await;
+    refuse(&w, id, &disagreed()).await; // left at 3 000: held 500 s
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+
+    let deadline = 1_000 + BUDGET + 500 + 500;
+    head(&w.admin, ORIGIN, deadline - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    head(&w.admin, ORIGIN, deadline + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(refunds(&w).await, 0, "REQ-RF-1: no refund on unknown");
+}
+
+/// REQ-GV-1, REQ-RV-1, REQ-NX-4, AC-B1.4 (amendment 0019, A1d, ruled `d-payout-late-signing`,
+/// 2026-11-06: time under a pause is not counted in the deadline). A payout held by a pause in
+/// `Source-Final` far past its nominal deadline (22 + BUDGET) is released, signed and `Delivering`:
+/// on the cycles after the release it is neither reviewed nor cancelled, and its deadline is the
+/// nominal one moved by the time paused, measured on the destination's final heads at which the
+/// pause was taken and left. Past that, unknown, it goes to review with its cancel as any other.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_gv_1_a1d_a_payout_held_by_a_pause_past_its_deadline_is_not_reviewed_and_its_deadline_moves(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    head(&w.admin, ORIGIN, 30).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    let id = withdrawal(&w, 20, [71; 32], 700).await; // the clock starts at 22
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    assert!(
+        order(&w.admin, id, 1).await.is_none(),
+        "new work under the pause"
+    );
+    assert_eq!(
+        transitions(
+            &w,
+            id,
+            &format!("condition = 'CND-Paused' AND network = '{ORIGIN}' AND block_number = 30")
+        )
+        .await,
+        1,
+        "the pause is taken resting on the destination's final head"
+    );
+
+    // Lifted far past the nominal deadline; the payout goes out.
+    let lifted = 30 + 3 * BUDGET;
+    head(&w.admin, ORIGIN, lifted).await;
+    exec(&w.admin, "DELETE FROM pauses").await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    deliver(&w, id, 1, t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+
+    // The next cycles do not send it to review, nor order its cancel.
+    w.settle(t0()).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    assert_eq!(transitions(&w, id, "to_state = 'Needs-Review'").await, 0);
+    assert_eq!(
+        cancels(&w).await,
+        0,
+        "no cancel of a payout that waited out a pause"
+    );
+
+    // Its deadline moved by the time paused, exactly.
+    let deadline = 22 + BUDGET + (lifted - 30);
+    head(&w.admin, ORIGIN, deadline - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    head(&w.admin, ORIGIN, deadline + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert!(
+        cancel_order(&w.admin, signed_of(&w.admin, id, 1).await)
+            .await
+            .is_some(),
+        "REQ-NX-4: past the moved deadline, the cancel is ordered"
+    );
+    assert_eq!(refunds(&w).await, 0, "REQ-RF-1: no refund on unknown");
+}
+
+/// REQ-GV-1, REQ-RF-5, REQ-EO-6, REQ-RV-1 (amendments 0019 A1d and 0022 A1b): the new attempt of a
+/// payout proven not executed is new work. A pause in force at the proof holds it in `Delivering`
+/// as `CND-Paused`, and no order of attempt 2 is recorded; it is never refunded because of the
+/// pause. Once the pause is lifted attempt 2 is ordered and signed, and its deadline, counted from
+/// the proof it rests on, moves by the time paused.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_gv_1_a1d_a_pause_holds_the_new_attempt_and_its_deadline_moves_by_the_paused_time(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, _) = payout_in_flight(&w, 73).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    prove(&w.admin, id, 1, ORIGIN, 100).await; // before the deadline: a new attempt, not a refund
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Delivering".into(), Some("CND-Paused".into()))
+    );
+    assert_eq!(
+        later_attempts(&w, id).await,
+        0,
+        "attempt 2 ordered under the pause"
+    );
+
+    let lifted = 100 + 2 * BUDGET;
+    head(&w.admin, ORIGIN, lifted).await;
+    w.settle(t0()).await;
+    assert_eq!(later_attempts(&w, id).await, 0, "still paused");
+    assert_eq!(
+        refunds(&w).await,
+        0,
+        "REQ-GV-1: never refunded because of the pause"
+    );
+    exec(&w.admin, "DELETE FROM pauses").await;
+    w.cycle(t0()).await;
+    deliver(&w, id, 2, t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    assert_eq!(store_attempt(&w, id).await, 2);
+
+    let deadline = 100 + BUDGET + (lifted - 100);
+    w.settle(t0()).await;
+    head(&w.admin, ORIGIN, deadline - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    head(&w.admin, ORIGIN, deadline + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(refunds(&w).await, 0);
+}
+
+/// The transfer's current attempt, as the store numbers it.
+async fn store_attempt(w: &World, id: i64) -> i32 {
+    scalar(
+        &w.admin,
+        &format!("SELECT COALESCE(max(attempt), 0) FROM transitions WHERE transfer_id = {id}"),
+    )
+    .await
+}
+
+/// REQ-GV-1, REQ-NX-4 (amendment 0022, A1b): a pause holds new work only. The cancel the core
+/// orders for a payout unknown past its deadline is not new work (it moves nothing and is no
+/// attempt), so the signer signs it under a global pause.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_nx_4_a1b_a_cancel_is_signed_under_a_pause(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, signed) = payout_in_flight(&w, 72).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    head(&w.admin, ORIGIN, PAST).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    let (order, _) = cancel_order(&w.admin, signed)
+        .await
+        .expect("a cancel order under the pause");
+    prepare_cancel(&w.admin, order, None).await;
+    w.settle(t0()).await;
+    let (intent, _) = cancel_signing_intent(&w.admin, signed)
+        .await
+        .expect("the cancel's signing intent");
+    sign(&w, intent).await;
+}
+
 /// REQ-RV-1, issue #35 point 1: a refusal that keeps coming back and names nothing pages a human
 /// once, well before its deadline, and then goes to review at the deadline as any unknown leg.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]

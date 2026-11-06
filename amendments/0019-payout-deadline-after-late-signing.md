@@ -5,13 +5,14 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0019 — when the deadline of a payout that is signed late starts
 
-**Status:** proposed by the issue #35 helper, 2026-11-04. **Not ruled and not applied to `SPEC.md`.** Nothing in the
-issue #35 pull request depends on it: none of the options below is built. Point 4 of the gap
-is built and is put to the owner.
+**Status:** proposed by the issue #35 helper, 2026-11-04. **Ruled by @pandres95 on the decision form, 2026-11-06
+(`d-payout-late-signing`): "Leave pause time out", option A1d.** A1a, A1b and A1c are not taken. Applied to `SPEC.md`
+v0.5.7 (§5.4, `REQ-GV-1`, `REQ-LM-1`, §10 `CND-Paused` and `CND-CutOff`); built in the core (`deadline_held`). Point 4 of
+the gap (what pull request #70 built for `CND-PayoutWindow`) is confirmed as built and pinned by a test, below; it is not
+written into `SPEC.md`, because the ruling does not rule it.
 **Target:** `SPEC.md` v0.5.4 (§5.4 `Delivering`, `Delivered` -> `Needs-Review`; `REQ-RV-1`, `REQ-NX-4`, `NFR-2`; §10)
-**Date:** 2026-11-04
-**Needs:** a decision item on bezent's form (none exists yet). Numbered 0019 because 0018 is proposed in pull request #69;
-renumber if that changes.
+**Date:** 2026-11-04; ruled 2026-11-06, applied to `SPEC.md` v0.5.7 the same day
+**Needs:** nothing further for A1d. Point 4 and the point for the owner at the end stay open.
 **Rationale in one line:** a payout that was held back (a pause, a cut-off, a gate, slow signing) and is signed after the
 route's deadline is reviewed, and (on an origin network) its cancel is ordered, on the next cycle, although it was signed a moment ago and can
 still be included; the specification does not say whether that is intended.
@@ -46,19 +47,19 @@ still be included; the specification does not say whether that is intended.
 
 ## Options
 
-- **A1a. Count from when the attempt became signable.** The clock of an attempt starts at the later of its own point and the
+- **A1a. Count from when the attempt became signable.** *Not taken.* The clock of an attempt starts at the later of its own point and the
   moment its preparation first passed (the dry run passed, so a signing intent can be recorded). Time spent waiting for a
   gate or for a pause to lift no longer counts, for every condition, not only `CND-PayoutWindow`. Trade-off: `NFR-2`'s
   completion budget no longer measures the route end to end, and a pause can hold a transfer for as long as it lasts with no
   review at all; `REQ-EO-3` then needs the held condition's owner and a page of its own.
-- **A1b. A grace period after signing.** The clock stays as it is; a payout whose signature was recorded after the deadline
+- **A1b. A grace period after signing.** *Not taken.* The clock stays as it is; a payout whose signature was recorded after the deadline
   is neither reviewed nor cancelled until a further declared period (per route) has passed from the signature. Trade-off: one
   more declaration per route, and a deadline that is longer by the grace for every late signature.
-- **A1c. Leave it.** The current behaviour is the specification: a late payout is reviewed and cancelled, the race is
+- **A1c. Leave it.** *Not taken.* The current behaviour is the specification: a late payout is reviewed and cancelled, the race is
   decided on chain, and an included payout resolves the review as `Delivered`. Trade-off: reviews for payouts that were
   merely late.
 
-- **A1d. A1a restricted to a pause or a cut-off.** The helper's recommendation. Count from when the attempt became
+- **A1d. A1a restricted to a pause or a cut-off.** *Ruled.* The helper's recommendation. Count from when the attempt became
   signable, but only for time spent under a pause (`CND-Paused`) or a cut-off (`CND-CutOff`) that was taken and left;
   the time under a gate, under `CND-PayoutWindow` (already left out, as above) or in a refused preparation counts as it
   does now. Trade-off: two kinds of waiting are measured differently from the rest, and the core must record when a
@@ -68,10 +69,68 @@ The helper recommends **A1d (A1a restricted to the time between a pause or a cut
 `REQ-GV-1` already forbids failing or refunding a transfer *because of* the pause and a review is closer to that than it
 looks; but this is a ruling about what the completion budget means, so it is not the helper's to make.
 
-## What waits
+## Ruling
 
-None of A1a to A1d is built (the sum of point 4 is). If A1a, A1b or A1d is ruled, the change is in `services/core/src/engine.rs` (`delivering_deadline`,
-`unprepared_deadline`) and needs a feature note and tests (`AC-B1.4` and `REQ-NX-4` at the service layer, §9).
+`d-payout-late-signing`, @pandres95 on the decision form, 2026-11-06: **"Leave pause time out"**, A1d. Time a transfer spends
+under a pause (`CND-Paused`) or a cut-off (`CND-CutOff`), from when it takes the condition to when it leaves it, is not
+counted toward its delivery attempt's deadline. Time under a gate, in a refused preparation, or under any other condition
+counts as before; `CND-PayoutWindow` is left out as before (point 4).
+
+## Applied text (`SPEC.md` v0.5.7)
+
+- **§5.4**, after the transition table, a paragraph that subtracts from whatever the deadline of a delivery attempt counts
+  (the `Delivering`, `Delivered` -> `Needs-Review` edge's "unknown past its deadline", and `REQ-EO-3`'s refused
+  preparation): the time held under `CND-Paused` or `CND-CutOff`, taken and left, does not count, so a delivery that waited
+  out a pause or a cut-off is neither reviewed nor forced out for that time and its deadline moves by it. It does not
+  define the rest of the clock, so it leaves point 4 (`CND-PayoutWindow`) as built and unruled.
+- **`REQ-GV-1`**, appended: "The time a transfer waits under a pause does not count toward its deadline (§5.4)."
+- **`REQ-LM-1`**, the cut-off sentence: "…holds `CND-CutOff` until the route reopens, then resumes by itself; the time held
+  does not count toward its deadline (§5.4)."
+- **§10** `CND-Paused` and `CND-CutOff`: the time held does not count toward the transfer's deadline (§5.4).
+
+`NFR-2` and `NFR-3` are unchanged: latency is still measured end to end, from chain milestones, and a transfer held by a
+pause still counts its whole time there. The deadline, not the completion budget's measurement, is what A1d changes.
+
+The text says "delivery attempt", not "payout": the core's clock is one for a mint and a payout (`deadline_held`), and
+A1d's reason (`REQ-GV-1` forbids failing a transfer because of the pause) holds for both. A mint on the issuing network
+gets the same treatment.
+
+## Built
+
+- **The core** (`services/core/src/engine.rs`, `deadline_held` and `hold`; `services/core/src/store.rs`,
+  `held_under_pause_or_cutoff`). Taking and leaving `CND-Paused` or `CND-CutOff` now rests on the destination network's
+  latest final head, as `CND-PayoutWindow` already did, so each hold is measured on the clock the deadline is read on. The
+  deadline of an attempt is the one #70 built plus the sum of its closed pause and cut-off holds, chosen as the window's
+  holds are: recorded after the attempt's entry transition, by `id`. A hold recorded before the first `CND-PayoutWindow`
+  hold is already inside the time the window rule drops, so it is not left out twice. A hold still open counts nothing
+  here, and needs nothing: a transfer held by a pause or a cut-off is held by the gate, which no deadline reaches.
+  No migration.
+- **Does a pause hold the new attempt of a payout proven not executed? Yes**, as built before this ruling. After the proof
+  (`after_proof`), a new attempt is new work for its route: `gate(attempt + 1)` holds it, as `CND-Paused` in `Delivering` or
+  `Delivered`, and no order of the new attempt is recorded while the pause covers the route. When the pause is lifted the
+  condition clears, resting on the final head of that moment, and the new attempt is ordered. Its clock starts at the proof
+  it rests on; with A1d, the time it then waited under the pause is left out (the hold is recorded after the previous
+  attempt's entry transition and before the new attempt's, and the new attempt's deadline counts the holds after the
+  previous attempt's entry, the same `after` as the window's). A signing intent of the new attempt recorded before the
+  pause is held by the signer too (amendment 0022, A1b).
+- **Point 4, confirmed.** What #70 built is what the code does: of the time since the attempt's clock started, the time
+  **between** two `CND-PayoutWindow` holds counts, the time **before** the first hold does not (the clock restarts where the
+  first hold was taken), and the sum of every closed hold is left out (`store::held_under_window`). Pinned by
+  `services/core/tests/cancel.rs::cnd_payout_window_issue_35_time_between_holds_counts_and_time_before_the_first_does_not`,
+  where each of the three decides the moment of review, and by the earlier
+  `req_rv_1_issue_35_a_flapping_refusal_does_not_restart_the_deadline_each_time`.
+- Tests: `services/core/tests/cancel.rs::req_gv_1_a1d_a_payout_held_by_a_pause_past_its_deadline_is_not_reviewed_and_its_deadline_moves`
+  (`REQ-GV-1`, `REQ-RV-1`, `REQ-NX-4`, `AC-B1.4`, at the service layer): a payout paused far past its nominal deadline is
+  signed after the pause and not reviewed or cancelled on the next cycles; it goes to review, with its cancel, exactly at
+  the nominal deadline moved by the time paused.
+
+## Open after the ruling
+
+- **Point 4** is confirmed as built, not ruled: it changes when the owner rules it.
+- **The refund-or-retry choice after a proof** (`after_proof`) still compares the proof with the plain deadline from the
+  source leg's finality, with no hold left out, window or pause. A withdrawal paused past its deadline whose payout is then
+  proven not executed is refunded, not retried. A1d names the review deadline (`delivering_deadline`,
+  `unprepared_deadline`), not this one, so it is left as built.
 
 ## A point for the owner: a final inclusion that is not what was ordered
 
@@ -94,4 +153,5 @@ which says it is not a ruling. Until it is ruled an operator escalates to the ow
 
 | Action | Identifiers |
 |---|---|
-| Revised (if ruled) | §5.4 transition `Delivering`, `Delivered` -> `Needs-Review`; `NFR-2` or `REQ-GV-1`, by option |
+| Revised (A1d, v0.5.7) | §5.4 (the deadline of a delivery attempt, read by `Delivering`, `Delivered` -> `Needs-Review` and `REQ-EO-3`); `REQ-GV-1`; `REQ-LM-1`; §10 `CND-Paused`, `CND-CutOff` |
+| Unchanged | `NFR-2`, `NFR-3` |

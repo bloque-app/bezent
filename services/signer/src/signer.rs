@@ -32,7 +32,11 @@
 //!    signed again only once that transaction is proven not executed (`REQ-EO-4`);
 //! 7. refuses an amount that takes the key past its cap for the window: what the decoded bytes
 //!    move, summed per key, network and asset (`DEC-3`, `REQ-KY-3`, issue #23);
-//! 8. signs the intent's exact bytes and records the signature, with the nonce and asset it
+//! 8. refuses a mint or payout of a deposit or withdrawal whose route a pause covers and whose
+//!    attempt has no recorded signature: it is new work, whenever its intent was recorded
+//!    (`REQ-GV-1`, `INV-15`; amendment 0022, A1b). A replay, a refund mint, a cancel and a
+//!    statement are not held;
+//! 9. signs the intent's exact bytes and records the signature, with the nonce and asset it
 //!    decoded, append-only, before answering.
 //!
 //! An intent of purpose `statement` takes its own path (PLAN `DEC-16`, 2026-10-14; issue #42): it
@@ -193,6 +197,10 @@ pub enum Refusal {
         /// The nonce.
         nonce: u64,
     },
+    /// A pause covers the intent's route and its attempt has no recorded signature: it is new
+    /// work, held until the pause is lifted (`REQ-GV-1`, `INV-15`; amendment 0022, A1b). The
+    /// endpoint keeps the intent and asks again.
+    Paused,
 }
 
 impl Refusal {
@@ -217,6 +225,7 @@ impl Refusal {
             Self::NotTheOrder { .. } => "REQ-AR-3",
             Self::NotADelivery { .. } => "INV-9",
             Self::NonceInUse { .. } => "REQ-EO-4",
+            Self::Paused => "REQ-GV-1",
         }
     }
 }
@@ -315,6 +324,11 @@ impl fmt::Display for Refusal {
                 f,
                 "{spec}: the key signed at nonce {nonce} already, and that transaction is not \
                  proven not executed"
+            ),
+            Self::Paused => write!(
+                f,
+                "{spec} (INV-15, amendment 0022 A1b): a pause covers the route and the attempt has \
+                 no recorded signature, so it is new work; it is signed once the pause is lifted"
             ),
         }
     }
@@ -434,8 +448,9 @@ pub const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(150);
 /// nothing else, and can act as nothing else (`REQ-AR-3`; review S3; #46): the store's shared check
 /// ([`bezent_store::login::check_login`]), which every service runs. What the role may do is its
 /// rows of the grant matrix ([`bezent_store::grants::MATRIX`]): SELECT on intents and prepared
-/// transactions, SELECT and INSERT on signatures, and the two functions that tell it whether an
-/// attempt's gate is open and whether a statement's place is refused.
+/// transactions, SELECT and INSERT on signatures, and the three functions that tell it whether an
+/// attempt's gate is open, whether a pause holds an intent and whether a statement's place is
+/// refused.
 pub async fn check_login(pool: &PgPool) -> Result<(), String> {
     bezent_store::login::check_login(pool, bezent_store::SIGNER_ROLE).await
 }
@@ -850,6 +865,21 @@ impl<B: SigningEngine> Signer<B> {
                 signed,
                 amount: checked.amount,
             }));
+        }
+
+        // Amendment 0022, A1b (REQ-GV-1, INV-15, NFR-8): an attempt is in flight from its first
+        // recorded signature, and everything before it is new work. A mint or payout of a deposit
+        // or withdrawal whose route a pause covers, and whose attempt has no signature, is held
+        // here, whenever its intent was recorded. Asked last, after every guard that raises, so a
+        // pause never hides bytes that do not answer the order; inside this transaction and its
+        // lock, so a pause committed before this read holds this signature. A replay (above), a
+        // refund mint, a cancel and a statement are not held.
+        let held: bool = sqlx::query_scalar("SELECT pause_holds_intent($1)")
+            .bind(intent_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if held {
+            return Ok(Err(Refusal::Paused));
         }
 
         let scheme = self.backend.scheme(&binding.key)?;

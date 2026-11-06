@@ -91,8 +91,8 @@ is left.
 ## The compromise pause (issue #77)
 
 Before this, `raise` appended `pause-requested` and nothing read it. `REQ-IC-2`, `REQ-IC-4`, `AC-I1.2` and `REQ-BK-1` say
-bezent MUST pause. Recovery is in `deploy/compromise-pause.md`; what the specification leaves open is in amendment 0022
-(proposed, not built).
+bezent MUST pause. Recovery is in `deploy/compromise-pause.md`; what the specification left open is amendment 0022, ruled
+by @pandres95 on 2026-11-06 (`d-pause-0022`, "As recommended": A1b, A2a, P1 kept, P2 built; A3 and A4 not on the item).
 
 ### 1. What stops, and what cannot be stopped
 
@@ -102,9 +102,10 @@ bezent MUST pause. Recovery is in `deploy/compromise-pause.md`; what the specifi
 | Core | `gate` reads `pauses` on every step: before each phase of a first attempt (the transfer stays `Source-Final` until a signature is ready), a new attempt, a resolution. It records no further order or signing intent. So the signer has nothing new to sign (`INV-9`) |
 | Core, an attempt already signed | Passes, under any pause, a person's or the reserve check's too: it is in flight (`REQ-GV-1`, `INV-15`). Before #77 the gate held it `Source-Final` with `CND-Paused` while its transaction was on chain; the auto-pause would have made that common. A later preparation of the same order that fails its dry run (the signed transaction was never persisted and its era passed) records no new order while a pause covers the route (`deliver`; test `inv_15_a_signed_attempt_whose_new_preparation_fails_orders_nothing_under_a_pause`) |
 | Refund mint, refund payout, cancel, statement | Keep being ordered and signed, by design (`t.route()` is `None`; F-006 NOTES 1; `REQ-NX-4`; `REQ-PR-1`). "Stops new signing" (issue #77) means new delivery signing |
-| Endpoint and signer | Read no pause. **A signing intent recorded before the pause is still signed and submitted**, at the next poll, or whenever a stopped endpoint returns. On Kreivo for at most one era (`MAX_ERA`, 64 blocks) from its preparation: past it nothing is signed (`req_hn_3_a_prepared_transaction_whose_era_passed_is_never_signed`). **On an EVM network with no bound**: nothing expires (`NO_EXPIRY`). Whether that is new work is not settled: amendment 0022, A1. `REQ-GV-1` and `INV-15` forbid stopping more than new work, so it is not built |
+| Signer | **A signing intent recorded before the pause, whose attempt has no signature, is new work and is not signed** (amendment 0022, A1b; `REQ-GV-1` v0.5.7: "New work is everything before an attempt's first recorded signature"). The signer asks the store's `pause_holds_intent` (migration 0125, `SECURITY DEFINER`; the signer reads neither `pauses` nor `transfers`) last, after every guard that raises, inside its signing transaction, and refuses with `REQ-GV-1`. Before the ruling it read no pause, and such an intent was signed at the next poll, or whenever a stopped endpoint returned: on Kreivo within one era, on an EVM network with no bound. A replay, a refund mint, a cancel and a statement are not held. Tests `conditions.rs::ac_i2_1_inv_15_a1b_an_intent_recorded_before_the_pause_is_not_signed_until_it_is_lifted` (core) and `delivery.rs::ac_i2_1_a1b_an_intent_recorded_a_moment_before_the_pause_is_not_signed_until_it_is_lifted` (Kreivo endpoint) |
+| Endpoints | Read no pause. A refusal of the signer is "not signed": the intent stays and is asked for again on the next pass, and signed once the pause is lifted |
 | Already-signed transactions | Stored bytes are submitted and resent: in flight, and unstoppable anyway once anyone holds them. On Kreivo an era ends them; on an EVM network only the nonce does |
-| On-chain component, vault | **Not touched.** Their pause is a separate act of a separate role (`REQ-HN-9`, §7.F, `AC-I2.*`), a person's today: runbook step 1; amendment 0022, A2 |
+| On-chain component, vault | **Not touched.** Their pause is a separate act of a separate role (`REQ-HN-9`, §7.F, `AC-I2.*`), a person's: runbook step 1; amendment 0022, A2a (ruled: it stays a person's act) |
 
 So: bezent stops itself. **It cannot stop a stolen key**, which signs by itself; that is the on-chain pause and, as the
 backstop, the bounds of `REQ-KY-3`. Likewise a compromised signer process ignores anything asked of it. What a pause adds
@@ -138,8 +139,7 @@ endpoint, the signer) can write an alert with a `dedupe` of its own choosing (a 
 the store beyond uniqueness within the detector), and every new `dedupe` is a new alert, so a new global pause, until two
 operators lift it. A compromised or buggy detector can therefore hold the bridge down, repeatedly, and an alert stays in the
 log for ever. It is an outage, not a loss (it stops new work only, `INV-15`), and the same login could already page a person
-by the same act; but it is a new authority, and it is the owner's to accept or narrow: amendment 0022, "Points for the
-owner". It still cannot name a scope (`detector` is the store's stamp, so only the core has the `asset` exception), lift a
+by the same act; but it is a new authority. The owner accepted it for now (amendment 0022, P1, ruled 2026-11-06). It still cannot name a scope (`detector` is the store's stamp, so only the core has the `asset` exception), lift a
 pause or edit one. The ingress, the webhook dispatcher and the operators' logins cannot write an alert (0020, 0046, 0049).
 `REQ-AR-3` and the key rules are untouched: no key near the store, nothing new in the signer process.
 
@@ -151,10 +151,10 @@ pause or edit one. The ingress, the webhook dispatcher and the operators' logins
   (`INV-9`), and the detector raises again at its next look.
 - **Pause to no new signing intent: the next `pauses` read of the next step**, at `READ COMMITTED`; the core loop is
   sequential, so at most one step already past its gate at the commit records one more intent. Inside `NFR-8`.
-- **Not bounded by this:** the signing intents of 1 above: one era on Kreivo, unbounded on an EVM network. So issue #77's
-  "stops new signing within a stated bound" holds in full for what the pause stops, for intents recorded after it, and for
-  Kreivo's recorded intents within an era; it holds on an EVM network only for intents recorded after the pause, until A1 is
-  ruled.
+- **Pause to no new signature: the signer's next read of `pauses`** (amendment 0022, A1b), in its signing transaction, at
+  `READ COMMITTED`, under its advisory lock: a signature that read the store before the pause committed is the last one,
+  on every network. Inside `NFR-8`. Until the ruling a signing intent recorded before the pause was signed, one era on
+  Kreivo, unbounded on an EVM network; that is closed.
 - **Detection itself lags the event**, separately from all of this: for what the endpoints see on chain, finality, plus
   observer lag (`NFR-6`), plus the prover's cadence; a lane's idle use is seen only at the next preparation. The core's
   late-mint check runs in its cycle (`Core::cycle`), so a slow `check.tick`, which has no timeout, delays that detection and
@@ -175,8 +175,8 @@ two-login lift (`AC-I2.2`): no new path. "Flag" means I would not want to pause 
 | EVM `proof.rs` `check_signature` (2), Kreivo `proof.rs` `check_signature` (2) | A consumed nonce's signature answers no intent | A store restored to before the signature (`NFR-7`) | Yes |
 | EVM `proof.rs` `raise_once`, consumers | Not exactly one lane transaction at its nonce in the consuming block | **An incomplete block read**: the nonce reads agree across providers, the block is one read | **Flag** |
 | EVM `proof.rs` `raise_once`, undecoded | The consumer is not an EIP-1559 transaction of the lane | A provider's bad decode; otherwise true | Yes |
-| EVM `submit.rs` `lane_runs_code` | The lane holds code (EIP-7702) | **One provider's word**: any code on either counts | **Flag** |
-| EVM `submit.rs` `lane_use` | The lane's nonce is past every nonce signed plus one | **One provider's word**: `latest_nonce` takes the higher of two, right for picking a nonce, wrong for an alarm. Also a restored store | **Flag: the one I most want hardened** |
+| EVM `submit.rs` `lane_runs_code` | Both providers report code at the lane (EIP-7702) | Both providers wrong together. One provider's word is unknown: it pages `lane-use-unknown` and raises nothing (amendment 0022, P2) | Yes |
+| EVM `submit.rs` `lane_use` | Both providers report the lane's nonce past every nonce signed plus one; the lower of the two is raised on | Both providers wrong together; a restored store. One provider's word is unknown, as above (P2; `Pair::latest_nonces`, each provider on its own, not the higher of two) | Yes |
 | EVM `submit.rs` signer-key | The answer is not the lane key's | A half-done rotation | Yes |
 | Kreivo `proof.rs` `raise_once` | A nonce consumed by an extrinsic of the lane's account that is not one bezent recorded and cannot decode, or by none | An extrinsic bezent recorded in an older format is recognised by its hash against every recorded signed transaction of the lane before anything is called undecodable. **A runtime upgrade does not reach this path** (below). Otherwise true | Yes |
 | Kreivo `submit.rs` `signer_mismatch` | The answer is not the lane key's | A half-done rotation | Yes |
@@ -184,8 +184,10 @@ two-login lift (`AC-I2.2`): no new path. "Flag" means I would not want to pause 
 | Core, `late_mint.rs` | A final mint of a reference after its proof, or with nothing signed | A restored store; the prover-behind case was removed in PR #72 | Yes |
 | Core, `reserve/check.rs` `supply_breach` (`INV-4`, not through `raise`) | The contract's count and the issuance differ | Unchanged: it pauses the asset under 0040, the trigger leaves it alone | Yes, the asset |
 
-Hardening the flagged EVM ones (ask both providers before alarming, read the block from both) changes when they fire,
-not the spec; it is not in this change (amendment 0022, "Points for the owner"). The Kreivo one is done (review of this
+Hardening the flagged EVM ones changes when they fire, not the spec. The lane detectors ask both providers before
+alarming since the owner ruled amendment 0022's P2 (2026-11-06; test
+`submit.rs::ac_i1_2_p2_one_provider_reporting_the_lane_used_outside_bezent_pauses_nothing_and_both_do`); the consumer raiser
+(read the block from both) was not on the item and is unchanged. The Kreivo one is done (review of this
 change): an extrinsic of the lane's account that `decode_extrinsic` rejects is matched, by `blake2_256`, against every
 signed transaction recorded for that lane, not only the one watched, before it is called undecodable. A match is bezent's
 own: nothing is proven (`REQ-NX-3`), and nothing is raised. An unrecorded one still pauses.

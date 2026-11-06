@@ -139,7 +139,11 @@ Fixed in the PR: M1, S1, S2, S4, S5, S6 (each has a test named after its id). No
   an EVM key only to a network that declares a `chain_id`, a Kreivo key only to one that does not.
 - **SF1**: before each preparation and signature the endpoint raises the compromise path when the lane's nonce is past
   every nonce bezent signed plus one, or the lane holds code. A lane bezent never signed for raises nothing on its
-  nonce (as the Kreivo endpoint's S4).
+  nonce (as the Kreivo endpoint's S4). Since amendment 0022's P2 (ruled 2026-11-06) only on **both** providers' word:
+  each provider's latest nonce and code are read on their own (`Pair::latest_nonces`, `Pair::codes`), and one provider's
+  report, or a read that fails, is unknown: it pages `lane-use-unknown` (a log line, once an hour per lane and read),
+  raises and pauses nothing, and nothing is prepared or signed from the lane until they agree. Preparation still takes
+  the higher of the two nonces, and the start-up check still refuses a lane with code on either.
 - **SF2**: the signer signs a cancel only on its network's `chain_id`, with gas 21000 and fees within the network's
   `cancel_max_fee_per_gas`.
 - **0034 (PR #44)**: the endpoint writes `observations.kind` (`observe::kind`; `transaction` for its signed

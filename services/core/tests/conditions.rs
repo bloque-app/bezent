@@ -10,6 +10,7 @@
 
 mod common;
 
+use bezent_signer::{Outcome, Refusal};
 use chrono::Duration;
 use common::*;
 use serde_json::json;
@@ -48,6 +49,57 @@ async fn cnd_paused_new_work_waits_and_resumes_when_the_route_reopens(
     w.settle(t0()).await;
     assert_eq!(w.state(id).await, ("Source-Final".into(), None));
     assert!(order(&w.admin, id, 1).await.is_some());
+}
+
+/// `AC-I2.1`, `INV-15`, `REQ-GV-1` (amendment 0022, A1b, ruled `d-pause-0022`, 2026-11-06): an attempt
+/// is in flight from its first recorded signature, and everything before it is new work. A signing
+/// intent the core recorded a moment before a pause, with no signature yet, is held by the pause:
+/// the signer refuses it (custody, `INV-9`'s layer), nothing is signed, the core holds the transfer
+/// in `Source-Final` as `CND-Paused` and records nothing new. Once the pause is lifted the same
+/// intent is signed and the transfer moves to `Delivering`.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_inv_15_a1b_an_intent_recorded_before_the_pause_is_not_signed_until_it_is_lifted(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let id = source_final_deposit(&w).await;
+    w.cycle(t0()).await;
+    let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, o, None).await;
+    w.cycle(t0()).await;
+    let (s, _) = signing_intent(&w.admin, id, 1)
+        .await
+        .expect("the signing intent, recorded before the pause");
+    let intents = w.count("SELECT count(*) FROM intents").await;
+
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    let refused = w.signer.sign(s).await;
+    assert!(
+        matches!(refused, Outcome::Refused(Refusal::Paused)),
+        "signed new work under a pause: {refused:?}"
+    );
+    assert_eq!(w.count("SELECT count(*) FROM signatures").await, 0);
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    assert_eq!(
+        w.count("SELECT count(*) FROM intents").await,
+        intents,
+        "the core recorded new work under the pause"
+    );
+    // Asked again under the pause, by an endpoint that keeps the intent: still held.
+    assert!(matches!(
+        w.signer.sign(s).await,
+        Outcome::Refused(Refusal::Paused)
+    ));
+
+    exec(&w.admin, "DELETE FROM pauses").await;
+    sign(&w, s).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
 }
 
 /// `AC-I2.1`, `REQ-GV-1`: a global pause stops new work only; a transfer in flight is still observed and completed.

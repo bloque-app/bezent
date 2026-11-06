@@ -275,7 +275,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
     // The signer (migration 0012): it reads the intent, the core's order and the prepared bytes,
     // and records the signature. Since 0049 (audit must-fix 2) it also reads which token an
     // order's asset is paid in, and which signing intent a signed transaction is of (a cancel's
-    // target), to compare the bytes it decodes with the core's order. Nothing else (REQ-AR-3).
+    // target), to compare the bytes it decodes with the core's order. Since 0125 (amendment 0022,
+    // A1b) it asks whether a pause holds the intent, through a definer function, and reads
+    // neither `pauses` nor `transfers`. Nothing else (REQ-AR-3).
     (
         crate::SIGNER_ROLE,
         "SELECT",
@@ -298,6 +300,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         &[
             "attempt_gate_open(text,text,text,bytea,integer)",
             "bezent_applied_migrations()",
+            "pause_holds_intent(bigint)",
             "statement_place_refusal(text,bigint,bytea,jsonb)",
         ],
     ),

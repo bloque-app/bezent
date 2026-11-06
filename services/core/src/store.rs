@@ -275,6 +275,54 @@ pub async fn held_under_window(
     })
 }
 
+/// How long `transfer` was held under a pause (`CND-Paused`) or a cut-off (`CND-CutOff`), taken and
+/// left, since its attempt's clock started (amendment 0019, A1d, ruled `d-payout-late-signing`,
+/// 2026-11-06: time under a pause or a cut-off does not count toward the deadline). The holds are
+/// chosen as [`held_under_window`] chooses its own: recorded after the entry transition of delivery
+/// attempt `after`, by `id`, never by comparing clocks. When the transfer also held
+/// `CND-PayoutWindow` and left it, the clock already restarts where that first hold was taken, so
+/// only the holds recorded after it count here, and no time is left out twice. Each is measured
+/// from the final head it was taken at to the one it was left at (the core records the
+/// destination's head on both, [`crate::engine`]'s `hold`); a hold still open, or one either end of
+/// which rests on no head, counts nothing, so the time counts, as before.
+pub async fn held_under_pause_or_cutoff(
+    conn: &mut PgConnection,
+    transfer: i64,
+    after: i32,
+) -> sqlx::Result<chrono::Duration> {
+    let secs: i64 = sqlx::query_scalar(
+        "WITH x AS ( \
+             SELECT id, block_time, condition, lag(condition) OVER (ORDER BY id) AS before \
+             FROM transitions WHERE transfer_id = $1), \
+         entry AS ( \
+             SELECT coalesce((SELECT max(id) FROM transitions \
+                              WHERE transfer_id = $1 AND attempt <= $2), 0) AS id), \
+         window_first AS ( \
+             SELECT min(x.id) AS id FROM x, entry \
+             WHERE x.condition = 'CND-PayoutWindow' \
+               AND x.before IS DISTINCT FROM 'CND-PayoutWindow' AND x.id > entry.id \
+               AND EXISTS (SELECT 1 FROM transitions y WHERE y.transfer_id = $1 AND y.id > x.id \
+                             AND y.condition IS DISTINCT FROM 'CND-PayoutWindow')) \
+         SELECT coalesce(sum(extract(epoch FROM r.released - x.block_time)), 0)::bigint \
+         FROM x CROSS JOIN entry CROSS JOIN window_first w \
+         CROSS JOIN LATERAL ( \
+             SELECT y.block_time AS released FROM transitions y \
+             WHERE y.transfer_id = $1 AND y.id > x.id \
+               AND y.condition IS DISTINCT FROM x.condition \
+             ORDER BY y.id LIMIT 1) r \
+         WHERE x.condition IN ('CND-Paused', 'CND-CutOff') \
+           AND x.before IS DISTINCT FROM x.condition \
+           AND x.id > greatest(entry.id, coalesce(w.id, 0)) \
+           AND x.block_time IS NOT NULL AND r.released IS NOT NULL \
+           AND r.released > x.block_time",
+    )
+    .bind(transfer)
+    .bind(after)
+    .fetch_one(conn)
+    .await?;
+    Ok(chrono::Duration::seconds(secs))
+}
+
 /// The latest final head recorded for `network`.
 pub async fn latest_head(conn: &mut PgConnection, network: &str) -> sqlx::Result<Option<Point>> {
     let row: Option<(i64, Vec<u8>, DateTime<Utc>)> = sqlx::query_as(
