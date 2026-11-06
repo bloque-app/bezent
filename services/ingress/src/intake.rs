@@ -802,7 +802,7 @@ async fn decide_deposit(
     request_body = DepositConversionRequest,
     security(("bearer" = [])),
     responses(
-        (status = 201, description = "Taken in now: the deposit's status, its source now the output and its `converted_arrival` recorded; or `Refused` with its named error (ERR-SourceNotFound: no deposit of yours by that reference naming a convertible arrival, or no conversion output at the coordinate; ERR-SourceMismatch: an output of another network, reserve or asset; ERR-SourceConsumed: the output is bound already, or the deposit no longer awaits its conversion (it is past its review, or a refund of it is recorded or started); ERR-BelowMinimum, ERR-AboveMaximum, ERR-WindowExceeded: the output's amount is outside the deposit route's minimum or maximum, or over what its window has left; ERR-ReferenceConflict: its output is named already)", body = TransferStatus),
+        (status = 201, description = "Taken in now: the deposit's status, its source now the output and its `converted_arrival` recorded; or `Refused` with its named error (ERR-SourceNotFound: no deposit of yours by that reference naming a convertible arrival, or no conversion output at the coordinate; ERR-SourceMismatch: an output of another network, reserve or asset; ERR-SourceConsumed: the output is bound already, or the deposit no longer awaits its conversion (it is past its review, or a refund of it is recorded); ERR-BelowMinimum, ERR-AboveMaximum, ERR-WindowExceeded: the output's amount is outside the deposit route's minimum or maximum, or over what its window has left; ERR-ReferenceConflict: its output is named already)", body = TransferStatus),
         (status = 200, description = "A repeat: the original's status (REQ-ID-1)", body = TransferStatus),
         (status = 202, description = "taken-in: taken in, but the status could not be read back; read it by request reference", body = ErrorBody),
         (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
@@ -844,7 +844,7 @@ struct Awaiting {
     source_recipient: Option<String>,
     /// The state it held before its review, when it is in one (migration 0140).
     review_from: Option<String>,
-    /// A refund of it is recorded or started (migration 0140).
+    /// A refund of it is recorded (migration 0140).
     refunded: bool,
 }
 
@@ -903,7 +903,7 @@ async fn decide_conversion(
     match (d.state.as_str(), d.condition.as_deref()) {
         ("Source-Final", Some("CND-AwaitingConversion")) => {}
         // In review past its deadline, sent there from Source-Final holding the condition: the
-        // output may still be named while no refund of the deposit is recorded or started
+        // output may still be named while no refund of the deposit is recorded
         // (REQ-CV-2, REQ-RV-2; amendment 0018, Open 6, `d-cv-open-choices`). The deposit stays in
         // review: it ends as every review does, by a resolution with a second approver.
         ("Needs-Review", Some("CND-AwaitingConversion"))

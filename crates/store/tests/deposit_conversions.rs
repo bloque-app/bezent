@@ -698,7 +698,7 @@ async fn req_cv_2_req_rv_2_inv_2_an_output_is_named_for_a_deposit_in_review(pool
 
 /// `REQ-CV-2`, `REQ-RF-1`, `REQ-RV-2`, amendment 0018 Open 6 (`d-cv-open-choices` (a)): an output is
 /// not named for a deposit after a refund of it is recorded (a transfer whose `refund_of` is the
-/// deposit) or started (a review resolution into `Refunding` whose evidence the core did not refuse).
+/// deposit, or a review resolution into `Refunding` whose evidence the core did not refuse).
 /// A resolution the core refused starts nothing. Nothing is recorded by a refused request.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_cv_2_req_rf_1_req_rv_2_no_output_is_named_after_a_refund(pool: PgPool) {

@@ -2982,28 +2982,53 @@ impl Core {
             // Waits for the second approver (REQ-GV-5).
             return Ok(Did::default());
         }
-        // REQ-GV-5, amendment 0018 Open 6: a resolution into Delivering that was approved before
-        // its deposit's conversion output was named was approved with no amount to mint. It does
-        // not run, whenever the core looks at it; a new one is recorded once the output is named.
+        // REQ-GV-5, amendment 0018 Open 6 (chat ruling of 2026-11-06 by @pandres95): the approval
+        // records the exact output it approved. A resolution into Delivering for a deposit whose
+        // conversion output is named runs only if its approval recorded that output (coordinate and
+        // amount); one approved before the output was named recorded none, and one approved for
+        // another output does not match. Either is refused, and a new approval is needed. The
+        // comparison is on the output's identity, never on two timestamps.
         if before == State::SourceFinal && to == State::Delivering && t.kind == "deposit" {
-            let stale: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM deposit_conversions c \
-                   JOIN manual_approvals p ON p.action_id = $2 \
-                   WHERE c.transfer_id = $1 AND p.approved_at < c.recorded_at)",
+            let judged: Option<(bool, bool)> = sqlx::query_as(
+                "SELECT p.approved_output_network IS NOT NULL, \
+                        COALESCE(ROW(p.approved_output_network, p.approved_output_block_number, \
+                                     p.approved_output_block_hash, p.approved_output_position_kind, \
+                                     p.approved_output_position_index, p.approved_output_amount) \
+                                 IS NOT DISTINCT FROM \
+                                 ROW(x.source_network, x.source_block_number, x.source_block_hash, \
+                                     x.source_position_kind, x.source_position_index, x.amount), FALSE) \
+                 FROM transfers x \
+                 JOIN deposit_conversions c ON c.transfer_id = x.id \
+                 JOIN manual_approvals p ON p.action_id = $2 \
+                 WHERE x.id = $1",
             )
             .bind(t.id)
             .bind(action)
-            .fetch_one(&mut *conn)
+            .fetch_optional(&mut *conn)
             .await?;
-            if stale {
-                return self
-                    .refuse_evidence(
-                        conn,
-                        t,
-                        action,
-                        "approved before the conversion's output was named",
-                    )
-                    .await;
+            // No row: the deposit has no conversion (an ordinary deposit in review), so there is no
+            // output to compare.
+            if let Some((recorded, same)) = judged {
+                if !recorded {
+                    return self
+                        .refuse_evidence(
+                            conn,
+                            t,
+                            action,
+                            "approved before the conversion's output was named: the approval recorded no output",
+                        )
+                        .await;
+                }
+                if !same {
+                    return self
+                        .refuse_evidence(
+                            conn,
+                            t,
+                            action,
+                            "approved for another output than the deposit's: a new approval is needed",
+                        )
+                        .await;
+                }
             }
         }
         let verified = self

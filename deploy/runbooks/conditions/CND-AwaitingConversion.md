@@ -23,7 +23,7 @@ request reference (`POST /v0/deposits/conversion`, `REQ-RQ-4`). The store moves 
 records the arrival with both amounts (`deposit_conversions`); the core clears the condition and mints at the output's
 amount. Past the route's completion budget, counted from the arrival's finality, with no output named from a block at or
 before it, the deposit goes to `Needs-Review` with the condition kept, and is never refunded on a timer (`REQ-CV-6`,
-`REQ-RF-1`). Its requester may still name the output while no refund of the deposit is recorded or started (amendment
+`REQ-RF-1`). Its requester may still name the output while no refund of the deposit is recorded (amendment
 0018, Open 6): the deposit stays in review with its source and amount at the output, and the review ends by a resolution
 (below). A convertible arrival that no deposit names is not this condition: it is an unassociated arrival
 (`CND-Unassociated.md`).
@@ -61,7 +61,9 @@ Convertible holdings are itemised per token and network in the published stateme
    for a resolution into `Source-Final`, `Delivering` or `Refunding` the second login's `manual_approvals` row. When the
    requester has named the output (a `deposit_conversions` row; the deposit's source is the output), the resolution is
    into `Delivering`: the core orders the mint once, at the output's amount. Approve it only after the output is named:
-   one approved before then is refused (`review-evidence-refused`), and must be approved again. Do not
+   the approval names the output you reviewed (network, block, hash, position and amount; all or none), and one that names
+   none, or another output than the deposit's, is refused
+   (`review-evidence-refused`) and must be approved again. Do not
    record a resolution into `Refunding` for a deposit whose conversion may still be named unless you mean to refund: once
    one is recorded and not refused, naming is refused.
 3. Convertible holdings are never written off and never counted as reserve (REQ-CV-6). Moving them is the requester's.

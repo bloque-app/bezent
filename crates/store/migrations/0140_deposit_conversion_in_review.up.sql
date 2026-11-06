@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- Issue #10 (F-010), amendment 0018 Open 6, ruled by @pandres95 on the decision form (`d-cv-open-choices`,
 -- "As recommended", 2026-11-06): a conversion output may be named for a deposit in `Needs-Review`, as
--- long as no refund of the deposit is recorded or started.
+-- long as no refund of the deposit is recorded.
 --
 -- Nothing here moves the deposit out of review. The store records the conversion and moves the
 -- deposit's source and amount to the output, as it does at Source-Final, and the deposit stays in
@@ -11,11 +11,11 @@
 -- output's amount (REQ-GV-5, REQ-CV-5). No transition is added.
 --
 --   * review_entered_from(): the state a transfer held before its last review. deposit_refund_recorded():
---     whether a refund of a transfer is recorded or started.
+--     whether a refund of a transfer is recorded.
 --   * deposit_conversion_record() (0120): also takes a deposit in `Needs-Review` that was sent there from
 --     `Source-Final` holding `CND-AwaitingConversion`, with its source still the convertible arrival,
---     and refuses one with a refund recorded (a transfer whose `refund_of` is the deposit) or started
---     (a review resolution into `Refunding` whose evidence was not refused): deposit_refund_recorded().
+--     and refuses one with a refund recorded (a transfer whose `refund_of` is the deposit, or a review
+--     resolution into `Refunding` whose evidence was not refused): deposit_refund_recorded().
 --   * transfers_guard_update() (0120): the one move of the source and the amount is also allowed on a
 --     deposit in review, with the same record.
 --
@@ -36,7 +36,7 @@ $$;
 COMMENT ON FUNCTION review_entered_from(BIGINT) IS
     'REQ-RV-2: the state the transfer held before its last review (the edge a review resolution runs).';
 
--- Whether a refund of the deposit is recorded (a transfer whose refund_of is the deposit) or started (a
+-- Whether a refund of the deposit is recorded (a transfer whose refund_of is the deposit, or a
 -- review resolution into Refunding whose evidence the core did not refuse). The ingress reads it to
 -- refuse by name, and deposit_conversion_record() checks it under the deposit's lock.
 CREATE FUNCTION deposit_refund_recorded(p_transfer BIGINT)
@@ -55,7 +55,7 @@ CREATE FUNCTION deposit_refund_recorded(p_transfer BIGINT)
 $$;
 
 COMMENT ON FUNCTION deposit_refund_recorded(BIGINT) IS
-    'REQ-RF-1, REQ-RV-2 (amendment 0018, Open 6): whether a refund of the transfer is recorded or started; '
+    'REQ-RF-1, REQ-RV-2 (amendment 0018, Open 6): whether a refund of the transfer is recorded; '
     'a conversion output is not named for a deposit after it.';
 
 REVOKE EXECUTE ON FUNCTION review_entered_from(BIGINT), deposit_refund_recorded(BIGINT) FROM PUBLIC;
@@ -237,7 +237,7 @@ BEGIN
                 USING ERRCODE = 'BZ001';
         END IF;
         IF deposit_refund_recorded(t.id) THEN
-            RAISE EXCEPTION 'conversion refused: a refund of deposit % is recorded or started; its output is not named after it (REQ-CV-2, REQ-RF-1, REQ-RV-2)',
+            RAISE EXCEPTION 'conversion refused: a refund of deposit % is recorded; its output is not named after it (REQ-CV-2, REQ-RF-1, REQ-RV-2)',
                 t.bridge_reference
                 USING ERRCODE = 'BZ001';
         END IF;
@@ -326,4 +326,4 @@ $$;
 COMMENT ON FUNCTION deposit_conversion_record(BIGINT, BIGINT, TEXT, BIGINT, BYTEA, position_kind, BIGINT) IS
     'REQ-RQ-4, REQ-CV-2, INV-2, INV-6 (amendment 0018, A1b; Open 6): records a deposit''s conversion and moves '
     'its source and amount from its convertible arrival to the output, once, while it awaits it or is in review '
-    'from there with no refund recorded or started. The ingress alone calls it.';
+    'from there with no refund recorded. The ingress alone calls it.';

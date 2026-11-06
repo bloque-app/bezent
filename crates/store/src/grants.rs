@@ -342,7 +342,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         &[
             "ledger_accounts(network,address,kind,reason)",
             "manual_actions(kind,transfer_id,to_state,network,block_number,block_hash,block_time,justification)",
-            "manual_approvals(action_id,justification)",
+            "manual_approvals(action_id,justification,approved_output_network,approved_output_block_number,approved_output_block_hash,approved_output_position_kind,approved_output_position_index,approved_output_amount)",
         ],
     ),
     (
