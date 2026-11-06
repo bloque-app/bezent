@@ -2982,6 +2982,30 @@ impl Core {
             // Waits for the second approver (REQ-GV-5).
             return Ok(Did::default());
         }
+        // REQ-GV-5, amendment 0018 Open 6: a resolution into Delivering that was approved before
+        // its deposit's conversion output was named was approved with no amount to mint. It does
+        // not run, whenever the core looks at it; a new one is recorded once the output is named.
+        if before == State::SourceFinal && to == State::Delivering && t.kind == "deposit" {
+            let stale: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM deposit_conversions c \
+                   JOIN manual_approvals p ON p.action_id = $2 \
+                   WHERE c.transfer_id = $1 AND p.approved_at < c.recorded_at)",
+            )
+            .bind(t.id)
+            .bind(action)
+            .fetch_one(&mut *conn)
+            .await?;
+            if stale {
+                return self
+                    .refuse_evidence(
+                        conn,
+                        t,
+                        action,
+                        "approved before the conversion's output was named",
+                    )
+                    .await;
+            }
+        }
         let verified = self
             .evidence_holds(conn, t, before, to, attempt, &evidence)
             .await?;
@@ -3127,7 +3151,19 @@ impl Core {
                 }
                 _ => false,
             },
-            (State::SourceFinal, State::Delivering) => evidence.network == t.destination_network,
+            (State::SourceFinal, State::Delivering) => {
+                // A deposit still on its convertible arrival has no output to mint against, and a
+                // resolution approved before the output is named would otherwise run later, at an
+                // amount its approvers never saw (REQ-CV-1, REQ-CV-2, REQ-GV-5; amendment 0018,
+                // Open 6): it is refused, and a new one is recorded once the output is named.
+                let on_arrival = match t.source() {
+                    Some(c) if t.kind == "deposit" => store::observation_at(conn, &c)
+                        .await?
+                        .is_some_and(|o| o.kind == "convertible_arrival"),
+                    _ => false,
+                };
+                evidence.network == t.destination_network && !on_arrival
+            }
             (State::Delivering | State::Delivered, State::Delivering | State::Refunding) => {
                 let proven = matches!(store::proof_of(conn, t.id, attempt).await?,
                          Some(ProofPoint::Final(p)) if p.network == evidence.network

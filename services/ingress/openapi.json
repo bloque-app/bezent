@@ -175,7 +175,7 @@
             }
           },
           "201": {
-            "description": "Taken in now: the deposit's status, its source now the output and its `converted_arrival` recorded; or `Refused` with its named error (ERR-SourceNotFound: no deposit of yours by that reference naming a convertible arrival, or no conversion output at the coordinate; ERR-SourceMismatch: an output of another network, reserve or asset; ERR-SourceConsumed: the output is bound already, or the deposit no longer awaits its conversion; ERR-ReferenceConflict: its output is named already)",
+            "description": "Taken in now: the deposit's status, its source now the output and its `converted_arrival` recorded; or `Refused` with its named error (ERR-SourceNotFound: no deposit of yours by that reference naming a convertible arrival, or no conversion output at the coordinate; ERR-SourceMismatch: an output of another network, reserve or asset; ERR-SourceConsumed: the output is bound already, or the deposit no longer awaits its conversion (it is past its review, or a refund of it is recorded or started); ERR-BelowMinimum, ERR-AboveMaximum, ERR-WindowExceeded: the output's amount is outside the deposit route's minimum or maximum, or over what its window has left; ERR-ReferenceConflict: its output is named already)",
             "content": {
               "application/json": {
                 "schema": {

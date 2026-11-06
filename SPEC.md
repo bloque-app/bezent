@@ -1,7 +1,7 @@
 ---
 name: bezent
 summary: A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger's contract.
-spec_version: 0.5.9
+spec_version: 0.5.10
 status: draft
 date: 2026-11-06
 ---
@@ -15,13 +15,14 @@ It is normative and self-contained. It does not say how bezent is built, which t
 implement it, which networks it serves today, or why the project exists. `notes/` says why, and
 `notes/CONSTRAINTS-FOR-PLAN.md` says what the plan is expected to bind.
 
-Amendments 0001 to 0015, 0018, 0019 (A1d), 0020, 0021 (A1b), 0022 (A1b and A2a; A3 and A4 are not ruled), 0024 and 0026 are
+Amendments 0001 to 0015, 0018 (A1b; Open 3 and Open 6), 0019 (A1d), 0020, 0021 (A1b), 0022 (A1b and A2a; A3 and A4 are not ruled), 0024 and 0026 are
 applied (see `amendments/`).
 
 ### Change history
 
 | Version | Date | Change |
 |---|---|---|
+| 0.5.10 | 2026-11-06 | Amendment 0018, its Open 3 and Open 6 (decision item `d-cv-open-choices`, ruled by @pandres95 on the decision form: "As recommended"). A conversion output may be named for a deposit in `Needs-Review` for the conversion's deadline, as long as no refund of it is recorded or started; the deposit stays in review with its source and amount moved to the output, and the review ends as every review does, by a recorded resolution into `Delivering` with a second approver, after which the mint is ordered once at the output's amount; no edge is added (`REQ-RQ-4`, `REQ-CV-2`, `REQ-CV-6`). The output's amount is also checked against the route's minimum, maximum and window, with the route's own errors (`REQ-CV-2`, `REQ-LM-1`). `AC-A5.4` and `AC-A5.5` follow. |
 | 0.5.9 | 2026-11-06 | Amendment 0026 (decision item `d-requester-arrivals`, ruled by @pandres95 on the decision form: "Bind by sender"): each requester has declared senders, recorded by the operator, per origin network (`REQ-PN-3`, §2 "Declared sender"); a deposit binds only an arrival whose funder is one of the requesting requester's declared senders (`REQ-IN-3`, `REQ-RQ-3`), and is refused otherwise (`ERR-SenderNotDeclared`, `AC-A2.5`); an arrival no requester may bind stays an unassociated arrival (`REQ-IN-6`). A deposit naming a convertible arrival is checked on that arrival, and its conversion's output is bound through it (`REQ-CV-2`). Partly closes the exposure recorded in amendment 0018; what stays open is in amendment 0026. |
 | 0.5.8 | 2026-11-06 | Amendment 0021 (decision item `d-gate-sustained`, ruled by @pandres95 on the decision form: "24 hours"): "sustained" in V0's exit criteria is 24 consecutive hours of the reserve equation's evaluations at exactly zero divergence, a divergence restarting the window (§15). Amendment 0024 (`d-gate-scope`, ruled the same day: "As recommended"): the exit criteria gate only a release that moves value, the first release that lets a bridged asset carry value and each that adds an asset or a network to it; every other release needs its automated checks and the approval of one owner of the specification; a release declares which it is, and one that does not is refused (§15). No `REQ-*` changes. |
 | 0.5.7 | 2026-11-06 | Amendment 0022 (decision item `d-pause-0022`, ruled by @pandres95 on the decision form: "As recommended"): new work is everything before an attempt's first recorded signature, and an attempt with a recorded signature is in flight (`REQ-GV-1`, A1b), so a pause holds an attempt recorded before it that has no signature (§10 `CND-Paused`); the on-chain pause stays a person's act (A2a, no text). Amendment 0019 (decision item `d-payout-late-signing`, ruled the same day: "Leave pause time out", A1d): the time a payout is held under a pause or a cut-off, taken and left, does not count toward its attempt's deadline (§5.4, `REQ-GV-1`, `REQ-LM-1`, §10 `CND-Paused`, `CND-CutOff`). `NFR-2` and `NFR-3` are unchanged: latency is still measured end to end. |
@@ -835,7 +836,12 @@ arrival and the output are each consumed once (`INV-2`). Such a deposit records 
 converted output, with both amounts. bezent MUST verify that the output is a final conversion output at the
 reserve address the convertible arrived at, in a token admitted for the deposit's asset, and not consumed; that
 the arrival fed that conversion is the requester's word, as its price and slippage are (`REQ-CV-5`). The declared
-sender of `REQ-PN-3` is checked on the convertible arrival, when the deposit binds it.
+sender of `REQ-PN-3` is checked on the convertible arrival, when the deposit binds it. bezent MUST also
+check the output's amount, when its requester names it, against the deposit route's declared limits (`REQ-LM-1`), as it
+checks the arrival's at the deposit request: an output below the route's minimum, above its maximum, or over what the
+route's window has left is refused with the route's own error (`ERR-BelowMinimum`, `ERR-AboveMaximum`,
+`ERR-WindowExceeded`) before anything is recorded. The window counts the deposit once, at the output's amount in place of
+the arrival's. Nothing is matched by amount (`REQ-OT-2`): the output is the one the request names.
 
 **`REQ-CV-3`** *Withdrawn by amendment 0007 (A2), with `AC-B4.1` and `AC-B4.2`: every payout is in the
 origin token; a requester that wants another token converts what it receives.*
@@ -849,7 +855,14 @@ make a delivery or a mint up to a quoted amount; it mints or delivers what was o
 **`REQ-CV-6`** A conversion that does not complete by its deadline goes to `Needs-Review` (`REQ-RV-1`): a
 deposit holding `CND-AwaitingConversion` past the route's deadline, as for any condition held at `Source-Final`,
 goes to `Needs-Review`, and MUST NOT be refunded on a timer (`REQ-RF-1`). Its convertible holdings stay
-itemised; they are never written off and never counted as reserve.
+itemised; they are never written off and never counted as reserve. Its requester MAY still name the output
+(`REQ-RQ-4`) while no refund of the deposit is recorded or started. Naming does not end the review: the deposit stays in
+`Needs-Review` holding the condition, with its source and amount moved to the output (`REQ-CV-2`), and the review ends
+as every review does (`REQ-RV-2`), by a recorded resolution into `Delivering`, which is one ordinary edge from
+`Source-Final`, the state held before review (§5.4), made by one person and approved by a second (`REQ-GV-5`). The mint
+is then ordered once, at the output's amount (`REQ-CV-5`), through the ordinary steps. No transition is added. A
+resolution into `Delivering` approved before the deposit's output was named is refused, whenever it is looked at: it
+was approved with no amount to mint, and one recorded then must be approved again once the output is named.
 
 **`REQ-CV-7`** A requester MAY hold a role on a reserve address that lets it convert, at a protocol venue,
 convertible holdings at that address into the origin token. The network MUST enforce, by on-chain code
@@ -904,6 +917,14 @@ conversion actually delivered.
   `REQ-CV-5`).
 - `AC-A5.3` Given a statement, Then unconverted holdings appear itemised and outside the reserve equation
   (`REQ-CV-4`).
+- `AC-A5.4` Given a deposit in `Needs-Review` for its conversion's deadline, with no refund of it recorded or started,
+  and its requester names the conversion's output, Then the deposit stays in review with its source and amount at the
+  output; Then a resolution into `Delivering` recorded by one person and approved by a second orders the mint once,
+  at the output's amount; and Then a refund recorded or started first refuses the naming (`REQ-RQ-4`, `REQ-CV-2`,
+  `REQ-CV-6`, `REQ-RV-2`, `REQ-GV-5`).
+- `AC-A5.5` Given a deposit awaiting its conversion's output, Then an output named below the route's minimum, above its
+  maximum, or over what its window has left is refused with the route's own error, and nothing is recorded
+  (`REQ-CV-2`, `REQ-LM-1`).
 
 ### Epic B — Withdrawals
 
@@ -1056,9 +1077,11 @@ backend's attesting grant may add them. For a public backend, any requester hold
 the first accepted wins; a later different body is refused (`ERR-ReferenceConflict`).
 
 A deposit that names a convertible arrival takes one extra the same way: the requester that made it MAY add, by
-the deposit's request reference, the coordinate of its conversion's output (`REQ-CV-2`). Whether an output may be
-named once the deposit is in `Needs-Review` is open (amendment 0018, Open 6). It is written once, by that requester
-only; a later different body is refused (`ERR-ReferenceConflict`).
+the deposit's request reference, the coordinate of its conversion's output (`REQ-CV-2`). It is written once, by that
+requester only; a later different body is refused (`ERR-ReferenceConflict`). It MAY be added while the deposit holds
+`CND-AwaitingConversion` at `Source-Final`, and after the deposit has gone to `Needs-Review` for that condition's deadline
+(`REQ-CV-6`), as long as no refund of the deposit is recorded or started; once one is, it is refused
+(`ERR-SourceConsumed`). The output's amount is checked against the route (`REQ-CV-2`).
 
 **`REQ-RQ-5`** *Withdrawn by amendment 0001 (A12).*
 

@@ -574,13 +574,27 @@ async fn req_cv_2_inv_6_the_output_is_final_at_the_same_reserve_and_of_the_depos
     );
 }
 
-/// `REQ-CV-6`, `REQ-RV-2`: the output is named only while the deposit awaits it. One sent to review
-/// on its deadline ends only by evidence, never by this request.
-#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_cv_6_no_move_once_the_deposit_is_in_review(pool: PgPool) {
-    declarations(&pool).await;
+/// Sends deposit `id` to review from `from`, keeping `condition`, on a final head of the issuing
+/// network, as the core does at the deadline (`REQ-CV-6`).
+async fn to_review(pool: &PgPool, id: i64, from: &str, condition: &str) {
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO final_heads (network, block_number, block_hash, block_time) \
+               VALUES ('issuing', 500, '\\x01', '{BLOCK_TIME}') ON CONFLICT DO NOTHING; \
+             INSERT INTO transitions (transfer_id, from_state, to_state, condition, network, \
+                 block_number, block_hash, block_time) \
+               VALUES ({id}, '{from}', 'Needs-Review', '{condition}', 'issuing', 500, '\\x01', \
+                 '{BLOCK_TIME}')"
+        ),
+    )
+    .await;
+}
+
+/// A convertible arrival of 1 000 at block 10 and a final conversion output of 990 at block 12.
+async fn arrival_and_output(pool: &PgPool) {
     observed(
-        &pool,
+        pool,
         "origin-a",
         10,
         0,
@@ -592,21 +606,8 @@ async fn req_cv_6_no_move_once_the_deposit_is_in_review(pool: PgPool) {
         false,
     )
     .await;
-    let id = awaiting(&pool, "dep-1", 10).await;
-    exec(
-        &pool,
-        &format!(
-            "INSERT INTO final_heads (network, block_number, block_hash, block_time) \
-               VALUES ('issuing', 500, '\\x01', '{BLOCK_TIME}'); \
-             INSERT INTO transitions (transfer_id, from_state, to_state, condition, network, \
-                 block_number, block_hash, block_time) \
-               VALUES ({id}, 'Source-Final', 'Needs-Review', 'CND-AwaitingConversion', 'issuing', \
-                 500, '\\x01', '{BLOCK_TIME}')"
-        ),
-    )
-    .await;
     observed(
-        &pool,
+        pool,
         "origin-a",
         12,
         2,
@@ -618,10 +619,193 @@ async fn req_cv_6_no_move_once_the_deposit_is_in_review(pool: PgPool) {
         false,
     )
     .await;
+}
+
+/// `REQ-CV-2`, `REQ-RV-2`, `INV-2`, amendment 0018 Open 6 (`d-cv-open-choices` (a)): the output is
+/// named for a deposit sent to review from `Source-Final` for its deadline, still holding
+/// `CND-AwaitingConversion`. The store moves the source and the amount and records both amounts, as
+/// at `Source-Final`, and the deposit stays in `Needs-Review`: nothing here ends the review (that is
+/// a recorded resolution with a second approver, `REQ-GV-5`; `services/core/tests/conversions.rs`).
+/// The move is still once, and the source still cannot be rewritten by hand.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_cv_2_req_rv_2_inv_2_an_output_is_named_for_a_deposit_in_review(pool: PgPool) {
+    declarations(&pool).await;
+    arrival_and_output(&pool).await;
+    let id = awaiting(&pool, "dep-1", 10).await;
+    to_review(&pool, id, "Source-Final", "CND-AwaitingConversion").await;
+
+    // By hand, even by the owner, the source does not move without the record.
+    let err = sqlx::query(
+        "UPDATE transfers SET source_block_number = 12, source_position_index = 2, \
+             source_block_hash = '\\x0c', amount = 990 WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .expect_err("a source moved by hand in review");
+    assert_refusal(&err, "REQ-ST-7", "a source moved by hand in review");
+
+    let named = request(&pool, "swaps", "conv-1").await;
+    record(&pool, id, named, "origin-a", 12, 2)
+        .await
+        .expect("a deposit in review takes the output its requester names");
+    assert_eq!(source_of(&pool, id).await, (12, 2, "990".into()));
+    assert_eq!(
+        count(
+            &pool,
+            &format!(
+                "SELECT count(*) FROM deposit_conversions WHERE transfer_id = {id} \
+                   AND arrival_amount = 1000 AND output_amount = 990 AND intake_id = {named}"
+            )
+        )
+        .await,
+        1
+    );
+    let (state, condition): (String, Option<String>) =
+        sqlx::query_as("SELECT state::text, condition::text FROM transfers WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (state.as_str(), condition.as_deref()),
+        ("Needs-Review", Some("CND-AwaitingConversion"))
+    );
+
+    // Once: another output is refused, and the arrival is not unassociated.
+    observed(
+        &pool,
+        "origin-a",
+        14,
+        2,
+        "conversion_output",
+        "token-a",
+        5,
+        POOL,
+        RESERVE,
+        false,
+    )
+    .await;
+    let again = request(&pool, "swaps", "conv-2").await;
+    assert!(record(&pool, id, again, "origin-a", 14, 2).await.is_err());
+    assert_eq!(source_of(&pool, id).await, (12, 2, "990".into()));
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM unassociated_arrivals").await,
+        1,
+        "only the later, unnamed output is an unassociated arrival"
+    );
+}
+
+/// `REQ-CV-2`, `REQ-RF-1`, `REQ-RV-2`, amendment 0018 Open 6 (`d-cv-open-choices` (a)): an output is
+/// not named for a deposit after a refund of it is recorded (a transfer whose `refund_of` is the
+/// deposit) or started (a review resolution into `Refunding` whose evidence the core did not refuse).
+/// A resolution the core refused starts nothing. Nothing is recorded by a refused request.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_cv_2_req_rf_1_req_rv_2_no_output_is_named_after_a_refund(pool: PgPool) {
+    declarations(&pool).await;
+    arrival_and_output(&pool).await;
+    let id = awaiting(&pool, "dep-1", 10).await;
+    to_review(&pool, id, "Source-Final", "CND-AwaitingConversion").await;
+
+    // A review resolution into Refunding, recorded and not refused: a refund is started.
+    let action: i64 = sqlx::query_scalar(
+        "INSERT INTO manual_actions (kind, transfer_id, to_state, network, block_number, \
+             block_hash, block_time, actor, justification) \
+         VALUES ('review-resolution', $1, 'Refunding', 'issuing', 500, '\\x01', $2::timestamptz, \
+             'ops', 'refund it') RETURNING id",
+    )
+    .bind(id)
+    .bind(BLOCK_TIME)
+    .fetch_one(&pool)
+    .await
+    .expect("a recorded resolution");
     let named = request(&pool, "swaps", "conv-1").await;
     let err = record(&pool, id, named, "origin-a", 12, 2)
         .await
-        .expect_err("a deposit in review");
-    assert_refusal(&err, "REQ-CV-6", "a deposit in review");
+        .expect_err("a refund is started");
+    assert_refusal(&err, "REQ-RF-1", "a refund started");
+    assert_eq!(source_of(&pool, id).await, (10, 0, "1000".into()));
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM deposit_conversions").await,
+        0
+    );
+
+    // The core refused that evidence: it started nothing.
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO event_log (kind, transfer_id, payload) \
+               VALUES ('review-evidence-refused', {id}, \
+                       '{{\"manual_action_id\": \"{action}\"}}'::jsonb)"
+        ),
+    )
+    .await;
+    let again = request(&pool, "swaps", "conv-2").await;
+    record(&pool, id, again, "origin-a", 12, 2)
+        .await
+        .expect("a refused resolution starts no refund");
+    assert_eq!(source_of(&pool, id).await, (12, 2, "990".into()));
+
+    // A refund recorded: a transfer whose refund_of is the deposit. The store takes one only in the
+    // shape of a refund of a withdrawal or a deposit's payout; whichever it takes is refused here.
+    observed(
+        &pool,
+        "origin-a",
+        16,
+        0,
+        "convertible_arrival",
+        "convertible-a",
+        1_000,
+        "0xfunder",
+        RESERVE,
+        false,
+    )
+    .await;
+    let other = awaiting(&pool, "dep-2", 16).await;
+    to_review(&pool, other, "Source-Final", "CND-AwaitingConversion").await;
+    sqlx::query(
+        "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+             destination_network, destination, refund_of, state) \
+         SELECT 'bz-r-dep-2', 'r-dep-2', 'refund', asset, 1000, 'origin-a', 'dest-1', id, 'Received' \
+         FROM transfers WHERE id = $1",
+    )
+    .bind(other)
+    .execute(&pool)
+    .await
+    .expect("a refund transfer of the deposit");
+    observed(
+        &pool,
+        "origin-a",
+        18,
+        2,
+        "conversion_output",
+        "token-a",
+        990,
+        POOL,
+        RESERVE,
+        false,
+    )
+    .await;
+    let named = request(&pool, "swaps", "conv-3").await;
+    let err = record(&pool, other, named, "origin-a", 18, 2)
+        .await
+        .expect_err("a refund is recorded");
+    assert_refusal(&err, "REQ-RF-1", "a refund recorded");
+}
+
+/// `REQ-CV-2`, `REQ-CV-6`, `REQ-RV-2`: a deposit in review for another reason than its deadline, or
+/// sent there from a state other than `Source-Final`, takes no output.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_cv_2_req_cv_6_a_review_that_is_not_the_conversions_takes_no_output(pool: PgPool) {
+    declarations(&pool).await;
+    arrival_and_output(&pool).await;
+    // In review from Source-Final, but for another condition.
+    let id = awaiting(&pool, "dep-1", 10).await;
+    to_review(&pool, id, "Source-Final", "CND-DestinationRefused").await;
+    let named = request(&pool, "swaps", "conv-1").await;
+    let err = record(&pool, id, named, "origin-a", 12, 2)
+        .await
+        .expect_err("another review");
+    assert_refusal(&err, "REQ-CV-6", "a review for another condition");
     assert_eq!(source_of(&pool, id).await, (10, 0, "1000".into()));
 }

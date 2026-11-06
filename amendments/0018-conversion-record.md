@@ -8,7 +8,9 @@ SPDX-License-Identifier: CC-BY-4.0
 **Status:** proposed by the `F-010` helper, 2026-11-04; revised after review of pull request #69 (the exposure, option A1d, the
 proposal). **Ruled by @pandres95 in chat, 2026-11-05 (`d-cv-conversion-link`): A1b alone.** "And yes, A1b, please. Doing both
 doesn't make sense IMO." A1d is not taken. Applied to `SPEC.md` v0.5.5; built by issue #10 (migration 0120). The exposure
-below, and the choices listed under "Open after the ruling", stay **open**. The exposure is partly closed by amendment
+below, and the choices listed under "Open after the ruling", stay **open**, except Open 3 (route limits on the output) and
+Open 6 (an output named after review), which @pandres95 ruled on the decision form, 2026-11-06 (`d-cv-open-choices`, "As
+recommended"); applied to `SPEC.md` v0.5.10 (see "Ruling of 2026-11-06"). The exposure is partly closed by amendment
 0026 (`d-requester-arrivals`, 2026-11-06: "Bind by sender"), which says which rows of the table below close; the test that
 pinned it, `requester_binding_today.rs`, is now `services/ingress/tests/bind_by_sender.rs`.
 **Target:** `SPEC.md` v0.5.4 (§5.10 `REQ-CV-1`, `REQ-CV-2`, `REQ-CV-6`; §5.4; §7.A `REQ-RQ-3`, `REQ-RQ-4`; §10
@@ -206,6 +208,40 @@ ordinary arrivals; the table above stands.
 - **`AC-A5.1`** ("Given a deposit request naming a final arrival of a convertible token") and **`AC-A5.2`** ("… and its
   requester names it for the deposit"). **§15**: Epic A lists `REQ-CV-6` and `REQ-RQ-4`.
 
+## Ruling of 2026-11-06 (`d-cv-open-choices`: Open 3 and Open 6)
+
+@pandres95 on the decision form, 2026-11-06: **"As recommended."** Two choices, both applied to `SPEC.md` v0.5.10:
+
+- **Open 6 ruled: an output may be named for a deposit in `Needs-Review`, as long as the deposit has not been refunded.**
+  - *What the ruling means.* The deposit's requester may name the output while the deposit is in review for the
+    conversion's deadline (sent there from `Source-Final` holding `CND-AwaitingConversion`) and no refund of it is recorded
+    (a transfer whose `refund_of` is the deposit) or started (a review resolution into `Refunding` the core did not refuse).
+    After a refund the request is refused (`ERR-SourceConsumed`). The store moves the deposit's source and amount to the
+    output and records the arrival with both amounts, exactly as at `Source-Final`.
+  - *What happens to the deposit afterwards.* Naming is not evidence that ends a review (`REQ-RV-2`), and a mint moves value
+    (`REQ-GV-5`), so the deposit **stays in `Needs-Review`**, holding the condition, with its source and amount at the output.
+    It leaves by the transition the specification already has: §5.4's `Needs-Review` row ("any state reachable by one
+    ordinary edge from the state held before review"), where the state held before review is `Source-Final`, whose ordinary
+    edge is `Source-Final -> Delivering`. That is, a recorded resolution into `Delivering`, made by one operator and approved
+    by a second, evidenced as every such resolution is, after which the core orders the mint once, at the output's amount, by
+    the ordinary delivery steps (the same ones a resolution into `Delivering` runs for any deposit). **No transition and no
+    edge is added**, and no refund path: `Needs-Review -> Refunding` does not exist for a deposit held before review at
+    `Source-Final`, and nothing here adds it.
+  - *One consequence, stated (derived from `REQ-GV-5`, not part of the ruling's text).* A resolution into `Delivering`
+    that was approved before the deposit's output was named is refused by the core (`review-evidence-refused`), whenever it
+    looks at it: its approvers had no amount to approve, and it would otherwise run after the output is named, at an amount
+    they never saw. One recorded before naming is approved again once the output is named; one recorded before and approved
+    after naming runs. A resolution into `Delivering` for a deposit whose source is still the convertible arrival is refused
+    too: there is nothing to mint against.
+- **Open 3 ruled, as to route limits: the output's amount is checked against the route's limits too.** When the output is
+  named, an amount below the deposit route's minimum, above its maximum, or that would take the route's window past its limit
+  is refused with the route's own error (`ERR-BelowMinimum`, `ERR-AboveMaximum`, `ERR-WindowExceeded`), before anything is
+  recorded. Nothing is matched by amount: the output is the one the request names (`REQ-OT-2`). The window counts the
+  deposit once: the amount it stands at in the window (the arrival's) is replaced by the output's. There is no capacity
+  check: the deposit is already in flight. The check at the deposit request, on the arrival's amount, stands. **Still open
+  under Open 3:** the window counts the arrival's amount, in the convertible's minor units, while a deposit awaits (the store
+  declares no convertible's precision).
+
 ## Built (issue #10, migration 0120)
 
 - The store: `deposit_conversions` (one per deposit; the arrival and the output each unique) and `deposit_conversion_record()`,
@@ -224,6 +260,20 @@ ordinary arrivals; the table above stands.
   stateable from durable state: `deposit_conversions` holds the arrival, its token and amount, the output, its amount and the
   request that named it, and the status reports the arrival (`converted_arrival`).
 
+## Built for the ruling of 2026-11-06 (migration 0140)
+
+- The store: `deposit_conversion_record()` also takes a deposit in `Needs-Review` that was sent there from `Source-Final`
+  holding `CND-AwaitingConversion`, with its source still the convertible arrival, and refuses one with a refund recorded or
+  started (`deposit_refund_recorded()`). `transfers_guard_update()` lets the one move happen in review too, against the same
+  record. `review_entered_from()` reads the state held before the last review. No transition, edge or trigger on
+  `transitions` changes. The route's limits are the ingress's, like every route check, so the function takes none.
+- The ingress: `POST /v0/deposits/conversion` takes a deposit in review (the store's conditions, read first so a refusal is
+  named), and checks the output's amount against the route as above.
+- The core: no step is added. `Needs-Review` is ended by the resolution that already exists; the evidence check refuses a
+  resolution into `Delivering` for a deposit still on its convertible arrival.
+- Left as it was: a conversion recorded before review (an output named at `Source-Final` from a block past the deadline,
+  Open 7) also stays in review, and ends the same way.
+
 ## Open after the ruling
 
 None of these is applied; each is the owner's.
@@ -236,16 +286,18 @@ None of these is applied; each is the owner's.
    direct path should stay is open.
 3. **Which amount the route's limits measure while a deposit awaits** (A3's units). The deposit's amount is the convertible
    arrival's observed amount, in the convertible's minor units, until the output is named; then it is the output's, in the
-   origin token's. The limits and the window are checked as for any deposit, once, at the request, on the arrival's amount, and
-   not again on the output's. The store declares no convertible's precision. Open.
+   origin token's. **Ruled in part, 2026-11-06 (`d-cv-open-choices`):** the output's amount is now also checked against the
+   route's minimum, maximum and window when it is named (above). **Still open:** the arrival's check at the deposit request
+   is on its amount in the convertible's units, and the window counts that amount until the output replaces it; the store
+   declares no convertible's precision.
 4. **A3's third amount**, the convertible amount the swap spent (`detail.conversion.amount_in` of the output). It is recorded in
    the output's observation as before and not reported with the deposit. Open.
 5. **A2's "admitted as a convertible for the asset".** No declaration in the store says which convertibles an asset admits;
    the endpoint's classification (`convertible_arrival`, from its configured convertibles) is the evidence, and the asset is
    the one of the reserve the arrival is at. Open.
-6. **An output named after review.** A deposit in `Needs-Review` takes no conversion request (`ERR-SourceConsumed`); its review
-   ends by evidence (`REQ-RV-2`), and whether a named output is such evidence is not decided. The build refuses it today,
-   pending the owner's ruling; the specification does not settle it. Open.
+6. **An output named after review.** **Ruled, 2026-11-06 (`d-cv-open-choices`):** it may be named while no refund of the
+   deposit is recorded or started; the deposit stays in review and leaves by a recorded, approved resolution into
+   `Delivering` (above). Applied to `SPEC.md` v0.5.10; built by migration 0140.
 7. **When a conversion completes by its deadline.** As built, the condition clears only when the output named for the deposit
    is from a block at or before the deadline (on the output's network's clock) and the deposit has not gone to review; an
    output from a later block leaves the deposit to go to review once the issuing network's final head passes the deadline.

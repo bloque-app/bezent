@@ -84,9 +84,24 @@ Built by migration 0120 and the ingress and core changes below. `SPEC.md` v0.5.5
 | The source moves once from the arrival to the output, with its amount; the arrival is recorded with both amounts; each is consumed once (`REQ-CV-2`, `INV-2`) | `deposit_conversions`, `deposit_conversion_record()`, `transfers_guard_update`, `transfers_source_bindable()` (0120) | Store: `deposit_conversions.rs` `req_cv_2_req_rq_4_inv_2_…`, `inv_2_an_arrival_recorded_by_a_conversion_is_never_bound_again`, `inv_2_an_output_already_consumed_is_refused`. Service: `conversions.rs` `inv_2_an_arrival_named_twice_is_refused`, `inv_2_an_output_already_consumed_is_refused` |
 | Only a final conversion output at the same reserve, of the deposit's asset (`REQ-CV-2`, `INV-6`) | `deposit_conversion_record()`, `decide_conversion` | Store: `deposit_conversions.rs` `req_cv_2_inv_6_…` |
 | The mint is the output's, under the reference derived from the output (`AC-A5.2`, `REQ-CV-5`, `REQ-IN-4`) | `Core::conversion`, `Core::source_final` | Service: `conversions.rs` `ac_a5_2_req_cv_2_req_cv_5_req_rq_4_inv_2_inv_6_the_request_comes_first_then_the_output_then_the_mint` |
-| Past its deadline, `Needs-Review`, never a refund; an output from after the deadline does not complete it; none named after review (`REQ-CV-6`, `REQ-RF-1`) | `Core::conversion`, `Core::source_final`; `decide_conversion` | Store: `deposit_conversions.rs` `req_cv_6_no_move_once_the_deposit_is_in_review`. Service: `conversions.rs` `req_cv_6_req_rf_1_…`, `req_cv_6_an_output_after_the_deadline_…` |
+| Past its deadline, `Needs-Review`, never a refund; an output from after the deadline does not complete it; none named after review until 0140; see the ruling of 2026-11-06 below (`REQ-CV-6`, `REQ-RF-1`) | `Core::conversion`, `Core::source_final`; `decide_conversion` | Store: `deposit_conversions.rs` `req_cv_6_no_move_once_the_deposit_is_in_review`. Service: `conversions.rs` `req_cv_6_req_rf_1_…`, `req_cv_6_an_output_after_the_deadline_…` |
 
 The direct path stays as it was: a deposit may name a conversion output itself (`ac_a5_2_req_cv_2_req_cv_5_inv_6_an_output_named_directly_is_bound_and_minted`),
 and records no convertible arrival. What the ruling did not settle (this path, which amount the route's limits measure while
-a deposit awaits, the conversion's input amount, which convertibles an asset admits, an output named after review) and the
+a deposit awaits, the conversion's input amount, which convertibles an asset admits) and the
 exposure of "What the binding rules do not do" above are open in the amendment. Issue #10 stays open on them.
+
+## Amendment 0018, Open 3 and Open 6 (ruled 2026-11-06, `d-cv-open-choices`)
+
+Built by migration 0140, the ingress's `decide_conversion` and one check in the core's `evidence_holds`. `SPEC.md` v0.5.10
+carries the text.
+
+| Requirement | Where it is built | Where it is tested (layer, SPEC §9) |
+|---|---|---|
+| An output may be named for a deposit in `Needs-Review` (sent there from `Source-Final` holding the condition) while no refund of it is recorded or started; the deposit stays in review (`REQ-RQ-4`, `REQ-CV-2`, `REQ-CV-6`, `REQ-RV-2`) | `deposit_conversion_record()`, `transfers_guard_update()`, `review_entered_from()`, `deposit_refund_recorded()` (0140); `decide_conversion` | Store: `deposit_conversions.rs` `req_cv_2_req_rv_2_inv_2_an_output_is_named_for_a_deposit_in_review`, `req_cv_2_req_cv_6_a_review_that_is_not_the_conversions_takes_no_output`. Service: `conversions.rs` `req_cv_6_req_rf_1_past_its_deadline_…` |
+| After a refund is recorded or started, naming is refused (`REQ-RF-1`) | `deposit_refund_recorded()`; `decide_conversion` | Store: `deposit_conversions.rs` `req_cv_2_req_rf_1_req_rv_2_no_output_is_named_after_a_refund`. Service: `conversions.rs` `ac_a5_4_req_cv_2_req_rf_1_req_rv_2_an_output_is_not_named_after_a_refund_is_started` |
+| The review ends by a recorded resolution into `Delivering` with a second approver; the mint is ordered once, at the output's amount; no edge is added (`REQ-RV-2`, `REQ-GV-5`, `REQ-CV-5`, `INV-6`) | `Core::resolve` refuses one approved before the output was named; `Core::evidence_holds` refuses one while the source is still the convertible arrival | Service: `conversions.rs` `ac_a5_4_req_cv_2_req_rv_2_req_gv_5_inv_6_an_output_named_in_review_mints_once_after_a_two_person_resolution` |
+| The output's amount is checked against the route's minimum, maximum and window, with the route's errors (`REQ-CV-2`, `REQ-LM-1`) | `decide_conversion` | Service: `conversions.rs` `ac_a5_5_req_lm_1_req_lm_2_req_cv_2_the_output_is_checked_against_the_routes_limits` |
+
+Left open: the window counts a deposit's arrival amount, in the convertible's units, while it awaits; an output named at
+`Source-Final` from a block past the deadline (Open 7) also stays in review and ends the same way.
