@@ -23,7 +23,7 @@ request reference (`POST /v0/deposits/conversion`, `REQ-RQ-4`). The store moves 
 records the arrival with both amounts (`deposit_conversions`); the core clears the condition and mints at the output's
 amount. Past the route's completion budget, counted from the arrival's finality, with no output named from a block at or
 before it, the deposit goes to `Needs-Review` with the condition kept, and is never refunded on a timer (`REQ-CV-6`,
-`REQ-RF-1`). Its requester may still name the output while no refund of the deposit is recorded (amendment
+`REQ-RF-1`). Its requester may still name the output while no refund of the deposit is recorded (a resolution into `Refunding` recorded and not refused, `REQ-CV-6`; amendment
 0018, Open 6): the deposit stays in review with its source and amount at the output, and the review ends by a resolution
 (below). A convertible arrival that no deposit names is not this condition: it is an unassociated arrival
 (`CND-Unassociated.md`).

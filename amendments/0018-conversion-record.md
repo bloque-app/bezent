@@ -227,7 +227,8 @@ ordinary arrivals; the table above stands.
     the ordinary delivery steps (the same ones a resolution into `Delivering` runs for any deposit). **No transition and no
     edge is added**, and no refund path: `Needs-Review -> Refunding` does not exist for a deposit held before review at
     `Source-Final`, and nothing here adds it.
-  - *Ruled in chat, 2026-11-06, by @pandres95: the approval records the exact output it approved.* A resolution approved
+  - *Ruled in chat, 2026-11-06, by @pandres95: the approval records the exact output it approved.* Asked "should the approval
+    record the output it approved, or should that rule be dropped?", he answered: "Record." A resolution approved
     before the conversion output was named is not an approval of whatever output appears later. The approver
     names the output they reviewed (its coordinate and amount) on the approval
     (`manual_approvals.approved_output_*`, migration 0141; all six columns or none); the store does not fill it in from what

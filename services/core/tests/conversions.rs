@@ -1035,6 +1035,58 @@ async fn req_gv_5_req_cv_2_an_approval_for_one_output_does_not_mint_another(
     assert!(half.is_err(), "a half-named output was recorded");
 }
 
+/// `REQ-GV-5`, `REQ-CV-2`, amendment 0018 Open 6: the output an approval names is the output's whole
+/// coordinate. The deposit holds block 20, position 2, 4 990. An approval naming block 20 with another
+/// hash (the block was reorganised) or the same block at another position is refused, as is one
+/// naming the same amount; and an approval of the exact coordinate mints.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_gv_5_req_cv_2_an_approval_for_a_reorganised_block_or_another_position_is_refused(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (router, id) = in_review(&w).await;
+    name_output(&w, &router, id).await;
+
+    let approve = |action: i64, block_hash: Vec<u8>, index: i64| {
+        let pool = w.ops[1].clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO manual_approvals (action_id, justification, approved_output_network, \
+                     approved_output_block_number, approved_output_block_hash, \
+                     approved_output_position_kind, approved_output_position_index, \
+                     approved_output_amount) \
+                 VALUES ($1, 'checked', $2, 20, $3, 'log', $4, 4990::numeric)",
+            )
+            .bind(action)
+            .bind(ORIGIN)
+            .bind(block_hash)
+            .bind(index)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    // Same block number, a different hash: the block the approver saw is not the deposit's.
+    let reorg = resolution(&w, id, "Delivering", 7_100, 0).await;
+    approve(reorg, hash(ORIGIN, 21), 2).await;
+    // Same block, same hash, another position in it.
+    let position = resolution(&w, id, "Delivering", 7_200, 0).await;
+    approve(position, hash(ORIGIN, 20), 3).await;
+    for _ in 0..3 {
+        w.cycle(t0()).await;
+    }
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+    assert_eq!(refused_for(&w, reorg, "another output").await, 1);
+    assert_eq!(refused_for(&w, position, "another output").await, 1);
+
+    let right = resolution(&w, id, "Delivering", 7_400, 0).await;
+    approve(right, hash(ORIGIN, 20), 2).await;
+    w.settle(t0()).await;
+    assert!(order(&w.admin, id, 1).await.is_some());
+}
+
 /// `REQ-GV-5`, `REQ-CV-2`: an approval that names no output (the approver looked before the
 /// output was named) is refused for it, whatever the output the deposit holds by then. This one
 /// is approved first, and its clock is then set later than the output's
@@ -1156,13 +1208,14 @@ async fn ac_a5_5_req_lm_1_req_lm_2_req_cv_2_the_output_is_checked_against_the_ro
 }
 
 /// `REQ-CV-2`, `REQ-RF-1`, `REQ-RV-2`, amendment 0018 Open 6 (`d-cv-open-choices` (a)): an output is
-/// not named for a deposit after a refund of it is recorded. A review resolution into
+/// not named for a deposit once a refund of it is recorded (a resolution into `Refunding` recorded
+/// and not refused). A review resolution into
 /// `Refunding` is recorded by an operator; until the core refuses its evidence (a deposit sent to
 /// review from `Source-Final` has no edge to `Refunding`, so it is refused on the first cycle), naming
 /// is refused (`ERR-SourceConsumed`), with nothing recorded and nothing minted. Once the core has
 /// refused it, it starts no refund, and the output is named.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn ac_a5_4_req_cv_2_req_rf_1_req_rv_2_an_output_is_not_named_after_a_refund_is_started(
+async fn ac_a5_4_req_cv_2_req_rf_1_req_rv_2_an_output_is_not_named_once_a_refund_is_recorded_and_not_refused(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
