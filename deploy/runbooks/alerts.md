@@ -62,6 +62,7 @@ kind exists on `develop` at this commit.
 | `payout-window-alert` | engine | `pages/payout.md`, `conditions/CND-PayoutWindow.md` | yes | yes, by message text |
 | `payout-refusal-alert` | engine | `pages/payout.md` | yes | **no** (and quoted before `F-014`) |
 | `resolution-blocked-by-inclusion` | engine | `pages/payout.md` | yes | **no** (and quoted before `F-014`) |
+| `resolution-unprepared-alert` | engine | `pages/payout.md` | yes | **no** |
 | `attested-withdrawal-unrelayed` | engine | `pages/attested.md` | **no, PR #66** | no |
 | `attested-withdrawal-awaiting-head` | engine | `pages/attested.md` | **no, PR #66** | no |
 | `attested-report-refused` | attested reports | `pages/attested.md` | **no, PR #66** | no |
@@ -137,7 +138,7 @@ Stated as needs; this repository changes none of it.
 1. Test every pattern with `aws logs test-metric-filter` against a line of the running services, then turn the alarm
    actions on.
 2. Add filters for `"kind=statement-publish-failed"`, `"kind=payout-refusal-alert"`,
-   `"kind=resolution-blocked-by-inclusion"`, `"kind=late-mint-"` (a prefix pattern; the late-mint pages of PR #72 are on
+   `"kind=resolution-blocked-by-inclusion"`, `"kind=resolution-unprepared-alert"`, `"kind=late-mint-"` (a prefix pattern; the late-mint pages of PR #72 are on
    `develop`) and, when its pull request merges, `"kind=attested-"` (also a prefix).
 3. Alarm on the metrics above, with missing data treated as breaching.
 4. Give the alarm topic a destination that reaches a person: an on-call service with acknowledgement and escalation, or at

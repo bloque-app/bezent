@@ -92,7 +92,7 @@ Traceability</a></li>
       <div class="kicker">PLAN.md</div>
       <h1>bezent</h1>
       
-      <dl class="meta"><div><dt>Version</dt><dd>0.6.4</dd></div><div><dt>Status</dt><dd>approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first)</dd></div><div><dt>Date</dt><dd>2026-11-06</dd></div><div><dt>Source</dt><dd><code>bezent/PLAN.md</code> · 9a9aa94 2026-11-05 + local changes</dd></div></dl>
+      <dl class="meta"><div><dt>Version</dt><dd>0.6.5</dd></div><div><dt>Status</dt><dd>approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first); v0.6.5 binds SPEC.md v0.5.6 (amendment 0020: an attempt never prepared goes to review at the route&#x27;s deadline)</dd></div><div><dt>Date</dt><dd>2026-11-06</dd></div><div><dt>Source</dt><dd><code>bezent/PLAN.md</code> · 7434e29 2026-11-05 + local changes</dd></div></dl>
     </header>
     
 <h1 id="bezent--implementation-plan">bezent — Implementation Plan</h1>
@@ -134,7 +134,7 @@ true, with exit criteria</td>
 </table></div>
 <ol type="1">
 <li><strong>The plan never contradicts the spec.</strong> It binds
-<code>SPEC.md</code> v0.5.5. If a technical fact makes a requirement
+<code>SPEC.md</code> v0.5.6. If a technical fact makes a requirement
 impossible to meet, that becomes a spec amendment first
 (<code>amendments/</code>), and the plan follows it. A gap in the spec
 is handled the same way: we stop, propose an amendment, and do not fill
@@ -164,6 +164,17 @@ would change the spec goes through an amendment first.</li>
 </thead>
 <tbody>
 <tr class="odd">
+<td>0.6.5</td>
+<td>2026-11-06</td>
+<td>The plan binds <code>SPEC.md</code> v0.5.6. Amendment 0020
+(<code>d-never-prepared</code>, ruled Yes by @pandres95 in the decision
+form, 2026-11-06): a delivery attempt whose preparation never happened
+(the endpoint is down) goes to <code>Needs-Review</code> at the route's
+deadline, counted from the order, from the state it is in; never a
+refund or a retry (<code>REQ-EO-3</code>, <code>REQ-RF-1</code>,
+<code>REQ-RV-1</code>). Nothing else changes</td>
+</tr>
+<tr class="even">
 <td>0.6.4</td>
 <td>2026-11-06</td>
 <td>The plan binds <code>SPEC.md</code> v0.5.5, as the owner asked in
@@ -176,7 +187,7 @@ conversion's output by the request reference (<code>REQ-RQ-4</code>,
 <code>REQ-CV-2</code>). <code>DEC-9</code>, <code>DEC-13</code> and
 <code>F-010</code> are worded to match. Nothing else changes</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>0.6.3</td>
 <td>2026-10-30</td>
 <td>@pandres95's ruling <code>d-polygon-central-signer</code>
@@ -191,7 +202,7 @@ signer's intent check (<code>REQ-AR-3</code>). <code>DEC-11</code> and
 Polygon delivery (<code>F-009</code>, <code>M-1</code>).
 <code>SPEC.md</code> is unchanged</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>0.6.2</td>
 <td>2026-10-29</td>
 <td>The plan binds <code>SPEC.md</code> v0.5.4 (amendment 0015:
@@ -201,7 +212,7 @@ keys off AWS KMS: <code>DEC-11</code> names the store per key, and
 <code>RISK-7</code> is closed. The signer gets one
 <code>SigningEngine</code> interface (<code>F-005</code>)</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>0.6.1</td>
 <td>2026-10-22</td>
 <td>The plan binds <code>SPEC.md</code> v0.5.3 (amendments 0013 and
@@ -216,7 +227,7 @@ replaced by a key held by an independent party before the vault is
 funded, the holder still to be decided, a hot key until then
 (<code>DEC-10</code>, <code>RISK-10</code>)</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>0.6.0</td>
 <td>2026-10-20</td>
 <td>@pandres95's rulings of 2026-10-15 to 2026-10-20;
@@ -237,7 +248,7 @@ float (<code>DEC-18</code>, <code>F-014</code>). Block-denominated
 constants use 41,739 blocks a day (<code>DEC-6</code>). New
 <code>RISK-9</code> and <code>RISK-10</code></td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>0.1.0 to 0.5.0</td>
 <td>2026-10-13</td>
 <td>The first draft (0.1.0), the plan rulings (0.2.0), the sign-off, the

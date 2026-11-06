@@ -16,7 +16,20 @@ mod common;
 
 use chrono::Duration;
 use common::*;
+use serde_json::{Value, json};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+/// The payloads of the event log's `kind` entries for transfer `id`, oldest first.
+async fn events(w: &World, id: i64, kind: &str) -> Vec<Value> {
+    sqlx::query_scalar(
+        "SELECT payload FROM event_log WHERE transfer_id = $1 AND kind = $2 ORDER BY seq",
+    )
+    .bind(id)
+    .bind(kind)
+    .fetch_all(&w.admin)
+    .await
+    .unwrap()
+}
 
 /// A refusal the core names no condition for (`dry_run_condition`): it is retried, and holds
 /// nothing.
@@ -192,6 +205,231 @@ async fn req_rv_1_a_later_attempt_whose_preparation_never_passes_goes_to_review_
     );
 }
 
+/// Attempt `attempt` is ordered and the endpoint is absent: the core cycles, nothing is prepared,
+/// no preparation row exists, refused or not. The destination's next final head (`next`) is then
+/// seen, the first after the order: the endpoint's time is counted from it.
+async fn endpoint_absent(w: &World, id: i64, attempt: i32, next: i64) {
+    for _ in 0..3 {
+        w.cycle(t0()).await;
+    }
+    assert!(order(&w.admin, id, attempt).await.is_some(), "an order");
+    head(&w.admin, ORIGIN, next).await;
+    assert_eq!(
+        w.count("SELECT count(*) FROM prepared_transactions").await,
+        // Attempt 1's own preparation, when attempt 2 is the one left unprepared.
+        i64::from(attempt - 1)
+    );
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_req_eo_3_a_first_attempt_the_endpoint_never_prepares_goes_to_review_at_its_deadline(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // Issue #48. The endpoint is down: no preparation row exists.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [7; 32]).await;
+    endpoint_absent(&w, id, 1, 23).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+
+    head(&w.admin, ORIGIN, 22 + BUDGET - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    // Past the deadline, at a final block: review from the state it is in.
+    head(&w.admin, ORIGIN, 22 + BUDGET + 10).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    let before: String = scalar(
+        &w.admin,
+        &format!("SELECT state_before_review::text FROM reviews WHERE transfer_id = {id}"),
+    )
+    .await;
+    assert_eq!(before, "Source-Final");
+    // Never a refund (REQ-RF-1) or a retry (REQ-RV-1) on its own.
+    let intents = w.count("SELECT count(*) FROM intents").await;
+    w.settle(t0() + Duration::days(30)).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, intents);
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_a_later_attempt_the_endpoint_never_prepares_goes_to_review_from_delivering(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [8; 32]).await;
+    deliver(&w, id, 1, t0()).await;
+    prove(&w.admin, id, 1, ORIGIN, 100).await;
+    endpoint_absent(&w, id, 2, 101).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    // The attempt's clock starts at the proof it rests on (block 100).
+    head(&w.admin, ORIGIN, 100 + BUDGET - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    head(&w.admin, ORIGIN, 100 + BUDGET + 10).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_eo_3_an_endpoint_absent_for_cycles_that_returns_just_before_the_deadline_delivers(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // The deadline is read on every cycle the endpoint is absent; one head short of it, the
+    // endpoint prepares and the delivery proceeds to a signed transaction, with no review.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [9; 32]).await;
+    endpoint_absent(&w, id, 1, 23).await;
+    head(&w.admin, ORIGIN, 22 + BUDGET - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    deliver(&w, id, 1, t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    assert_eq!(w.count("SELECT count(*) FROM signed_transactions").await, 1);
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_eo_3_an_order_written_after_the_attempts_deadline_gives_the_endpoint_a_full_budget(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // Issue #48, review must-fix: the source leg was final long ago (a long hold or wait for a
+    // declaration came first), so the attempt's own clock is past the deadline when the order is
+    // finally written. The endpoint has not yet had one cycle: the transfer is not in review.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let reference = [10; 32];
+    let r = redemption(&w.admin, 20, &reference, 700).await;
+    decide(&w.admin, r, "final", 22).await;
+    let late = 22 + 5 * BUDGET;
+    head(&w.admin, ORIGIN, late).await;
+    for _ in 0..3 {
+        w.cycle(t0()).await;
+    }
+    let id: i64 = scalar(
+        &w.admin,
+        &format!(
+            "SELECT id FROM transfers WHERE kind = 'withdrawal' AND on_chain_reference = '\\x{}'",
+            hex::encode(reference)
+        ),
+    )
+    .await;
+    assert!(order(&w.admin, id, 1).await.is_some(), "an order");
+    head(&w.admin, ORIGIN, late + 1).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    // Still inside the budget from the order: nothing, however long the source leg was final.
+    head(&w.admin, ORIGIN, late + BUDGET - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    // The endpoint comes back, prepares and the delivery proceeds.
+    deliver(&w, id, 1, t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_eo_3_an_order_written_after_the_deadline_still_has_one_when_the_endpoint_stays_absent(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let reference = [11; 32];
+    let r = redemption(&w.admin, 20, &reference, 700).await;
+    decide(&w.admin, r, "final", 22).await;
+    let late = 22 + 5 * BUDGET;
+    head(&w.admin, ORIGIN, late).await;
+    for _ in 0..3 {
+        w.cycle(t0()).await;
+    }
+    let id: i64 = scalar(
+        &w.admin,
+        &format!(
+            "SELECT id FROM transfers WHERE kind = 'withdrawal' AND on_chain_reference = '\\x{}'",
+            hex::encode(reference)
+        ),
+    )
+    .await;
+    head(&w.admin, ORIGIN, late + 1).await;
+    head(&w.admin, ORIGIN, late + BUDGET + 10).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_issue_48_a_pause_is_not_a_never_prepared_attempt_and_it_resumes_with_its_budget(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // The never-prepared deadline asks only when nothing holds the transfer (a gate's condition is
+    // its own wait, `unprepared_deadline`). A pause that lifts inside the budget leaves the
+    // attempt as it was: no review, and the endpoint still has the rest of its time.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [12; 32]).await;
+    endpoint_absent(&w, id, 1, 23).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    head(&w.admin, ORIGIN, 22 + BUDGET - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    exec(&w.admin, "DELETE FROM pauses").await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+    // The endpoint returns inside the budget: the delivery proceeds.
+    deliver(&w, id, 1, t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_issue_48_time_under_a_pause_counts_but_only_a_lifted_pause_is_read_as_never_prepared(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // PINS THE EXISTING CLOCK RULE, which this fix does not change: a pause "resumes by itself and
+    // never" sends a transfer to review (`Condition::blocks_delivery`), so under the pause nothing
+    // moves however long it lasts; and the time under a gate counts (`unprepared_deadline`), so
+    // once it lifts an endpoint that never prepared the order within the route's time is read as
+    // never having prepared it.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [13; 32]).await;
+    endpoint_absent(&w, id, 1, 23).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    w.settle(t0()).await;
+    head(&w.admin, ORIGIN, 22 + BUDGET + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+    exec(&w.admin, "DELETE FROM pauses").await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Needs-Review".into(), None));
+}
+
 /// Operator `by` records, as their own login, a resolution of transfer `id` into `to` resting on
 /// the final head (`network`, `block`).
 async fn resolution(w: &World, id: i64, to: &str, network: &str, block: i64, by: usize) -> i64 {
@@ -306,4 +544,224 @@ async fn inv_8_a_signed_attempt_that_is_not_proven_still_blocks_the_refund(
         ))
         .await;
     assert_eq!(refused, 1);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_9_a_preparation_arriving_after_the_review_is_not_used_by_the_resolution_delivery(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // Attempt 2 was ordered, the endpoint was absent, and the transfer went to review. The
+    // endpoint then writes a passing preparation for that old order. The operator's resolution
+    // into a delivery runs on attempt 2 again: it must not sign over bytes prepared before the
+    // evidence the operator ruled on.
+    let w = World::new(options, connect).await;
+    let id = second_attempt_never_prepared(&w, [12; 32]).await;
+    head(&w.admin, ORIGIN, 100 + BUDGET + 10).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    let (old, _) = order(&w.admin, id, 2).await.unwrap();
+    let stale = prepare(&w.admin, old, None).await;
+
+    let action = resolution(&w, id, "Delivering", ORIGIN, 100, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    w.settle(t0()).await;
+    // No signing intent over the late row; a new order waits for its own preparation.
+    let over_stale: i64 = w
+        .count(&format!(
+            "SELECT count(*) FROM intents WHERE transfer_id = {id} AND payload ->> 'prepared' = '{stale}'"
+        ))
+        .await;
+    assert_eq!(over_stale, 0, "a signing intent over a stale preparation");
+    let (fresh, _) = order(&w.admin, id, 2).await.unwrap();
+    assert!(fresh > old, "a new order for the resolution");
+    // Its own preparation is used as usual.
+    prepare(&w.admin, fresh, None).await;
+    w.settle(t0()).await;
+    let (s, _) = signing_intent(&w.admin, id, 2)
+        .await
+        .expect("a signing intent");
+    sign(&w, s).await;
+    w.settle(t0()).await;
+    // The resolution's delivery ran on the fresh order (the head is past this attempt's own
+    // deadline, so the signed attempt may be back in review by now).
+    let ran: i64 = w
+        .count(&format!(
+            "SELECT count(*) FROM transitions WHERE transfer_id = {id} \
+               AND to_state = 'Delivering' AND attempt = 2 AND manual_action_id = {action}"
+        ))
+        .await;
+    assert_eq!(ran, 1);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_eo_3_a_stalled_head_feed_does_not_shorten_the_endpoints_budget(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // Issue #48 review: the order is written and the destination's final heads then stop for
+    // longer than the route's time. The endpoint is counted from the first head the core sees
+    // after the order, not from the one before it, so the first head after the stall is no
+    // deadline: the endpoint prepares inside its own budget and nothing goes to review.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [15; 32]).await;
+    for _ in 0..3 {
+        w.cycle(t0()).await;
+    }
+    assert!(order(&w.admin, id, 1).await.is_some(), "an order");
+    let after = 22 + 2 * BUDGET;
+    head(&w.admin, ORIGIN, after).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+    head(&w.admin, ORIGIN, after + BUDGET - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    deliver(&w, id, 1, t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivering");
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_9_a_late_row_of_the_earlier_order_does_not_hide_the_resolutions_own(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // Order A (attempt 2) is never prepared and the transfer goes to review. A resolution into a
+    // delivery orders B. The endpoint writes B's row first and A's late row second, so A's has the
+    // higher id: the newest row of the attempt is the stale one. B's own row is still the one read,
+    // and the resolution signs over it, never over A's.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [14; 32]).await;
+    deliver(&w, id, 1, t0()).await;
+    prove(&w.admin, id, 1, ORIGIN, 100).await;
+    endpoint_absent(&w, id, 2, 101).await;
+    head(&w.admin, ORIGIN, 101 + BUDGET + 10).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    let (old, _) = order(&w.admin, id, 2).await.unwrap();
+
+    let action = resolution(&w, id, "Delivering", ORIGIN, 100, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    w.settle(t0()).await;
+    let (fresh, _) = order(&w.admin, id, 2).await.unwrap();
+    assert!(fresh > old, "a new order for the resolution");
+
+    let own = prepare(&w.admin, fresh, None).await;
+    let stale = prepare(&w.admin, old, None).await;
+    assert!(
+        stale > own,
+        "the late row of the earlier order is the newest"
+    );
+    w.settle(t0()).await;
+    let over = |row: i64| {
+        format!(
+            "SELECT count(*) FROM intents WHERE transfer_id = {id} AND payload ->> 'prepared' = '{row}'"
+        )
+    };
+    assert_eq!(w.count(&over(stale)).await, 0, "signed over the stale row");
+    assert_eq!(
+        w.count(&over(own)).await,
+        1,
+        "no signing intent over the order's own row"
+    );
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_9_a_late_row_of_the_earlier_order_does_not_hide_the_own_row_of_a_plain_retry(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // The same read with no resolution: attempt 2 of a plain retry has an order A, then an order
+    // B for the same attempt (the latest is the one read). The endpoint writes B's row first and
+    // A's late row second, so A's has the higher id. B's own row is read first and signed over;
+    // A's is never used, and nothing is read as never prepared because of it.
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [17; 32]).await;
+    deliver(&w, id, 1, t0()).await;
+    prove(&w.admin, id, 1, ORIGIN, 100).await;
+    endpoint_absent(&w, id, 2, 101).await;
+    let (old, _) = order(&w.admin, id, 2).await.unwrap();
+    sqlx::query(
+        "INSERT INTO intents (transfer_id, network, purpose, on_chain_reference, reference_scope, attempt, payload) \
+         SELECT transfer_id, network, purpose, on_chain_reference, reference_scope, attempt, payload \
+         FROM intents WHERE id = $1",
+    )
+    .bind(old)
+    .execute(&w.admin)
+    .await
+    .unwrap();
+    let (fresh, _) = order(&w.admin, id, 2).await.unwrap();
+    assert!(fresh > old, "a second order for the same attempt");
+
+    let own = prepare(&w.admin, fresh, None).await;
+    let stale = prepare(&w.admin, old, None).await;
+    assert!(
+        stale > own,
+        "the late row of the earlier order is the newest"
+    );
+    w.settle(t0()).await;
+    let over = |row: i64| {
+        format!(
+            "SELECT count(*) FROM intents WHERE transfer_id = {id} AND payload ->> 'prepared' = '{row}'"
+        )
+    };
+    assert_eq!(w.count(&over(stale)).await, 0, "signed over the stale row");
+    assert_eq!(
+        w.count(&over(own)).await,
+        1,
+        "no signing intent over the own row"
+    );
+    assert_eq!(w.state(id).await.0, "Delivering");
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_eo_3_a_resolutions_order_the_endpoint_never_prepares_pages_once_and_moves_nothing(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    // The transfer is in review, so the never-prepared deadline cannot send it there again; the
+    // resolution into a delivery would otherwise wait for a preparation that does not come, with
+    // nobody told. It pages once per order and changes no state.
+    let w = World::new(options, connect).await;
+    let log = PageLog::start();
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [16; 32]).await;
+    deliver(&w, id, 1, t0()).await;
+    prove(&w.admin, id, 1, ORIGIN, 100).await;
+    endpoint_absent(&w, id, 2, 101).await;
+    head(&w.admin, ORIGIN, 101 + BUDGET + 10).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+
+    let action = resolution(&w, id, "Delivering", ORIGIN, 100, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    w.settle(t0()).await;
+    let (fresh, _) = order(&w.admin, id, 2).await.unwrap();
+    let kind = "resolution-unprepared-alert";
+    let pages = || events(&w, id, kind);
+    // Inside the route's time from the first head after the order: nothing yet.
+    head(&w.admin, ORIGIN, 101 + BUDGET + 20).await;
+    w.settle(t0()).await;
+    head(&w.admin, ORIGIN, 101 + BUDGET + 20 + BUDGET - 10).await;
+    w.settle(t0()).await;
+    assert!(pages().await.is_empty(), "paged inside the route's time");
+    // Past it: one page, however many cycles follow.
+    let moves = w.count("SELECT count(*) FROM transitions").await;
+    head(&w.admin, ORIGIN, 101 + BUDGET + 20 + BUDGET + 10).await;
+    w.settle(t0()).await;
+    w.settle(t0()).await;
+    let paged = pages().await;
+    assert_eq!(paged.len(), 1, "paged once");
+    assert_eq!(paged[0]["order"], json!(fresh.to_string()));
+    assert_page(&log, kind, 1);
+    assert_eq!(w.state(id).await, ("Needs-Review".into(), None));
+    assert_eq!(w.count("SELECT count(*) FROM transitions").await, moves);
+    // The endpoint then prepares and the resolution runs.
+    prepare(&w.admin, fresh, None).await;
+    w.settle(t0()).await;
+    assert!(signing_intent(&w.admin, id, 2).await.is_some());
 }

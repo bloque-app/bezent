@@ -1313,6 +1313,33 @@ async fn req_rf_1_issue_35_a_new_attempt_is_withheld_beside_an_inclusion_on_the_
     assert_eq!(w.state(id).await.0, "Delivering");
 }
 
+/// REQ-RV-1, REQ-RF-1, issue #48: a new attempt that the endpoint never prepares, beside a standing
+/// inclusion on an origin network, is never ordered at all (withheld), so the never-prepared
+/// deadline cannot send it to review or to a refund over the inclusion.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_issue_48_a_never_prepared_attempt_beside_an_inclusion_is_withheld_not_reviewed(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, _signed) = payout_in_flight(&w, 73).await;
+    payout_included(&w, id, 30).await;
+    w.settle(t0()).await;
+    prove_replaced(&w.admin, id, 1, 25, 28).await;
+    head(&w.admin, ORIGIN, 28 + 5 * BUDGET).await;
+    for _ in 0..3 {
+        w.settle(t0()).await;
+    }
+    assert_eq!(w.state(id).await.0, "Delivered");
+    assert!(order(&w.admin, id, 2).await.is_none());
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+}
+
 /// REQ-RF-1, INV-16, review of the fix round of #35: the daily page of a hold is not measured on the
 /// destination's head alone. With the head frozen (its endpoint stalled) the hold would otherwise
 /// never page again; the core's own clock counts a day too, from the log, across a restart.
