@@ -68,7 +68,7 @@
 //! refuses to start. `max_walk` bounds how far one look walks back by parent hash: on a first start
 //! it must cover the blocks from `start_block` to the finalized head, or the backlog is a gap (the walk
 //! is kept in rungs, so an error late in it, or a restart, does not lose it). `archive_max_response_bytes`
-//! caps one answer of a source (16 MiB by default).
+//! caps one answer of a source (16 MiB by default; at least 8 MiB, to fit a `:code` proof).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -258,6 +258,12 @@ fn default_archive_max_response_bytes() -> u32 {
     16 * 1024 * 1024
 }
 
+/// The least `archive_max_response_bytes` accepted: the proof of Kreivo's `:code` comes in one
+/// answer, as hex. The code is about 2 MB (spec 134: 1,988,778 bytes, `fixtures/`), so about 4 MB
+/// of hex plus proof nodes; 8 MiB leaves it twice that to grow. Below it a source can never serve
+/// a runtime's code, every runtime not yet met is `Unavailable`, and the walk stalls on it.
+pub const MIN_ARCHIVE_MAX_RESPONSE_BYTES: u32 = 8 * 1024 * 1024;
+
 /// A history source's URL for logs: scheme, host and port only. Credentials (`user:pass@`), the
 /// path (some providers put the API key there) and the query are left out.
 pub fn source_name(url: &str) -> String {
@@ -354,8 +360,10 @@ impl Config {
         if self.watch_silence_ms == 0 {
             return Err("watch_silence_ms must be positive".into());
         }
-        if self.archive_max_response_bytes < 1024 {
-            return Err("archive_max_response_bytes must be at least 1024".into());
+        if self.archive_max_response_bytes < MIN_ARCHIVE_MAX_RESPONSE_BYTES {
+            return Err(format!(
+                "archive_max_response_bytes must be at least {MIN_ARCHIVE_MAX_RESPONSE_BYTES} (8 MiB): it must fit the proof of a runtime's :code (about 4 MB as hex), or the walk stalls on every new runtime"
+            ));
         }
         if let Some(u) = self
             .archive_rpc
@@ -610,12 +618,17 @@ mod tests {
     fn issue_49_the_response_cap_is_16_mib_and_bounded_below() {
         let mut c = sample();
         assert_eq!(c.archive_max_response_bytes, 16 * 1024 * 1024);
-        c.archive_max_response_bytes = 10;
+        assert!(c.archive_max_response_bytes >= MIN_ARCHIVE_MAX_RESPONSE_BYTES);
+        // The floor fits a `:code` proof: spec 134's code (fixtures) as hex, and as much again.
+        assert!(MIN_ARCHIVE_MAX_RESPONSE_BYTES as usize >= 2 * 2 * 1_988_778);
+        c.archive_max_response_bytes = MIN_ARCHIVE_MAX_RESPONSE_BYTES - 1;
+        let err = c.check().unwrap_err();
         assert!(
-            c.check()
-                .unwrap_err()
-                .contains("archive_max_response_bytes")
+            err.contains("archive_max_response_bytes") && err.contains("8388608"),
+            "{err}"
         );
+        c.archive_max_response_bytes = MIN_ARCHIVE_MAX_RESPONSE_BYTES;
+        assert!(c.check().is_ok());
     }
 
     #[test]
