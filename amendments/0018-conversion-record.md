@@ -8,7 +8,9 @@ SPDX-License-Identifier: CC-BY-4.0
 **Status:** proposed by the `F-010` helper, 2026-11-04; revised after review of pull request #69 (the exposure, option A1d, the
 proposal). **Ruled by @pandres95 in chat, 2026-11-05 (`d-cv-conversion-link`): A1b alone.** "And yes, A1b, please. Doing both
 doesn't make sense IMO." A1d is not taken. Applied to `SPEC.md` v0.5.5; built by issue #10 (migration 0120). The exposure
-below, and the choices listed under "Open after the ruling", stay **open**.
+below, and the choices listed under "Open after the ruling", stay **open**. The exposure is partly closed by amendment
+0026 (`d-requester-arrivals`, 2026-11-06: "Bind by sender"), which says which rows of the table below close; the test that
+pinned it, `requester_binding_today.rs`, is now `services/ingress/tests/bind_by_sender.rs`.
 **Target:** `SPEC.md` v0.5.4 (§5.10 `REQ-CV-1`, `REQ-CV-2`, `REQ-CV-6`; §5.4; §7.A `REQ-RQ-3`, `REQ-RQ-4`; §10
 `CND-AwaitingConversion`; `AC-A5.1`, `AC-A5.2`; §15)
 **Date:** 2026-11-04; ruled and applied 2026-11-05

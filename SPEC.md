@@ -1,7 +1,7 @@
 ---
 name: bezent
 summary: A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger's contract.
-spec_version: 0.5.8
+spec_version: 0.5.9
 status: draft
 date: 2026-11-06
 ---
@@ -15,13 +15,14 @@ It is normative and self-contained. It does not say how bezent is built, which t
 implement it, which networks it serves today, or why the project exists. `notes/` says why, and
 `notes/CONSTRAINTS-FOR-PLAN.md` says what the plan is expected to bind.
 
-Amendments 0001 to 0015, 0018, 0019 (A1d), 0020, 0021 (A1b), 0022 (A1b and A2a; A3 and A4 are not ruled) and 0024 are
+Amendments 0001 to 0015, 0018, 0019 (A1d), 0020, 0021 (A1b), 0022 (A1b and A2a; A3 and A4 are not ruled), 0024 and 0026 are
 applied (see `amendments/`).
 
 ### Change history
 
 | Version | Date | Change |
 |---|---|---|
+| 0.5.9 | 2026-11-06 | Amendment 0026 (decision item `d-requester-arrivals`, ruled by @pandres95 on the decision form: "Bind by sender"): each requester has declared senders, recorded by the operator, per origin network (`REQ-PN-3`, §2 "Declared sender"); a deposit binds only an arrival whose funder is one of the requesting requester's declared senders (`REQ-IN-3`, `REQ-RQ-3`), and is refused otherwise (`ERR-SenderNotDeclared`, `AC-A2.5`); an arrival no requester may bind stays an unassociated arrival (`REQ-IN-6`). A deposit naming a convertible arrival is checked on that arrival, and its conversion's output is bound through it (`REQ-CV-2`). Partly closes the exposure recorded in amendment 0018; what stays open is in amendment 0026. |
 | 0.5.8 | 2026-11-06 | Amendment 0021 (decision item `d-gate-sustained`, ruled by @pandres95 on the decision form: "24 hours"): "sustained" in V0's exit criteria is 24 consecutive hours of the reserve equation's evaluations at exactly zero divergence, a divergence restarting the window (§15). Amendment 0024 (`d-gate-scope`, ruled the same day: "As recommended"): the exit criteria gate only a release that moves value, the first release that lets a bridged asset carry value and each that adds an asset or a network to it; every other release needs its automated checks and the approval of one owner of the specification; a release declares which it is, and one that does not is refused (§15). No `REQ-*` changes. |
 | 0.5.7 | 2026-11-06 | Amendment 0022 (decision item `d-pause-0022`, ruled by @pandres95 on the decision form: "As recommended"): new work is everything before an attempt's first recorded signature, and an attempt with a recorded signature is in flight (`REQ-GV-1`, A1b), so a pause holds an attempt recorded before it that has no signature (§10 `CND-Paused`); the on-chain pause stays a person's act (A2a, no text). Amendment 0019 (decision item `d-payout-late-signing`, ruled the same day: "Leave pause time out", A1d): the time a payout is held under a pause or a cut-off, taken and left, does not count toward its attempt's deadline (§5.4, `REQ-GV-1`, `REQ-LM-1`, §10 `CND-Paused`, `CND-CutOff`). `NFR-2` and `NFR-3` are unchanged: latency is still measured end to end. |
 | 0.5.6 | 2026-11-06 | Amendment 0020 (decision item `d-never-prepared`, ruled by @pandres95 in the decision form, Yes): a delivery attempt whose preparation never happened (the endpoint is down, so no preparation row, refused or not, is written) goes to `Needs-Review` at the route's deadline, counted from the later of the attempt's own clock and the first final head of the destination network seen at or after the attempt was ordered, from the state it is in. No refund, no retry (`REQ-EO-3`, `REQ-RF-1`, `REQ-RV-1`). §5.2's `Needs-Review` row, §5.4's `Source-Final` and `Delivering`, `Delivered` rows and `REQ-RV-1` follow. |
@@ -250,6 +251,7 @@ One canonical name per concept. This document uses each term only in the sense g
 | **Route** | An (asset, origin network, direction) triple bezent serves, with its declared limits (`REQ-LM-1`). A venue route is (asset, from network, to network, venue). |
 | **Requester** | A system authorised to ask bezent for transfers. It decides what moves and where. It never decides whether value arrived. |
 | **Funder** | Whoever sends value to a reserve address. Never a caller of bezent. |
+| **Declared sender** | An account the operator records, for one requester and one origin network, as one that requester's value is sent from (`REQ-PN-3`). A deposit binds only an arrival whose funder, as its backend reports it, is one of the requesting requester's declared senders. |
 | **Beneficiary** | Whoever receives a delivery. Never a caller of bezent. |
 | **Deposit address** | *Withdrawn by amendment 0007 (A1): deposit addresses are the requester's (§1.6).* |
 | **Treasury** | The reserve address on an origin network: where bezent holds an asset's reserve, and from which it pays out. |
@@ -285,7 +287,7 @@ One canonical name per concept. This document uses each term only in the sense g
 
 | Party | Who | Authority | Interacts through |
 |---|---|---|---|
-| **Requester** | A system the operator authorises | Request deposits, convert at a reserve address within its role (`REQ-CV-7`), add an expiry to a redemption, relay an attested backend's payout instructions, and attest for an attested backend, each within declared routes. Never mint. Never declare an outcome on a public backend (`REQ-BE-5`) | Request, query and event surfaces (§7.A–C) |
+| **Requester** | A system the operator authorises | Request deposits of arrivals from its declared senders (`REQ-PN-3`), convert at a reserve address within its role (`REQ-CV-7`), add an expiry to a redemption, relay an attested backend's payout instructions, and attest for an attested backend, each within declared routes. Never mint. Never declare an outcome on a public backend (`REQ-BE-5`) | Request, query and event surfaces (§7.A–C) |
 | **Operator** | The party running the deployment | Custodian of every reserve. Holds the keys, through the custody capability (§4.4(c)). Owns the surplus | Operator surface (§7.D) |
 | **Governance** | The holders of administrative roles on the on-chain component and on reserve addresses | Pause, unpause, set bounds, upgrade, rotate keys: each a separate role (`REQ-GV-*`) | The issuing network, and the operator surface |
 | **Ledger** | A ledger of record on the issuing network | None over bezent. bezent never calls it (`REQ-LG-1`) | A requester's account on the issuing network (§7.G) |
@@ -299,6 +301,11 @@ authenticated MUST NOT be accepted.
 **`REQ-PN-2`** Requester authority MUST be scoped by kind: requesting deposits, adding a redemption's extras
 (withdrawals, `REQ-RQ-4`), requesting refunds of unassociated arrivals (`REQ-RQ-6`), and attesting for an attested
 backend are separate grants.
+
+**`REQ-PN-3`** Each requester MUST declare its senders, per origin network, and the operator records the declaration:
+the accounts that requester's value is sent from (§2, "Declared sender"). A requester's authority to request
+deposits extends only to arrivals whose funder, as the backend reports it, is one of its declared senders
+(`REQ-IN-3`). No request declares, adds or asserts a sender (`REQ-RQ-7`).
 
 ---
 
@@ -722,8 +729,9 @@ the block at that height still has the hash observed (`REQ-OB-2`).
 
 **`REQ-IN-3`** A final arrival of an admitted token at a reserve address MUST wait as an unassociated
 arrival (`CND-Unassociated`) until a requester binds it with a deposit request that names its coordinate
-(`REQ-RQ-3`). The deposit then begins at `Source-Final`, with a bridge reference derived deterministically
-from the coordinate.
+(`REQ-RQ-3`). Only a requester one of whose declared senders on that network is the arrival's funder may bind it
+(`REQ-PN-3`); a request by any other is refused (`ERR-SenderNotDeclared`) and binds nothing. The deposit then
+begins at `Source-Final`, with a bridge reference derived deterministically from the coordinate.
 
 **`REQ-IN-4`** A deposit MUST be minted only against one final, unconsumed arrival of the same token
 family and the same amount, and the mint MUST carry that arrival's on-chain reference (`INV-2`, `INV-6`).
@@ -732,7 +740,8 @@ family and the same amount, and the mint MUST carry that arrival's on-chain refe
 the requester's, from its own account.
 
 **`REQ-IN-6`** An arrival that cannot become a deposit (a token not admitted, an amount outside the route's
-bounds, value with no matching deposit request, venue delivery or surplus contribution) MUST be recorded as an
+bounds, value with no matching deposit request, value from a funder no requester declared as a sender (`REQ-PN-3`),
+venue delivery or surplus contribution) MUST be recorded as an
 **unassociated arrival** with an owner (`CND-Unassociated`). An arrival with no deposit request by the route's
 deadline stays `CND-Unassociated` with its owner. It MUST NOT be absorbed into reserve, minted or dropped. Releasing it is a refund request by a requester with the destination it supplies,
 or a recorded surplus contribution by the operator, each with a second approver.
@@ -825,7 +834,8 @@ becomes the output, and the convertible arrival is recorded against the deposit 
 arrival and the output are each consumed once (`INV-2`). Such a deposit records the convertible arrival and the
 converted output, with both amounts. bezent MUST verify that the output is a final conversion output at the
 reserve address the convertible arrived at, in a token admitted for the deposit's asset, and not consumed; that
-the arrival fed that conversion is the requester's word, as its price and slippage are (`REQ-CV-5`).
+the arrival fed that conversion is the requester's word, as its price and slippage are (`REQ-CV-5`). The declared
+sender of `REQ-PN-3` is checked on the convertible arrival, when the deposit binds it.
 
 **`REQ-CV-3`** *Withdrawn by amendment 0007 (A2), with `AC-B4.1` and `AC-B4.2`: every payout is in the
 origin token; a requester that wants another token converts what it receives.*
@@ -872,6 +882,10 @@ deposit request names once it cannot be taken back, and not before.
 - `AC-A2.3` Given an observation that stops matching before finality, Then it is withdrawn, and nothing is
   minted (`REQ-IN-7`).
 - `AC-A2.4` *Withdrawn by amendment 0007 (A1).*
+- `AC-A2.5` Given a final arrival whose funder is not one of my declared senders on its network, Then my
+  deposit request naming it is refused (`ERR-SenderNotDeclared`), and binds nothing;
+  an arrival no requester declared stays an unassociated arrival (`REQ-PN-3`,
+  `REQ-IN-3`, `REQ-IN-6`).
 
 **`US-A3`** *Withdrawn by amendment 0001 (A9), with `AC-A3.1` and `AC-A3.2`.*
 
@@ -1032,7 +1046,8 @@ answered. The answer carries bezent reference and the state.
 
 **`REQ-RQ-3`** **Request a deposit:** request reference, the coordinate of a final arrival at a reserve
 address (of an admitted token, or of a convertible token, `REQ-CV-1`), the destination, and the refund
-destination. A coordinate is consumed once (`INV-2`).
+destination. A coordinate is consumed once (`INV-2`). The arrival's funder MUST be one of the requester's declared
+senders on its network (`REQ-PN-3`); otherwise the request is refused (`ERR-SenderNotDeclared`).
 
 **`REQ-RQ-4`** **Request a withdrawal:** a redemption is the request. The requester MAY add, by the
 redemption's reference, an expiry, and for an attested backend the relayed instructions (`REQ-RQ-9`). A
@@ -1364,6 +1379,7 @@ The layers are:
 | `ERR-SourceNotFound` | The coordinate named does not hold a movement bezent can bind |
 | `ERR-SourceMismatch` | The movement at the coordinate differs in token, amount or recipient from the request |
 | `ERR-SourceConsumed` | The source leg or funding was already bound to a transfer (`INV-2`) |
+| `ERR-SenderNotDeclared` | The arrival's funder is not one of the requester's declared senders on its network (`REQ-PN-3`, `REQ-IN-3`) |
 | `ERR-InvalidDestination` | The destination or refund destination is malformed for its network |
 | `ERR-Overloaded` | bezent cannot take more work within budget. Retryable (`REQ-LM-4`) |
 | `ERR-Malformed` | The request does not parse, or lacks a field its kind requires |

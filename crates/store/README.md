@@ -101,14 +101,14 @@ and no role may DELETE or TRUNCATE anything but the dispatcher's own condition h
 | `webhook_secrets`, `webhook_transfer_urls`, `webhook_condition_urls` | ingress |
 | `webhook_deliveries`, `webhook_condition_holds` (and DELETE), `webhook_cursor(after)` UPDATE, `webhook_deliveries(state, attempts, next_attempt_at, leased_until, last_status, last_error, finished_at)` UPDATE | webhook dispatcher |
 | `manual_actions(kind, transfer_id, to_state, network, block_number, block_hash, block_time, justification)`, `manual_approvals(action_id, justification)`, `ledger_accounts(network, address, kind, reason)`; EXECUTE `operator_pause`, `operator_request_unpause`, `operator_approve_unpause`, `operator_record` (0091: the only way an operator pauses, lifts a pause or records an administrative act) | operators |
-| `networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `endpoint_scopes`, `evm_endpoint_networks` | nobody: the migration owner's declarations |
+| `networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `requesters`, `requester_grants`, `requester_credentials`, `requester_senders`, `surplus_funding_addresses`, `endpoint_scopes`, `evm_endpoint_networks` | nobody: the migration owner's declarations |
 
 Who **reads** what (SELECT):
 
 | Role | Reads |
 |---|---|
 | core | every record but `requester_credentials`, `requesters`, `requester_grants` and the webhooks' tables; `late_mint_checks` (0075, 0076) it reads and settles (`checked_at`, `failures`, `held_cycles`, `settled_at`, `verdict` only: the store queues, nothing deletes) |
-| ingress | the declarations (`networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `pauses`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `ledger_accounts_listed`), the requests (`intake`, `intake_answers`, `relayed_instructions`), `transfers`, `transitions`, `attempt_milestones`, `observations`, `observation_outcomes`, `event_log`, `event_log_head`, and the views `transfer_status`, `event_log_position`, `book_balances`; of the webhooks' tables, `webhook_deliveries` and the unsealed columns of the secrets and URLs. **No** intent, signature, signed bytes, proof, reading, book entry or posting, or reserve record (the `book_balances` view gives it the balances only) |
+| ingress | the declarations (`networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `pauses`, `requesters`, `requester_grants`, `requester_credentials`, `requester_senders`, `surplus_funding_addresses`, `ledger_accounts_listed`), the requests (`intake`, `intake_answers`, `relayed_instructions`), `transfers`, `transitions`, `attempt_milestones`, `observations`, `observation_outcomes`, `event_log`, `event_log_head`, and the views `transfer_status`, `event_log_position`, `book_balances`; of the webhooks' tables, `webhook_deliveries` and the unsealed columns of the secrets and URLs. **No** intent, signature, signed bytes, proof, reading, book entry or posting, or reserve record (the `book_balances` view gives it the balances only) |
 | Kreivo endpoint, EVM endpoint | (the EVM endpoint also `evm_endpoint_networks`, which logins record which EVM network, migration 0056) `networks`, `assets`, `admitted_tokens`, `reserves`, `endpoint_scopes`, `intents`, `signatures`, their own records (`observations`, `observation_outcomes`, `observation_ranges`, `observation_gaps`, `observation_watermarks`, `final_heads`, `prepared_transactions`, `signed_transactions`, `non_execution_proofs`, `reserve_readings`; the EVM endpoint also `fee_position_readings`) and `event_log`; the Kreivo endpoint also `observation_walk_anchors` (0052: blocks of a long history walk, so it resumes). **No** transfer, request or book |
 | webhook dispatcher | `event_log`, `event_log_head`, `transfers`, `intake`, `intake_answers`, `requester_grants`, and the webhooks' tables, sealed columns included |
 | signer | `intents` (the signing intent and the core's order), `prepared_transactions`, `signatures`, and since 0049 `admitted_tokens` and `signed_transactions(id, intent_id)` (to compare the bytes it decodes with the core's order: the token an asset is paid in, a cancel's target) and `event_log(seq)` (the position of an alert it appends); nothing else |
@@ -120,7 +120,7 @@ Who may **call** what (EXECUTE; the functions that run as the owner are marked *
 | Role | Calls |
 |---|---|
 | core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
-| ingress | `source_bindable`, `funding_arrival`, `bezent_writer_holds` |
+| ingress | `source_bindable`, `funding_arrival`, `sender_declared` (0135), `bezent_writer_holds` |
 | Kreivo endpoint, EVM endpoint | `bezent_writer_holds`, `bezent_endpoint_writer`, `bezent_evm_endpoint_writer`, `bezent_row_network`, `observation_kind_on_network`, `observation_kind_for_event`, `observation_writer_covers` (the guards' helpers, which run as the inserting login) |
 | signer | `attempt_gate_open` *definer*, `pause_holds_intent` *definer* (0125: whether a pause holds a signing intent whose attempt has no signature, amendment 0022 A1b), `statement_place_refusal` *definer* |
 | operators | `ops_observables` *definer* (0090), `source_bindable`, `funding_arrival`, `one_business_day_after`, `operator_pause` *definer*, `operator_request_unpause` *definer*, `operator_approve_unpause` *definer*, `operator_record` *definer* |
@@ -167,6 +167,14 @@ The audit of PR #56 added these (0049), for every login but the owner:
 - A bound deposit's destination is on the issuing network and its refund destination on its arrival's
   network; an unassociated arrival's refund pays out on the arrival's network; neither is accepted
   otherwise.
+
+Since 0135 (amendment 0026, `d-requester-arrivals`), whoever writes it, the owner included: the answer that binds a
+deposit to its request (no error, not a conversion's answer) is refused unless the observation at the deposit's source
+was sent from one of the request's requester's declared senders on that network (`requester_senders`;
+`sender_declared()` compares without case on a network of address format `evm`, exactly otherwise, and a movement with
+no sender matches nothing). The ingress refuses such a request first, with `ERR-SenderNotDeclared`. A transfer carries no
+requester, so the answer is where the store can check it; the requester a request names is the ingress's to
+authenticate (`REQ-PN-1`), so this backs the ingress's rule and does not defend against a login holding its role.
 
 An attempt that was ordered and never signed (issue #25, 0051) stood in the way of a withdrawal's refund for
 good: it has an intent and, there being no signed transaction, no proof of non-execution to record. The core
@@ -295,6 +303,27 @@ stop working as soon as it runs. As the migration owner, on the release's store:
    already held `bezent_evm_endpoint` when 0056 ran was mapped to **every** EVM origin network declared at that
    moment; delete the surplus rows (`DELETE FROM evm_endpoint_networks WHERE login = '…' AND network <> '…'`) so
    each login keeps only its own. Other services read nothing of this table.
+   **Each requester needs its senders** (migration 0135, amendment 0026, `REQ-PN-3`). From 0135 on, a deposit binds only
+   an arrival sent from one of its requester's declared senders; until a requester has a row for a network, **every**
+   deposit it requests there is refused `ERR-SenderNotDeclared`. As the migration owner, insert one row per requester,
+   origin network and sending address, **before starting the ingress** on a store that 0135 has just migrated:
+
+   ```sql
+   -- deploy: one row per requester, origin network and address its value is sent from
+   INSERT INTO requester_senders (requester, network, address) VALUES
+       ('<requester>', '<origin network>', '<0x… sending address>'),
+       ('<requester>', '<origin network>', '<0x… another sending address>');
+   ```
+
+   A sender is the address the token moved out of, as the network's endpoint records it (`observations.sender`): on an
+   EVM network the `from` of the ERC-20 `Transfer` log, compared without regard to case. That is the swept address for a
+   sweep by `transferFrom`, and a Safe's or a router's own address for a transfer it makes from its own balance; it is
+   never the transaction's signer as such. Keep the senders of two requesters **disjoint** (for example Bloque Test's and
+   Bloque's): an address declared for both lets either claim the other's arrivals from it (amendment 0026, Open 2). Do
+   not declare a reserve, a venue's pool or router, or any contract many parties send through: every arrival from it
+   becomes the declaring requester's. An arrival from an undeclared sender stays unassociated (`REQ-IN-6`) and binds once
+   its sender is declared for its requester. To withdraw a sender, `DELETE FROM requester_senders WHERE requester = '…'
+   AND network = '…' AND address = '…'`; deposits already bound stay bound. Other services read nothing of this table.
 4. **Make each operator's login** (one per person, below) and bring it to `bezent_operator` the same way.
 5. **Check** every login (the query at the end) and **start** the services. Each runs its own check
    before it serves and refuses to start, saying why, if anything is left.

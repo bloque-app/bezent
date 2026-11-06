@@ -701,7 +701,9 @@ impl Bed {
              INSERT INTO evm_endpoint_networks (login, network) VALUES ('{evm_login}', '{POLYGON}'); \
              INSERT INTO requesters (requester) VALUES ('swaps'); \
              INSERT INTO requester_grants (requester, grant_kind) VALUES \
-               ('swaps', 'deposit'), ('swaps', 'withdrawal'), ('swaps', 'refund');"
+               ('swaps', 'deposit'), ('swaps', 'withdrawal'), ('swaps', 'refund'); \
+             INSERT INTO requester_senders (requester, network, address) VALUES \
+               ('swaps', '{POLYGON}', '{DEPOSITOR}');"
         ))
         .execute(&admin)
         .await

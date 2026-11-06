@@ -56,7 +56,7 @@ use tokio::sync::Mutex;
 
 use self::chain::{Block, Observed, hex0x};
 use self::standin::Lane;
-use crate::setup::{self, ASSET, ISSUING, ORIGIN, SERVED};
+use crate::setup::{self, ASSET, ISSUING, ORIGIN, SERVED, TEST_SENDER};
 
 /// The shortest driver token taken.
 pub const MIN_TOKEN: usize = 16;
@@ -293,9 +293,7 @@ impl Driver {
         } else {
             ("OtherArrival", "other_arrival")
         };
-        let sender = body
-            .sender
-            .unwrap_or_else(|| "0x00000000000000000000000000000000000000de".to_owned());
+        let sender = body.sender.unwrap_or_else(|| TEST_SENDER.to_owned());
         let block = chain::new_block(&mut tx, ORIGIN, 1).await?;
         chain::observe(
             &mut tx,

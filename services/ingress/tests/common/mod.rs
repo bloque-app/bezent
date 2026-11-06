@@ -45,6 +45,10 @@ pub const CAPACITY: i64 = 100;
 
 /// The credentials of the seeded requesters: `alpha` holds every grant, `beta` only deposits,
 /// `gamma` none.
+/// The sender of the fixtures' arrivals, declared for alpha and for beta (`REQ-PN-3`, amendment
+/// 0026): a deposit binds only an arrival from one of its requester's declared senders. The tests of
+/// that rule declare senders of their own.
+pub const FUNDER: &str = "0xfunder";
 pub const ALPHA: &str = "alpha-k1.alpha-secret-0123456789";
 pub const BETA: &str = "beta-k1.beta-secret-0123456789";
 pub const GAMMA: &str = "gamma-k1.gamma-secret-0123456789";
@@ -101,6 +105,8 @@ pub async fn seed(pool: &PgPool) {
              INSERT INTO requester_grants (requester, grant_kind) VALUES \
                ('alpha', 'deposit'), ('alpha', 'withdrawal'), ('alpha', 'refund'), ('alpha', 'attest'), \
                ('beta', 'deposit'); \
+             INSERT INTO requester_senders (requester, network, address) VALUES \
+               ('alpha', '{ORIGIN}', '{FUNDER}'), ('beta', '{ORIGIN}', '{FUNDER}'); \
              {} {} {}",
             credential("alpha", ALPHA),
             credential("beta", BETA),
@@ -167,7 +173,7 @@ pub fn arrival_seen(amount: u64) -> Seen<'static> {
     Seen {
         token: TOKEN,
         amount,
-        sender: "0xfunder",
+        sender: FUNDER,
         recipient: RESERVE,
         reference: None,
         kind: Some("arrival"),
@@ -190,7 +196,7 @@ pub async fn observe(
         Seen {
             token,
             amount,
-            sender: "0xfunder",
+            sender: FUNDER,
             recipient,
             reference: None,
             kind: Some("arrival"),
