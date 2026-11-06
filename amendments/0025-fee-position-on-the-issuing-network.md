@@ -41,7 +41,8 @@ configuration holds the alert floor, were the plan's to decide and were open (`F
 ## What the ruling does not say
 
 - **An unknown or stale reading** (a network with a floor whose fee position cannot be read) raises no page of its own.
-  It is the missing-data alarm on `fee_position_amount` and the growing `fee_position_age_seconds` that catch it
+  **While a reading stays unknown the core does not page, so the infrastructure alarm on `fee_position_age_seconds` is
+  required before value moves.** It is the missing-data alarm on `fee_position_amount` and the growing `fee_position_age_seconds` that catch it
   (`deploy/runbooks/alerts.md`). A reviewer who wants a page for it adds a kind.
 - **A network with no floor** is logged at start and has no page; the core does not refuse to start, so that a
   deployment's configuration can be updated after the release that adds the setting.

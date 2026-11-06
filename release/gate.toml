@@ -4,6 +4,9 @@
 # F-013: what the release gate (tools/ci/release_gate.py, .github/workflows/release-gate.yml) requires. Reviewed by
 # the spec owner (CODEOWNERS). Read the header of release_gate.py first.
 
+# One list serves both release classes, as built and pending the owner's ruling (amendment 0024, open): an ordinary
+# release is held to it too, so it cannot pass until the self-hosted pool exists.
+#
 # Each check below must have succeeded on the release commit itself. A squash merge carries none of its pull
 # request's runs, and a workflow filtered by path does not run on a commit that touches none of them, so the
 # release procedure dispatches those workflows (contracts, evm-contracts, e2e-evm, e2e-zombienet) on the release

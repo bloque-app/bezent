@@ -9,7 +9,8 @@ SPDX-License-Identifier: CC-BY-4.0
 `SPEC.md` v0.5.8 (§15, release scope) and `PLAN.md` v0.6.7 (`DEC-19`), and built in `tools/ci/release_gate.py`.
 **Target:** `SPEC.md` v0.5.7 (§15, release scope); `PLAN.md` `DEC-19`
 **Date:** 2026-11-06
-**Needs:** nothing further. Numbered 0024 because 0023 is the last on `develop`, and 0016 and 0017 are held by pull
+**Needs:** the owner's ruling on the two open points below (the check list shared by both classes, and the criteria map
+for an ordinary release); the rest is ruled. Numbered 0024 because 0023 is the last on `develop`, and 0016 and 0017 are held by pull
 request #66.
 **Rationale in one line:** §15 and `DEC-19` describe one release, the first, and the gate was built to ask every
 release for the evidence of that one: a month of runbook exercises, a test-bed window and a 48-hour soak for a change
@@ -59,7 +60,7 @@ of what was proven before value moved.
 
 ### What is left as it was, and what the ruling does not say
 
-- The two lists the ruling does not settle, and how they were left: an ordinary release is held to the **same list of
+- **Open, pending the owner's ruling:** the two lists the ruling does not settle, and how they are built meanwhile: an ordinary release is held to the **same list of
   checks** as a value-moving one (so while the self-hosted pool is not configured, neither can pass), and it does
   **not** have to show the criteria map free of exceptions and known-unmet entries, since the map itself is green on a
   pull request with them. A reviewer who wants either tightened changes `gate.toml`.

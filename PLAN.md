@@ -583,10 +583,12 @@ end-to-end suite being green and every runbook exercised.**
   24 consecutive hours (`d-gate-sustained`, amendment 0021; a divergence restarts the window); every final source leg
   delivered, refunded, or held in a named condition with an owner; and every runbook exercised.
 - **Which releases the gate binds in full** (`d-gate-scope`, amendment 0024, SPEC §15). The full gate (the exit criteria,
-  the runbook exercises, the soak, a criteria map with no exception or known-unmet entry, and the sign-off of the spec
-  owner and a maintainer) applies only to a release that moves value: the first release of bUSDC, and each new asset or
-  network. Every other release needs the checks of `release/gate.toml` green on its commit and one spec owner's
-  sign-off. The class is the top-level `class` of `release/evidence.toml`, `"value-moving"` or `"ordinary"`; the gate
+  the runbook exercises, the soak and the sign-off of the spec owner and a maintainer) applies only to a release that
+  moves value: the first release of bUSDC, and each new asset or network. Every other release needs the checks of
+  `release/gate.toml` green on its commit and one spec owner's sign-off. Two points amendment 0024 does not rule are
+  **as built, pending the owner's ruling (amendment 0024, open)**: a criteria map with no exception or known-unmet
+  entry blocks a value-moving release only (`release_gate.py`, `mechanical_map`), and both classes share one list of
+  checks in `gate.toml`, so an ordinary release cannot pass until the self-hosted pool exists. The class is the top-level `class` of `release/evidence.toml`, `"value-moving"` or `"ordinary"`; the gate
   reads nothing else for it, refuses a release with no class or an unknown one (it never defaults to ordinary), and
   takes what each class needs from `gate.toml`. The evidence is one pull request approved by the spec owner, so the
   class is attested by review. The soak is a requirement of every value-moving release.

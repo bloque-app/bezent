@@ -128,7 +128,7 @@ network, a floor in the smallest unit as a string. Each minute the core compares
 floor, exactly (as the store's text, not the metric's float), and pages `fee-position-low` when it is below: once on
 crossing, then once a day while it stays below, and at once again after a recovery (`fee-position-recovered` in the
 `event_log`). The runbook is `pages/float-top-up.md`. A network with no floor is logged once at start and never paged on. An
-unknown or missing reading is not low and raises no page of its own: **the missing-data alarm on `fee_position_amount` and the
+unknown or missing reading is not low and raises no page of its own, so **while a reading stays unknown the core does not page and the infrastructure alarm on `fee_position_age_seconds` is required before value moves**: **the missing-data alarm on `fee_position_amount` and the
 growing `fee_position_age_seconds` are its signals**, and a delivery that already could not pay shows as `fee_short_transfers`
 (`CND-FeeShort`).
 
