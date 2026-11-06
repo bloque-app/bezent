@@ -111,6 +111,7 @@ impl FakeChain {
                 hash: genesis,
             },
             parent: [0; 32],
+            code_updated: false,
         };
         FakeChain {
             state: Mutex::new(State {
@@ -327,6 +328,7 @@ impl FakeChain {
                     hash: hash_of(number, &parent.header.block.hash),
                 },
                 parent: parent.header.block.hash,
+                code_updated: false,
             },
             time_ms: time_of(number),
             extrinsics: Vec::new(),

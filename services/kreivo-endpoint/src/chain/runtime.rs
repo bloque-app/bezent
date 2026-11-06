@@ -22,13 +22,15 @@
 //!   ([`metadata_from_code`]). The code's own runtime version must be the one
 //!   `System::LastRuntimeUpgrade` names, or nothing is decoded.
 //!
-//! Each runtime's metadata is kept by spec version, seeded with the light client's own (fetched by
-//! subxt through smoldot, which ran it on code it verified). A block whose runtime cannot be told,
+//! Each runtime's metadata is kept by the hash of its proven code, never by spec version: a code swap
+//! that keeps the version would otherwise be served the old metadata. A block's code is carried from
+//! its parent's while no header between them says `:code` was stored, and read again otherwise
+//! ([`Runtimes`]). A block whose runtime cannot be told,
 //! fetched or run is `Invalid` or `Unavailable`: a visible gap, never a guess (`REQ-OB-3`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use parity_scale_codec::{Compact, Decode, DecodeAll};
 use smoldot::executor::{
@@ -40,7 +42,8 @@ use smoldot::executor::{
 use smoldot::trie::TrieEntryVersion;
 use subxt::Metadata;
 
-use super::{BlockRef, ChainError, ChainResult};
+use super::{BlockRef, ChainError, ChainResult, Header};
+use crate::kreivo::blake2_256;
 
 /// `Timestamp::Now`: `twox128("Timestamp") ‖ twox128("Now")`.
 pub const TIMESTAMP_NOW: [u8; 32] =
@@ -58,7 +61,7 @@ pub const HEAP_PAGES: &[u8] = b":heappages";
 
 /// The metadata version asked of a runtime; subxt also reads 14 and 16.
 const METADATA_VERSION: u32 = 15;
-/// The most bytes a runtime's code may decompress to (smoldot's own bound for `:code`).
+/// The most bytes of `:code` loaded, as stored (before any decompression).
 const MAX_CODE: usize = 50 * 1024 * 1024;
 
 const fn hex32(s: &str) -> [u8; 32] {
@@ -139,6 +142,9 @@ pub fn metadata_from_code(
             RuntimeCall::NextKey(next) if next.child_trie().is_none() && !next.branch_nodes() => {
                 next.inject_key(None::<std::iter::Empty<Nibble>>)
             }
+            RuntimeCall::NextKey(next) if next.child_trie().is_none() => {
+                return Err(invalid("the metadata call asked for a trie's branch nodes"));
+            }
             RuntimeCall::StorageGet(_) | RuntimeCall::NextKey(_) => {
                 return Err(invalid("the metadata call read a child trie"));
             }
@@ -206,44 +212,146 @@ pub trait History {
         keys: &[Vec<u8>],
     ) -> impl Future<Output = ChainResult<Vec<Option<Vec<u8>>>>> + Send;
 
-    /// The parent of `at`, from its verified header.
-    fn parent(&self, at: &BlockRef) -> impl Future<Output = ChainResult<BlockRef>> + Send;
+    /// The verified header of `at`; it is refused unless it is `at`'s.
+    fn block_header(&self, at: &BlockRef) -> impl Future<Output = ChainResult<Header>> + Send;
 }
 
-/// Each runtime's metadata met so far, by spec version.
+/// A hash of a runtime's code: BLAKE2b-256 of the proven `:code`.
+type CodeHash = [u8; 32];
+
+/// How many blocks' code is remembered (about a day of Kreivo's blocks).
+const REMEMBERED_BLOCKS: usize = 16_384;
+/// Blocks after one whose header carries `RuntimeEnvironmentUpdated` in which the code in force may
+/// still change: from system version 3 on, `:code` is replaced in `on_finalize` two blocks after
+/// the digest is deposited. Until then, a block's code is read rather than carried forward.
+const SETTLE: u8 = 3;
+
+/// A runtime met: what its code is, as run here.
+struct Met {
+    id: RuntimeId,
+    metadata: Metadata,
+}
+
+/// The code a block was executed by, as far as it is known.
+#[derive(Clone, Copy)]
+struct Ran {
+    code: CodeHash,
+    /// Blocks since the last one at or before this block with `RuntimeEnvironmentUpdated`
+    /// (0 is this block), at most [`SETTLE`]. Only at `SETTLE` is the next block's code known to
+    /// be this one's.
+    quiet: u8,
+}
+
+#[derive(Default)]
+struct Kept {
+    /// Each runtime's metadata, by the hash of its proven code.
+    by_code: HashMap<CodeHash, Met>,
+    /// The code each recent block was executed by, by block hash.
+    ran: HashMap<[u8; 32], Ran>,
+    order: VecDeque<[u8; 32]>,
+}
+
+/// Each runtime's metadata met so far, by the hash of its code.
+///
+/// The spec version is not the key: a code swap that keeps it (`set_code_without_checks`,
+/// `authorize_upgrade` without the version check) does not touch `System::LastRuntimeUpgrade`, so
+/// a block's runtime could not be told from it. The code is what decides, and reading it at every
+/// block (about 2 MB each) is not affordable, so the code of a block is carried from its parent's
+/// while neither has a `RuntimeEnvironmentUpdated` digest in the verified header (frame-system
+/// deposits it wherever it stores `:code`, `:pending_code` or the heap pages: `set_code`,
+/// `set_code_without_checks`, `apply_authorized_upgrade`, and a parachain's applied validation
+/// code, which goes through `update_code_in_storage`). A raw `set_storage` of `:code` skips it; that
+/// is root, and is not covered. The spec name and version of the code (and so of the block's
+/// `System::LastRuntimeUpgrade`) are checked on every use, hit or not.
+#[derive(Default)]
 pub struct Runtimes {
-    by_spec: Mutex<HashMap<u32, Metadata>>,
+    kept: Mutex<Kept>,
 }
 
 impl Runtimes {
-    /// Knowing only `spec_version`'s `metadata`: the light client's, which smoldot ran on code
-    /// it verified.
-    pub fn seeded(spec_version: u32, metadata: Metadata) -> Runtimes {
-        Runtimes {
-            by_spec: Mutex::new(HashMap::from([(spec_version, metadata)])),
+    /// Nothing known: the first block met reads its code.
+    pub fn new() -> Runtimes {
+        Runtimes::default()
+    }
+
+    fn kept(&self) -> MutexGuard<'_, Kept> {
+        self.kept.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The metadata of `code` if it was met, checked against `runtime`.
+    fn met(&self, code: &CodeHash, runtime: &RuntimeId) -> ChainResult<Option<Metadata>> {
+        let kept = self.kept();
+        let Some(met) = kept.by_code.get(code) else {
+            return Ok(None);
+        };
+        if met.id != *runtime {
+            return Err(invalid(format!(
+                "the code in force is {} {}, but the block's System::LastRuntimeUpgrade names {} {}",
+                met.id.spec_name, met.id.spec_version, runtime.spec_name, runtime.spec_version
+            )));
+        }
+        Ok(Some(met.metadata.clone()))
+    }
+
+    fn remember(&self, at: &BlockRef, ran: Ran) {
+        let mut kept = self.kept();
+        if kept.ran.insert(at.hash, ran).is_none() {
+            kept.order.push_back(at.hash);
+            if kept.order.len() > REMEMBERED_BLOCKS
+                && let Some(old) = kept.order.pop_front()
+            {
+                kept.ran.remove(&old);
+            }
         }
     }
 
-    fn known(&self, spec_version: u32) -> Option<Metadata> {
-        self.by_spec
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&spec_version)
-            .cloned()
-    }
-
-    /// The metadata of `runtime`, the runtime that executed block `at`: kept, or else run from the
-    /// code in the state of `at`'s parent (see the module documentation) and kept.
+    /// The metadata of `runtime`, the runtime that executed block `at`: from the code known to have
+    /// executed it, or else run from the code in the state of `at`'s parent (see the module
+    /// documentation) and kept.
     pub async fn metadata(
         &self,
         history: &impl History,
         at: &BlockRef,
         runtime: &RuntimeId,
     ) -> ChainResult<Metadata> {
-        if let Some(m) = self.known(runtime.spec_version) {
+        let known = self.kept().ran.get(&at.hash).copied();
+        if let Some(ran) = known
+            && let Some(m) = self.met(&ran.code, runtime)?
+        {
             return Ok(m);
         }
-        let parent = history.parent(at).await?;
+        let header = history.block_header(at).await?;
+        let parent = BlockRef {
+            number: at
+                .number
+                .checked_sub(1)
+                .ok_or_else(|| invalid("the genesis has no parent"))?,
+            hash: header.parent,
+        };
+        let carried = self
+            .kept()
+            .ran
+            .get(&parent.hash)
+            .copied()
+            .filter(|p| p.quiet >= SETTLE);
+        if let Some(p) = carried
+            && let Some(m) = self.met(&p.code, runtime)?
+        {
+            let quiet = if header.code_updated {
+                0
+            } else {
+                (p.quiet + 1).min(SETTLE)
+            };
+            self.remember(
+                at,
+                Ran {
+                    code: p.code,
+                    quiet,
+                },
+            );
+            return Ok(m);
+        }
+        // Not carried: read the code in force. Its digests tell how soon it can change again.
         let mut values = history
             .storage(&parent, &[CODE.to_vec(), HEAP_PAGES.to_vec()])
             .await?;
@@ -255,6 +363,26 @@ impl Runtimes {
             .pop()
             .flatten()
             .ok_or_else(|| invalid(format!("no :code at block {}", parent.number)))?;
+        let hash = blake2_256(&code);
+        let mut quiet = SETTLE;
+        let mut flags = vec![header.code_updated];
+        let mut cursor = parent;
+        while flags.len() < usize::from(SETTLE) && cursor.number > 0 {
+            let h = history.block_header(&cursor).await?;
+            flags.push(h.code_updated);
+            cursor = BlockRef {
+                number: cursor.number - 1,
+                hash: h.parent,
+            };
+        }
+        if let Some(i) = flags.iter().position(|f| *f) {
+            quiet = u8::try_from(i).unwrap_or(SETTLE);
+        }
+        let ran = Ran { code: hash, quiet };
+        if let Some(m) = self.met(&hash, runtime)? {
+            self.remember(at, ran);
+            return Ok(m);
+        }
         let expected = runtime.clone();
         let metadata = tokio::task::spawn_blocking(move || {
             metadata_from_code(&code, heap_pages.as_deref(), &expected)
@@ -266,10 +394,14 @@ impl Runtimes {
             block = at.number,
             "the metadata of another runtime, run from its code at the block's parent"
         );
-        self.by_spec
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(runtime.spec_version, metadata.clone());
+        self.kept().by_code.insert(
+            hash,
+            Met {
+                id: runtime.clone(),
+                metadata: metadata.clone(),
+            },
+        );
+        self.remember(at, ran);
         Ok(metadata)
     }
 }

@@ -45,6 +45,9 @@ pub struct Header {
     pub block: BlockRef,
     /// Its parent's hash.
     pub parent: [u8; 32],
+    /// Whether its digest carries `RuntimeEnvironmentUpdated`: the block stored a runtime's code
+    /// (`:code` or `:pending_code`), or its heap pages.
+    pub code_updated: bool,
 }
 
 /// The runtime's version, at a block.

@@ -297,7 +297,14 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
       history source is not something `chain::archive` does. Types are the code's whatever the state. The test checks
       that the resulting type registry is exactly spec 134's own. So **constants in it are not the chain's, and none
       is read**.
-    - The result is kept by spec version, seeded with the light client's (spec, metadata) pair.
+    - The result is kept by the hash of the proven `:code`, not by spec version: a code swap that keeps the version
+      (`set_code_without_checks`, `authorize_upgrade` without the version check) does not touch
+      `System::LastRuntimeUpgrade`. A block's code is carried from its parent's while no header says code was stored
+      (`RuntimeEnvironmentUpdated`, deposited by frame-system wherever it writes `:code`, `:pending_code` or the heap
+      pages; from system version 3 `:code` is replaced two blocks later, so the code is read again for three
+      blocks after one). Otherwise `:code` is read at the parent and hashed. The spec name and version are checked
+      on every use, cached or not. A raw `set_storage` of `:code` leaves no digest and is not covered. Nothing is
+      seeded: the first block of a process reads and runs its code.
     - Decoding now happens after the read. A proven answer that does not decode is `Invalid` and no longer falls back to
       the other side.
 
@@ -308,7 +315,9 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
     metadata. Spec 136's metadata fails with variant 227. The walk decodes the block through spec 134's code read at the
     parent, never at the block. A parent whose code is another runtime is refused.
 
-**Runbook** (first start on Kreivo mainnet): `start_block = 39867043`, `first_seq = 0`, `archive_rpc` with the
+**Runbook** (first start on Kreivo mainnet): `start_block = 39867043`, `first_seq = 0`, `archive_max_response_bytes` left at
+its default or at least 8 MiB (the proof of a `:code` of about 2 MB is about 4 MB as hex; a lower value is refused at
+`--check` and at start, because a source could never serve a new runtime and the walk would stall), `archive_rpc` with the
 archive node first, `max_walk` above the blocks from `start_block` to the head (a smaller value records the backlog as a gap that never
 fills; the walk itself is kept in rungs, item 37). The replay is sequential: a header and a
 proof per block, about 0.19 s per block from a client about 95 ms from the node, so about 4 to 5 hours for the
@@ -325,5 +334,6 @@ zombienet node run as an archive, back to `start_block` and its parent.
 - **The replay is sequential** (one request at a time per block). Pipelining the header walk and the proofs would cut
   the first start from hours to minutes; not done here.
 - **Runtime upgrades**: events are decoded with the metadata of the block's own runtime (item 41). The first block of
-  each runtime not yet met reads and runs its code (about 2 MB) once per process.
+  each runtime not yet met reads and runs its code (about 2 MB) once per process, and the code is read again for three
+  blocks after any header that stores code.
 - **The light-client code path is compiled in CI but exercised only by `T-013-05`** (zombienet).

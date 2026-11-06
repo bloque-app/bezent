@@ -97,6 +97,7 @@ pub fn verify_header(hash: &[u8; 32], bytes: &[u8]) -> Result<Verified, String> 
                 hash: *hash,
             },
             parent: *h.parent_hash,
+            code_updated: h.digest.has_runtime_environment_updated(),
         },
         state_root: *h.state_root,
         extrinsics_root: *h.extrinsics_root,

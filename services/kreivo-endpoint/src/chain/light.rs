@@ -742,7 +742,7 @@ impl LightChain {
         // dropped, here or if this future is).
         drop(watchers);
         let client = client.map_err(unavailable)?;
-        let runtimes = Runtimes::seeded(client.runtime_version().spec_version, client.metadata());
+        let runtimes = Runtimes::new();
         Ok(LightChain {
             client,
             rpc: LegacyRpcMethods::<PolkadotConfig>::new(rpc_client),
@@ -848,6 +848,12 @@ impl LightChain {
                 hash: *hash,
             },
             parent: header.parent_hash.0,
+            code_updated: header.digest.logs.iter().any(|l| {
+                matches!(
+                    l,
+                    subxt::config::substrate::DigestItem::RuntimeEnvironmentUpdated
+                )
+            }),
         })
     }
 
@@ -908,16 +914,17 @@ impl History for LightChain {
         self.raw(at, keys).await
     }
 
-    async fn parent(&self, at: &BlockRef) -> ChainResult<BlockRef> {
+    async fn block_header(&self, at: &BlockRef) -> ChainResult<Header> {
+        // The header asked for by `at`'s hash is `at`'s own: its number must be `at`'s, so that
+        // the parent it names is block `at.number - 1`.
         let header = self.header(&at.hash).await?;
-        let number = at
-            .number
-            .checked_sub(1)
-            .ok_or_else(|| invalid("the genesis has no parent"))?;
-        Ok(BlockRef {
-            number,
-            hash: header.parent,
-        })
+        if header.block != *at {
+            return Err(invalid(format!(
+                "the header served for block {} is block {}'s",
+                at.number, header.block.number
+            )));
+        }
+        Ok(header)
     }
 }
 
@@ -1731,7 +1738,7 @@ mod runtime_tests {
     /// read at each block.
     struct FakeHistory {
         state: HashMap<Slot, Vec<u8>>,
-        parents: HashMap<[u8; 32], BlockRef>,
+        headers: HashMap<[u8; 32], Header>,
         reads: Mutex<HashMap<Slot, usize>>,
     }
 
@@ -1760,11 +1767,61 @@ mod runtime_tests {
                 b"the next runtime, not this block's".to_vec(),
             );
             state.insert((parent.hash, runtime::CODE.to_vec()), parent_code.to_vec());
+            // The block, its parent and its grandparent, none of them storing code.
+            let grand = BlockRef {
+                number: parent.number - 1,
+                hash: [0xaa; 32],
+            };
+            let header = |block: BlockRef, parent: [u8; 32]| Header {
+                block,
+                parent,
+                code_updated: false,
+            };
             FakeHistory {
                 state,
-                parents: HashMap::from([(block.hash, parent)]),
+                headers: HashMap::from([
+                    (block.hash, header(block, parent.hash)),
+                    (parent.hash, header(parent, grand.hash)),
+                    (grand.hash, header(grand, [0xab; 32])),
+                ]),
                 reads: Mutex::default(),
             }
+        }
+
+        /// Whether the headers of the block, its parent and its grandparent say they stored code.
+        fn storing_code(mut self, block: bool, parent: bool, grand: bool) -> FakeHistory {
+            let (b, p) = blocks();
+            for (hash, flag) in [(b.hash, block), (p.hash, parent), ([0xaa; 32], grand)] {
+                self.headers.get_mut(&hash).unwrap().code_updated = flag;
+            }
+            self
+        }
+
+        /// The block's child, which has the block's events, time and runtime, and no header
+        /// that stores code. Its parent's `:code` is the block's, which is not a runtime.
+        fn with_child(mut self) -> (FakeHistory, BlockRef) {
+            let (block, _) = blocks();
+            let child = BlockRef {
+                number: block.number + 1,
+                hash: [0xb2; 32],
+            };
+            for key in [
+                runtime::TIMESTAMP_NOW,
+                runtime::SYSTEM_EVENTS,
+                runtime::LAST_RUNTIME_UPGRADE,
+            ] {
+                let v = self.state[&(block.hash, key.to_vec())].clone();
+                self.state.insert((child.hash, key.to_vec()), v);
+            }
+            self.headers.insert(
+                child.hash,
+                Header {
+                    block: child,
+                    parent: block.hash,
+                    code_updated: false,
+                },
+            );
+            (self, child)
         }
 
         fn reads(&self, at: &BlockRef, key: &[u8]) -> usize {
@@ -1793,8 +1850,8 @@ mod runtime_tests {
                 .collect())
         }
 
-        async fn parent(&self, at: &BlockRef) -> ChainResult<BlockRef> {
-            self.parents
+        async fn block_header(&self, at: &BlockRef) -> ChainResult<Header> {
+            self.headers
                 .get(&at.hash)
                 .copied()
                 .ok_or_else(|| ChainError::Unavailable("no such header".into()))
@@ -1825,8 +1882,8 @@ mod runtime_tests {
     async fn walk_40004557_decodes_with_the_metadata_of_its_own_runtime() {
         let (block, parent) = blocks();
         let history = FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134);
-        // As in production: only the head's runtime (spec 136) is known at start.
-        let runtimes = Runtimes::seeded(136, metadata(META_136));
+        // As in production: no runtime is known at start.
+        let runtimes = Runtimes::new();
         let read = events_at(&history, &runtimes, &block, &contract())
             .await
             .unwrap();
@@ -1850,6 +1907,62 @@ mod runtime_tests {
         assert_eq!(history.reads(&parent, runtime::CODE), 1);
     }
 
+    /// Decodes the recorded block, then its child, which names the same runtime (spec 134).
+    async fn walk_two(
+        history: &FakeHistory,
+        child: &BlockRef,
+    ) -> (ChainResult<BlockEvents>, ChainResult<BlockEvents>) {
+        let (block, _) = blocks();
+        let runtimes = Runtimes::new();
+        let first = events_at(history, &runtimes, &block, &contract()).await;
+        let second = events_at(history, &runtimes, child, &contract()).await;
+        (first, second)
+    }
+
+    #[tokio::test]
+    async fn walk_40004557_a_block_after_one_that_stored_code_does_not_reuse_the_cached_metadata() {
+        // Spec 134 stays the spec version, but the block stored another code: its child is
+        // executed by it, and the code is read again (here it is not a runtime). Keyed by spec
+        // version, the child would be decoded with the metadata of the code before.
+        let (block, _) = blocks();
+        let (history, child) =
+            FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134).with_child();
+        let history = history.storing_code(true, false, false);
+        let (first, second) = walk_two(&history, &child).await;
+        first.unwrap();
+        assert!(matches!(second, Err(ChainError::Invalid(_))), "{second:?}");
+        assert_eq!(history.reads(&block, runtime::CODE), 1);
+    }
+
+    #[tokio::test]
+    async fn walk_40004557_the_code_is_read_again_until_it_cannot_change_but_not_after() {
+        let (block, parent) = blocks();
+        // The code can change two blocks after a header that stores it (system version 3 and up
+        // replaces `:code` in `on_finalize`, after `:pending_code`).
+        for flags in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let (history, child) =
+                FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134)
+                    .with_child();
+            let history = history.storing_code(flags.0, flags.1, flags.2);
+            let (first, second) = walk_two(&history, &child).await;
+            first.unwrap();
+            assert!(second.is_err(), "{flags:?}");
+            assert_eq!(history.reads(&block, runtime::CODE), 1, "{flags:?}");
+        }
+        // Nothing stored it: the child is decoded with its parent's code, which is not read again.
+        let (history, child) =
+            FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134).with_child();
+        let (first, second) = walk_two(&history, &child).await;
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(history.reads(&parent, runtime::CODE), 1);
+        assert_eq!(history.reads(&block, runtime::CODE), 0);
+    }
+
     #[tokio::test]
     async fn a_parent_whose_code_is_not_the_runtime_the_block_names_decodes_nothing() {
         let (block, _) = blocks();
@@ -1859,7 +1972,7 @@ mod runtime_tests {
                 spec_name.to_string(),
             ));
             let history = FakeHistory::recorded(lru, CODE_134);
-            let runtimes = Runtimes::seeded(1, metadata(META_136));
+            let runtimes = Runtimes::new();
             let Err(ChainError::Invalid(why)) =
                 events_at(&history, &runtimes, &block, &contract()).await
             else {
