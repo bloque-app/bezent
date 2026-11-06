@@ -402,23 +402,25 @@ async fn req_rv_1_issue_48_a_pause_is_not_a_never_prepared_attempt_and_it_resume
     assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
 }
 
+/// REQ-RV-1, REQ-EO-3, REQ-GV-1 (amendment 0019, A1d, ruled `d-payout-late-signing`, 2026-11-06,
+/// which answers amendment 0020's "lift of a pause"): a pause resumes by itself and never sends a
+/// transfer to review, so under it nothing moves however long it lasts; and the time under it no
+/// longer counts toward the deadline, so an endpoint that never prepared the order is not read as
+/// never having prepared it on the first cycle after the lift. Its deadline moves by the time
+/// paused, and past that it goes to review as before.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_rv_1_issue_48_time_under_a_pause_counts_but_only_a_lifted_pause_is_read_as_never_prepared(
+async fn req_rv_1_issue_48_a1d_time_under_a_pause_does_not_count_toward_the_never_prepared_deadline(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
-    // PINS THE EXISTING CLOCK RULE, which this fix does not change: a pause "resumes by itself and
-    // never" sends a transfer to review (`Condition::blocks_delivery`), so under the pause nothing
-    // moves however long it lasts; and the time under a gate counts (`unprepared_deadline`), so
-    // once it lifts an endpoint that never prepared the order within the route's time is read as
-    // never having prepared it.
     let w = World::new(options, connect).await;
     reserve(&w.admin, 1_000_000).await;
     let id = withdrawal(&w, 20, [13; 32]).await;
     endpoint_absent(&w, id, 1, 23).await;
     exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
-    w.settle(t0()).await;
-    head(&w.admin, ORIGIN, 22 + BUDGET + 10).await;
+    w.settle(t0()).await; // the pause is taken at the head of 23
+    let lifted = 22 + BUDGET + 10;
+    head(&w.admin, ORIGIN, lifted).await;
     w.settle(t0()).await;
     assert_eq!(
         w.state(id).await,
@@ -426,6 +428,16 @@ async fn req_rv_1_issue_48_time_under_a_pause_counts_but_only_a_lifted_pause_is_
     );
     assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
     exec(&w.admin, "DELETE FROM pauses").await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+
+    // The deadline, about 23 + BUDGET, moved by the time paused (lifted - 23).
+    let deadline = 23 + BUDGET + (lifted - 23);
+    head(&w.admin, ORIGIN, deadline - 20).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    head(&w.admin, ORIGIN, deadline + 20).await;
     w.settle(t0()).await;
     assert_eq!(w.state(id).await, ("Needs-Review".into(), None));
 }
