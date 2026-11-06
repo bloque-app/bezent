@@ -122,7 +122,7 @@ Who may **call** what (EXECUTE; the functions that run as the owner are marked *
 | core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
 | ingress | `source_bindable`, `funding_arrival`, `bezent_writer_holds` |
 | Kreivo endpoint, EVM endpoint | `bezent_writer_holds`, `bezent_endpoint_writer`, `bezent_evm_endpoint_writer`, `bezent_row_network`, `observation_kind_on_network`, `observation_kind_for_event`, `observation_writer_covers` (the guards' helpers, which run as the inserting login) |
-| signer | `attempt_gate_open` *definer*, `statement_place_refusal` *definer* |
+| signer | `attempt_gate_open` *definer*, `pause_holds_intent` *definer* (0125: whether a pause holds a signing intent whose attempt has no signature, amendment 0022 A1b), `statement_place_refusal` *definer* |
 | operators | `ops_observables` *definer* (0090), `source_bindable`, `funding_arrival`, `one_business_day_after`, `operator_pause` *definer*, `operator_request_unpause` *definer*, `operator_approve_unpause` *definer*, `operator_record` *definer* |
 
 Every service and the operators also call `bezent_applied_migrations()` *definer*, which lists the

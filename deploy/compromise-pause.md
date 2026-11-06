@@ -12,9 +12,11 @@ SPDX-License-Identifier: CC-BY-4.0
 Any `key-compromise` alert pauses the whole bridge in the transaction that records it (migration 0095). No person, and
 no other service, was involved. One row in `pauses`, `cause = 'REQ-IC-4'`, names the alert in `alert_seq`.
 
-- **Stopped:** new requests (`ERR-RoutePaused`), new orders and signing intents, new attempts of a transfer in flight.
-- **Not stopped:** observation; transfers in flight; refund mints, cancels and statements; a signing intent recorded
-  before the pause, which is still signed and submitted (amendment 0022, proposed).
+- **Stopped:** new requests (`ERR-RoutePaused`), new orders and signing intents, new attempts of a transfer in flight,
+  and the signature of a signing intent recorded before the pause whose attempt has no signature yet: the signer refuses
+  it until the pause is lifted, and the endpoint asks again (amendment 0022, A1b, ruled 2026-11-06).
+- **Not stopped:** observation; transfers in flight (an attempt with a recorded signature); refund mints, cancels and
+  statements.
 - **Not stopped, and bezent cannot stop it:** a stolen key signing by itself.
 
 The exception is the supply mismatch (`INV-4`): an alert with `scope` `asset` pauses that asset's routes, under
@@ -47,8 +49,8 @@ coordinate, the sender, the recipient, the amount.
 
 | The alert says | A false alarm looks like | Before lifting |
 |---|---|---|
-| `lane's nonce on chain is past every nonce bezent signed` (EVM) | One provider answered high: the check takes the higher of the two. The other, and a block explorer, show the lower | Fix or replace the provider. If the nonce really moved, it is real |
-| `the delivery key holds code` | One provider returned code: any code on either counts | Same |
+| `lane's nonce on chain is past every nonce bezent signed, on both providers` (EVM) | Both providers answered high, which one bad provider can no longer do alone (amendment 0022, P2: one provider's report pages `lane-use-unknown` and pauses nothing). A block explorer shows the lower | Fix or replace the providers. If the nonce really moved, it is real |
+| `the delivery key holds code` | Both providers returned code; one alone no longer raises (P2) | Same |
 | `transactions of the lane at its nonce in the consuming block` | Zero or several, from an incomplete block read | Read the block from a public source |
 | `an extrinsic of the delivery key that the endpoint cannot decode` (Kreivo) | None known. An extrinsic bezent recorded is recognised by its hash against every signed transaction of the lane, so it raises nothing, in whatever format. A runtime upgrade does not make bezent's own undecodable: bezent signs nothing for a runtime it has no format for | Treat it as real: the key signed something bezent never recorded |
 | `the bytes asked to be signed do not answer the core's order` (signer) | A new format or version skew between the endpoint and the signer's decoder | Align the versions |

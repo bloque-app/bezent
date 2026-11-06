@@ -34,7 +34,9 @@
 //! never from the reason's text (PR #52 review S-2). Taking and leaving the hold rest on the
 //! destination network's latest final head: the time held does not count toward the attempt's
 //! deadline, whose clock restarts when the hold is left (review M-1), and a hold longer than
-//! [`Settings::payout_window_alert_after`] pages once, then daily (review S-3).
+//! [`Settings::payout_window_alert_after`] pages once, then daily (review S-3). Time held under a
+//! pause or a cut-off (`CND-Paused`, `CND-CutOff`), taken and left on the destination's final head,
+//! does not count toward the deadline either (amendment 0019, A1d).
 //!
 //! # Forced non-execution, with review (`REQ-RV-1`, `REQ-NX-4`, `REQ-RV-2`; issue #41)
 //!
@@ -684,8 +686,19 @@ impl Core {
     /// [`Core::deadline`] for an attempt whose clock started at `start`, with the time the transfer
     /// was held in `CND-PayoutWindow` since then left out, and the clock restarted where the first
     /// hold was taken (amendment 0012; review M-1). Every hold counts, so a provider that flaps in
-    /// and out of the hold restarts nothing (issue #35). The holds are those recorded after the
-    /// last transition of the attempt before `attempt` (see [`store::held_under_window`]).
+    /// and out of the hold restarts nothing (issue #35): the time between two holds counts, and the
+    /// time before the first does not. The holds are those recorded after the last transition of
+    /// the attempt before `attempt` (see [`store::held_under_window`]).
+    ///
+    /// The time held under a pause (`CND-Paused`) or a cut-off (`CND-CutOff`), taken and left, is
+    /// left out as well (amendment 0019, A1d, ruled `d-payout-late-signing`, 2026-11-06;
+    /// `REQ-GV-1`): a delivery released from a pause after its nominal deadline is neither reviewed
+    /// nor cancelled for the time it waited, and its deadline moves by that time
+    /// ([`store::held_under_pause_or_cutoff`]). This is for a **payout** (a withdrawal's, and a refund
+    /// of an unassociated arrival, both on an origin network; [`purpose`]) only: the ruling is about
+    /// the payout clock, so a mint (a deposit's or a refund mint) keeps the clock it had, and time
+    /// under a pause counts toward its deadline (amendment 0019, open question). Time under any
+    /// other condition counts.
     async fn deadline_held(
         &self,
         conn: &mut PgConnection,
@@ -693,12 +706,17 @@ impl Core {
         attempt: i32,
         start: DateTime<Utc>,
     ) -> sqlx::Result<DateTime<Utc>> {
-        Ok(
-            match store::held_under_window(conn, t.id, attempt - 1, Some(start)).await? {
-                Some((first, held)) => self.deadline(conn, t, first.max(start)).await? + held,
-                None => self.deadline(conn, t, start).await?,
-            },
-        )
+        // Payouts only (`d-payout-late-signing`): a mint's clock is what it was before A1d.
+        let gated = if purpose(t).0 == "payout" {
+            store::held_under_pause_or_cutoff(conn, t.id, attempt - 1).await?
+        } else {
+            chrono::Duration::zero()
+        };
+        let deadline = match store::held_under_window(conn, t.id, attempt - 1, Some(start)).await? {
+            Some((first, held)) => self.deadline(conn, t, first.max(start)).await? + held,
+            None => self.deadline(conn, t, start).await?,
+        };
+        Ok(deadline + gated)
     }
 
     /// The latest final head on `network`, if it is past `deadline` (`REQ-OB-5`: decided at a final
@@ -828,6 +846,8 @@ impl Core {
     /// leaving `CND-PayoutWindow` rests on the destination network's latest final head, the clock
     /// the hold is measured on: its alert ([`Core::payout_window_alert`]) and the attempt's
     /// deadline, which restarts when the hold is left ([`Core::delivering_deadline`]; review M-1).
+    /// Taking or leaving `CND-Paused` or `CND-CutOff` rests on it too, so the time held is measured
+    /// and left out of the deadline (amendment 0019, A1d; [`Core::deadline_held`]).
     async fn hold(
         &self,
         conn: &mut PgConnection,
@@ -838,8 +858,14 @@ impl Core {
             return Ok(Did::default());
         }
         let state = t.state();
-        let window = [t.condition(), c].contains(&Some(Condition::PayoutWindow));
-        let head = if window {
+        // A pause or a cut-off is measured for a payout only: the mint keeps the clock it had.
+        let payout = purpose(t).0 == "payout";
+        let measured = [t.condition(), c].iter().any(|x| match x {
+            Some(Condition::PayoutWindow) => true,
+            Some(Condition::Paused | Condition::CutOff) => payout,
+            _ => false,
+        });
+        let head = if measured {
             store::latest_head(conn, &t.destination_network).await?
         } else {
             None
@@ -1996,7 +2022,8 @@ impl Core {
     /// (the previous attempt's proof), or at the source leg's finality for the first; and it
     /// restarts at the final head where the transfer last left `CND-PayoutWindow`, so a payout
     /// released after its original deadline is neither reviewed nor cancelled for the time it
-    /// waited (amendment 0012; review M-1). On a network
+    /// waited (amendment 0012; review M-1); the time it waited under a pause or a cut-off is left
+    /// out the same way (amendment 0019, A1d; [`Core::deadline_held`]). On a network
     /// where transactions never expire, the cancel of an attempt of which nothing was observed
     /// (`forcible`) is ordered at the same moment ([`Core::order_cancels`], `REQ-NX-4`).
     async fn delivering_deadline(
@@ -2089,7 +2116,8 @@ impl Core {
     ///
     /// The clock is the attempt's: the source leg's finality for the first attempt, the previous
     /// attempt's proof of non-execution for a later one, with the time held in `CND-PayoutWindow`
-    /// left out (amendment 0012). Time under the other conditions counts, since only a
+    /// left out (amendment 0012), and the time held under a pause or a cut-off (amendment 0019,
+    /// A1d). Time under the other conditions counts, since only a
     /// refusal that names nothing is measured: `CND-FeeShort`, `CND-MintWindow` and the gates
     /// resume by themselves (§10), and `CND-DestinationRefused` has its own deadline.
     ///

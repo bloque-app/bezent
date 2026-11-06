@@ -254,6 +254,20 @@ impl World {
         }
     }
 
+    /// A second signer, in process, on the signer's login, over `wrap` of a fresh test backend:
+    /// for a test that needs the key backend to do something while it signs.
+    pub async fn signer_over<B: bezent_signer::engine::SigningEngine>(
+        &self,
+        wrap: impl FnOnce(FileBackend) -> B,
+    ) -> Signer<B> {
+        let (backend, config) = signer_files();
+        let backend = wrap(backend);
+        let policy = config.policy(&backend).unwrap();
+        let pool = login_pool(&self.admin, SIGNER_LOGIN, bezent_store::SIGNER_ROLE, 4).await;
+        let (log, _captured) = Log::capture();
+        Signer::new(pool, policy, backend, log)
+    }
+
     /// A core restarted from nothing but the store.
     pub async fn restarted(&self) -> Core {
         let pool = login_pool(&self.admin, CORE_LOGIN, bezent_store::CORE_ROLE, 2).await;

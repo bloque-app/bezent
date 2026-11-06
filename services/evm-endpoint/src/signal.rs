@@ -8,6 +8,10 @@
 //! channel. A failed write fails the step, which records nothing and is repeated: the signal is
 //! written on a later look, never dropped. Each is written once: a repeated look finds it there.
 
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use bezent_signer::compromise::{self, ObservedSignature, Verdict};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -115,4 +119,36 @@ pub async fn anomaly_once(
         tracing::error!(dedupe, seq, %detail, "a delivery anomaly is in the event log");
     }
     Ok(())
+}
+
+/// How often [`lane_use_unknown`] pages for the same read: a provider that is down, or two that
+/// keep disagreeing, page once an hour, not on every pass.
+pub const LANE_USE_UNKNOWN_EVERY: Duration = Duration::from_secs(3_600);
+
+/// When each read of [`lane_use_unknown`] last paged, by its `dedupe`. In the process only: a
+/// restart pages again, which is the safe side.
+static LANE_USE_PAGED: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new());
+
+/// Pages a person (`kind=lane-use-unknown`) when the read of the lane that would raise the
+/// compromise path cannot say whether the delivery key was used outside bezent: the two providers
+/// disagree, or one failed (amendment 0022, P2, ruled `d-pause-0022`, 2026-11-06). The read is
+/// unknown, never one provider's word: nothing is raised and nothing paused, and nothing is
+/// prepared or signed from the lane until both answer alike. A log line only: the endpoint's login
+/// appends no other kind to the event log (0046, 0049). At most once per `dedupe` per
+/// [`LANE_USE_UNKNOWN_EVERY`]; the passes in between log a warning.
+pub fn lane_use_unknown(dedupe: &str, detail: &Value) {
+    let now = Instant::now();
+    let mut paged = LANE_USE_PAGED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if paged
+        .get(dedupe)
+        .is_some_and(|at| now.duration_since(*at) < LANE_USE_UNKNOWN_EVERY)
+    {
+        tracing::warn!(dedupe, %detail, "the lane's use is unknown again; paged already");
+        return;
+    }
+    paged.insert(dedupe.to_owned(), now);
+    tracing::error!(kind = %"lane-use-unknown", dedupe, %detail,
+        "page: the providers do not agree, or one failed, on whether the delivery key was used outside bezent; nothing is raised or signed from the lane until they do");
 }

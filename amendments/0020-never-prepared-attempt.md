@@ -55,11 +55,17 @@ attested backend of PR #66) has no preparation to be missing, and this amendment
 
 ## A point for the owner: the lift of a pause
 
+*Answered by amendment 0019, A1d (`d-payout-late-signing`, ruled 2026-11-06, `SPEC.md` v0.5.7 §5.4): the time under a pause
+no longer counts toward this deadline, so the deadline moves by the time paused, and the first cycle after a lift does not
+send the transfer to review for the pause. The test that pinned the behaviour below is now
+`req_rv_1_issue_48_a1d_time_under_a_pause_does_not_count_toward_the_never_prepared_deadline`. The text below is what stood
+before, kept for the record.*
+
 Time under a pause counts toward this deadline, as it does toward the refused-preparation deadline of amendment 0013
 (`REQ-GV-1` gives a pause no restart; F-003 NOTES item 24). A pause holds the transfer, so nothing is read under it, and an
 endpoint that stayed down through a long pause has an order older than the route's time on the day the pause lifts: the first
 cycle after the lift sends the transfer to review, although the endpoint was never given a moment under the lift to answer.
-The code does this today and pins it (`req_rv_1_issue_48_time_under_a_pause_counts_but_only_a_lifted_pause_is_read_as_never_prepared`).
+The code did this, and a test pinned it, until A1d.
 The question for the owner is whether the lift should give one grace cycle, so that the route's time is counted again from
 the first final head after the lift, and so an endpoint that is ready when the pause lifts is not sent to review for the
 pause. Not built: it changes what a pause costs, and a pause is the operator's tool. The same lift touches the page below: a

@@ -273,9 +273,22 @@ it.
     a day while it lasts, durably (the last page is read from the event log), a day counted on the destination's final
     head or on the core's clock, whichever passes first, so it does not go quiet while the destination's endpoint
     stalls.
-27. **A payout signed after its deadline** (point 2 of the issue): **amendment 0019, proposed, not built.** The
-    specification does not say whether the clock starts when the attempt becomes signable or whether a late signature
-    gets a grace period; the choice changes what the completion budget (`NFR-2`) means.
+27. **A payout signed after its deadline** (point 2 of the issue): **amendment 0019, ruled 2026-11-06
+    (`d-payout-late-signing`, A1d, "Leave pause time out"), `SPEC.md` v0.5.7 §5.4.** The time a transfer is held under
+    `CND-Paused` or `CND-CutOff`, taken and left, does not count toward a payout attempt's deadline: a payout a
+    pause or a cut-off held past its nominal deadline is neither reviewed nor cancelled on the cycles after its release,
+    and its deadline moves by the time held (`Core::deadline_held`, `store::held_under_pause_or_cutoff`). Taking and
+    leaving either condition now rests on the destination's final head (`Core::hold`), as `CND-PayoutWindow` did, so
+    the time is measured on the deadline's clock; the holds are chosen by `id` after the attempt's entry transition, as
+    item 26's, and one recorded before the first `CND-PayoutWindow` hold is not left out twice. It is for a payout only (`purpose`): a mint's deadline is counted
+    as before, and applying A1d to mints is open (amendment 0019). Time under a gate, a refused preparation or any other condition counts as before. **A new
+    attempt under a pause**: after a proof of non-execution, `after_proof` asks the gate for attempt n+1, which a pause
+    holds as `CND-Paused` in `Delivering` or `Delivered`, ordering nothing; the new attempt's clock starts at the proof and
+    leaves out the time it was paused. The refund-or-retry choice after the proof still compares the proof with the
+    plain deadline from the source leg's finality (no hold left out): not named by the ruling, left as built (amendment
+    0019, "Open after the ruling"). Tests: `cancel.rs::req_gv_1_a1d_a_payout_held_by_a_pause_past_its_deadline_is_not_reviewed_and_its_deadline_moves`,
+    `cancel.rs::req_gv_1_a1d_a_pause_holds_the_new_attempt_and_its_deadline_moves_by_the_paused_time`; item 26's rule for
+    `CND-PayoutWindow` is pinned by `cancel.rs::cnd_payout_window_issue_35_time_between_holds_counts_and_time_before_the_first_does_not`.
 28. **Only a final inclusion is evidence for a review** (`REQ-RV-2`, `INV-16`). Item 23 attached the payout's inclusion as
     the review's evidence as soon as the leg was observed. Evidence is never withdrawn, so an inclusion that was later
     reorganised away blocked the cancel's `not-executed` evidence for good. It is attached now only when the observation's
