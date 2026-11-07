@@ -21,8 +21,8 @@
 //! endpoints recorded in `reserve_readings` at the very final point the check names (network, block
 //! number and hash), so every term rests on one point per network. Nothing recorded there, or a
 //! reading recorded as unknown (the providers disagreed, a read failed), is a [`ReadError`]: the
-//! evaluation is incomplete, and one that stays so past the network's bound pauses the asset
-//! (`REQ-IC-2`). Attested backends' reports (F-011) are not wired: an attested position is a
+//! evaluation is incomplete, and the asset's routes are held until one holds (`REQ-IC-2`, amendment
+//! 0028). Attested backends' reports (F-011) are not wired: an attested position is a
 //! [`ReadError`], "no attested assets configured".
 //!
 //! # A supply mismatch is a breach of `INV-4` (PLAN `DEC-16`, 2026-10-15; PR #50 review M1)

@@ -374,11 +374,12 @@ async fn inv_4_the_core_pauses_on_a_flagged_supply_reading_only(pool: PgPool) {
         DENIED
     );
     exec(&pool, &pause("bUSDC", busdc, flagged)).await;
+    // The core may delete only its own blind hold (amendment 0028): the store refuses this one.
     assert_eq!(
         as_role(&pool, "bezent_core", "DELETE FROM pauses")
             .await
             .as_deref(),
-        DENIED
+        Some(bezent_store::REFUSAL_SQLSTATE)
     );
     // No function of 0040 is PUBLIC's.
     for f in [

@@ -51,9 +51,12 @@ kind exists on `develop` at this commit.
 | `supply-mismatch-pause` | reserve check | `pages/reserve.md` | yes | yes (ReservePages) |
 | `reserve-alert` | reserve check | `pages/reserve.md` | yes | yes (ReservePages) |
 | `book-quarantine` | reserve book | `pages/reserve.md` | yes | yes (ReservePages) |
-| `reserve-check-stalled` | reserve check | `pages/reserve.md` | yes | yes (ObserverLagPages) |
-| `reserve-check-incomplete` | reserve check | `pages/reserve.md` | yes | yes (ObserverLagPages) |
-| `reserve-check-failed` | reserve check | `pages/reserve.md` | yes | yes (ObserverLagPages) |
+| `reserve-blind` | reserve check (amendment 0028: the asset held blind beyond its bound, or a finality stall) | `pages/reserve.md` | yes | **no**: the filter must be added |
+| `reserve-check-stalled` | reserve check (only when the failure could not be recorded, so nothing is held) | `pages/reserve.md` | yes | yes (ObserverLagPages) |
+| `reserve-check-incomplete` | reserve check: since amendment 0028 recorded only (`recorded=`), never paged | `pages/reserve.md` | yes | yes (ObserverLagPages), and now matches nothing |
+| `reserve-check-failed` | reserve check (paged only when the failure could not be recorded; otherwise recorded only) | `pages/reserve.md` | yes | yes (ObserverLagPages) |
+| `reserve-hold` | reserve check: a hold placed (amendment 0028); recorded only (`recorded=`), never paged | `pages/reserve.md` | yes | no, and none wanted |
+| `reserve-hold-lifted` | reserve check: a hold lifted by an evaluation that holds; recorded only, never paged | `pages/reserve.md` | yes | no, and none wanted |
 | `key-compromise` | reserve check (supply mismatch); the core's signals step (every other alert) | `pages/key-compromise.md` | yes | yes (KeyCompromisePages), but before `F-014` only the supply-mismatch case ever logged it |
 | `lane-use-unknown` | EVM endpoint (the lane detectors, amendment 0022 P2); a log line only, once an hour per lane and read | `pages/key-compromise.md` | yes | **no** |
 | `statement-overdue` | statements | `pages/statements.md` | yes | yes (StatementPages) |

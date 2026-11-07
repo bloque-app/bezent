@@ -286,6 +286,37 @@ this is how the bucket is reached.
 - **Open.** SSE-KMS and a publicly readable bucket conflict (anonymous readers cannot read SSE-KMS objects). The
   lock mode has no default and production's is the owner's to name (GOVERNANCE or COMPLIANCE).
 
+## Amendment 0028: a blind check holds, a money difference pauses (2026-11-07)
+
+@pandres95's ruling in chat, 2026-11-07: "Yes, write the amendment and build it." Two production pauses at start-up
+(a `REQ-IC-2` stall pause at the cold start, a `REQ-BK-1` pause while the walk caught up), with every term zero, each
+needed the two-login lift. Items 6, 16 and 17 above describe the behaviour before this change; what replaces it:
+
+32. **Lag is not a divergence.** `final_point` and `final_head` are no longer `Difference`s. A point behind its
+    network's final head beyond `reserve_point_lag_seconds`, or a latest final head older than that by the clock, makes
+    an evaluation that agrees on every term **incomplete** (reason `blind (amendment 0028 …)`, naming each network and
+    `catching up` or `a finality stall`), with its terms and the book's kept in the record. It diverges only on a
+    difference of value; when it also lags, it diverges and is held as well (`Evaluation::blind`).
+33. **The hold is a row of `pauses`** (migration 0142): cause `blind`, generated `kind` `hold`, asset-scoped, naming the
+    evaluation it began at, one per asset. Every reader of `pauses` (the gate, the ingress, `pause_holds_intent`, the
+    deadline clock) refuses work under it, unchanged. The core places it at the first evaluation that does not hold
+    (incomplete, blind, or diverging while lagging), in that evaluation's transaction, and lifts it (`DELETE`) in the
+    transaction of the next that holds. The store refuses the core any other `DELETE` (trigger `pauses_guard_delete`) and
+    a hold naming an evaluation that held; `operator_request_unpause` refuses a hold. The core no longer inserts a
+    `REQ-IC-2` evaluation pause; `stalled()` is gone.
+34. **Pages.** `reserve-blind`, once per hold and `why`: `finality-stall` at once, or `beyond-bound` once the hold is older
+    than `networks.reserve_blind_page_seconds` (default 600, at most 3600; the smallest of the asset's networks'). Not
+    paged, only recorded (event log, and a WARN line under `recorded=`): `reserve-hold`, `reserve-hold-lifted`,
+    `reserve-check-incomplete`, and `reserve-check-failed` when the failure was recorded. A failure the store cannot
+    record pages as before, since nothing can be held. Every page about a pause or a hold names `class` (`blind` or
+    `money-differs`) and `stop`, and carries `values` and `lags`.
+35. **Catching up or a finality stall.** The endpoints record only the live finalized head, so a fresh latest head with a
+    point behind it is our walk (or a pending observation) catching up; a latest head older than the bound by the clock,
+    or one that has not changed since the hold began once the hold is older than the network's bound, is a finality
+    stall or nothing recording heads. The core cannot tell those two apart and pages both at once.
+36. **Order.** `main.rs` runs the reserve check before the cycle, so on a core's first pass an asset the check cannot see
+    is held before new work for it is started.
+
 ## Review items left open (PR #40 review, 2026-10-14)
 
 Not fixed in this PR (each needs more than a small change, or a ruling); none of them lets a divergence pass unseen.

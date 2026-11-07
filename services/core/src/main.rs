@@ -4,8 +4,9 @@
 //!
 //! - `bezent-core <config-path>` runs a cycle every `cycle_seconds` until SIGINT or SIGTERM, then
 //!   finishes the cycle in progress and exits. Every cycle reads durable state only, so a restart
-//!   picks up where the last one left off (`REQ-AR-1`). After each cycle it runs the reserve check
-//!   (each asset evaluated once a minute, from the readings the endpoints recorded at final heads,
+//!   picks up where the last one left off (`REQ-AR-1`). Before each cycle it runs the reserve check
+//!   (amendment 0028: an asset it cannot see is held before the cycle starts new work for it; each
+//!   asset evaluated once a minute, from the readings the endpoints recorded at final heads,
 //!   `NFR-5`, `REQ-BK-8`) and publishes each asset's daily statement, signed by the signer process
 //!   (`REQ-PR-1`; PLAN `DEC-16`; issue #42), paging one that is overdue. `[statement]` is required;
 //!   only a test deployment may leave it out, by saying so (PR #50 review M2). A test deployment
@@ -175,16 +176,9 @@ async fn main() -> ExitCode {
                     tracing::error!(error = %e, "stopping: the store no longer holds only test networks");
                     return ExitCode::from(2);
                 }
-                let cycle_ok = match core.cycle(chrono::Utc::now()).await {
-                    Ok(report) => {
-                        tracing::debug!(?report, "cycle");
-                        true
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "cycle failed; the next one starts from the store");
-                        false
-                    }
-                };
+                // The reserve check runs before the cycle (amendment 0028): on a core's first pass,
+                // and for an asset whose last evaluation is a minute old, an asset the check cannot
+                // see is held before the cycle can start new work for it.
                 let check_ok = match check.tick(&SystemClock).await {
                     Ok(evaluations) => {
                         for e in &evaluations {
@@ -194,6 +188,16 @@ async fn main() -> ExitCode {
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "NFR-5: the reserve check could not list the assets; tried again next cycle");
+                        false
+                    }
+                };
+                let cycle_ok = match core.cycle(chrono::Utc::now()).await {
+                    Ok(report) => {
+                        tracing::debug!(?report, "cycle");
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "cycle failed; the next one starts from the store");
                         false
                     }
                 };
