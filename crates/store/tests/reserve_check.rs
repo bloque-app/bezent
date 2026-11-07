@@ -178,9 +178,12 @@ async fn req_bk_1_req_ic_2_the_core_pauses_only_an_assets_routes_on_that_assets_
         Some(PRIVILEGE)
     );
     exec(&pool, &pause("asset-a", "'REQ-BK-1'", diverged.to_string())).await;
+    // The core may delete only its own blind hold (amendment 0028): a divergence's pause is the
+    // operators' to lift, whatever the latest evaluation says.
+    evaluation(&pool, "asset-a", "holds").await;
     assert_eq!(
         as_role(&pool, core, "DELETE FROM pauses").await.as_deref(),
-        Some(PRIVILEGE)
+        refused
     );
 }
 
@@ -265,8 +268,8 @@ async fn req_ic_2_the_core_pauses_an_asset_on_a_stalled_check_or_a_quarantined_o
     pool: PgPool,
 ) {
     // Migration 0031 (review M1, M2): still only the asset's routes, still never lifted by the
-    // core; now also for an evaluation of it that could not be made, or an observation of it the
-    // book could not post.
+    // core; also for an observation of it the book could not post. An evaluation of it that could
+    // not be made is a hold since amendment 0028 (migration 0142), never a REQ-IC-2 pause.
     assets(&pool).await;
     let held = evaluation(&pool, "asset-a", "holds").await;
     let incomplete = |asset: &'static str| {
@@ -306,6 +309,7 @@ async fn req_ic_2_the_core_pauses_an_asset_on_a_stalled_check_or_a_quarantined_o
     for sql in [
         pause("asset-a", held.to_string(), "NULL".into()),
         pause("asset-a", other.to_string(), "NULL".into()),
+        pause("asset-a", stalled.to_string(), "NULL".into()),
         pause("asset-b", "NULL".into(), quarantined.to_string()),
     ] {
         assert_eq!(
@@ -338,12 +342,22 @@ async fn req_ic_2_the_core_pauses_an_asset_on_a_stalled_check_or_a_quarantined_o
         owner.as_database_error().and_then(|d| d.code()).as_deref(),
         Some(CHECK)
     );
-    for sql in [
-        pause("asset-a", stalled.to_string(), "NULL".into()),
-        pause("asset-a", "NULL".into(), quarantined.to_string()),
-    ] {
-        assert_eq!(as_role(&pool, core, &sql).await, None, "{sql}");
-    }
+    assert_eq!(
+        as_role(
+            &pool,
+            core,
+            &pause("asset-a", "NULL".into(), quarantined.to_string())
+        )
+        .await,
+        None
+    );
+    // A stall pause recorded before migration 0142 stays valid (the owner may still write one, a
+    // restore does), and stays a pause.
+    exec(&pool, &pause("asset-a", stalled.to_string(), "NULL".into())).await;
+    assert_eq!(
+        text(&pool, "SELECT kind FROM pauses WHERE cause = 'REQ-IC-2'").await,
+        "pause"
+    );
     // The quarantine is append-only, and the core cannot lift a pause.
     assert_eq!(
         as_role(&pool, core, "DELETE FROM book_quarantine")
@@ -407,4 +421,124 @@ async fn nfr_5_req_ic_2_sf_c_the_lag_bound_is_held_against_budgets_in_any_order(
         "NFR-6",
     )
     .await;
+}
+
+/// Runs `sql` as `role` and commits it.
+async fn as_role_committed(pool: &PgPool, role: &str, sql: &str) {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(&format!("SET LOCAL ROLE {role}; {sql}"))
+        .execute(&mut *tx)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    tx.commit().await.unwrap();
+}
+
+async fn incomplete(pool: &PgPool, asset: &str) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, reason) \
+         VALUES ($1, now(), 'incomplete', 'blind: the point lags') RETURNING id",
+    )
+    .bind(asset)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Amendment 0028 (migration 0142; `REQ-IC-2`, `REQ-GV-2`): the core holds an asset's routes only
+/// on an evaluation of it that did not hold, once per asset, and lifts only its own hold, only once
+/// the asset's latest evaluation holds. It never lifts a pause, and an operator never lifts a hold.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_ic_2_req_gv_2_a0028_the_core_holds_only_while_blind_and_lifts_only_its_own_hold(
+    pool: PgPool,
+) {
+    assets(&pool).await;
+    let core = bezent_store::CORE_ROLE;
+    let refused = Some(bezent_store::REFUSAL_SQLSTATE);
+    let held = evaluation(&pool, "asset-a", "holds").await;
+    let other = incomplete(&pool, "asset-b").await;
+    let blind = incomplete(&pool, "asset-a").await;
+    let hold = |asset: &str, e: i64| {
+        format!("INSERT INTO pauses (asset, cause, evaluation_id) VALUES ('{asset}', 'blind', {e})")
+    };
+    // A hold names an evaluation of its own asset that did not hold.
+    for sql in [hold("asset-a", held), hold("asset-a", other)] {
+        assert_eq!(
+            as_role(&pool, core, &sql).await.as_deref(),
+            refused,
+            "{sql}"
+        );
+    }
+    // Only an asset's routes, never a network, a direction or the bridge: the table's check.
+    assert_sqlstate(
+        &pool,
+        &format!(
+            "INSERT INTO pauses (asset, direction, cause, evaluation_id) \
+             VALUES ('asset-a', 'deposit', 'blind', {blind})"
+        ),
+        CHECK,
+    )
+    .await;
+    as_role_committed(&pool, core, &hold("asset-a", blind)).await;
+    let hold_id: i64 = sqlx::query_scalar("SELECT id FROM pauses WHERE kind = 'hold'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        text(
+            &pool,
+            &format!("SELECT cause FROM pauses WHERE id = {hold_id}")
+        )
+        .await,
+        "blind"
+    );
+    // One per asset.
+    assert_sqlstate(&pool, &hold("asset-a", blind), UNIQUE).await;
+    // A hold is not lifted while the check is blind, nor while the money differs.
+    assert_eq!(
+        as_role(&pool, core, "DELETE FROM pauses WHERE cause = 'blind'")
+            .await
+            .as_deref(),
+        refused
+    );
+    let diverged = evaluation(&pool, "asset-a", "diverges").await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO pauses (asset, cause, evaluation_id) VALUES ('asset-a', 'REQ-BK-1', {diverged})"
+        ),
+    )
+    .await;
+    assert_eq!(
+        as_role(&pool, core, "DELETE FROM pauses WHERE cause = 'blind'")
+            .await
+            .as_deref(),
+        refused
+    );
+    // Once an evaluation holds, the core lifts its hold, and still no pause.
+    evaluation(&pool, "asset-a", "holds").await;
+    exec(&pool, "INSERT INTO pauses (asset) VALUES ('asset-a')").await;
+    for sql in [
+        "DELETE FROM pauses WHERE cause = 'REQ-BK-1'",
+        "DELETE FROM pauses WHERE cause IS NULL",
+        "DELETE FROM pauses",
+    ] {
+        assert_eq!(as_role(&pool, core, sql).await.as_deref(), refused, "{sql}");
+    }
+    // An operator does not lift a hold by hand: it lifts itself (amendment 0028).
+    let alice = operator_login(&pool, OPERATORS[0]).await;
+    let err = sqlx::query("SELECT operator_request_unpause($1, 'looks harmless')")
+        .bind(hold_id)
+        .fetch_one(&alice)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("amendment 0028"), "{err}");
+    as_role_committed(&pool, core, "DELETE FROM pauses WHERE cause = 'blind'").await;
+    assert_eq!(
+        text(
+            &pool,
+            "SELECT string_agg(coalesce(cause, 'operator') || ':' || kind, ',' ORDER BY id) FROM pauses"
+        )
+        .await,
+        "REQ-BK-1:pause,operator:pause"
+    );
 }

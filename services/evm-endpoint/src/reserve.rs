@@ -10,8 +10,8 @@
 //! that block number. Both answers are recorded. When they agree the reading is that balance; when
 //! they disagree, or either fails, the reading is **unknown**, with the reason (`DEC-12`): never
 //! the higher, never the lower, never one provider's word. The check takes an evaluation with an
-//! unknown reading as incomplete, and one that stays so past the network's bound pauses the asset
-//! (`REQ-IC-2`).
+//! unknown reading as incomplete, and holds the asset's routes until an evaluation holds
+//! (`REQ-IC-2`, amendment 0028).
 //!
 //! The readings are recorded with the final head, in one transaction ([`crate::observe`]), so a
 //! final point the check picks has its readings with it.

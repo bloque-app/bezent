@@ -124,11 +124,15 @@ why = "REQ-PR-2: the statement chain is the service's"
 
 [layer."AC-E2.1"]
 layers = ["service"]
-why = "REQ-BK-1, REQ-IC-2: the core's reserve check pauses and pages (INV-1 is the service's)"
+why = "REQ-BK-1, REQ-IC-2: the core's reserve check pauses and pages on a difference of value (INV-1 is the service's)"
 
 [layer."AC-E2.2"]
 layers = ["service"]
 why = "REQ-BK-4, REQ-TR-5: the reserve book charges surplus; the core reduces no delivery"
+
+[layer."AC-E2.3"]
+layers = ["service"]
+why = "REQ-IC-2, REQ-GV-2, NFR-5 (amendment 0028): the core's reserve check holds, pages and lifts its own hold; the store's guards back it"
 
 [layer."AC-G1.1"]
 layers = ["service"]

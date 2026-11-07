@@ -5,10 +5,10 @@ SPDX-License-Identifier: CC-BY-4.0
 ---
 id: reserve
 kind: pages
-covers: [REQ-IC-2, REQ-BK-1, REQ-BK-3, REQ-BK-8, REQ-BK-10, NFR-5, NFR-6, INV-1, INV-4]
-pages: [reserve-divergence, reserve-alert, reserve-check-incomplete, reserve-check-failed, reserve-check-stalled, supply-mismatch-pause, book-quarantine]
+covers: [REQ-IC-2, REQ-BK-1, REQ-BK-3, REQ-BK-8, REQ-BK-10, REQ-GV-2, NFR-5, NFR-6, INV-1, INV-4]
+pages: [reserve-divergence, reserve-blind, reserve-alert, reserve-check-incomplete, reserve-check-failed, reserve-check-stalled, supply-mismatch-pause, book-quarantine, reserve-hold, reserve-hold-lifted]
 observables: [reserve_equation_outcome, reserve_equation_age_seconds, reserve_amount, observer_lag_estimate_seconds, open_gaps, pauses_in_force]
-tests: [services/core/tests/reserve_check.rs::req_ic_2_nfr_5_m2_an_evaluation_that_cannot_be_made_beyond_the_bound_pauses, services/core/tests/reserve_check.rs::inv_1_req_ic_2_m1_an_observation_the_book_cannot_post_is_quarantined_paged_and_paused, crates/store/tests/reserve_check.rs::req_bk_1_req_ic_2_the_core_pauses_only_an_assets_routes_on_that_assets_divergence, services/core/tests/reserve_check.rs::ac_e2_1_a_divergence_pauses_the_assets_routes_keeps_observing_and_pages_a_human, services/core/tests/operations.rs::ac_i2_1_an_operators_pause_holds_new_work_in_each_scope_and_a_second_operator_lifts_it]
+tests: [services/core/tests/reserve_check.rs::ac_e2_3_req_ic_2_nfr_5_m2_an_evaluation_that_cannot_be_made_is_held_and_paged_past_the_bound, services/core/tests/reserve_check.rs::ac_e2_3_req_ic_2_a_cold_start_with_every_term_zero_is_held_not_paused_and_lifts_itself, services/core/tests/reserve_check.rs::inv_1_nfr_5_ac_e2_3_m2_a_walk_catching_up_is_held_never_a_divergence, services/core/tests/reserve_check.rs::inv_1_nfr_6_ac_e2_3_mf2_a_finality_stall_is_held_and_paged_at_once, services/core/tests/reserve_check.rs::ac_e2_1_ac_e2_3_req_bk_1_a_value_difference_while_lagging_pauses_and_never_lifts_itself, services/core/tests/reserve_check.rs::inv_1_req_ic_2_m1_an_observation_the_book_cannot_post_is_quarantined_paged_and_paused, crates/store/tests/reserve_check.rs::req_bk_1_req_ic_2_the_core_pauses_only_an_assets_routes_on_that_assets_divergence, services/core/tests/reserve_check.rs::ac_e2_1_a_divergence_pauses_the_assets_routes_keeps_observing_and_pages_a_human, services/core/tests/operations.rs::ac_i2_1_an_operators_pause_holds_new_work_in_each_scope_and_a_second_operator_lifts_it]
 exercised: no
 ---
 # Reserve pages
@@ -17,19 +17,34 @@ exercised: no
 
 The reserve equation (reserve, in transit, supply, owed mint, owed payout, surplus) is re-derived from the networks at
 final points and compared with the book, at zero tolerance, at least once a minute per bridged asset (`NFR-5`,
-`REQ-BK-8`). Each page below is one way that check tells a person something is wrong. The check pauses the asset's
-routes itself in four of the seven cases; lifting that pause is always an operator's act (`REQ-GV-2`), and the core
-never lifts it.
+`REQ-BK-8`). Since amendment 0028 the check stops new work of an asset in one of two ways, and every page says which
+(`class` and `stop` in its detail):
 
-| Page | Meaning | The core has paused |
+- **A hold** (`class: blind`, `stop: hold`; a row of `pauses` of cause `blind`, `kind` `hold`): the check **cannot see**
+  the asset. Its evaluation could not be made, or a point it rests on lags its network's final head beyond the bound,
+  or a network's final head is stale. Nothing is known to be wrong. New deposits and withdrawals of the asset are refused
+  exactly as under a pause; transfers in flight are still observed. **The core lifts the hold itself** at the first
+  evaluation that holds. Nobody lifts it by hand: `operator_request_unpause` refuses it. A person is paged
+  (`reserve-blind`) only once the asset has been blind for longer than its bound (`networks.reserve_blind_page_seconds`,
+  default 600 s, the smallest of the asset's networks'), or at once on a finality stall.
+- **A pause** (`class: money-differs`, `stop: pause`): **the money differs**, or the book could not post a movement, or
+  the supply count and the issuance differ (`INV-4`). The core never lifts it: two operators do (`REQ-GV-2`). A
+  difference of value found while the check also lags is a pause (and a hold as well): a hold never masks money.
+
+| Page | Meaning | What the core did |
 |---|---|---|
-| `reserve-divergence` | A term or an item differs between the networks and the book, or surplus is negative. | yes, the asset |
-| `supply-mismatch-pause` | The on-chain component's count of the asset differs from the issuance (`INV-4`). Also raises `key-compromise`. | yes, the asset |
-| `book-quarantine` | An observation the book could not post was set aside; everything else is still posted and checked. | yes, the asset it moves |
-| `reserve-check-stalled` | The equation could not be made for longer than the smallest bound of the asset's networks: a finality stall or an observation gap. | yes, the asset |
-| `reserve-check-incomplete` | One evaluation could not be made (no final point, a reading or the store failed). Paged once; recorded as incomplete, never as holding. | no, until it stalls |
-| `reserve-check-failed` | The evaluation itself errored. | no, until it stalls |
+| `reserve-divergence` | A term or an item differs between the networks and the book, or surplus is negative. Carries `values`, `lags` and `also_blind`. | paused the asset (`REQ-BK-1`) |
+| `supply-mismatch-pause` | The on-chain component's count of the asset differs from the issuance (`INV-4`). Also raises `key-compromise`. | paused the asset |
+| `book-quarantine` | An observation the book could not post was set aside; everything else is still posted and checked. | paused the asset it moves |
+| `reserve-blind` | The asset has been held blind for longer than its bound (`why: beyond-bound`), or a network's final head is not advancing (`why: finality-stall`: the chain stopped finalizing, or nothing records its heads). Carries `values`, `lags`, `reason`, `since`. No difference of value is known. | holds the asset; lifts the hold itself when an evaluation holds |
+| `reserve-check-failed` | The evaluation errored and the failure could not even be recorded, so nothing could be held. | nothing: hold the asset by hand (step 2) |
+| `reserve-check-stalled` | As above, for longer than the bound. | nothing: hold the asset by hand (step 2) |
 | `reserve-alert` | Surplus is below its alert level or floor, a reversal is not restored within a business day, or the floor or level is not declared (`REQ-BK-10`, `REQ-BE-6`). | no (mints may pause: see below) |
+
+Recorded in the event log and the service's log (`recorded=<kind>`, a WARN line no page filter matches), never paged:
+`reserve-hold` (a hold was placed), `reserve-hold-lifted` (an evaluation held and the hold was lifted, with how long it
+lasted), `reserve-check-incomplete` (the evaluations turned incomplete) and `reserve-check-failed` when the failure was
+recorded (the asset is then held).
 
 ## Pages
 
@@ -44,22 +59,28 @@ WHERE metric IN ('reserve_equation_outcome', 'reserve_equation_age_seconds', 're
                  'observer_lag_estimate_seconds', 'open_gaps', 'pauses_in_force') ORDER BY metric, asset, network;
 SELECT id, asset, evaluated_at, outcome, reason, differences FROM reserve_evaluations
 ORDER BY id DESC LIMIT 10;
-SELECT id, asset, cause FROM pauses ORDER BY id;
+SELECT id, asset, cause, kind, evaluation_id FROM pauses ORDER BY id;
 SELECT seq, kind, payload FROM event_log WHERE kind = '<the page kind>' ORDER BY seq DESC LIMIT 5;
 SELECT * FROM book_quarantine ORDER BY id DESC LIMIT 5;
 ```
 
-The outcome is 0 holds, 1 diverges, 2 could not be made. The itemised `differences` say which term and which item
+The outcome is 0 holds, 1 diverges, 2 could not be made or cannot see (a blind evaluation is recorded as incomplete, its
+`reason` naming each blind network and whether it is catching up or a finality stall). The itemised `differences` say which term and which item
 (a network, a reference) the networks and the book disagree on, in minor units. An incomplete or stalled evaluation
 names its reason: look first at `observer_lag_estimate_seconds` and `open_gaps` for the networks the asset uses (a network that
 stopped recording final heads, or a gap) and at the endpoint's own health (`deploy/health.md`).
 
 ## Do
 
-1. **Do not lift the pause yet.** The pause is the correct state until the cause is understood (`REQ-IC-2`). Work in
-   flight is still observed and completed (`INV-15`); tell requesters it is delayed, never failed (`REQ-IC-3`).
-2. If the page is not paired with a pause (`reserve-check-incomplete`, `reserve-check-failed`, `reserve-alert`) and you
-   cannot yet say it is harmless, pause the asset yourself: `SELECT operator_pause('<asset>', NULL, NULL, '<page, evaluation id>');`
+1. **Read the class first.** `blind` is a hold: nothing is known to be wrong with the money, and the hold lifts itself
+   when the check sees again; find why it cannot see (the `reason` and the `lags`: a `catching-up` network's walk or an
+   observation awaiting its outcome; a `finality-stall` network's chain or its endpoint), and do not try to lift it.
+   `money-differs` is a pause: **do not lift it yet.** It is the correct state until the cause is understood
+   (`REQ-IC-2`). Either way work in flight is still observed and completed (`INV-15`); tell requesters it is delayed,
+   never failed (`REQ-IC-3`).
+2. If the page is paired with neither a pause nor a hold (`reserve-check-failed` or `reserve-check-stalled` from a
+   failure the store could not record, `reserve-alert`) and you cannot yet say it is harmless, pause the asset yourself:
+   `SELECT operator_pause('<asset>', NULL, NULL, '<page, evaluation id>');`
 3. Find the cause from the differences. Typical causes, each established from public chain data and the store, not
    from a guess: an endpoint that stopped recording (restart it; `deploy/health.md`); a gap (the endpoint fills it from
    the archive source; the gap closes by itself when read); a provider disagreement (the endpoint refuses a final
@@ -139,7 +160,8 @@ stopped recording final heads, or a gap) and at the endpoint's own health (`depl
 5. For a surplus alert the fix is to fund the reserve from a declared operator funding address (an arrival there is
    surplus from chain data, never a deposit: `INV-1`, `REQ-IN-3`). Do it from the deployment's own notes, then
    `SELECT operator_record('surplus-contribution', '<asset, network>', '{}'::jsonb, '<why>');`.
-6. When the next evaluation holds and the cause is fixed, lift the pause with two people:
+6. A hold needs nothing: it is gone at the first evaluation that holds (`reserve-hold-lifted` in the log). For a pause,
+   when the next evaluation holds and the cause is fixed, lift it with two people:
    `SELECT operator_request_unpause(<pause id>, '<why>');` by one, `SELECT operator_approve_unpause(<request id>, '<why>');`
    by another. The core re-pauses if the equation still diverges (`INV-4`: a supply-mismatch pause is lifted only by an
    operator and a book correction does not lift it).
@@ -157,6 +179,7 @@ stopped recording final heads, or a gap) and at the endpoint's own health (`depl
 ## Exercise
 
 On the test bed: record an arrival the book cannot post, see `book-quarantine` and the pause; stop an endpoint for longer
-than the bound and see `reserve-check-stalled`; lift each pause with two operators and see the work resume.
+than the bound and see the hold, the `reserve-blind` page, and the hold lift itself when the endpoint is back; lift each
+pause with two operators and see the work resume.
 
 Status: not exercised (NFR-9). Behaviour proven by the tests listed above, not by a run of this runbook.

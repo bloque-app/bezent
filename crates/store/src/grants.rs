@@ -10,8 +10,10 @@
 //! `crates/store/README.md` explains it in prose.
 //!
 //! A pause by compromise is deliberately absent: no role holds `pauses(alert_seq)`, nor anything on
-//! `pauses` beyond the core's asset pauses, and the signer and the endpoints hold nothing on it.
-//! The store makes it on the alert's insert (migration 0095), so issue #77 widened nothing here.
+//! `pauses` beyond the core's asset pauses and holds, and the signer and the endpoints hold nothing
+//! on it. The store makes it on the alert's insert (migration 0095), so issue #77 widened nothing
+//! here. The core's `DELETE` on `pauses` (amendment 0028, migration 0142) lifts only its own blind
+//! hold: the store's trigger refuses it any other row.
 //!
 //! A privilege is one of:
 //! - `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER` on a table or
@@ -132,6 +134,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "transfers(on_chain_reference)",
         ],
     ),
+    // Amendment 0028 (0142): the core lifts its own blind hold, and nothing else; the store's
+    // trigger refuses any other row, and a hold while the asset's latest evaluation does not hold.
+    (crate::CORE_ROLE, "DELETE", &["pauses"]),
     (
         crate::CORE_ROLE,
         "EXECUTE",

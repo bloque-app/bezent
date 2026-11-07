@@ -9,7 +9,7 @@ mod common;
 
 use bezent_core_service::refs::{self, Coordinate};
 use bezent_core_service::reserve::book::{self, Cost, Report};
-use bezent_core_service::reserve::check::{Clock, Outcome};
+use bezent_core_service::reserve::check::{Blind, Clock, Outcome};
 use bezent_core_service::reserve::coordinate_key;
 use bezent_core_service::reserve::readings::AttestedPosition;
 use chrono::{Duration, Utc};
@@ -287,8 +287,12 @@ async fn req_bk_3_a_negative_surplus_is_a_divergence(
     assert_eq!(e.differences[0].term, "surplus");
 }
 
+/// Amendment 0028 (`AC-E2.3`, `REQ-IC-2`): an evaluation that cannot read is incomplete and never
+/// holds. The asset's routes are held from the first one, nobody is paged within the blind bound
+/// (the turn to incomplete is only recorded), and the hold lifts itself at the first evaluation
+/// that holds. Nothing diverged, so nothing is paused.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn nfr_5_an_evaluation_that_cannot_read_is_incomplete_never_holds_and_pages_once(
+async fn nfr_5_ac_e2_3_an_evaluation_that_cannot_read_holds_the_routes_and_lifts_itself(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -301,6 +305,7 @@ async fn nfr_5_an_evaluation_that_cannot_read_is_incomplete_never_holds_and_page
     let e = check.tick(&clock).await.unwrap().remove(0);
     assert_eq!(e.outcome, Outcome::Incomplete);
     assert!(e.reason.as_deref().unwrap().contains("REQ-OB-3"), "{e:?}");
+    assert_eq!(stops(&w).await, (1, 0));
     clock.advance(Duration::minutes(1));
     read_all(&w.admin, 100).await;
     readings.chain().unreachable = true;
@@ -310,13 +315,83 @@ async fn nfr_5_an_evaluation_that_cannot_read_is_incomplete_never_holds_and_page
         e.reason.as_deref().unwrap().contains("unreachable"),
         "{e:?}"
     );
-    assert_eq!(pager.kinds(), ["reserve-check-incomplete"]);
-    // Never a pause: nothing diverged.
-    assert_eq!(w.count("SELECT count(*) FROM pauses").await, 0);
+    // Recorded, not paged: one hold, and its turn to incomplete logged once.
+    assert!(pager.kinds().is_empty(), "{:?}", pager.kinds());
+    assert_eq!(stops(&w).await, (1, 0));
+    assert_eq!(logged(&w, "reserve-hold").await, 1);
+    assert_eq!(logged(&w, "reserve-check-incomplete").await, 1);
     clock.advance(Duration::minutes(1));
     readings.chain().unreachable = false;
     let e = check.tick(&clock).await.unwrap().remove(0);
-    assert_eq!(e.outcome, Outcome::Holds);
+    assert_eq!(e.outcome, Outcome::Holds, "{e:?}");
+    assert_eq!(stops(&w).await, (0, 0));
+    assert_eq!(logged(&w, "reserve-hold-lifted").await, 1);
+    assert!(pager.kinds().is_empty(), "{:?}", pager.kinds());
+}
+
+/// The holds and the pauses in force, by kind (amendment 0028).
+async fn stops(w: &World) -> (i64, i64) {
+    (
+        w.count("SELECT count(*) FROM pauses WHERE kind = 'hold'")
+            .await,
+        w.count("SELECT count(*) FROM pauses WHERE kind = 'pause'")
+            .await,
+    )
+}
+
+/// How many entries of `kind` the event log holds.
+async fn logged(w: &World, kind: &str) -> i64 {
+    w.count(&format!(
+        "SELECT count(*) FROM event_log WHERE kind = '{kind}'"
+    ))
+    .await
+}
+
+/// Amendment 0028, the production start-up of 2026-11-06: at a cold start nothing is read yet and
+/// every term is zero. The asset's routes are held, not paused; nobody is paged before the blind
+/// bound (ten minutes by default); and the hold lifts itself at the first evaluation that holds,
+/// with no operator (`AC-E2.3`, `REQ-IC-2`, `REQ-GV-2`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_req_ic_2_a_cold_start_with_every_term_zero_is_held_not_paused_and_lifts_itself(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (check, readings, pager) = checker(&w);
+    sync_chain(&w.admin, &readings).await;
+    let clock = ManualClock::at(t0());
+    for _ in 0..10 {
+        let e = check.tick(&clock).await.unwrap().remove(0);
+        assert_eq!(e.outcome, Outcome::Incomplete, "{e:?}");
+        clock.advance(Duration::minutes(1));
+    }
+    assert_eq!(stops(&w).await, (1, 0), "a hold, never a pause");
+    assert!(pager.kinds().is_empty(), "{:?}", pager.kinds());
+    // The endpoints catch up: every term is zero, and the equation holds.
+    read_all(&w.admin, 10 * 60).await;
+    let e = check.tick(&clock).await.unwrap().remove(0);
+    assert_eq!(e.outcome, Outcome::Holds, "{e:?}");
+    assert_eq!((e.chain.supply, e.book.supply), (0, 0));
+    assert_eq!(e.chain.reserve[ORIGIN], 0);
+    assert_eq!(stops(&w).await, (0, 0));
+    // The only page is the surplus alert a holding evaluation of a reserve of zero raises
+    // (`REQ-BK-10`: the level is one unit here): nothing about the hold.
+    assert_eq!(pager.kinds(), ["reserve-alert"]);
+    assert_eq!(
+        pager.pages()[0].detail["alert"],
+        "surplus-below-alert-level"
+    );
+    let lifted: serde_json::Value = scalar(
+        &w.admin,
+        "SELECT payload FROM event_log WHERE kind = 'reserve-hold-lifted'",
+    )
+    .await;
+    assert_eq!(lifted["class"], "blind");
+    assert_eq!(lifted["held_seconds"], 600);
+    assert_eq!(
+        lifted["values"]["supply"],
+        json!({"chain": "0", "book": "0"})
+    );
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -662,19 +737,22 @@ async fn inv_1_req_ic_2_m1_an_observation_the_book_cannot_post_is_quarantined_pa
     );
 }
 
-/// Review M2, probe `probe_stuck_observation_freezes_the_final_point`: one issuing-network
-/// observation whose outcome is never recorded cannot freeze the point the check reads at. A point
-/// that lags the final head beyond the network's bound is a divergence: the asset pauses and a
-/// human is paged (`NFR-5`, `REQ-IC-2`).
+/// Review M2 and amendment 0028, the production start-up of 2026-11-07: one issuing-network
+/// observation whose outcome is not yet recorded keeps the point the check reads at behind the
+/// final head, as the walk catching up does. It cannot freeze the point: the evaluation never
+/// holds. But the heads keep arriving and every term agrees, so the check is blind (catching up),
+/// not diverging: the asset's routes are held, never paused under `REQ-BK-1`, and nobody is paged
+/// until the blind bound passes; then once. Once the point catches up the hold lifts itself
+/// (`NFR-5`, `REQ-IC-2`, `AC-E2.3`).
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn inv_1_nfr_5_req_ic_2_m2_an_observation_without_an_outcome_cannot_freeze_the_point(
+async fn inv_1_nfr_5_ac_e2_3_m2_a_walk_catching_up_is_held_never_a_divergence(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
     fund(&w, 5, 1_000).await;
     head(&w.admin, ISSUING, 20).await;
-    observe(
+    let pending = observe(
         &w.admin,
         ISSUING,
         30,
@@ -691,82 +769,108 @@ async fn inv_1_nfr_5_req_ic_2_m2_an_observation_without_an_outcome_cannot_freeze
     read_all(&w.admin, 1_000).await;
     let (check, readings, pager) = checker(&w);
     sync_chain(&w.admin, &readings).await;
-    let clock = ManualClock::at(t0());
-    for _ in 0..3 {
+    let clock = ManualClock::at(t0() + Duration::seconds(1_000));
+    for minute in 0..=11 {
+        // The chain keeps finalizing: a fresh final head every minute.
+        read_all(&w.admin, 1_000 + 60 * minute).await;
         let e = check.tick(&clock).await.unwrap().remove(0);
-        assert_eq!(e.outcome, Outcome::Diverges, "{e:?}");
+        assert_eq!(e.outcome, Outcome::Incomplete, "{e:?}");
+        assert!(e.differences.is_empty(), "{:?}", e.differences);
         assert_eq!(e.points[ISSUING].block_number, 20);
-        assert_eq!(e.lags[ISSUING].seconds, 980);
-        assert!(
-            e.differences
-                .iter()
-                .any(|d| d.term == "final_point" && d.item.as_deref().unwrap().contains(ISSUING)),
+        assert_eq!(e.lags[ISSUING].seconds, 980 + 60 * minute);
+        assert_eq!(
+            e.blind.get(ISSUING),
+            Some(&Blind::CatchingUp),
             "{:?}",
-            e.differences
+            e.blind
         );
-        clock.advance(Duration::hours(6));
+        assert!(!e.blind.contains_key(ORIGIN), "{:?}", e.blind);
+        assert!(
+            e.reason.as_deref().unwrap().contains("catching up"),
+            "{e:?}"
+        );
+        if minute <= 10 {
+            assert!(
+                pager.kinds().is_empty(),
+                "minute {minute}: {:?}",
+                pager.kinds()
+            );
+        }
+        clock.advance(Duration::minutes(1));
     }
-    assert_eq!(
-        w.count(&format!(
-            "SELECT count(*) FROM pauses WHERE asset = '{ASSET}' AND cause = 'REQ-BK-1'"
-        ))
-        .await,
-        1
-    );
-    assert_eq!(pager.kinds(), ["reserve-divergence"]);
-    // The bound is the network's own: one minute plus its finality time, as declared (within the
-    // ceiling of review SF2), measured at a clock the head is fresh at.
-    exec(
-        &w.admin,
-        &format!(
-            "UPDATE networks SET reserve_point_lag_seconds = 1000 WHERE network = '{ISSUING}'"
-        ),
-    )
-    .await;
-    let e = check.evaluate(ASSET, t0()).await.unwrap();
-    assert_eq!(e.outcome, Outcome::Holds, "{:?}", e.differences);
+    assert_eq!(stops(&w).await, (1, 0), "held, never paused");
+    assert_eq!(pager.kinds(), ["reserve-blind"]);
+    let page = &pager.pages()[0].detail;
+    assert_eq!(page["class"], "blind");
+    assert_eq!(page["why"], "beyond-bound");
+    assert_eq!(page["blind_seconds"], 660);
+    assert_eq!(page["bound_seconds"], 600);
+    assert_eq!(page["lags"][ISSUING]["state"], "catching-up");
+    assert_eq!(page["values"]["supply"], json!({"chain": "0", "book": "0"}));
+    // The walk catches up: the observation gets its outcome, and the point reaches the head.
+    decide(&w.admin, pending, "withdrawn", 1_000 + 60 * 12).await;
+    read_all(&w.admin, 1_000 + 60 * 12).await;
+    let e = check.tick(&clock).await.unwrap().remove(0);
+    assert_eq!(e.outcome, Outcome::Holds, "{e:?}");
+    assert_eq!(stops(&w).await, (0, 0));
+    assert_eq!(pager.kinds().len(), 1);
 }
 
-/// Review M2: an evaluation that cannot be made for longer than the bound pauses the asset's
-/// routes and pages, once (`REQ-IC-2`: a finality stall, an observation gap).
+/// Review M2 and amendment 0028: an evaluation that cannot be made holds the asset's routes at
+/// once, and a person is paged once the asset has been blind for longer than its bound, once. The
+/// bound is `networks.reserve_blind_page_seconds` (ten minutes by default, at most an hour), the
+/// smallest of the asset's networks' (`REQ-IC-2`, `NFR-5`, `AC-E2.3`).
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_ic_2_nfr_5_m2_an_evaluation_that_cannot_be_made_beyond_the_bound_pauses(
+async fn ac_e2_3_req_ic_2_nfr_5_m2_an_evaluation_that_cannot_be_made_is_held_and_paged_past_the_bound(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
+    assert_eq!(
+        w.count(&format!(
+            "SELECT reserve_blind_page_seconds::bigint FROM networks WHERE network = '{ISSUING}'"
+        ))
+        .await,
+        600
+    );
+    assert!(
+        sqlx::query("UPDATE networks SET reserve_blind_page_seconds = 3601")
+            .execute(&w.admin)
+            .await
+            .is_err(),
+        "the bound has a ceiling"
+    );
+    exec(
+        &w.admin,
+        &format!("UPDATE networks SET reserve_blind_page_seconds = 120 WHERE network = '{ORIGIN}'"),
+    )
+    .await;
     fund(&w, 5, 1_000).await;
     read_all(&w.admin, 100).await;
     let (check, readings, pager) = checker(&w);
     sync_chain(&w.admin, &readings).await;
     readings.chain().unreachable = true;
     let clock = ManualClock::at(t0());
-    for _ in 0..2 {
+    for _ in 0..3 {
         let e = check.tick(&clock).await.unwrap().remove(0);
         assert_eq!(e.outcome, Outcome::Incomplete);
+        assert_eq!(stops(&w).await, (1, 0));
         clock.advance(Duration::minutes(1));
     }
-    // A minute of incomplete evaluations is within the bound.
-    assert_eq!(w.count("SELECT count(*) FROM pauses").await, 0);
+    // Two minutes blind is within the bound.
+    assert!(pager.kinds().is_empty(), "{:?}", pager.kinds());
     let e = check.tick(&clock).await.unwrap().remove(0);
     assert_eq!(e.outcome, Outcome::Incomplete);
-    assert_eq!(
-        w.count(&format!(
-            "SELECT count(*) FROM pauses WHERE asset = '{ASSET}' AND cause = 'REQ-IC-2' \
-               AND evaluation_id = {}",
-            e.id
-        ))
-        .await,
-        1
-    );
-    assert_eq!(
-        pager.kinds(),
-        ["reserve-check-incomplete", "reserve-check-stalled"]
-    );
+    assert_eq!(pager.kinds(), ["reserve-blind"]);
+    let page = &pager.pages()[0].detail;
+    assert_eq!(page["why"], "beyond-bound");
+    assert_eq!(page["bound_seconds"], 120);
+    assert_eq!(page["blind_seconds"], 180);
+    assert_eq!(page["stop"], "hold");
     clock.advance(Duration::minutes(1));
     check.tick(&clock).await.unwrap();
-    assert_eq!(w.count("SELECT count(*) FROM pauses").await, 1);
-    assert_eq!(pager.kinds().len(), 2);
+    assert_eq!(stops(&w).await, (1, 0));
+    assert_eq!(pager.kinds().len(), 1, "once per hold");
 }
 
 /// Review S6: a floor or alert level the operator did not declare alerts (`REQ-BK-10`: "a floor
@@ -902,12 +1006,13 @@ async fn inv_1_inv_2_req_in_3_mf1_an_operator_top_up_is_never_bound_nor_minted(
     assert!(pager.pages().is_empty(), "{:?}", pager.pages());
 }
 
-/// Review MF2, probe `probe_b_stale_head_holds_for_hours`: final heads stop being recorded at
-/// block 100. The point does not lag the latest *recorded* head, but that head lags the clock:
-/// past the bound the evaluation diverges, pauses and pages, never holds (`INV-1`, `NFR-5`,
-/// `REQ-IC-2`: a finality stall).
+/// Review MF2 and amendment 0028: final heads stop being recorded at block 100. The point does not
+/// lag the latest *recorded* head, but that head lags the clock beyond the bound: a finality stall
+/// (or nothing recording the heads). The evaluation never holds; the asset's routes are held, not
+/// paused, and a person is paged at once, once per hold. When heads resume and an evaluation holds,
+/// the hold lifts itself (`INV-1`, `NFR-5`, `NFR-6`, `REQ-IC-2`, `AC-E2.3`).
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn inv_1_nfr_5_req_ic_2_mf2_a_final_head_older_than_the_bound_never_holds(
+async fn inv_1_nfr_6_ac_e2_3_mf2_a_finality_stall_is_held_and_paged_at_once(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -924,7 +1029,8 @@ async fn inv_1_nfr_5_req_ic_2_mf2_a_final_head_older_than_the_bound_never_holds(
             .evaluate(ASSET, t0() + Duration::hours(hours))
             .await
             .unwrap();
-        assert_eq!(e.outcome, Outcome::Diverges, "{e:?}");
+        assert_eq!(e.outcome, Outcome::Incomplete, "{e:?}");
+        assert!(e.differences.is_empty(), "{:?}", e.differences);
         assert_eq!(e.lags[ISSUING].seconds, 0);
         assert_eq!(
             e.lags[ISSUING].head_age_seconds,
@@ -933,33 +1039,52 @@ async fn inv_1_nfr_5_req_ic_2_mf2_a_final_head_older_than_the_bound_never_holds(
             e.lags
         );
         for network in [ISSUING, ORIGIN] {
-            assert!(
-                e.differences.iter().any(|d| d.term == "final_head"
-                    && d.item.as_deref().unwrap().contains(network)),
+            assert_eq!(
+                e.blind.get(network),
+                Some(&Blind::FinalityStall),
                 "{:?}",
-                e.differences
+                e.blind
             );
         }
+        assert!(
+            e.reason.as_deref().unwrap().contains("finality stall"),
+            "{e:?}"
+        );
+        // Paged at once, on the first blind evaluation, and not again.
+        assert_eq!(pager.kinds(), ["reserve-blind"]);
     }
-    assert_eq!(
-        w.count(&format!(
-            "SELECT count(*) FROM pauses WHERE asset = '{ASSET}' AND cause = 'REQ-BK-1'"
-        ))
-        .await,
-        1
-    );
-    assert_eq!(pager.kinds(), ["reserve-divergence"]);
+    assert_eq!(stops(&w).await, (1, 0), "held, never paused");
+    let page = &pager.pages()[0].detail;
+    assert_eq!(page["why"], "finality-stall");
+    assert_eq!(page["class"], "blind");
+    assert_eq!(page["stalled_networks"], json!([ISSUING, ORIGIN]));
+    assert_eq!(page["blind_seconds"], 0);
+    // The heads resume.
+    read_all(&w.admin, 24 * 3_600).await;
+    let e = check
+        .evaluate(ASSET, t0() + Duration::hours(24) + Duration::minutes(1))
+        .await
+        .unwrap();
+    assert_eq!(e.outcome, Outcome::Holds, "{e:?}");
+    assert_eq!(stops(&w).await, (0, 0));
+    assert_eq!(pager.kinds().len(), 1);
 }
 
-/// Review SF1: an evaluation that errors (here, the store refuses to record any complete one) is
-/// recorded as incomplete, paged once when it turns so, and pauses the asset's routes once it has
-/// been failing for longer than the bound; never a page a minute (`REQ-IC-2`, `NFR-5`).
+/// Review SF1 and amendment 0028: an evaluation that errors (here, the store refuses to record any
+/// complete one) is recorded as incomplete and holds the asset's routes at once; its turn to
+/// failing is recorded, not paged, and a person is paged once it has been failing for longer than
+/// the blind bound; never a page a minute (`REQ-IC-2`, `NFR-5`, `AC-E2.3`).
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_ic_2_nfr_5_sf1_an_evaluation_that_errors_pauses_past_the_bound_and_pages_once(
+async fn req_ic_2_nfr_5_ac_e2_3_sf1_an_evaluation_that_errors_is_held_and_paged_past_the_bound_once(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
+    exec(
+        &w.admin,
+        "UPDATE networks SET reserve_blind_page_seconds = 120",
+    )
+    .await;
     fund(&w, 5, 1_000).await;
     read_all(&w.admin, 1_000).await;
     exec(
@@ -974,34 +1099,25 @@ async fn req_ic_2_nfr_5_sf1_an_evaluation_that_errors_pauses_past_the_bound_and_
     let (check, readings, pager) = checker(&w);
     sync_chain(&w.admin, &readings).await;
     let clock = ManualClock::at(t0());
-    for _ in 0..2 {
-        assert!(check.tick(&clock).await.unwrap().is_empty());
-        clock.advance(Duration::minutes(1));
-    }
-    // A minute of failures is within the bound: paged once, not paused.
-    assert_eq!(pager.kinds(), ["reserve-check-failed"]);
-    assert_eq!(w.count("SELECT count(*) FROM pauses").await, 0);
     for _ in 0..3 {
         assert!(check.tick(&clock).await.unwrap().is_empty());
         clock.advance(Duration::minutes(1));
     }
-    assert_eq!(
-        w.count(&format!(
-            "SELECT count(*) FROM pauses WHERE asset = '{ASSET}' AND cause = 'REQ-IC-2' \
-               AND evaluation_id IS NOT NULL"
-        ))
-        .await,
-        1
-    );
+    // Two minutes of failures is within the bound: held, recorded, nobody paged.
+    assert!(pager.kinds().is_empty(), "{:?}", pager.kinds());
+    assert_eq!(stops(&w).await, (1, 0));
+    assert_eq!(logged(&w, "reserve-check-failed").await, 1);
+    for _ in 0..3 {
+        assert!(check.tick(&clock).await.unwrap().is_empty());
+        clock.advance(Duration::minutes(1));
+    }
+    assert_eq!(stops(&w).await, (1, 0));
     assert_eq!(
         w.count("SELECT count(*) FROM reserve_evaluations WHERE outcome = 'incomplete'")
             .await,
-        5
+        6
     );
-    assert_eq!(
-        pager.kinds(),
-        ["reserve-check-failed", "reserve-check-stalled"]
-    );
+    assert_eq!(pager.kinds(), ["reserve-blind"]);
 }
 
 /// Review SF2: the lag bound has a ceiling per network: at most an hour, and no more than the
@@ -1098,10 +1214,10 @@ async fn inv_2_req_rq_6_sf_a_the_store_refuses_a_refund_of_an_operator_top_up(
 }
 
 /// Review SF-B: the lag bound defaults to the network's finality time plus a minute, so a network
-/// that finalizes in 13 minutes is not paused while its heads arrive on time, and is when they
-/// stop (`NFR-5`, `REQ-IC-2`).
+/// that finalizes in 13 minutes is not held while its heads arrive on time, and is when they
+/// stop: held, and paged at once as a finality stall (`NFR-5`, `REQ-IC-2`; amendment 0028).
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn nfr_5_req_ic_2_sf_b_a_slow_finality_network_pauses_only_when_heads_stop(
+async fn nfr_5_req_ic_2_sf_b_a_slow_finality_network_is_held_only_when_heads_stop(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -1147,14 +1263,16 @@ async fn nfr_5_req_ic_2_sf_b_a_slow_finality_network_pauses_only_when_heads_stop
         .evaluate(ASSET, t0() + Duration::seconds(100 + 841))
         .await
         .unwrap();
-    assert_eq!(e.outcome, Outcome::Diverges, "{e:?}");
-    assert!(
-        e.differences
-            .iter()
-            .any(|d| d.term == "final_head" && d.item.as_deref().unwrap().contains(ORIGIN)),
+    assert_eq!(e.outcome, Outcome::Incomplete, "{e:?}");
+    assert!(e.differences.is_empty(), "{:?}", e.differences);
+    assert_eq!(
+        e.blind.get(ORIGIN),
+        Some(&Blind::FinalityStall),
         "{:?}",
-        e.differences
+        e.blind
     );
+    assert_eq!(stops(&w).await, (1, 0));
+    assert_eq!(pager.kinds(), ["reserve-blind"]);
 }
 
 /// Review SF3: a funding declaration applies only from the block it is declared at. An arrival
@@ -1221,4 +1339,143 @@ async fn req_bk_5_inv_1_sf3_a_funding_declaration_never_applies_retroactively(
         );
     }
     assert!(pager.pages().is_empty(), "{:?}", pager.pages());
+}
+
+/// Amendment 0028: a hold never masks a money difference. While the point lags (catching up), the
+/// reserve the network shows is one unit short of the book's: the evaluation diverges, the asset's
+/// routes pause under `REQ-BK-1` (and are held as well), and the page names the money, the values
+/// and the lag. When the check sees again and the reserve is back, the hold lifts itself; the pause
+/// does not: only two operators lift it (`REQ-BK-1`, `REQ-GV-2`, `AC-E2.1`, `AC-E2.3`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_1_ac_e2_3_req_bk_1_a_value_difference_while_lagging_pauses_and_never_lifts_itself(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    fund(&w, 5, 1_000).await;
+    head(&w.admin, ISSUING, 20).await;
+    let pending = observe(
+        &w.admin,
+        ISSUING,
+        30,
+        0,
+        ISSUING_ASSET,
+        50,
+        None,
+        Some(DESTINATION_ACCOUNT),
+        Some(&[0xab; 32]),
+        true,
+        json!({"event": "Minted"}),
+    )
+    .await;
+    read_all(&w.admin, 1_000).await;
+    let (check, readings, pager) = checker(&w);
+    sync_chain(&w.admin, &readings).await;
+    *readings
+        .chain()
+        .reserve
+        .get_mut(&(TOKEN.to_owned(), RESERVE.to_owned()))
+        .unwrap() -= 1;
+    let clock = ManualClock::at(t0() + Duration::seconds(1_000));
+    let e = check.tick(&clock).await.unwrap().remove(0);
+    assert_eq!(e.outcome, Outcome::Diverges, "{e:?}");
+    assert_eq!(e.blind.get(ISSUING), Some(&Blind::CatchingUp));
+    assert!(
+        e.differences
+            .iter()
+            .all(|d| d.term == "reserve" || d.term == "surplus"),
+        "only differences of value: {:?}",
+        e.differences
+    );
+    assert_eq!(stops(&w).await, (1, 1), "paused, and held as well");
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM pauses WHERE asset = '{ASSET}' AND cause = 'REQ-BK-1'"
+        ))
+        .await,
+        1
+    );
+    assert_eq!(pager.kinds(), ["reserve-divergence"]);
+    let page = &pager.pages()[0].detail;
+    assert_eq!(page["class"], "money-differs");
+    assert_eq!(page["stop"], "pause");
+    assert_eq!(page["also_blind"][ISSUING], "catching-up");
+    assert_eq!(
+        page["values"]["reserve"][ORIGIN],
+        json!({"chain": "999", "book": "1000"})
+    );
+    assert_eq!(page["lags"][ISSUING]["seconds"], 980);
+    // The walk catches up and the reserve is back: the check sees and holds, so the hold lifts;
+    // the pause stands, evaluation after evaluation.
+    decide(&w.admin, pending, "withdrawn", 1_060).await;
+    *readings
+        .chain()
+        .reserve
+        .get_mut(&(TOKEN.to_owned(), RESERVE.to_owned()))
+        .unwrap() += 1;
+    for minute in 1..=3 {
+        clock.advance(Duration::minutes(1));
+        read_all(&w.admin, 1_000 + 60 * minute).await;
+        let e = check.tick(&clock).await.unwrap().remove(0);
+        assert_eq!(e.outcome, Outcome::Holds, "{e:?}");
+        assert_eq!(stops(&w).await, (0, 1), "the hold lifted, the pause stands");
+    }
+    assert_eq!(pager.kinds(), ["reserve-divergence"]);
+}
+
+/// Amendment 0028 (`AC-E2.3`, `REQ-GV-1`, `INV-15`): while the check cannot see, new deposits and
+/// withdrawals of the asset wait exactly as under a pause (`CND-Paused`, no order), and move on by
+/// themselves once the check sees again and lifts its hold. No operator acts.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_inv_15_new_deposits_and_withdrawals_wait_while_held_and_move_on_when_it_lifts(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    fund(&w, 5, 1_000_000).await;
+    minted_deposit(&w, 10, 5_000).await;
+    let (check, readings, pager) = checker(&w);
+    let clock = ManualClock::at(t0());
+    // Nothing read yet: the check cannot see the asset, and holds it.
+    let e = check.tick(&clock).await.unwrap().remove(0);
+    assert_eq!(e.outcome, Outcome::Incomplete);
+    assert_eq!(stops(&w).await, (1, 0));
+    // New work arrives: a deposit of a final arrival, and a final redemption.
+    final_arrival(&w.admin, 60, 0, 300).await;
+    let deposit = deposit(&w.admin, 60, 300).await;
+    let withdrawal = redeemed(&w, 70, [5; 32], 700).await;
+    w.settle(t0()).await;
+    for (name, id) in [("deposit", deposit), ("withdrawal", withdrawal)] {
+        assert_eq!(
+            w.state(id).await,
+            ("Source-Final".into(), Some("CND-Paused".into())),
+            "{name} while held"
+        );
+        assert!(
+            order(&w.admin, id, 1).await.is_none(),
+            "{name} ordered while held"
+        );
+    }
+    // The endpoints catch up; the check sees, holds, and lifts its hold; the work moves on.
+    read_all(&w.admin, 200).await;
+    sync_chain(&w.admin, &readings).await;
+    clock.advance(Duration::minutes(1));
+    let e = check.tick(&clock).await.unwrap().remove(0);
+    assert_eq!(e.outcome, Outcome::Holds, "{e:?}");
+    assert_eq!(stops(&w).await, (0, 0));
+    w.settle(t0()).await;
+    for (name, id) in [("deposit", deposit), ("withdrawal", withdrawal)] {
+        assert!(
+            order(&w.admin, id, 1).await.is_some(),
+            "{name} not ordered once lifted"
+        );
+    }
+    assert!(
+        !pager
+            .kinds()
+            .iter()
+            .any(|k| k == "reserve-blind" || k == "reserve-divergence"),
+        "{:?}",
+        pager.kinds()
+    );
 }
