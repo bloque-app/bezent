@@ -36,3 +36,25 @@ pub mod store;
 
 pub use config::Config;
 pub use engine::{Core, Report, Settings};
+
+/// One pass of the running core (amendment 0028): the reserve check first, so an asset it cannot
+/// see is held before the cycle can start new work for it, then the cycle. Returns whether each
+/// answered: the check's `Err` is a store that could not list the assets (every asset is then held,
+/// `reserve::check::Unseen::all`), the cycle's a cycle that failed. `core` must be watching
+/// `check` ([`Core::watching`]).
+pub async fn pass<R, P>(
+    core: &Core,
+    check: &reserve::check::ReserveCheck<R, P>,
+    clock: &impl reserve::check::Clock,
+) -> (
+    sqlx::Result<Vec<reserve::check::Evaluation>>,
+    sqlx::Result<Report>,
+)
+where
+    R: reserve::readings::Readings,
+    P: reserve::check::Pager,
+{
+    let evaluations = check.tick(clock).await;
+    let report = core.cycle(clock.now()).await;
+    (evaluations, report)
+}

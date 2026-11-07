@@ -12,8 +12,8 @@ use bezent_evm_endpoint::evm;
 use bezent_evm_endpoint::observe::Step;
 use bezent_evm_endpoint::rpc::mock::MockChain;
 use common::{
-    CHAIN_ID, Fixture, contracts, delivery, depositor, payout_logs, pool_address, transfer_log,
-    usdc, usdt0, vault,
+    CHAIN_ID, Fixture, NETWORK, contracts, delivery, depositor, payout_logs, pool_address,
+    transfer_log, usdc, usdt0, vault,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -458,4 +458,66 @@ async fn t_009_05_self_zero_bare_emit_and_unpaired_transfers_are_not_payouts(
             "UnpairedReference",
         ]
     );
+}
+
+/// Amendment 0028 (`NFR-6`, `REQ-IC-2`): one step that walks a backlog for longer than the
+/// reserve check's lag bound records the live final point again between its ranges, with the
+/// vault's readings, so the network's latest final head stays fresh while the walk catches up and
+/// the check sees a walk catching up, not a finality stall. The step still reads only up to the
+/// final point it started at.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_nfr_6_a_long_step_keeps_recording_the_live_final_head_between_ranges(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect, 40).await;
+    f.chain.finalize(12);
+    // The chain finalizes on while the step reads: a block at every logs read.
+    f.chain.finalize_on_logs(Some(1));
+    let mut follower = f.follower();
+    follower.head_refresh = Some(std::time::Duration::ZERO);
+    let step = follower.step().await.unwrap();
+    assert!(
+        matches!(
+            step,
+            Step::Read {
+                first: 1,
+                last: 12,
+                ..
+            }
+        ),
+        "{step:?}"
+    );
+    let heads: Vec<i64> = sqlx::query_scalar(
+        "SELECT block_number FROM final_heads WHERE network = $1 ORDER BY block_number",
+    )
+    .bind(NETWORK)
+    .fetch_all(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!(heads.first(), Some(&12), "{heads:?}");
+    assert!(
+        heads.len() >= 3 && heads.iter().all(|h| *h >= 12),
+        "a live head recorded between each pair of ranges: {heads:?}"
+    );
+    let latest = *heads.last().unwrap();
+    assert!(latest > 12, "{heads:?}");
+    // Each head recorded between ranges carries its readings, as the step's own does.
+    let read: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM reserve_readings WHERE network = $1 AND block_number = $2",
+    )
+    .bind(NETWORK)
+    .bind(latest)
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    assert!(read > 0, "no readings at the head recorded between ranges");
+    // The walk read no further than the point it started at.
+    let watermark: Option<i64> =
+        sqlx::query_scalar("SELECT watermark FROM observation_watermarks WHERE network = $1")
+            .bind(NETWORK)
+            .fetch_one(&f.admin)
+            .await
+            .unwrap();
+    assert_eq!(watermark, Some(12));
 }

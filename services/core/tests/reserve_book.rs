@@ -122,6 +122,7 @@ async fn req_as_9_a_bbtc_remainder_lands_in_surplus_with_the_deposits_reference(
         ),
     )
     .await;
+    seen(&w.admin).await;
     let a = observe(
         &w.admin,
         ORIGIN,

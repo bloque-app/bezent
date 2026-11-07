@@ -204,6 +204,7 @@ pub async fn declare_on(admin: &PgPool, vault: &str, d: &Declared<'_>) {
         token,
         token_precision,
     } = d;
+    // The reserve check has seen the asset (amendment 0028), or the signer would hold its payouts.
     sqlx::raw_sql(&format!(
         "INSERT INTO networks (network, role, address_format, backend) VALUES \
            ('{ISSUING}', 'issuing', 'ss58', NULL), ('{network}', 'origin', 'evm', 'evm:{chain_id}'); \
@@ -212,6 +213,8 @@ pub async fn declare_on(admin: &PgPool, vault: &str, d: &Declared<'_>) {
          INSERT INTO admitted_tokens (network, token, asset, precision) VALUES \
            ('{network}', '{token}', '{asset}', {token_precision}); \
          INSERT INTO reserves (asset, network, address) VALUES ('{asset}', '{network}', '{vault}'); \
+         INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+           VALUES ('{asset}', '2000-01-01T00:00:00Z', 'holds', 0); \
          INSERT INTO evm_endpoint_networks (login, network) VALUES \
            ('evm_endpoint_tests_{}', '{network}');",
         bezent_store::EVM_ENDPOINT_ROLE
@@ -418,6 +421,7 @@ impl Fixture {
             },
             start_block: 1,
             max_range: 4,
+            head_refresh: None,
         }
     }
 

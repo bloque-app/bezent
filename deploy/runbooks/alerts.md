@@ -107,7 +107,9 @@ deployment):
 | `fee_short_transfers` | above 0 | `CND-FeeShort` |
 | `fee_position_amount` | the floor is in the core's configuration and the core pages on it (`fee-position-low`, below); this alarm is for **missing data**, which the page does not cover: a breach. Every network | `REQ-ST-6`, `REQ-TR-5` |
 | `fee_position_age_seconds` | growing without bound: the endpoint is not recording a reading | `REQ-ST-6` |
-| `pauses_in_force` | above 0 (information). It counts holds too (amendment 0028: `SELECT kind FROM pauses`); an alarm on it must not page for a hold | `REQ-GV-1` |
+| `pauses_in_force` | above 0 (information). Pauses only (`kind = 'pause'`); holds are apart since amendment 0028 | `REQ-GV-1` |
+| `holds_in_force` | information only: the core pages a hold itself (`reserve-blind`) once it outlasts its bound | `REQ-IC-2` |
+| `hold_age_seconds` (dimension `Asset`) | above the asset's blind bound (`networks.reserve_blind_page_seconds`, 600 s by default): a backstop to `reserve-blind` | `REQ-IC-2` |
 | `submission_gate_state` (dimension `Network`; written by the Kreivo endpoint) | not 0 for a few minutes (alert); missing data is a breach. `0` open, `1` closed | issue #104, `REQ-ST-6` |
 
 **The Kreivo submission gate** (issue #104, `services/kreivo-endpoint/src/metric.rs`). The endpoint builds and signs a

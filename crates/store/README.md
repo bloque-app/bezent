@@ -92,7 +92,7 @@ and no role may DELETE or TRUNCATE anything but the dispatcher's own condition h
 | `unsigned_attempt_cancellations` | core: an attempt ordered and never signed, cancelled under an approved review resolution into `Refunding` (0051) |
 | `book_entries`, `book_postings`, `book_quarantine` | core |
 | `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_statement_objects` (0053: where the statement sink wrote each object, with its ETag and version id) | core |
-| `pauses(asset, cause, evaluation_id, quarantine_id, reading_id)` | core; no role holds `alert_seq`: a compromise pause is the store's own, on an alert's insert (0095). `DELETE` on `pauses`: core, its own blind hold only (0142, amendment 0028) |
+| `pauses(asset, cause, evaluation_id, quarantine_id, reading_id, held_heads)` | core; no role holds `alert_seq`: a compromise pause is the store's own, on an alert's insert (0095). `DELETE` on `pauses`: core, its own blind hold only (0142, amendment 0028) |
 | `observations`, `observation_outcomes`, `observation_ranges`, `final_heads` | Kreivo endpoint, EVM endpoint: each its own networks only, the Kreivo endpoint the issuing network, the EVM endpoint the EVM origin networks (the guard of 0049 on every chain table, by the session's login and the role it acts as; 0034 and 0035 before it) |
 | `prepared_transactions`, `signed_transactions`, `non_execution_proofs` | Kreivo endpoint, EVM endpoint: each its own networks only, a preparation counting as its order's network and a signed transaction as its intent's (0049) |
 | `reserve_readings` | Kreivo endpoint, EVM endpoint: each its own networks only (0049) |
@@ -172,6 +172,12 @@ The audit of PR #56 added these (0049), for every login but the owner:
   naming an evaluation (rows from before 0142 stay pauses). `operator_request_unpause` refuses a hold: it lifts itself.
   `networks.reserve_blind_page_seconds` (default 600, at most 3600) is how long an asset may be held before the core
   pages `reserve-blind`; the operator sets it per network beside `reserve_point_lag_seconds`.
+  A hold carries `held_heads` (each of its asset's networks' latest final head and watermark when it was placed), and
+  the core may delete a hold only while the asset's latest evaluation holds and names a book cut. `reserve_check_holds
+  (asset)` (definer; the core may call it, and `pause_holds_intent` does) is whether that is so: the core's gate and the
+  signer hold an asset for which it is false, whatever `pauses` says. The latest evaluation is the latest by id
+  (`reserve_evaluations_latest_by_id`). `ops_observables()`'s `pauses_in_force` counts pauses only;
+  `holds_in_force` and `hold_age_seconds` count holds.
 - A bound deposit's destination is on the issuing network and its refund destination on its arrival's
   network; an unassociated arrival's refund pays out on the arrival's network; neither is accepted
   otherwise.

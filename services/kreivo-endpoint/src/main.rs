@@ -133,7 +133,7 @@ mod run {
     use bezent_kreivo_endpoint::config::Config;
     use bezent_kreivo_endpoint::metric;
     use bezent_kreivo_endpoint::network;
-    use bezent_kreivo_endpoint::observe::{Follower, Step, WALK_RUNG};
+    use bezent_kreivo_endpoint::observe::{Follower, WALK_RUNG};
     use bezent_kreivo_endpoint::proof::Prover;
     use bezent_kreivo_endpoint::submit::{GateState, Lane, SignerLink, Submitter};
     use bezent_kreivo_endpoint::supply::{Recorded, Supplies};
@@ -309,20 +309,23 @@ mod run {
             let result: Result<bool, sqlx::Error> = async {
                 // Caught up: the light client's finalized head is read, and every final block
                 // before it (issue #61).
-                let caught_up = loop {
-                    match follower.step().await? {
-                        Step::Read { .. } => {
-                            // A walk that moves is healthy (issue #61): blocks were read and
-                            // recorded, so the follower advanced and the store answered, unless
-                            // the pass before failed. A stuck one never gets here and goes stale.
-                            if !failed_before {
-                                bezent_kreivo_endpoint::health::beat(&heartbeat);
-                            }
+                // Amendment 0028: while a long backlog is walked, the supply (and with it the
+                // finalized head) is recorded between steps, so the reserve check sees a walk
+                // catching up, not a finality stall.
+                let caught_up = bezent_kreivo_endpoint::observe::catch_up(
+                    &follower,
+                    &supplies,
+                    Some(bezent_kreivo_endpoint::observe::HEAD_REFRESH),
+                    || {
+                        // A walk that moves is healthy (issue #61): blocks were read and
+                        // recorded, so the follower advanced and the store answered, unless
+                        // the pass before failed. A stuck one never gets here and goes stale.
+                        if !failed_before {
+                            bezent_kreivo_endpoint::health::beat(&heartbeat);
                         }
-                        Step::CaughtUp { .. } => break true,
-                        _ => break false,
-                    }
-                };
+                    },
+                )
+                .await?;
                 let counts = chain.history_counts();
                 let lied: u64 = counts.iter().map(|c| c.lied).sum();
                 if lied > lied_seen {

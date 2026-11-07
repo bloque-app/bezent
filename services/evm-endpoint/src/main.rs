@@ -185,6 +185,7 @@ async fn run(config: Config) -> Result<(), String> {
         },
         start_block: config.start_block,
         max_range: config.max_range,
+        head_refresh: Some(bezent_evm_endpoint::observe::HEAD_REFRESH),
     };
     let submitter = Submitter {
         pair: &pair,

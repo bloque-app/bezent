@@ -510,8 +510,11 @@ lock.
   routes instead, as a row of `pauses` of cause `blind` that the core alone writes and lifts, at the first evaluation that
   holds. It pages `reserve-blind` once it outlasts `networks.reserve_blind_page_seconds` (default 600 s, the smallest of
   the asset's networks'), or at once on a finality stall: no final head within the bound by the clock, or the same latest
-  final head since the hold began. A difference of value found while the check lags is a pause and a hold. The core runs
-  the check before its cycle, so an asset it cannot see is held before the cycle starts new work for it.
+  final head since the hold began, in either case while the network's walk has stopped. A difference of value found while
+  the check lags is a pause and a hold. Until the check has seen an asset (its latest evaluation, by id, holds and was
+  made: `reserve_check_holds`), the core's gate and the signer hold it with or without a hold row. The core runs the
+  check before its cycle, and a check's first tick evaluates every asset. The endpoints record the live final head again
+  every 15 s while they walk a backlog, so a long catch-up is not a finality stall.
 - The statement names each asset's backend and assurance class, lists unconverted holdings outside the equation, says
   it is a signed claim and not a proof of solvency, and says which terms rest on reports.
 - An append-only bucket with object lock keeps every statement, so a later revision is detectable without bezent.

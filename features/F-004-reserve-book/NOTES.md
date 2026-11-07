@@ -298,24 +298,37 @@ needed the two-login lift. Items 6, 16 and 17 above describe the behaviour befor
     `catching up` or `a finality stall`), with its terms and the book's kept in the record. It diverges only on a
     difference of value; when it also lags, it diverges and is held as well (`Evaluation::blind`).
 33. **The hold is a row of `pauses`** (migration 0142): cause `blind`, generated `kind` `hold`, asset-scoped, naming the
-    evaluation it began at, one per asset. Every reader of `pauses` (the gate, the ingress, `pause_holds_intent`, the
-    deadline clock) refuses work under it, unchanged. The core places it at the first evaluation that does not hold
-    (incomplete, blind, or diverging while lagging), in that evaluation's transaction, and lifts it (`DELETE`) in the
-    transaction of the next that holds. The store refuses the core any other `DELETE` (trigger `pauses_guard_delete`) and
-    a hold naming an evaluation that held; `operator_request_unpause` refuses a hold. The core no longer inserts a
-    `REQ-IC-2` evaluation pause; `stalled()` is gone.
-34. **Pages.** `reserve-blind`, once per hold and `why`: `finality-stall` at once, or `beyond-bound` once the hold is older
-    than `networks.reserve_blind_page_seconds` (default 600, at most 3600; the smallest of the asset's networks'). Not
-    paged, only recorded (event log, and a WARN line under `recorded=`): `reserve-hold`, `reserve-hold-lifted`,
-    `reserve-check-incomplete`, and `reserve-check-failed` when the failure was recorded. A failure the store cannot
-    record pages as before, since nothing can be held. Every page about a pause or a hold names `class` (`blind` or
-    `money-differs`) and `stop`, and carries `values` and `lags`.
-35. **Catching up or a finality stall.** The endpoints record only the live finalized head, so a fresh latest head with a
-    point behind it is our walk (or a pending observation) catching up; a latest head older than the bound by the clock,
-    or one that has not changed since the hold began once the hold is older than the network's bound, is a finality
-    stall or nothing recording heads. The core cannot tell those two apart and pages both at once.
-36. **Order.** `main.rs` runs the reserve check before the cycle, so on a core's first pass an asset the check cannot see
-    is held before new work for it is started.
+    evaluation it began at and, in `held_heads`, each of the asset's networks' latest final head and watermark then; one
+    per asset. Every reader of `pauses` (the gate, the ingress, `pause_holds_intent`, the deadline clock) refuses work
+    under it, unchanged. The core places it at the first evaluation that does not hold (incomplete, blind, or diverging
+    while lagging), in that evaluation's transaction, and lifts it (`DELETE`) in the transaction of the next that holds.
+    The store refuses the core any other `DELETE` (trigger `pauses_guard_delete`: the latest evaluation by id must hold
+    and name a book cut) and a hold naming an evaluation that held; `operator_request_unpause` refuses a hold. The core
+    no longer inserts a `REQ-IC-2` evaluation pause; `stalled()` is gone. Every evaluation and every record of a failure
+    takes the advisory lock `bezent/reserve-evaluation/<asset>` first; "latest" is by id everywhere.
+34. **Unseen is held.** The gate (`Core::route_held`) and the signer (`pause_holds_intent`) also hold an asset for which
+    `reserve_check_holds` is false (its latest evaluation, by id, does not hold or names no book cut, or there is none),
+    and the gate holds what the check could not even record (`Unseen`, shared through `Core::watching`): an asset whose
+    failed evaluation the store refused, and every asset while the check cannot list them. A check's first tick
+    evaluates every asset.
+35. **Pages.** `reserve-blind`, once per hold and `why`: `finality-stall` at once, or `beyond-bound` once the hold is older
+    than `networks.reserve_blind_page_seconds` (default 600, at most 3600; the smallest of the asset's own networks':
+    its issuing network and its reserve networks). Not paged, only recorded (event log, and a WARN line under
+    `recorded=`): `reserve-hold`, `reserve-hold-lifted`, `reserve-check-incomplete`, and `reserve-check-failed` when
+    the failure was recorded. A failure the store cannot record pages `reserve-check-failed` at once and
+    `reserve-check-stalled` past the blind bound, both held in memory. Every page about a pause or a hold names `class`
+    (`blind` or `money-differs`) and `stop`. `values` is on `reserve-divergence`, `reserve-check-incomplete`,
+    `reserve-hold`, `reserve-blind`, `reserve-hold-lifted`, `reserve-check-failed` and `reserve-check-stalled` (null
+    when nothing could be derived); `lags` on `reserve-divergence`, `reserve-check-incomplete`, `reserve-hold` and
+    `reserve-blind`; `held_heads` on `reserve-hold` and `reserve-blind`.
+36. **Catching up or a finality stall.** The endpoints record only the live finalized head, and since 0028 record it again
+    every 15 s while they walk a backlog (EVM: between the ranges of a step; Kreivo: between the steps of a catch-up).
+    A network is a finality stall when its walk has stopped (the watermark has not moved) and either its latest head is
+    older than its lag bound by the clock, or the hold is older than that bound and the latest head is still the one in
+    `held_heads`. A stale head with a moving walk is catching up. A network with no head ever recorded is never a stall.
+    The core cannot tell a stalled chain from nothing recording heads and pages both at once. When a reading fails the
+    points and lags already found are kept, so the rule still applies.
+37. **Order.** `bezent_core_service::pass` (used by `main.rs`) runs the reserve check before the cycle.
 
 ## Review items left open (PR #40 review, 2026-10-14)
 

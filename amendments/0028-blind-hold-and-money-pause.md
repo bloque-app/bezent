@@ -55,8 +55,9 @@ once the networks are read again, and one where a term of value is known to be w
 3. **Every pause and page names its kind** (a "blind" hold or a "money differs" pause) and carries the values (supply,
    reserve, book, the lag figures), so a reader can tell at a glance whether money is at stake.
 
-Fail-closed is kept: while blind, nothing new may start. A hold never masks a money difference: a difference of value
-found while the check also lags is a pause. The self-lift is only for the hold; the core still never lifts a pause of a
+Fail-closed is kept: while blind, nothing new may start. A hold never masks a money difference the check can see: a
+difference of value found while the check also lags is a pause. While it cannot read the terms at all, a difference may
+exist unseen; the hold is what stops new work meanwhile. The self-lift is only for the hold; the core still never lifts a pause of a
 divergence, of a quarantined observation, of a compromise, or of `INV-4`.
 
 ## Ruling
@@ -79,23 +80,37 @@ item by item, a negative surplus (`REQ-BK-3`), and the supply mismatch of `INV-4
 diverges and pauses under `REQ-BK-1`, whether or not it also lags; when it also lags, the asset is held as well, so that
 lifting the pause while the check is still blind starts nothing.
 
-"No complete evaluation yet" is the first case: an asset's first evaluation at a cold start has no final point, so it is
-incomplete and holds at once. The core now runs the reserve check before its cycle on each pass, so on a core's first
-pass an asset the check cannot see is held before the cycle can start new work for it (residual window: item 6 below).
+"No complete evaluation yet" is held whether or not a hold row exists. The core's gate and the signer's
+`pause_holds_intent` treat an asset as held unless its latest evaluation, by id, holds and was made (it names the book
+entry it cut at: `reserve_check_holds`). That covers an asset never evaluated, one declared while the core runs, the
+moment after a restart or after 0142 is applied, and any race between a hold and the work it holds. The hold row is still
+written, for the record and for paging: an asset's first evaluation at a cold start has no final point, so it is
+incomplete and holds at once. The core runs the reserve check before its cycle on each pass, and a check's first tick
+evaluates every asset however recent its last evaluation, so a restarted core sees each asset before its cycle runs.
+
+If the store refuses even the record of a failed evaluation, nothing durable can be held: the core's gate holds the
+asset in memory until an evaluation is recorded again, and, while the check cannot list the assets at all, every asset.
 
 ## Catching up or a finality stall
 
 Both endpoints record the network's **live** finalized head in `final_heads` (the EVM follower records the pair's final
 point at each step, with the vault's readings; the Kreivo endpoint records the finalized head with its supply readings).
-Neither records a head walked from history. So, per network:
+Neither records a head walked from history. Since this amendment both also record it again while they walk a backlog
+(every 15 s: the EVM follower between the ranges of one step, the Kreivo endpoint between the steps of a catch-up), so a
+long catch-up keeps the latest head fresh. So, per network:
 
 - **Catching up**: the latest recorded final head is fresh by the clock (within the network's bound), and the point the
   check can read at lags it beyond the bound. The chain is finalizing; our reading of it (the walk's watermark, or an
   observation still awaiting its outcome) is behind. Held; paged only once the asset has been blind for longer than its
   blind bound.
-- **Finality stall**: no final head recorded within the bound by the clock; or, once the asset has been held for longer
-  than the network's bound, the latest final head is still the one recorded when the hold began. The second test does not
-  rest on block timestamps, which can mislead the clock. Held and paged at once.
+- **Finality stall**, while the network's walk has also stopped: no final head recorded within the bound by the clock,
+  and the watermark has not moved since the evaluation before; or, once the asset has been held for longer than the
+  network's bound, the latest final head is still the one recorded when the hold began (`pauses.held_heads`, written
+  for every hold, a cold start's and a recorded failure's included), and the watermark has not moved since. The second
+  test does not rest on block timestamps, which can mislead the clock. A network on which no head was ever recorded is
+  never a stall: nothing has been seen to stop. Held and paged at once.
+- A stale head while the walk still moves is catching up, held and paged only past the blind bound: the walk cannot pass
+  the latest head, so once it reaches it and stops, a stall that is real pages.
 
 The core cannot tell a chain that stopped finalizing from nothing recording its heads (an endpoint stopped, both of its
 providers behind): both look like a final head that does not advance, and both page at once, since neither ends by
@@ -107,7 +122,8 @@ itself. The classification decides only when a person is paged, never whether wo
   work as a pause does, and is lifted by bezent itself once an evaluation holds.
 - **`REQ-BK-1`**: "Any difference of value, to the smallest unit, MUST pause the asset's routes and page a human
   (`REQ-IC-2`). An evaluation that cannot be made, or that rests on a point too far behind its network's final head, is
-  not a divergence: it holds the asset's routes (`REQ-IC-2`). A hold never masks a difference of value."
+  not a divergence: it holds the asset's routes (`REQ-IC-2`). A hold never masks a difference of value the evaluation
+  can see: one found while the check also lags is a pause as well."
 - **`REQ-GV-2`**, appended: "The one exception is a hold (`REQ-IC-2`): bezent lifts it itself once an evaluation of the
   reserve equation holds, and no person lifts it by hand. A pause is never lifted by bezent."
 - **`REQ-IC-2`**: split in two. On a condition that shows value is wrong or unexplained (a divergence in the reserve
@@ -140,26 +156,43 @@ lifted as before.
   reader changed: the core's gate (`Source-Final`, `CND-Paused`), the ingress (`ERR-RoutePaused`, the route table's
   `paused`), the signer's `pause_holds_intent` (amendment 0022 A1b), and the deadline clock (amendment 0019 A1d). A hold
   is asset-scoped, names the evaluation it began at, and there is at most one per asset.
-- **Who writes it.** The core may insert a hold only naming an evaluation of that asset that did not hold. It may
-  delete a row of `pauses` only if it is a hold and the asset's latest evaluation, by id, holds and is later than the one
-  the hold names; every other row is refused by the store's trigger (PostgreSQL has no column-level `DELETE`), so the
+- **Who writes it.** The core may insert a hold only naming an evaluation of that asset that did not hold, with
+  `held_heads` (each of the asset's networks' latest final head and watermark then). It may delete a row of `pauses`
+  only if it is a hold and the asset's latest evaluation, by id, holds, was made (names a book cut) and is later than the
+  one the hold names; every other row is refused by the store's trigger (PostgreSQL has no column-level `DELETE`), so the
   core still lifts no pause. The core no longer inserts a `REQ-IC-2` pause naming an evaluation; such rows already
   recorded stay valid, and stay pauses. `operator_request_unpause` refuses a hold.
+- **Unseen means held.** `reserve_check_holds(asset)` (the latest evaluation, by id, holds and was made) is read by the
+  core's gate and by the signer's `pause_holds_intent`: an asset for which it is false is held, whatever `pauses` says.
+  The latest evaluation is the latest by id everywhere (a new index), and every evaluation and every record of a failure
+  takes the per-asset advisory lock `bezent/reserve-evaluation/<asset>` first, so a hold and its lift follow the order
+  the evaluations are recorded in.
 - **The check.** Lag and staleness are no longer `Difference`s. An evaluation diverges only on a difference of value.
   Blind evaluations are incomplete, their reason naming each blind network and whether it is catching up or a
   finality stall. The hold is placed, and an incomplete evaluation's turn is logged, in the evaluation's transaction,
   without a page (`reserve-hold`, `reserve-check-incomplete`, `reserve-check-failed` in the event log). The hold is lifted
   in the transaction of the evaluation that holds (`reserve-hold-lifted`). `reserve-blind` is paged once per hold and
   reason (`why`: `finality-stall` or `beyond-bound`). The blind bound is `networks.reserve_blind_page_seconds` (default
-  600, at most 3600), the smallest of the asset's networks', beside `reserve_point_lag_seconds`. An evaluation whose
-  failure cannot even be recorded cannot be held, so it still pages at once (`reserve-check-failed`) and again past the
-  bound (`reserve-check-stalled`), as before.
+  600, at most 3600), the smallest of the asset's own networks' (its issuing network and its reserve networks),
+  beside `reserve_point_lag_seconds`. When a reading fails, the points and lags already found are kept, so a stale head
+  on the same evaluation still pages at once. An evaluation whose failure cannot even be recorded cannot be held in the
+  store: the core's gate holds the asset in memory (`Unseen`), and it pages at once (`reserve-check-failed`) and again
+  past the blind bound (`reserve-check-stalled`), both `class` `blind`, `stop` `hold`, `recorded` false. While the
+  check cannot list the assets, the gate holds every asset.
 - **Naming.** Every page about a pause or a hold carries `class` (`blind` or `money-differs`) and `stop` (`hold` or
-  `pause`); `reserve-divergence`, `reserve-hold`, `reserve-blind` and `reserve-hold-lifted` carry `values` (each term as
-  the networks show it and as the book holds it) and `lags` (each network's point, latest final head, lag in blocks and
-  seconds, head age, bound and state). `reserve-divergence` also names the networks it is blind on (`also_blind`).
-  `book-quarantine`, `supply-mismatch-pause` and the core's `key-compromise` name `class` `money-differs`.
-- **Order.** The core runs the reserve check before its cycle on each pass.
+  `pause`). `values` (each term as the networks show it and as the book holds it, null when nothing could be derived)
+  is carried by `reserve-divergence`, `reserve-check-incomplete`, `reserve-hold`, `reserve-blind`,
+  `reserve-hold-lifted`, `reserve-check-failed` and `reserve-check-stalled`; `lags` (each network's point, latest final
+  head, lag in blocks and seconds, head age, bound, watermark and state) by `reserve-divergence`,
+  `reserve-check-incomplete`, `reserve-hold` and `reserve-blind`; `held_heads` by `reserve-hold` and `reserve-blind`.
+  `reserve-divergence` also names the networks it is blind on (`also_blind`). `book-quarantine`,
+  `supply-mismatch-pause` and the core's `key-compromise` name `class` `money-differs`.
+- **Order.** The core runs the reserve check before its cycle on each pass (`bezent_core_service::pass`); a check's
+  first tick evaluates every asset.
+- **The endpoints.** The EVM follower records the live final point, with its readings, between the ranges of a step
+  every 15 s (`head_refresh`); the Kreivo endpoint records the supply at the finalized head between the steps of a
+  catch-up every 15 s (`observe::catch_up`).
+- **Observables.** `pauses_in_force` counts pauses only; `holds_in_force` and `hold_age_seconds` (per asset) count holds.
 - Tests: `services/core/tests/reserve_check.rs`
   (`ac_e2_3_req_ic_2_a_cold_start_with_every_term_zero_is_held_not_paused_and_lifts_itself`,
   `inv_1_nfr_5_ac_e2_3_m2_a_walk_catching_up_is_held_never_a_divergence`,
@@ -171,6 +204,19 @@ lifted as before.
   (`ac_e2_3_a_blind_hold_refuses_new_requests_and_its_lift_admits_them`), `services/core/tests/conditions.rs`
   (`ac_e2_3_a1b_a_hold_keeps_an_unsigned_intent_unsigned_until_the_core_lifts_it`: the signer refuses under a hold), and
   `crates/store/tests/reserve_check.rs` (`req_ic_2_req_gv_2_a0028_the_core_holds_only_while_blind_and_lifts_only_its_own_hold`).
+  From the review of the first build: `ac_e2_3_a_pass_runs_the_check_before_the_cycle`,
+  `req_ic_2_a0028_evaluations_of_an_asset_take_its_lock_and_run_one_at_a_time`,
+  `ac_e2_3_req_bk_1_a_divergence_the_check_can_see_keeps_an_existing_hold`,
+  `ac_e2_3_a0028_a_head_unchanged_since_the_hold_began_is_a_stall_whatever_its_block_time`,
+  `ac_e2_3_a0028_held_heads_hold_for_a_cold_start_and_a_recorded_failure`,
+  `ac_e2_3_a0028_a_stale_head_with_a_moving_walk_is_catching_up`,
+  `ac_e2_3_a0028_a_failed_read_keeps_the_lags_and_a_stale_head_pages_at_once`,
+  `ac_e2_3_a0028_an_evaluation_the_store_cannot_record_is_held_in_memory` and
+  `ac_e2_3_a0028_the_first_tick_evaluates_every_asset` (`reserve_check.rs`);
+  `ac_e2_3_a1b_an_asset_the_check_has_not_seen_is_held_with_no_hold_row` (`conditions.rs`);
+  `ac_e2_3_nfr_6_a_long_step_keeps_recording_the_live_final_head_between_ranges` (`services/evm-endpoint/tests/observe.rs`)
+  and `ac_e2_3_nfr_6_a_long_catch_up_records_the_finalized_head_between_steps` (`services/kreivo-endpoint/tests/observe.rs`).
+  Test fixtures that move value declare that the check has seen their assets (a holding evaluation recorded as made).
 
 ## Open after the ruling
 
@@ -189,21 +235,24 @@ None of these is applied; each is the owner's.
    before.
 5. **Requesters** see a hold as `CND-Paused` and `ERR-RoutePaused`. Whether a requester should see the hold as its own
    condition (`REQ-IC-5`) is not ruled; nothing on the requester surface changed.
-6. **Residual windows.** An asset declared while the core runs, in the moment between that pass's check and its cycle,
-   has no evaluation and so no hold for at most one pass; the signer's read of `pauses` (amendment 0022 A1b) and the
-   next pass close it. With the core down nothing is evaluated and no hold is placed, but nothing is ordered either; the
-   ingress keeps taking requests, which wait at the core.
+6. **Residual windows.** An asset the check has not seen is held by the gate and the signer with or without a hold row,
+   so a new asset, a restart and the moment after 0142 hold nothing open. What remains: a core whose gate holds an asset
+   in memory (the store refused the record) holds it only in that process; another core or a restart would not, until
+   its own first tick. The ingress does not read `reserve_check_holds`: it keeps taking requests for an asset not yet
+   seen, which wait at the core. With the core down nothing is evaluated, but nothing is ordered either.
 7. **The observables.** `reserve_equation_outcome` is 2 for a blind evaluation, as for any incomplete one ("could not
-   be made"); `pauses_in_force` counts holds. Separate observables for holds are not built. An infrastructure alarm on
-   either must wait out the blind bound, or it pages where the core does not (`deploy/runbooks/alerts.md`).
+   be made"); `pauses_in_force` counts pauses only, `holds_in_force` and `hold_age_seconds` holds. An infrastructure
+   alarm on `reserve_equation_outcome` must wait out the blind bound, or it pages where the core does not
+   (`deploy/runbooks/alerts.md`).
 8. **Behaviour that is stricter than before.** A transient failure to read (one evaluation incomplete) now holds new
    work at once, for at least one evaluation period, where before it paused nothing until the bound. A blind
    evaluation is incomplete, so a statement does not state it: a blind stretch longer than the statement's evaluation
    age (15 minutes) ends in `statement-overdue`, where a lag used to be stated as a divergence.
 9. **Deployment.** Every service refuses to start unless the store's migrations are exactly its own, so a core and a
    store on either side of 0142 cannot start together. A core already running when 0142 is applied can no longer record
-   a `REQ-IC-2` stall pause: its failed evaluation goes to the unrecorded path and pages `reserve-check-failed`. Apply
-   0142 and restart the core together.
+   a `REQ-IC-2` stall pause: its failed evaluation goes to the unrecorded path and pages `reserve-check-failed`. It can
+   still raise a `REQ-BK-1` pause from a lag (its own code counts a lag as a divergence), which then needs the two-login
+   lift as before. Apply 0142 and restart the core together.
 
 ## Identifier ledger
 

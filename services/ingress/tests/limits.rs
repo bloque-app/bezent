@@ -180,7 +180,7 @@ async fn ac_e2_3_a_blind_hold_refuses_new_requests_and_its_lift_admits_them(pool
         &format!(
             "WITH v AS (INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, reason) \
                         VALUES ('{ASSET}', now(), 'incomplete', 'blind: catching up') RETURNING id) \
-             INSERT INTO pauses (asset, cause, evaluation_id) SELECT '{ASSET}', 'blind', id FROM v"
+             INSERT INTO pauses (asset, cause, evaluation_id, held_heads) SELECT '{ASSET}', 'blind', id, '{{}}' FROM v"
         ),
     )
     .await;
@@ -193,8 +193,8 @@ async fn ac_e2_3_a_blind_hold_refuses_new_requests_and_its_lift_admits_them(pool
     exec(
         &core,
         &format!(
-            "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome) \
-             VALUES ('{ASSET}', now(), 'holds'); \
+            "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+             VALUES ('{ASSET}', now(), 'holds', 0); \
              DELETE FROM pauses WHERE asset = '{ASSET}' AND cause = 'blind'"
         ),
     )
