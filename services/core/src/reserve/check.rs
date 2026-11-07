@@ -342,8 +342,6 @@ pub struct ReserveCheck<R, P> {
     first: std::sync::atomic::AtomicBool,
     /// Each asset's blind bound as last read, for a stall the store cannot be asked about.
     bounds: Mutex<HashMap<String, i64>>,
-    /// Assets whose last turn found their lock busy: due again at the next tick.
-    retry: Mutex<HashSet<String>>,
 }
 
 /// What a re-derivation found, for the evaluation's record and the statement.
@@ -384,7 +382,6 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
             unseen: std::sync::Arc::default(),
             first: std::sync::atomic::AtomicBool::new(true),
             bounds: Mutex::default(),
-            retry: Mutex::default(),
         }
     }
 
@@ -435,13 +432,8 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         let first = self.first.swap(false, std::sync::atomic::Ordering::SeqCst);
         let mut done = Vec::new();
         for (asset, last) in assets {
-            // An asset whose last turn found its lock busy is due again now (amendment 0028).
-            let retry = self.retry().remove(&asset);
-            if (first
-                || retry
-                || last.is_none_or(|l| now - l >= period())
-                || quarantined.contains(&asset))
-                && let Some(e) = self.evaluate_or_page(&asset, now, last).await
+            if (first || last.is_none_or(|l| now - l >= period()) || quarantined.contains(&asset))
+                && let Some(e) = self.evaluate_or_page(&asset, now).await
             {
                 done.push(e);
             }
@@ -464,66 +456,27 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
     /// routes, as an incomplete evaluation does, paging only once the hold outlasts its bound
     /// (review SF1; `REQ-IC-2`, amendment 0028). If even that cannot be recorded, nothing can be
     /// held, so the episode is kept here: paged at once, and paged as a stall once past the bound.
-    /// `last` is when the asset was last evaluated, for a turn whose lock is busy ([`Self::busy`]).
-    async fn evaluate_or_page(
-        &self,
-        asset: &str,
-        now: DateTime<Utc>,
-        last: Option<DateTime<Utc>>,
-    ) -> Option<Evaluation> {
+    async fn evaluate_or_page(&self, asset: &str, now: DateTime<Utc>) -> Option<Evaluation> {
         let error = match self.evaluated(asset, now).await {
-            Ok(Turn::Done(e)) => {
+            Ok(e) => {
                 self.unrecorded_episode().remove(asset);
                 self.unseen.assets().remove(asset);
                 return Some(e);
             }
-            Ok(Turn::Busy) => {
-                self.busy(asset, now, last);
-                return None;
-            }
             Err(e) => e.to_string(),
         };
         match self.record_failure(asset, now, &error).await {
-            Ok(Turn::Done(acts)) => {
+            Ok(acts) => {
                 self.unrecorded_episode().remove(asset);
                 self.unseen.assets().remove(asset);
                 self.act(&acts);
             }
-            Ok(Turn::Busy) => self.busy(asset, now, last),
             Err(r) => {
                 tracing::error!(asset, error = %r, "NFR-5: a failed evaluation could not be recorded");
                 self.unrecorded(asset, now, &error);
             }
         }
         None
-    }
-
-    /// A turn whose asset lock another session holds past [`LOCK_WAIT`] (amendment 0028). The asset
-    /// is due again at the next tick. While its last evaluation is recent, another evaluation is
-    /// recording: the turn is skipped. Once it is none, or older than three periods, whatever holds
-    /// the lock is not recording (a session that took the key and keeps it, a peer whose every
-    /// record fails): that is an evaluation that cannot be recorded, held in memory and paged.
-    fn busy(&self, asset: &str, now: DateTime<Utc>, last: Option<DateTime<Utc>>) {
-        self.retry().insert(asset.to_owned());
-        if last.is_none_or(|l| now - l > period() * 3) {
-            tracing::error!(
-                asset,
-                "NFR-5: the asset's evaluation lock is held and no evaluation of it has been recorded for three periods"
-            );
-            self.unrecorded(
-                asset,
-                now,
-                &format!(
-                    "the asset's evaluation lock is held elsewhere and no evaluation of it has been recorded since {}",
-                    last.map_or_else(|| "ever".to_owned(), |l| l.to_rfc3339())
-                ),
-            );
-        } else {
-            tracing::info!(
-                asset,
-                "the asset's evaluation lock is held by another evaluation; the asset is evaluated again at the next tick"
-            );
-        }
     }
 
     /// An evaluation of `asset` that could not be recorded at all: nothing durable can be held, so
@@ -582,12 +535,6 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         }
     }
 
-    fn retry(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
-        self.retry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     fn unrecorded_episode(
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<String, (DateTime<Utc>, bool)>> {
@@ -605,11 +552,9 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         asset: &str,
         now: DateTime<Utc>,
         error: &str,
-    ) -> sqlx::Result<Turn<Acts>> {
+    ) -> sqlx::Result<Acts> {
         let mut tx = self.pool.begin().await?;
-        if !lock_asset(&mut tx, asset).await? {
-            return Ok(Turn::Busy);
-        }
+        lock_asset(&mut tx, asset).await?;
         let previous: Option<String> = sqlx::query_scalar(
             "SELECT outcome FROM reserve_evaluations WHERE asset = $1 ORDER BY id DESC LIMIT 1",
         )
@@ -661,7 +606,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
             store::event(&mut tx, &p.kind, None, &p.detail).await?;
         }
         tx.commit().await?;
-        Ok(Turn::Done(acts))
+        Ok(acts)
     }
 
     /// Pages what is to be paged, and logs what is only recorded. A recorded entry is logged under
@@ -678,26 +623,18 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
 
     /// Evaluates the reserve equation for `asset` at `now` and acts on the outcome. Posting what is
     /// pending first never stops it (review M1).
-    /// If another session holds the asset's evaluation lock past [`LOCK_WAIT`], the error says so.
     pub async fn evaluate(&self, asset: &str, now: DateTime<Utc>) -> sqlx::Result<Evaluation> {
         self.post().await;
-        match self.evaluated(asset, now).await? {
-            Turn::Done(e) => Ok(e),
-            Turn::Busy => Err(sqlx::Error::Protocol(format!(
-                "the evaluation lock of {asset} is held elsewhere (amendment 0028)"
-            ))),
-        }
+        self.evaluated(asset, now).await
     }
 
-    async fn evaluated(&self, asset: &str, now: DateTime<Utc>) -> sqlx::Result<Turn<Evaluation>> {
+    async fn evaluated(&self, asset: &str, now: DateTime<Utc>) -> sqlx::Result<Evaluation> {
         // One evaluation of an asset at a time, decided and recorded under one lock (amendment
         // 0028): what an evaluation reads, the outcome it comes to and the hold it places or lifts
         // follow the evaluations' ids. The reads run in a savepoint, so a store error while reading
         // is an incomplete evaluation, recorded, not a failed one.
         let mut tx = self.pool.begin().await?;
-        if !lock_asset(&mut tx, asset).await? {
-            return Ok(Turn::Busy);
-        }
+        lock_asset(&mut tx, asset).await?;
         let mut read = sqlx::Acquire::begin(&mut *tx).await?;
         let mut broken = false;
         let derivation = match self.derive(&mut read, asset, now).await {
@@ -989,7 +926,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         }
         tx.commit().await?;
         self.act(&acts);
-        Ok(Turn::Done(Evaluation {
+        Ok(Evaluation {
             id,
             asset: asset.to_owned(),
             evaluated_at: now,
@@ -1002,7 +939,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
             book: book_terms,
             differences,
             alerts,
-        }))
+        })
     }
 
     /// The alerts that hold for `asset` (`REQ-BK-10`, `REQ-BE-6`).
@@ -1331,42 +1268,16 @@ struct Seen<'a> {
     values: &'a Value,
 }
 
-/// How long an evaluation waits for another evaluation of the same asset before it skips its turn.
-const LOCK_WAIT: &str = "3s";
-
-/// What a turn of an asset's evaluation came to: done, or its lock was busy (amendment 0028).
-enum Turn<T> {
-    Done(T),
-    Busy,
-}
-
 /// Takes the per-asset lock every evaluation and every record of a failure takes first, in its
-/// own transaction (amendment 0028), as the engine's locks do. It waits at most [`LOCK_WAIT`];
-/// `false` is a lock another session holds past that (`lock_not_available`): the transaction is
-/// then spent, and the turn is the caller's to treat as busy ([`ReserveCheck::busy`]).
-async fn lock_asset(tx: &mut PgConnection, asset: &str) -> sqlx::Result<bool> {
-    sqlx::query(&format!("SET LOCAL lock_timeout = '{LOCK_WAIT}'"))
-        .execute(&mut *tx)
-        .await?;
-    let locked = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+/// own transaction (amendment 0028), as the engine's locks do. It waits as any statement does, up
+/// to the session's `statement_timeout`; a timeout is a store error like any other, so a failed
+/// evaluation is recorded, or, if even that cannot be, held in memory and paged.
+async fn lock_asset(tx: &mut PgConnection, asset: &str) -> sqlx::Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!("bezent/reserve-evaluation/{asset}"))
         .execute(&mut *tx)
-        .await;
-    match locked {
-        Ok(_) => {}
-        Err(e)
-            if e.as_database_error()
-                .and_then(|d| d.code())
-                .is_some_and(|c| c == "55P03") =>
-        {
-            return Ok(false);
-        }
-        Err(e) => return Err(e),
-    }
-    sqlx::query("SET LOCAL lock_timeout TO DEFAULT")
-        .execute(&mut *tx)
-        .await?;
-    Ok(true)
+        .await
+        .map(|_| ())
 }
 
 /// Each network's watermark at the latest evaluation of `asset` at least that network's lag bound

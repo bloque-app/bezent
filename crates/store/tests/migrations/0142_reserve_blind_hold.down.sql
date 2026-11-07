@@ -175,8 +175,6 @@ CREATE OR REPLACE FUNCTION pause_holds_intent(p_intent BIGINT) RETURNS BOOLEAN
                 AND (p.direction IS NULL OR p.direction = t.kind)))
 $$;
 DROP FUNCTION reserve_check_holds(TEXT);
-DROP TRIGGER reserve_evaluations_stamp ON reserve_evaluations;
-DROP FUNCTION reserve_evaluations_stamp();
 DROP INDEX reserve_evaluations_latest_by_id;
 DROP INDEX event_log_reserve_blind_pages;
 DROP TRIGGER pauses_guard_delete ON pauses;
