@@ -421,7 +421,6 @@ impl Fixture {
             },
             start_block: 1,
             max_range: 4,
-            head_refresh: None,
         }
     }
 

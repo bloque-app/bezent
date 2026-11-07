@@ -37,9 +37,9 @@
 --     treat an asset for which it is false as held, whatever `pauses` says: an asset never
 --     evaluated, one declared while the core runs, and the moment after a restart are held until
 --     the check has seen them. The hold row stays the record, and what pages.
---   * The latest evaluation is the latest by id everywhere (a new index); the evaluation and the
---     record of a failure take a per-asset advisory lock first, so a hold and its lift follow the
---     order the evaluations are recorded in.
+--   * The latest evaluation is the latest by id here and in the core (a new index); the evaluation
+--     and the record of a failure take a per-asset advisory lock first, so a hold and its lift
+--     follow the order the evaluations are recorded in.
 --   * `ops_observables()`: `pauses_in_force` counts pauses only; `holds_in_force` and
 --     `hold_age_seconds` count holds.
 

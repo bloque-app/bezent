@@ -105,7 +105,7 @@ pub async fn seed(owner: &PgPool, requesters: &[(String, String, String)]) -> Re
          INSERT INTO evm_endpoint_networks (login, network) VALUES \
            ('{LOGIN_DRIVER_EVM}', '{ORIGIN}') ON CONFLICT DO NOTHING; \
          INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
-           SELECT '{ASSET}', now(), 'holds', 0 WHERE NOT EXISTS \
+           SELECT '{ASSET}', '2000-01-01T00:00:00Z', 'holds', 0 WHERE NOT EXISTS \
              (SELECT 1 FROM reserve_evaluations WHERE asset = '{ASSET}');"
     ))
     .execute(&mut *tx)

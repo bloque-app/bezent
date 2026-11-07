@@ -305,7 +305,9 @@ needed the two-login lift. Items 6, 16 and 17 above describe the behaviour befor
     The store refuses the core any other `DELETE` (trigger `pauses_guard_delete`: the latest evaluation by id must hold
     and name a book cut) and a hold naming an evaluation that held; `operator_request_unpause` refuses a hold. The core
     no longer inserts a `REQ-IC-2` evaluation pause; `stalled()` is gone. Every evaluation and every record of a failure
-    takes the advisory lock `bezent/reserve-evaluation/<asset>` first; "latest" is by id everywhere.
+    takes the advisory lock `bezent/reserve-evaluation/<asset>` before it reads and holds it until it is recorded;
+    "latest" is by id in the check, the gate, the signer's read, the delete guard and `ops_observables` (a statement
+    still picks by time). `held_heads` is best effort (`{}` when the heads cannot be read).
 34. **Unseen is held.** The gate (`Core::route_held`) and the signer (`pause_holds_intent`) also hold an asset for which
     `reserve_check_holds` is false (its latest evaluation, by id, does not hold or names no book cut, or there is none),
     and the gate holds what the check could not even record (`Unseen`, shared through `Core::watching`): an asset whose
@@ -321,9 +323,10 @@ needed the two-login lift. Items 6, 16 and 17 above describe the behaviour befor
     `reserve-hold`, `reserve-blind`, `reserve-hold-lifted`, `reserve-check-failed` and `reserve-check-stalled` (null
     when nothing could be derived); `lags` on `reserve-divergence`, `reserve-check-incomplete`, `reserve-hold` and
     `reserve-blind`; `held_heads` on `reserve-hold` and `reserve-blind`.
-36. **Catching up or a finality stall.** The endpoints record only the live finalized head, and since 0028 record it again
-    every 15 s while they walk a backlog (EVM: between the ranges of a step; Kreivo: between the steps of a catch-up).
-    A network is a finality stall when its walk has stopped (the watermark has not moved) and either its latest head is
+36. **Catching up or a finality stall.** The endpoints record only the live finalized head, and none in the middle of a
+    walk, so the latest head ages during a catch-up (`NFR-6` sees it) while the watermark moves.
+    A network is a finality stall when its walk has stopped (the watermark has not moved; a watermark the evaluation
+    before did not record is unknown, not stopped) and either its latest head is
     older than its lag bound by the clock, or the hold is older than that bound and the latest head is still the one in
     `held_heads`. A stale head with a moving walk is catching up. A network with no head ever recorded is never a stall.
     The core cannot tell a stalled chain from nothing recording heads and pages both at once. When a reading fails the
