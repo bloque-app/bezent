@@ -384,11 +384,11 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
 its default or at least 8 MiB (the proof of a `:code` of about 2 MB is about 4 MB as hex; a lower value is refused at
 `--check` and at start, because a source could never serve a new runtime and the walk would stall), `archive_rpc` with the
 archive node first, `max_walk` above the blocks from `start_block` to the head (a smaller value records the backlog as a gap that never
-fills; the walk itself is kept in rungs, item 37). The replay is sequential: a header and a
-proof per block, about 0.19 s per block from a client about 95 ms from the node (the proven key of item 41 rides in the
-same proof: under 1 KB and about 5 ms more per block, measured on 2026-11-06), so about 4 to 5 hours for the
-backlog of 2026-10-22, during which nothing else in the loop runs and `NFR-6` alerts fire; it is shorter close to the
-node. `wss://` verifies with the system's roots (`rustls-platform-verifier`); the distroless runtime image carries
+fills; the walk itself is kept in rungs, item 37). The replay reads `walk_concurrency` blocks at once (item 42). One at a time, from a client about 95 ms from the
+node, a block cost about 0.19 s (the proven key of item 41 rides in the same proof: under 1 KB). On 2026-11-06, a
+replay of 3,000 blocks from there ran at about 44 blocks/s at 16, about 90 at 32 (the default) and about 166 at 64;
+the node's round trip is still the limit, so it is faster close to the node. While it runs, nothing else in the loop
+runs. `wss://` verifies with the system's roots (`rustls-platform-verifier`); the distroless runtime image carries
 them. A failed start-up check names the source and why. `T-013-05` (zombienet) now needs `archive_rpc` too: a
 zombienet node run as an archive, back to `start_block` and its parent.
 

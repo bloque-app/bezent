@@ -315,6 +315,11 @@ impl<S: Source> Archive<S> {
         Fut: Future<Output = Result<T, Fail>> + 'a,
     {
         let n = self.sources.len();
+        if n == 0 {
+            return Err(ChainError::Unavailable(
+                "no archive_rpc is configured".to_owned(),
+            ));
+        }
         let first = self.first();
         let (mut failures, mut lied) = (Vec::new(), false);
         for i in (0..n).map(|k| (first + k) % n) {
@@ -346,11 +351,7 @@ impl<S: Source> Archive<S> {
                 }
             }
         }
-        let why = if n == 0 {
-            "no archive_rpc is configured".to_owned()
-        } else {
-            format!("{what}: {}", failures.join("; "))
-        };
+        let why = format!("{what}: {}", failures.join("; "));
         Err(if lied {
             ChainError::Invalid(why)
         } else {
@@ -803,6 +804,12 @@ mod tests {
         assert!(matches!(
             archive.storage(&at, &keys(&f)).await,
             Err(ChainError::Unavailable(_))
+        ));
+        // No source at all is unknown, not a panic.
+        let none: Archive<Fake> = Archive::new(Vec::new());
+        assert!(matches!(
+            none.storage(&at, &keys(&f)).await,
+            Err(ChainError::Unavailable(e)) if e.contains("no archive_rpc")
         ));
     }
 
