@@ -305,19 +305,23 @@ needed the two-login lift. Items 6, 16 and 17 above describe the behaviour befor
     The store refuses the core any other `DELETE` (trigger `pauses_guard_delete`: the latest evaluation by id must hold
     and name a book cut) and a hold naming an evaluation that held; `operator_request_unpause` refuses a hold. The core
     no longer inserts a `REQ-IC-2` evaluation pause; `stalled()` is gone. Every evaluation and every record of a failure
-    takes the advisory lock `bezent/reserve-evaluation/<asset>` before it reads and holds it until it is recorded (waiting 3 s at most: past that the turn is skipped, not failed);
-    "latest" is by id in the check, the gate, the signer's read, the delete guard and `ops_observables` (a statement
-    still picks by time). `held_heads` is best effort (`{}` when the heads cannot be read).
+    takes the advisory lock `bezent/reserve-evaluation/<asset>` before it reads and holds it until it is recorded
+    (waiting 3 s at most: past that the turn is skipped, not failed); "latest" is by id in the check, the gate, the
+    signer's read, the delete guard and `ops_observables`; a statement still picks by time, and so does the walk's
+    baseline (`walked_watermarks`: an index seek on `reserve_evaluations_latest`, passing over records of failures).
+    `held_heads` is best effort (`{}` when the heads cannot be read). Past the lock wait, a turn is skipped while the
+    asset was evaluated within three periods, and held in memory and paged after that.
 34. **Unseen is held.** The gate (`Core::route_held`) and the signer (`pause_holds_intent`) also hold an asset for which
-    `reserve_check_holds` is false (its latest evaluation, by id, does not hold or names no book cut, or there is none),
+    `reserve_check_holds` is false (its latest evaluation, by id, does not hold, names no book cut, was recorded more
+    than 180 s ago by the store's clock, which the store stamps, or there is none),
     and the gate holds what the check could not even record (`Unseen`, shared through `Core::watching`): an asset whose
     failed evaluation the store refused, and every asset while the check cannot list them. A check's first tick
     evaluates every asset.
-35. **Pages.** `reserve-blind`, once per hold and `why`: `finality-stall` at once, or `beyond-bound` once the hold is older
-    than `networks.reserve_blind_page_seconds` (default 600, at most 3600; the smallest of the asset's own networks':
-    its issuing network and its reserve networks). Not paged, only recorded (event log, and a WARN line under
-    `recorded=`): `reserve-hold`, `reserve-hold-lifted`, `reserve-check-incomplete`, and `reserve-check-failed` when
-    the failure was recorded. A failure the store cannot record pages `reserve-check-failed` at once and
+35. **Pages.** `reserve-blind`, once per hold and `why`: `finality-stall` at once, or `beyond-bound` once the hold is
+    older than `networks.reserve_blind_page_seconds` (default 600, at most 3600; the smallest of the asset's own
+    networks': its issuing network and its reserve networks). Not paged, only recorded (event log, and a WARN line under
+    `recorded=`): `reserve-hold`, `reserve-hold-lifted`, `reserve-check-incomplete`, and `reserve-check-failed` when the
+    failure was recorded. A failure the store cannot record pages `reserve-check-failed` at once and
     `reserve-check-stalled` past the blind bound, both held in memory. Every page about a pause or a hold names `class`
     (`blind` or `money-differs`) and `stop`. `values` is on `reserve-divergence`, `reserve-check-incomplete`,
     `reserve-hold`, `reserve-blind`, `reserve-hold-lifted`, `reserve-check-failed` and `reserve-check-stalled` (null

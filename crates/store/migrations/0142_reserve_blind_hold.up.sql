@@ -32,8 +32,9 @@
 --     and block time) and read watermark when it was placed, apart from the evaluation's points, so
 --     "the final head has not moved since the hold began" holds for a hold placed at a cold start
 --     or by a failed evaluation as well.
---   * `reserve_check_holds(asset)`: whether the asset's latest evaluation, by id, holds and was made
---     (it names the book entry it cut at). The core's gate and the signer's `pause_holds_intent`
+--   * `reserve_check_holds(asset)`: whether the asset's latest evaluation, by id, holds, was made
+--     (it names the book entry it cut at) and was recorded within 180 s (`recorded_at`, which the
+--     store now stamps for every writer but the owner). The core's gate and the signer's `pause_holds_intent`
 --     treat an asset for which it is false as held, whatever `pauses` says: an asset never
 --     evaluated, one declared while the core runs, and the moment after a restart are held until
 --     the check has seen them. The hold row stays the record, and what pages.
@@ -91,8 +92,13 @@ COMMENT ON COLUMN pauses.held_heads IS
 
 CREATE INDEX reserve_evaluations_latest_by_id ON reserve_evaluations (asset, id DESC);
 
--- Whether the reserve check has seen `p_asset`: its latest evaluation, by id, holds and was made (it
--- names the book entry it cut at). False for an asset never evaluated. SECURITY DEFINER so that
+-- Whether the reserve check has seen `p_asset`, and lately: its latest evaluation, by id, holds, was
+-- made (it names the book entry it cut at), and was recorded within the last 180 s by the store's
+-- clock. False for an asset never evaluated, and for one whose check has stopped: the check
+-- evaluates each asset once a minute (NFR-5), so three missed evaluations mean it is not running
+-- for the asset (a core that died, an evaluation that never records), and the asset is held,
+-- whatever the core does. The store's clock (`recorded_at`, stamped below), not the core's
+-- `evaluated_at`: it is the one the gate and the signer share. SECURITY DEFINER so that
 -- `pause_holds_intent`, the signer's only read, and the core share one rule.
 CREATE FUNCTION reserve_check_holds(p_asset TEXT) RETURNS BOOLEAN
     LANGUAGE sql
@@ -102,13 +108,31 @@ CREATE FUNCTION reserve_check_holds(p_asset TEXT) RETURNS BOOLEAN
     AS $$
     SELECT COALESCE((
         SELECT v.outcome = 'holds' AND v.book_entry_cut IS NOT NULL
+               AND v.recorded_at >= now() - interval '180 seconds'
         FROM reserve_evaluations v WHERE v.asset = p_asset ORDER BY v.id DESC LIMIT 1), false)
 $$;
 
 COMMENT ON FUNCTION reserve_check_holds(TEXT) IS
-    'Amendment 0028 (REQ-IC-2): whether the asset''s latest reserve evaluation, by id, holds and was '
-    'made. An asset for which it is false is held: no new work starts and the signer signs no new '
-    'mint or payout of it.';
+    'Amendment 0028 (REQ-IC-2): whether the asset''s latest reserve evaluation, by id, holds, was '
+    'made, and was recorded within 180 s (three of the check''s one-minute periods). An asset for which '
+    'it is false is held: no new work starts and the signer signs no new mint or payout of it.';
+
+-- The store stamps when an evaluation is recorded, for every writer but the owner (a restore keeps
+-- what it restores): `reserve_check_holds` judges freshness by it, so no writer may date it.
+CREATE FUNCTION reserve_evaluations_stamp() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT pg_has_role(current_user, (SELECT relowner FROM pg_class WHERE oid = TG_RELID), 'USAGE') THEN
+        NEW.recorded_at := now();
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER reserve_evaluations_stamp
+    BEFORE INSERT ON reserve_evaluations
+    FOR EACH ROW EXECUTE FUNCTION reserve_evaluations_stamp();
 
 -- Amendment 0022 A1b (0125), widened by amendment 0028: an unsigned mint or payout is also held
 -- while the reserve check has not seen its asset.
@@ -412,6 +436,7 @@ COMMENT ON FUNCTION ops_observables() IS
 
 -- Grants. No function here is PUBLIC's; the trigger functions fire without an EXECUTE grant.
 REVOKE EXECUTE ON FUNCTION pauses_guard_delete() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION reserve_evaluations_stamp() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION operator_request_unpause(BIGINT, TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION operator_request_unpause(BIGINT, TEXT) TO bezent_operator;
 

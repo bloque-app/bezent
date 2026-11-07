@@ -1285,7 +1285,8 @@ async fn nfr_5_req_ic_2_sf_b_a_slow_finality_network_is_held_only_when_heads_sto
     );
     assert_eq!(stops(&w).await, (1, 0));
     assert_eq!(pager.kinds(), ["reserve-blind"]);
-    // A bound after the evaluation that held, the origin's walk has not moved: a stall there too.
+    // A bound after the evaluation that held at 880, the origin's walk has not moved: a stall there
+    // too.
     let e = check
         .evaluate(ASSET, t0() + Duration::seconds(880 + 841))
         .await
@@ -2200,7 +2201,9 @@ async fn slow_walk(w: &World, last: i64) {
 }
 
 /// Amendment 0028: "the walk has stopped" is judged against the latest evaluation at least the
-/// network's lag bound old, never one seconds old. The head is stale and the walk moves slowly; a
+/// network's lag bound old, never one seconds old. (Here the evaluation a bound old and the one
+/// before the restart see the same walk; the slow-finality test is the one where the baseline
+/// alone decides.) The head is stale and the walk moves slowly; a
 /// core restarts and its first tick runs five seconds after the last evaluation, the watermark
 /// unmoved since: that is no finality stall, and nothing is paged. Within one bound after, with the
 /// walk still where it was, the stall is real, and paged.
@@ -2256,19 +2259,26 @@ async fn ac_e2_3_a0028_a_restart_seconds_after_an_evaluation_does_not_take_a_slo
     assert_eq!(pager2.pages()[0].detail["why"], "finality-stall");
 }
 
-/// Amendment 0028: an evaluation waits a few seconds at most for the asset's lock. Past that,
-/// another evaluation is recording: this turn is skipped, not failed. Nothing is recorded, no
-/// failure, no hold, nothing held in memory.
+/// Amendment 0028: an evaluation waits a few seconds at most for the asset's lock. While the asset
+/// was evaluated lately, a busy lock means another evaluation is recording: the turn is skipped,
+/// not failed, and the asset is due again at the next tick. A lock that stays held while nothing is
+/// recorded for three periods is no such evaluation (a session that took the key and keeps it, a
+/// peer whose every record fails): the asset is held in memory and paged, then paged as a stall
+/// past the blind bound. (Its last holding evaluation also goes stale by the store's clock, which
+/// holds it in the store: `ac_e2_3_a0028_a_stale_holding_evaluation_holds_an_order_and_an_intent`.)
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_ic_2_a0028_a_turn_that_cannot_get_the_lock_is_skipped_not_failed(
+async fn req_ic_2_a0028_a_lock_held_without_recording_is_skipped_then_held_and_paged(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
     fund(&w, 5, 1_000).await;
-    read_all(&w.admin, 100).await;
+    read_all(&w.admin, 100_000).await;
     let (check, readings, pager) = checker(&w);
     sync_chain(&w.admin, &readings).await;
+    let clock = ManualClock::at(t0());
+    assert_eq!(check.tick(&clock).await.unwrap()[0].outcome, Outcome::Holds);
+    // Another session takes the key, and keeps it.
     let mut other = w.admin.begin().await.unwrap();
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!("bezent/reserve-evaluation/{ASSET}"))
@@ -2276,14 +2286,87 @@ async fn req_ic_2_a0028_a_turn_that_cannot_get_the_lock_is_skipped_not_failed(
         .await
         .unwrap();
     let before = w.count("SELECT count(*) FROM reserve_evaluations").await;
-    assert!(check.tick(&ManualClock::at(t0())).await.unwrap().is_empty());
-    other.rollback().await.unwrap();
+    // Repeated skips while the last evaluation is recent: the asset is due again at each tick
+    // (ten seconds apart, inside the minute), and nothing is recorded, held or paged.
+    for _ in 0..2 {
+        clock.advance(Duration::seconds(10));
+        assert!(check.tick(&clock).await.unwrap().is_empty());
+        assert!(!check.unseen().holds(ASSET));
+    }
     assert_eq!(
         w.count("SELECT count(*) FROM reserve_evaluations").await,
         before
     );
-    assert_eq!(stops(&w).await, (0, 0));
-    assert!(!check.unseen().holds(ASSET));
     assert!(pager.kinds().is_empty(), "{:?}", pager.kinds());
     assert_eq!(logged(&w, "reserve-check-failed").await, 0);
+    // Three periods without an evaluation recorded: held in memory, and paged.
+    clock.advance(Duration::minutes(3));
+    assert!(check.tick(&clock).await.unwrap().is_empty());
+    assert!(check.unseen().holds(ASSET));
+    assert_eq!(pager.kinds(), ["reserve-check-failed"]);
+    // Past the blind bound, the stall.
+    clock.advance(Duration::seconds(601));
+    check.tick(&clock).await.unwrap();
+    assert_eq!(
+        pager.kinds(),
+        ["reserve-check-failed", "reserve-check-stalled"]
+    );
+    other.rollback().await.unwrap();
+    // The lock is free again: the asset, due, is evaluated at once, and the gate lets it go.
+    clock.advance(Duration::seconds(1));
+    assert_eq!(check.tick(&clock).await.unwrap()[0].outcome, Outcome::Holds);
+    assert!(!check.unseen().holds(ASSET));
+}
+
+/// Amendment 0028: the record of a failed evaluation takes the asset's lock too. Here the
+/// evaluation fails (the store refuses it, slowly) and another session takes the key the moment it
+/// is released: the record finds the lock busy. The asset was evaluated lately, so that is a skip:
+/// no failure is recorded twice, nothing is held in memory or paged, and it is due again next tick.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_ic_2_a0028_a_failure_record_that_finds_the_lock_busy_is_skipped(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    fund(&w, 5, 1_000).await;
+    read_all(&w.admin, 100_000).await;
+    let (check, readings, pager) = checker(&w);
+    sync_chain(&w.admin, &readings).await;
+    let clock = ManualClock::at(t0());
+    assert_eq!(check.tick(&clock).await.unwrap()[0].outcome, Outcome::Holds);
+    exec(
+        &w.admin,
+        "CREATE FUNCTION refuse_slowly() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_sleep(1); RAISE EXCEPTION 'refused for the test' USING ERRCODE = 'BZ001'; END $$; \
+         REVOKE EXECUTE ON FUNCTION refuse_slowly() FROM PUBLIC; \
+         CREATE TRIGGER refuse_slowly BEFORE INSERT ON reserve_evaluations \
+           FOR EACH ROW WHEN (NEW.reason IS NULL) EXECUTE FUNCTION refuse_slowly();",
+    )
+    .await;
+    let admin = w.admin.clone();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let taker = tokio::spawn(async move {
+        // Queued behind the evaluation, it gets the key when the evaluation's transaction ends.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let mut tx = admin.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("bezent/reserve-evaluation/{ASSET}"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        released.await.ok();
+        tx.rollback().await.unwrap();
+    });
+    clock.advance(Duration::minutes(1));
+    let before = w.count("SELECT count(*) FROM reserve_evaluations").await;
+    assert!(check.tick(&clock).await.unwrap().is_empty());
+    release.send(()).unwrap();
+    taker.await.unwrap();
+    assert_eq!(
+        w.count("SELECT count(*) FROM reserve_evaluations").await,
+        before
+    );
+    assert_eq!(logged(&w, "reserve-check-failed").await, 0);
+    assert!(!check.unseen().holds(ASSET));
+    assert!(pager.kinds().is_empty(), "{:?}", pager.kinds());
 }

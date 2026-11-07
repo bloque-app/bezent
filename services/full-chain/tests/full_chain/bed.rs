@@ -1033,6 +1033,18 @@ impl Bed {
     /// One cycle of the core, as its loop runs them (`services/core/src/main.rs`): the cycle, then
     /// the log's compromise alerts surfaced. The reserve check is [`Bed::check_reserve`].
     pub async fn core_pass(&self) {
+        // The bed runs the reserve check only in `check_reserve`: it keeps the asset seen, as the
+        // sidecar does (amendment 0028: a holding evaluation older than 180 s holds the asset).
+        sqlx::raw_sql(
+            "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+             SELECT a.asset, now(), 'holds', 0 FROM assets a \
+             WHERE (SELECT v.outcome = 'holds' AND v.book_entry_cut IS NOT NULL \
+                           AND v.recorded_at < now() - interval '60 seconds' \
+                    FROM reserve_evaluations v WHERE v.asset = a.asset ORDER BY v.id DESC LIMIT 1)",
+        )
+        .execute(&self.core_pool)
+        .await
+        .expect("renew the seeded holding evaluation");
         let report = self.core.cycle(Utc::now()).await.expect("cycle");
         assert_eq!(report.failed, 0, "a step of the core failed: {report:?}");
         bezent_core_service::signals::surface(&self.core_pool)

@@ -348,6 +348,15 @@ async fn serve() -> Result<(), String> {
                 stop_tx.notify_one();
                 return;
             }
+            // The sidecar runs no reserve check (amendment 0028): it keeps the asset seen by renewing
+            // the holding evaluation it seeded, so the gate and the signer, which hold an asset
+            // whose holding evaluation is older than 180 s, do not. TEST only.
+            if let Err(e) = sqlx::raw_sql(bezent_sidecar::setup::RENEW_SEEN)
+                .execute(&watch_pool)
+                .await
+            {
+                tracing::warn!(error = %e, "the seeded holding evaluation could not be renewed");
+            }
             if let Err(e) = core.cycle(chrono::Utc::now()).await {
                 tracing::warn!(error = %e, "cycle failed; the next one starts from the store");
             }
