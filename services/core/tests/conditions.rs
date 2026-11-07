@@ -218,6 +218,65 @@ async fn ac_e2_3_a1b_an_asset_the_check_has_not_seen_is_held_with_no_hold_row(
     assert_eq!(w.state(id).await, ("Delivering".into(), None));
 }
 
+/// Amendment 0028: a holding evaluation is only as good as it is fresh. The asset's latest
+/// evaluation held, but was recorded more than 180 s ago by the store's clock (the check has
+/// stopped for it: a core that died, a lock held elsewhere): the gate holds a final deposit as
+/// `CND-Paused`, and the signer refuses a mint recorded before, whatever the core is doing. A fresh
+/// holding evaluation lets both go.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_a0028_a_stale_holding_evaluation_holds_an_order_and_an_intent(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let id = source_final_deposit(&w).await;
+    w.cycle(t0()).await;
+    let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, o, None).await;
+    w.cycle(t0()).await;
+    let (s, _) = signing_intent(&w.admin, id, 1)
+        .await
+        .expect("the signing intent");
+    // The latest evaluation held, three and a third periods ago by the store's clock (the owner
+    // may date it; every other writer is stamped).
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut, recorded_at) \
+             VALUES ('{ASSET}', now(), 'holds', 0, now() - interval '200 seconds')"
+        ),
+    )
+    .await;
+    assert!(matches!(
+        w.signer.sign(s).await,
+        Outcome::Refused(Refusal::Paused)
+    ));
+    let deposit2 = {
+        let a = arrival(&w.admin, 30, 5_000).await;
+        decide(&w.admin, a, "final", 32).await;
+        deposit(&w.admin, 30, 5_000).await
+    };
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(deposit2).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    assert!(order(&w.admin, deposit2, 1).await.is_none());
+    // A core's login cannot date its evaluation: the store stamps it.
+    exec(
+        w.core.pool(),
+        &format!(
+            "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut, recorded_at) \
+             VALUES ('{ASSET}', now(), 'holds', 0, now() - interval '1 day')"
+        ),
+    )
+    .await;
+    sign(&w, s).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    assert!(order(&w.admin, deposit2, 1).await.is_some());
+}
+
 /// A key backend that commits a pause while it signs: the moment between the signer's first read
 /// of the pause and the record of the signature.
 struct PausesWhileSigning {

@@ -14,16 +14,16 @@ The items under "Open after the ruling" stay open.
 **Needs:** nothing further for the ruling. Each item under "Open after the ruling" needs a decision of its own.
 Numbered 0028 because 0027 is reserved for the draft of pull request #111. If #111 takes `SPEC.md` v0.5.11 or `PLAN.md`
 v0.6.10 first, this one renumbers its versions to what is next. Migration 0142.
-**Rationale in one line:** the reserve check paused an asset in the same way, and needed the same two-login lift, whether
-it could not see the networks or the money actually differed, so a start-up with every term at zero read as an alarm and
-held the bridge until two people acted.
+**Rationale in one line:** the reserve check paused an asset in the same way, and needed the same two-login lift,
+whether it could not see the networks or the money actually differed, so a start-up with every term at zero read as an
+alarm and held the bridge until two people acted.
 
 ## What happened (production, 2026-11-06 and 2026-11-07)
 
 Two pauses were raised at start-up, both with supply, reserve and book all zero:
 
-1. **Pause 1, `REQ-IC-2`, at the cold start.** Nothing had been read yet: no range without a hole, so no final point. The
-   evaluation was incomplete, and once it had been incomplete for longer than the smallest lag bound of the asset's
+1. **Pause 1, `REQ-IC-2`, at the cold start.** Nothing had been read yet: no range without a hole, so no final point.
+   The evaluation was incomplete, and once it had been incomplete for longer than the smallest lag bound of the asset's
    networks, the check paused the asset's routes under `REQ-IC-2`, naming the evaluation, and paged
    `reserve-check-stalled`.
 2. **Pause 2, `REQ-BK-1`, while the walk caught up.** The final heads were fresh, but the point the check could read at
@@ -31,8 +31,8 @@ Two pauses were raised at start-up, both with supply, reserve and book all zero:
    `Difference` (terms `final_point` and `final_head`), so the evaluation came out `Diverges`: a `REQ-BK-1` pause and a
    `reserve-divergence` page, with no term of value differing.
 
-Each needed `operator_request_unpause` and `operator_approve_unpause` from a different login (`REQ-GV-2`). The core never
-lifts its own pauses. Neither page said whether money was at stake.
+Each needed `operator_request_unpause` and `operator_approve_unpause` from a different login (`REQ-GV-2`). The core
+never lifts its own pauses. Neither page said whether money was at stake.
 
 ## The gap
 
@@ -44,12 +44,12 @@ once the networks are read again, and one where a term of value is known to be w
 
 ## The proposal (as put to the owner)
 
-1. **Cannot see: a hold, not a pause.** While the check is blind (no complete evaluation yet, an evaluation incomplete, a
-   reserve point behind the final head beyond the bound, a final head stale), the asset's routes refuse new deposits and
-   withdrawals exactly as a pause does; transfers already in flight are still observed. The hold lifts by itself once an
-   evaluation holds again (fresh, complete, no differences). A person is paged only if the blind state lasts beyond a
-   bound (ten minutes by default, configurable), or at once when it is a finality stall of the chain (the final head not
-   advancing), as distinct from our own walk catching up (the final head advancing, our point behind).
+1. **Cannot see: a hold, not a pause.** While the check is blind (no complete evaluation yet, an evaluation incomplete,
+   a reserve point behind the final head beyond the bound, a final head stale), the asset's routes refuse new deposits
+   and withdrawals exactly as a pause does; transfers already in flight are still observed. The hold lifts by itself
+   once an evaluation holds again (fresh, complete, no differences). A person is paged only if the blind state lasts
+   beyond a bound (ten minutes by default, configurable), or at once when it is a finality stall of the chain (the final
+   head not advancing), as distinct from our own walk catching up (the final head advancing, our point behind).
 2. **The money differs: a pause, as today.** Unchanged: it stays until the two-login lift (`REQ-GV-2`). Lag and
    staleness are no longer counted as a difference of value that produces a `REQ-BK-1` pause.
 3. **Every pause and page names its kind** (a "blind" hold or a "money differs" pause) and carries the values (supply,
@@ -57,8 +57,8 @@ once the networks are read again, and one where a term of value is known to be w
 
 Fail-closed is kept: while blind, nothing new may start. A hold never masks a money difference the check can see: a
 difference of value found while the check also lags is a pause. While it cannot read the terms at all, a difference may
-exist unseen; the hold is what stops new work meanwhile. The self-lift is only for the hold; the core still never lifts a pause of a
-divergence, of a quarantined observation, of a compromise, or of `INV-4`.
+exist unseen; the hold is what stops new work meanwhile. The self-lift is only for the hold; the core still never lifts
+a pause of a divergence, of a quarantined observation, of a compromise, or of `INV-4`.
 
 ## Ruling
 
@@ -83,8 +83,8 @@ lifting the pause while the check is still blind starts nothing.
 "No complete evaluation yet" is held whether or not a hold row exists. The core's gate and the signer's
 `pause_holds_intent` treat an asset as held unless its latest evaluation, by id, holds and was made (it names the book
 entry it cut at: `reserve_check_holds`). That covers an asset never evaluated, one declared while the core runs, the
-moment after a restart or after 0142 is applied, and any race between a hold and the work it holds. The hold row is still
-written, for the record and for paging: an asset's first evaluation at a cold start has no final point, so it is
+moment after a restart or after 0142 is applied, and any race between a hold and the work it holds. The hold row is
+still written, for the record and for paging: an asset's first evaluation at a cold start has no final point, so it is
 incomplete and holds at once. The core runs the reserve check before its cycle on each pass, and a check's first tick
 evaluates every asset however recent its last evaluation, so a restarted core sees each asset before its cycle runs.
 
@@ -104,19 +104,26 @@ still see the lag, `NFR-6`), and what moves is the watermark. So, per network:
   observation still awaiting its outcome) is behind. Held; paged only once the asset has been blind for longer than its
   blind bound.
 - **Finality stall**, while the network's walk has also stopped: no final head recorded within the bound by the clock,
-  and the watermark has not moved since the latest evaluation at least that bound old (never one seconds old: a
-  restarted core's first tick, an asset just quarantined; a walk that moves slowly, such as the Kreivo endpoint's,
-  which moves its watermark once per chunk, is not taken for a stopped one); or, once the asset has been held for longer than the
-  network's bound, the latest final head is still the one recorded when the hold began (`pauses.held_heads`, written
-  for every hold, a cold start's and a recorded failure's included), and the watermark has not moved since. The second
-  test does not rest on block timestamps, which can mislead the clock. A network on which no head was ever recorded is
-  never a stall: nothing has been seen to stop. Held and paged at once.
+  and the watermark has not moved since the latest evaluation at least that bound old that recorded one (never one
+  seconds old, so a restarted core's first tick or an asset just quarantined does not take a slow walk for a stopped
+  one); or, once the asset has been held for longer than the network's bound, the latest final head is still the one
+  recorded when the hold began (`pauses.held_heads`, written for every hold, a cold start's and a recorded failure's
+  included), and the watermark has not moved since. The second test does not rest on block timestamps, which can
+  mislead the clock. A network on which no head was ever recorded is never a stall: nothing has been seen to stop.
+- **When `finality-stall` pages.** Once the walk is judged stopped, at once. Judging it stopped needs a baseline a bound
+  old, so a stall can page later than the moment the head stops: up to one bound later after a restart, for a new
+  asset, after the deploy of 0142, and when the head stops during a catch-up (the walk then has to reach the head and
+  stand still for a bound). The Kreivo endpoint moves its watermark once per 256-block chunk, after a header walk: a
+  slow walk there is not taken for a stopped one only while each chunk finishes within the issuing network's bound;
+  a chunk slower than that pages as a stall. The slow-finality test shows the delay: at 941 s the origin network
+  (bound 840 s) is still `CatchingUp`, since no evaluation is yet a bound old, and its stall is judged a bound after
+  the evaluation that held at 880.
 - A stale head while the walk still moves is catching up, held and paged only past the blind bound: the walk cannot pass
   the latest head, so once it reaches it and stops, a stall that is real pages.
-- "Unknown" (no evaluation at least a bound old that recorded the network's watermark, or a hold with no `held_heads`)
-  counts as not stopped, so a stale head is not yet a stall. Unknown can last: after repeated failures that record no
-  watermark, or with `held_heads = {}`. Such a stall is still held, and still paged, as `beyond-bound`, at the blind
-  bound.
+- "Unknown" (no evaluation at least a bound old that recorded the network's watermark, or a hold with no
+  `held_heads`) counts as not stopped, so a stale head is not yet a stall. Unknown can last: after repeated failures
+  that record no watermark, or with `held_heads = {}`. Such a stall is still held, and still paged, as
+  `beyond-bound`, at the blind bound.
 
 The core cannot tell a chain that stopped finalizing from nothing recording its heads (an endpoint stopped, both of its
 providers behind): both look like a final head that does not advance, and both page at once, since neither ends by
@@ -143,12 +150,12 @@ itself. The classification decides only when a person is paged, never whether wo
 - **`NFR-6`**: "beyond the route's budget it is `REQ-IC-2`" becomes "beyond the route's budget the asset is held
   (`REQ-IC-2`)".
 - **`AC-E2.1`**: "Given any difference of value in the reserve equation, whether or not the check also lags, Then the
-  asset's routes pause until more than one approver lifts it, transfers in flight continue to be observed, and a human is
-  paged with the values."
-- **`AC-E2.3`** (new, layer service): "Given the reserve check cannot see an asset (no evaluation yet, one that cannot be
-  made, a point behind the final head, a stale final head), Then its routes are held: new work waits as under a pause and
-  transfers in flight continue to be observed; the hold lifts itself at the first evaluation that holds; and a human is
-  paged only once it has lasted beyond its bound, or at once on a finality stall (`REQ-IC-2`, `REQ-GV-2`, `NFR-5`)."
+  asset's routes pause until more than one approver lifts it, transfers in flight continue to be observed, and a human
+  is paged with the values."
+- **`AC-E2.3`** (new, layer service): "Given the reserve check cannot see an asset (no evaluation yet, one that cannot
+  be made, a point behind the final head, a stale final head), Then its routes are held: new work waits as under a pause
+  and transfers in flight continue to be observed; the hold lifts itself at the first evaluation that holds; and a human
+  is paged only once it has lasted beyond its bound, or at once on a finality stall (`REQ-IC-2`, `REQ-GV-2`, `NFR-5`)."
 - **§10 `CND-Paused`**: a pause or a hold covers the route. A requester sees a hold as `CND-Paused` and
   `ERR-RoutePaused`, as it sees a pause.
 
@@ -164,34 +171,43 @@ lifted as before.
   is asset-scoped, names the evaluation it began at, and there is at most one per asset.
 - **Who writes it.** The core may insert a hold only naming an evaluation of that asset that did not hold, with
   `held_heads` (each of the asset's networks' latest final head and watermark then). It may delete a row of `pauses`
-  only if it is a hold and the asset's latest evaluation, by id, holds, was made (names a book cut) and is later than the
-  one the hold names; every other row is refused by the store's trigger (PostgreSQL has no column-level `DELETE`), so the
-  core still lifts no pause. The core no longer inserts a `REQ-IC-2` pause naming an evaluation; such rows already
-  recorded stay valid, and stay pauses. `operator_request_unpause` refuses a hold.
+  only if it is a hold and the asset's latest evaluation, by id, holds, was made (names a book cut) and is later than
+  the one the hold names; every other row is refused by the store's trigger (PostgreSQL has no column-level `DELETE`),
+  so the core still lifts no pause. The core no longer inserts a `REQ-IC-2` pause naming an evaluation; such rows
+  already recorded stay valid, and stay pauses. `operator_request_unpause` refuses a hold.
 - **Unseen means held.** `reserve_check_holds(asset)` (the latest evaluation, by id, holds and was made) is read by the
   core's gate and by the signer's `pause_holds_intent`: an asset for which it is false is held, whatever `pauses` says.
+  A holding evaluation counts only while it is fresh: recorded within 180 s by the store's clock (`recorded_at`, which
+  the store now stamps for every writer but the owner). The check evaluates each asset once a minute (`NFR-5`), so
+  three missed evaluations mean the check is not running for the asset (a core that died, a lock held by something
+  that never records); the gate and the signer then hold it, whatever the core does. Three periods leave room for one
+  slow evaluation and one skipped turn; the store's clock, not the core's `evaluated_at`, is the one the gate and the
+  signer share.
   The latest evaluation is the latest by id in the check, the gate, the signer's read, the delete guard and
   `ops_observables` (a new index); a statement still states the latest complete evaluation by time, as before, and
   under the lock an asset's evaluations are recorded in time order. Every evaluation and every record of a failure takes
   the per-asset advisory lock `bezent/reserve-evaluation/<asset>` before it reads anything and holds it until it is
   recorded, so an evaluation decides on what is true when it gets the lock, and a hold and its lift follow the order the
-  evaluations are recorded in. The lock is waited for at most 3 s (`lock_timeout`): past that another evaluation of the
-  asset is recording, and the turn is skipped, neither failed nor recorded. A watermark the latest evaluation at least
+  evaluations are recorded in. The lock is waited for at most 3 s (`lock_timeout`). Past that, while the asset was
+  evaluated within three periods, another evaluation is recording: the turn is skipped, neither failed nor recorded,
+  and the asset is due again at the next tick. Past three periods, whatever holds the lock is not recording: the turn
+  is an evaluation that cannot be recorded, held in memory and paged (`reserve-check-failed`, then
+  `reserve-check-stalled` past the blind bound). A watermark the latest evaluation at least
   a bound old did not record (none, or one recorded before 0142) is unknown, not stopped: the first evaluation after
   the deploy does not page a stale head as a stall at once.
   `held_heads` is best effort: if the heads cannot be read, the hold is recorded with none.
 - **The check.** Lag and staleness are no longer `Difference`s. An evaluation diverges only on a difference of value.
   Blind evaluations are incomplete, their reason naming each blind network and whether it is catching up or a
   finality stall. The hold is placed, and an incomplete evaluation's turn is logged, in the evaluation's transaction,
-  without a page (`reserve-hold`, `reserve-check-incomplete`, `reserve-check-failed` in the event log). The hold is lifted
-  in the transaction of the evaluation that holds (`reserve-hold-lifted`). `reserve-blind` is paged once per hold and
-  reason (`why`: `finality-stall` or `beyond-bound`). The blind bound is `networks.reserve_blind_page_seconds` (default
-  600, at most 3600), the smallest of the asset's own networks' (its issuing network and its reserve networks),
+  without a page (`reserve-hold`, `reserve-check-incomplete`, `reserve-check-failed` in the event log). The hold is
+  lifted in the transaction of the evaluation that holds (`reserve-hold-lifted`). `reserve-blind` is paged once per hold
+  and reason (`why`: `finality-stall` or `beyond-bound`). The blind bound is `networks.reserve_blind_page_seconds`
+  (default 600, at most 3600), the smallest of the asset's own networks' (its issuing network and its reserve networks),
   beside `reserve_point_lag_seconds`. When a reading fails, the points and lags already found are kept, so a stale head
   on the same evaluation still pages at once. An evaluation whose failure cannot even be recorded cannot be held in the
   store: the core's gate holds the asset in memory (`Unseen`), and it pages at once (`reserve-check-failed`) and again
-  past the blind bound (`reserve-check-stalled`), both `class` `blind`, `stop` `hold`, `recorded` false. While the
-  check cannot list the assets, the gate holds every asset.
+  past the blind bound (`reserve-check-stalled`), both `class` `blind`, `stop` `hold`, `recorded` false. While the check
+  cannot list the assets, the gate holds every asset.
 - **Naming.** Every page about a pause or a hold carries `class` (`blind` or `money-differs`) and `stop` (`hold` or
   `pause`). `values` (each term as the networks show it and as the book holds it, null when nothing could be derived)
   is carried by `reserve-divergence`, `reserve-check-incomplete`, `reserve-hold`, `reserve-blind`,
@@ -202,7 +218,8 @@ lifted as before.
   `supply-mismatch-pause` and the core's `key-compromise` name `class` `money-differs`.
 - **Order.** The core runs the reserve check before its cycle on each pass (`bezent_core_service::pass`); a check's
   first tick evaluates every asset.
-- **Observables.** `pauses_in_force` counts pauses only; `holds_in_force` and `hold_age_seconds` (per asset) count holds.
+- **Observables.** `pauses_in_force` counts pauses only; `holds_in_force` and `hold_age_seconds` (per asset) count
+  holds.
 - Tests: `services/core/tests/reserve_check.rs`
   (`ac_e2_3_req_ic_2_a_cold_start_with_every_term_zero_is_held_not_paused_and_lifts_itself`,
   `inv_1_nfr_5_ac_e2_3_m2_a_walk_catching_up_is_held_never_a_divergence`,
@@ -213,8 +230,9 @@ lifted as before.
   `nfr_5_ac_e2_3_…`, `req_ic_2_nfr_5_ac_e2_3_sf1_…` and `…_sf_b_…`), `services/ingress/tests/limits.rs`
   (`ac_e2_3_a_blind_hold_refuses_new_requests_and_its_lift_admits_them`), `services/core/tests/conditions.rs`
   (`ac_e2_3_a1b_a_hold_keeps_an_unsigned_intent_unsigned_until_the_core_lifts_it`: the signer refuses under a hold), and
-  `crates/store/tests/reserve_check.rs` (`req_ic_2_req_gv_2_a0028_the_core_holds_only_while_blind_and_lifts_only_its_own_hold`).
-  From the review of the first build: `ac_e2_3_a_pass_runs_the_check_before_the_cycle`,
+  `crates/store/tests/reserve_check.rs`
+  (`req_ic_2_req_gv_2_a0028_the_core_holds_only_while_blind_and_lifts_only_its_own_hold`). From the review of the first
+  build: `ac_e2_3_a_pass_runs_the_check_before_the_cycle`,
   `req_ic_2_a0028_evaluations_of_an_asset_take_its_lock_and_run_one_at_a_time`,
   `ac_e2_3_req_bk_1_a_divergence_the_check_can_see_keeps_an_existing_hold`,
   `ac_e2_3_a0028_a_head_unchanged_since_the_hold_began_is_a_stall_whatever_its_block_time`,
@@ -224,13 +242,14 @@ lifted as before.
   `ac_e2_3_a0028_an_evaluation_the_store_cannot_record_is_held_in_memory` and
   `ac_e2_3_a0028_the_first_tick_evaluates_every_asset` (`reserve_check.rs`);
   `ac_e2_3_a1b_an_asset_the_check_has_not_seen_is_held_with_no_hold_row` (`conditions.rs`);
-  `ac_e2_3_nfr_6_a_long_step_moves_the_watermark_and_records_only_its_own_head` (`services/evm-endpoint/tests/observe.rs`).
-  From the second review: `ac_e2_3_a0028_after_the_deploy_an_unknown_watermark_is_not_a_stall_yet`,
+  `ac_e2_3_nfr_6_a_long_step_moves_the_watermark_and_records_only_its_own_head`
+  (`services/evm-endpoint/tests/observe.rs`). From the second review:
+  `ac_e2_3_a0028_after_the_deploy_an_unknown_watermark_is_not_a_stall_yet`,
   `ac_e2_3_a0028_an_asset_with_no_evaluation_at_all_is_held`,
   `ac_e2_3_a0028_a_check_that_cannot_list_the_assets_holds_every_transfer` and
   `ac_e2_3_a0028_a_hold_is_recorded_when_the_heads_cannot_be_read`; the lock test now fails if the lock is taken only to
-  record.
-  Test fixtures that move value declare that the check has seen their assets (a holding evaluation recorded as made).
+  record. Test fixtures that move value declare that the check has seen their assets (a holding evaluation recorded as
+  made).
 
 ## Open after the ruling
 
@@ -253,8 +272,8 @@ None of these is applied; each is the owner's.
    so a new asset, a restart and the moment after 0142 hold nothing open. What remains: a core whose gate holds an asset
    in memory (the store refused the record) holds it only in that process. The signer does not see that hold (it reads
    only the store), so an intent recorded before it may still be signed; another core or a restart would not hold it
-   either, until its own first tick. The ingress does not read `reserve_check_holds`: it keeps taking requests for an asset not yet
-   seen, which wait at the core. With the core down nothing is evaluated, but nothing is ordered either.
+   either, until its own first tick. The ingress does not read `reserve_check_holds`: it keeps taking requests for an
+   asset not yet seen, which wait at the core. With the core down nothing is evaluated, but nothing is ordered either.
 7. **The observables.** `reserve_equation_outcome` is 2 for a blind evaluation, as for any incomplete one ("could not
    be made"); `pauses_in_force` counts pauses only, `holds_in_force` and `hold_age_seconds` holds. An infrastructure
    alarm on `reserve_equation_outcome` must wait out the blind bound, or it pages where the core does not

@@ -172,6 +172,8 @@ The audit of PR #56 added these (0049), for every login but the owner:
   naming an evaluation (rows from before 0142 stay pauses). `operator_request_unpause` refuses a hold: it lifts itself.
   `networks.reserve_blind_page_seconds` (default 600, at most 3600) is how long an asset may be held before the core
   pages `reserve-blind`; the operator sets it per network beside `reserve_point_lag_seconds`.
+  `reserve_check_holds` also requires that evaluation to have been recorded within 180 s by the store's clock
+  (`recorded_at`, which a trigger now stamps for every writer but the owner).
   A hold carries `held_heads` (each of its asset's networks' latest final head and watermark when it was placed), and
   the core may delete a hold only while the asset's latest evaluation holds and names a book cut. `reserve_check_holds
   (asset)` (definer; the core may call it, and `pause_holds_intent` does) is whether that is so: the core's gate and the

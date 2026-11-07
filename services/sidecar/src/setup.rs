@@ -73,6 +73,15 @@ pub fn as_login(base: &PgConnectOptions, name: &str, password: &str) -> PgConnec
     bezent_store::login::as_login(base, name, password)
 }
 
+/// Renews a holding evaluation of each asset whose latest one held, was made, and is a minute old
+/// or more, as the core's login (amendment 0028): the sidecar runs no reserve check, and the gate
+/// and the signer hold an asset whose holding evaluation is older than 180 s. TEST only.
+pub const RENEW_SEEN: &str = "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+     SELECT a.asset, now(), 'holds', 0 FROM assets a \
+     WHERE (SELECT v.outcome = 'holds' AND v.book_entry_cut IS NOT NULL \
+                   AND v.recorded_at < now() - interval '60 seconds' \
+            FROM reserve_evaluations v WHERE v.asset = a.asset ORDER BY v.id DESC LIMIT 1)";
+
 /// The declarations the test networks need, and the requesters. Idempotent. A store seeded by an
 /// earlier sidecar gains what this one adds (the asset's issuing identity, the origin network's
 /// backend, the withdrawal route), and nothing it holds is changed. The sidecar runs no reserve
