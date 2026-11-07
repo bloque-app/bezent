@@ -306,14 +306,13 @@ needed the two-login lift. Items 6, 16 and 17 above describe the behaviour befor
     and name a book cut) and a hold naming an evaluation that held; `operator_request_unpause` refuses a hold. The core
     no longer inserts a `REQ-IC-2` evaluation pause; `stalled()` is gone. Every evaluation and every record of a failure
     takes the advisory lock `bezent/reserve-evaluation/<asset>` before it reads and holds it until it is recorded
-    (waiting 3 s at most: past that the turn is skipped, not failed); "latest" is by id in the check, the gate, the
-    signer's read, the delete guard and `ops_observables`; a statement still picks by time, and so does the walk's
-    baseline (`walked_watermarks`: an index seek on `reserve_evaluations_latest`, passing over records of failures).
-    `held_heads` is best effort (`{}` when the heads cannot be read). Past the lock wait, a turn is skipped while the
-    asset was evaluated within three periods, and held in memory and paged after that.
+    (waiting up to `statement_timeout`; a timeout fails as any store error does); "latest" is by id in the check, the
+    gate, the signer's read, the delete guard and `ops_observables`; a statement still picks by time, and so does the
+    walk's baseline (`walked_watermarks`: an index seek on `reserve_evaluations_latest`, passing over records of
+    failures). `held_heads` is best effort (`{}` when the heads cannot be read).
 34. **Unseen is held.** The gate (`Core::route_held`) and the signer (`pause_holds_intent`) also hold an asset for which
-    `reserve_check_holds` is false (its latest evaluation, by id, does not hold, names no book cut, was recorded more
-    than 180 s ago by the store's clock, which the store stamps, or there is none),
+    `reserve_check_holds` is false (its latest evaluation, by id, does not hold or names no book cut, or there is none;
+    its age is not asked: a known limitation, amendment 0028 item 6),
     and the gate holds what the check could not even record (`Unseen`, shared through `Core::watching`): an asset whose
     failed evaluation the store refused, and every asset while the check cannot list them. A check's first tick
     evaluates every asset.

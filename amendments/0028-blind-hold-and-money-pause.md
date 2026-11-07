@@ -177,24 +177,16 @@ lifted as before.
   already recorded stay valid, and stay pauses. `operator_request_unpause` refuses a hold.
 - **Unseen means held.** `reserve_check_holds(asset)` (the latest evaluation, by id, holds and was made) is read by the
   core's gate and by the signer's `pause_holds_intent`: an asset for which it is false is held, whatever `pauses` says.
-  A holding evaluation counts only while it is fresh: recorded within 180 s by the store's clock (`recorded_at`, which
-  the store now stamps for every writer but the owner). The check evaluates each asset once a minute (`NFR-5`), so
-  three missed evaluations mean the check is not running for the asset (a core that died, a lock held by something
-  that never records); the gate and the signer then hold it, whatever the core does. Three periods leave room for one
-  slow evaluation and one skipped turn; the store's clock, not the core's `evaluated_at`, is the one the gate and the
-  signer share.
   The latest evaluation is the latest by id in the check, the gate, the signer's read, the delete guard and
   `ops_observables` (a new index); a statement still states the latest complete evaluation by time, as before, and
   under the lock an asset's evaluations are recorded in time order. Every evaluation and every record of a failure takes
   the per-asset advisory lock `bezent/reserve-evaluation/<asset>` before it reads anything and holds it until it is
   recorded, so an evaluation decides on what is true when it gets the lock, and a hold and its lift follow the order the
-  evaluations are recorded in. The lock is waited for at most 3 s (`lock_timeout`). Past that, while the asset was
-  evaluated within three periods, another evaluation is recording: the turn is skipped, neither failed nor recorded,
-  and the asset is due again at the next tick. Past three periods, whatever holds the lock is not recording: the turn
-  is an evaluation that cannot be recorded, held in memory and paged (`reserve-check-failed`, then
-  `reserve-check-stalled` past the blind bound). A watermark the latest evaluation at least
-  a bound old did not record (none, or one recorded before 0142) is unknown, not stopped: the first evaluation after
-  the deploy does not page a stale head as a stall at once.
+  evaluations are recorded in. The lock is waited for as any statement is, up to the session's `statement_timeout`; a
+  timeout there is a store error like any other: the failed evaluation is recorded, or, if even that cannot be, held in
+  memory and paged. Production runs one core, so nothing else is expected to hold the key. A watermark the latest
+  evaluation at least a bound old did not record (none, or one recorded before 0142) is unknown, not stopped: the first
+  evaluation after the deploy does not page a stale head as a stall at once.
   `held_heads` is best effort: if the heads cannot be read, the hold is recorded with none.
 - **The check.** Lag and staleness are no longer `Difference`s. An evaluation diverges only on a difference of value.
   Blind evaluations are incomplete, their reason naming each blind network and whether it is catching up or a
@@ -274,6 +266,10 @@ None of these is applied; each is the owner's.
    only the store), so an intent recorded before it may still be signed; another core or a restart would not hold it
    either, until its own first tick. The ingress does not read `reserve_check_holds`: it keeps taking requests for an
    asset not yet seen, which wait at the core. With the core down nothing is evaluated, but nothing is ordered either.
+   **Known limitation, true before this amendment:** `reserve_check_holds` does not ask how old the latest holding
+   evaluation is. While the core is dead (or something keeps the asset's evaluation lock and never records), the
+   latest evaluation stays `holds`, and the signer keeps signing intents the core recorded before it stopped. A
+   freshness window on the store's clock was built and withdrawn in review; whether to bound it is the owner's.
 7. **The observables.** `reserve_equation_outcome` is 2 for a blind evaluation, as for any incomplete one ("could not
    be made"); `pauses_in_force` counts pauses only, `holds_in_force` and `hold_age_seconds` holds. An infrastructure
    alarm on `reserve_equation_outcome` must wait out the blind bound, or it pages where the core does not
