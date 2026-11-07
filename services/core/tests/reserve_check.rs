@@ -1269,14 +1269,34 @@ async fn nfr_5_req_ic_2_sf_b_a_slow_finality_network_is_held_only_when_heads_sto
         .unwrap();
     assert_eq!(e.outcome, Outcome::Incomplete, "{e:?}");
     assert!(e.differences.is_empty(), "{:?}", e.differences);
+    // The origin's walk is judged against an evaluation at least its bound (840 s) old, and there
+    // is none yet: not yet a stall there. The issuing network's head (bound 60 s) is.
     assert_eq!(
         e.blind.get(ORIGIN),
+        Some(&Blind::CatchingUp),
+        "{:?}",
+        e.blind
+    );
+    assert_eq!(
+        e.blind.get(ISSUING),
         Some(&Blind::FinalityStall),
         "{:?}",
         e.blind
     );
     assert_eq!(stops(&w).await, (1, 0));
     assert_eq!(pager.kinds(), ["reserve-blind"]);
+    // A bound after the evaluation that held, the origin's walk has not moved: a stall there too.
+    let e = check
+        .evaluate(ASSET, t0() + Duration::seconds(880 + 841))
+        .await
+        .unwrap();
+    assert_eq!(
+        e.blind.get(ORIGIN),
+        Some(&Blind::FinalityStall),
+        "{:?}",
+        e.blind
+    );
+    assert_eq!(pager.kinds(), ["reserve-blind"], "once per hold");
 }
 
 /// Review SF3: a funding declaration applies only from the block it is declared at. An arrival
@@ -2099,6 +2119,7 @@ async fn ac_e2_3_a0028_a_check_that_cannot_list_the_assets_holds_every_transfer(
     exec(&w.admin, "REVOKE SELECT ON assets FROM bezent_core").await;
     let clock = ManualClock::at(t0() + Duration::minutes(1));
     assert!(check.tick(&clock).await.is_err());
+    assert!(check.unseen().all());
     exec(&w.admin, "GRANT SELECT ON assets TO bezent_core").await;
     for _ in 0..3 {
         core.cycle(t0()).await.unwrap();
@@ -2148,4 +2169,121 @@ async fn ac_e2_3_a0028_a_hold_is_recorded_when_the_heads_cannot_be_read(
     assert_eq!(held, json!({}));
     assert!(!check.unseen().holds(ASSET));
     exec(&w.admin, "GRANT SELECT ON final_heads TO bezent_core").await;
+}
+
+/// The issuing network as a slow walk sees it: its latest final head, 10 000, dated t0 + 100 s
+/// (stale once the clock passes it), heads at 5 000 and 6 000 to read at, and a read range up to
+/// `last` under that head.
+async fn slow_walk(w: &World, last: i64) {
+    for (block, at) in [(10_000, 100), (5_000, 50), (6_000, 50)] {
+        exec(
+            &w.admin,
+            &format!(
+                "INSERT INTO final_heads (network, block_number, block_hash, block_time) \
+                 VALUES ('{ISSUING}', {block}, '\\x{}', '{}') ON CONFLICT DO NOTHING",
+                hex::encode(hash(ISSUING, block)),
+                (t0() + Duration::seconds(at)).to_rfc3339()
+            ),
+        )
+        .await;
+    }
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO observation_ranges (network, first_block, last_block, outcome, \
+                 final_block_number, final_block_hash) \
+             VALUES ('{ISSUING}', 0, {last}, 'read', 10000, '\\x{}')",
+            hex::encode(hash(ISSUING, 10_000))
+        ),
+    )
+    .await;
+}
+
+/// Amendment 0028: "the walk has stopped" is judged against the latest evaluation at least the
+/// network's lag bound old, never one seconds old. The head is stale and the walk moves slowly; a
+/// core restarts and its first tick runs five seconds after the last evaluation, the watermark
+/// unmoved since: that is no finality stall, and nothing is paged. Within one bound after, with the
+/// walk still where it was, the stall is real, and paged.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_a0028_a_restart_seconds_after_an_evaluation_does_not_take_a_slow_walk_for_a_stall(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    fund(&w, 5, 1_000).await;
+    read_through(&w.admin, ORIGIN, 100_000).await;
+    slow_walk(&w, 5_000).await;
+    let (check, readings, pager) = checker(&w);
+    sync_chain(&w.admin, &readings).await;
+    assert_eq!(
+        check.evaluate(ASSET, t0()).await.unwrap().outcome,
+        Outcome::Holds
+    );
+    // Ten minutes on the head is stale, and the walk has moved: catching up.
+    slow_walk(&w, 6_000).await;
+    let e = check
+        .evaluate(ASSET, t0() + Duration::minutes(10))
+        .await
+        .unwrap();
+    assert_eq!(
+        e.blind.get(ISSUING),
+        Some(&Blind::CatchingUp),
+        "{:?}",
+        e.blind
+    );
+    // A restart: the new core's first tick, five seconds later, the watermark unmoved since.
+    let (restarted, readings2, pager2) = checker(&w);
+    sync_chain(&w.admin, &readings2).await;
+    let clock = ManualClock::at(t0() + Duration::minutes(10) + Duration::seconds(5));
+    let e = restarted.tick(&clock).await.unwrap().remove(0);
+    assert_eq!(
+        e.blind.get(ISSUING),
+        Some(&Blind::CatchingUp),
+        "{:?}",
+        e.blind
+    );
+    assert!(pager.kinds().is_empty() && pager2.kinds().is_empty());
+    // One bound later the walk is still at 6 000: a stall, paged.
+    clock.advance(Duration::seconds(61));
+    let e = restarted.tick(&clock).await.unwrap().remove(0);
+    assert_eq!(
+        e.blind.get(ISSUING),
+        Some(&Blind::FinalityStall),
+        "{:?}",
+        e.blind
+    );
+    assert_eq!(pager2.kinds(), ["reserve-blind"]);
+    assert_eq!(pager2.pages()[0].detail["why"], "finality-stall");
+}
+
+/// Amendment 0028: an evaluation waits a few seconds at most for the asset's lock. Past that,
+/// another evaluation is recording: this turn is skipped, not failed. Nothing is recorded, no
+/// failure, no hold, nothing held in memory.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_ic_2_a0028_a_turn_that_cannot_get_the_lock_is_skipped_not_failed(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    fund(&w, 5, 1_000).await;
+    read_all(&w.admin, 100).await;
+    let (check, readings, pager) = checker(&w);
+    sync_chain(&w.admin, &readings).await;
+    let mut other = w.admin.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("bezent/reserve-evaluation/{ASSET}"))
+        .execute(&mut *other)
+        .await
+        .unwrap();
+    let before = w.count("SELECT count(*) FROM reserve_evaluations").await;
+    assert!(check.tick(&ManualClock::at(t0())).await.unwrap().is_empty());
+    other.rollback().await.unwrap();
+    assert_eq!(
+        w.count("SELECT count(*) FROM reserve_evaluations").await,
+        before
+    );
+    assert_eq!(stops(&w).await, (0, 0));
+    assert!(!check.unseen().holds(ASSET));
+    assert!(pager.kinds().is_empty(), "{:?}", pager.kinds());
+    assert_eq!(logged(&w, "reserve-check-failed").await, 0);
 }

@@ -463,6 +463,15 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                 self.unseen.assets().remove(asset);
                 return Some(e);
             }
+            // Another evaluation of the asset is recording (amendment 0028): this turn is skipped,
+            // not failed; the asset is as that evaluation leaves it.
+            Err(e) if is_lock_timeout(&e) => {
+                tracing::info!(
+                    asset,
+                    "another evaluation of the asset is recording; this turn is skipped"
+                );
+                return None;
+            }
             Err(e) => e.to_string(),
         };
         match self.record_failure(asset, now, &error).await {
@@ -470,6 +479,12 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                 self.unrecorded_episode().remove(asset);
                 self.unseen.assets().remove(asset);
                 self.act(&acts);
+            }
+            Err(e) if is_lock_timeout(&e) => {
+                tracing::info!(
+                    asset,
+                    "another evaluation of the asset is recording; the failure is not recorded twice"
+                );
             }
             Err(r) => {
                 tracing::error!(asset, error = %r, "NFR-5: a failed evaluation could not be recorded");
@@ -550,14 +565,13 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
     ) -> sqlx::Result<Acts> {
         let mut tx = self.pool.begin().await?;
         lock_asset(&mut tx, asset).await?;
-        let previous: Option<(String, Value)> = sqlx::query_as(
-            "SELECT outcome, points FROM reserve_evaluations WHERE asset = $1 \
-             ORDER BY id DESC LIMIT 1",
+        let previous: Option<String> = sqlx::query_scalar(
+            "SELECT outcome FROM reserve_evaluations WHERE asset = $1 ORDER BY id DESC LIMIT 1",
         )
         .bind(asset)
         .fetch_optional(&mut *tx)
         .await?;
-        let walked = previous_watermarks(previous.as_ref().map(|(_, p)| p));
+        let walked = walked_watermarks(&mut tx, asset, now).await?;
         let bound = blind_bound(&mut tx, asset).await?;
         self.bounds().insert(asset.to_owned(), bound);
         let assessment = assess(&mut tx, asset, now, &walked).await?;
@@ -572,7 +586,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         .fetch_one(&mut *tx)
         .await?;
         let mut acts = Acts::default();
-        if previous.as_ref().is_none_or(|(o, _)| o != "incomplete") {
+        if previous.as_deref() != Some("incomplete") {
             acts.logged.push(Page {
                 kind: "reserve-check-failed".into(),
                 asset: asset.to_owned(),
@@ -732,7 +746,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         .bind(asset)
         .fetch_optional(&mut *tx)
         .await?;
-        let walked = previous_watermarks(previous.as_ref().map(|(_, _, p)| p));
+        let walked = walked_watermarks(&mut tx, asset, now).await?;
         let bound = blind_bound(&mut tx, asset).await?;
         self.bounds().insert(asset.to_owned(), bound);
         // Review M2: a point too far behind its network's final head is no check at all; nor,
@@ -1264,30 +1278,61 @@ struct Seen<'a> {
     values: &'a Value,
 }
 
+/// How long an evaluation waits for another evaluation of the same asset before it skips its turn.
+const LOCK_WAIT: &str = "3s";
+
 /// Takes the per-asset lock every evaluation and every record of a failure takes first, in its
-/// own transaction (amendment 0028), as the engine's locks do.
+/// own transaction (amendment 0028), as the engine's locks do. It waits at most [`LOCK_WAIT`]: past
+/// that another evaluation of the asset is recording, and the error is a lock timeout
+/// ([`is_lock_timeout`]), this turn's to skip, never a failure to record.
 async fn lock_asset(tx: &mut PgConnection, asset: &str) -> sqlx::Result<()> {
+    sqlx::query(&format!("SET LOCAL lock_timeout = '{LOCK_WAIT}'"))
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!("bezent/reserve-evaluation/{asset}"))
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SET LOCAL lock_timeout TO DEFAULT")
         .execute(&mut *tx)
         .await
         .map(|_| ())
 }
 
-/// Each network's watermark as an evaluation's points recorded it (`points.<network>.lag`).
-fn previous_watermarks(points: Option<&Value>) -> BTreeMap<String, i64> {
-    points
-        .and_then(Value::as_object)
-        .map(|o| {
-            o.iter()
-                .filter_map(|(n, p)| {
-                    p.pointer("/lag/watermark")
-                        .and_then(Value::as_i64)
-                        .map(|w| (n.clone(), w))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// Whether `e` is the per-asset lock's wait running out (`lock_not_available`, SQLSTATE 55P03).
+fn is_lock_timeout(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .and_then(|d| d.code())
+        .is_some_and(|c| c == "55P03")
+}
+
+/// Each network's watermark as the latest evaluation of `asset` at least that network's lag bound
+/// old (by `evaluated_at`) recorded it: what "the walk has stopped" is judged against (amendment
+/// 0028). A network with no such evaluation, or one that recorded no watermark for it, is absent:
+/// unknown, not stopped. An evaluation seconds old (a restarted core's first tick, an asset just
+/// quarantined) is never the baseline, so a walk that moves slowly is not taken for a stopped one.
+async fn walked_watermarks(
+    tx: &mut PgConnection,
+    asset: &str,
+    now: DateTime<Utc>,
+) -> sqlx::Result<BTreeMap<String, i64>> {
+    let rows: Vec<(String, Option<i64>)> = sqlx::query_as(&format!(
+        "SELECT n.network, \
+                (SELECT (v.points -> n.network -> 'lag' ->> 'watermark')::bigint \
+                 FROM reserve_evaluations v \
+                 WHERE v.asset = $1 \
+                   AND v.evaluated_at <= $2 - make_interval(secs => n.reserve_point_lag_seconds) \
+                 ORDER BY v.id DESC LIMIT 1) \
+         FROM networks n WHERE n.network IN ({ASSET_NETWORKS})"
+    ))
+    .bind(asset)
+    .bind(now)
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(n, w)| w.map(|w| (n, w)))
+        .collect())
 }
 
 /// The networks an asset rests on: the issuing network, when the asset is issued there, and its
@@ -1436,9 +1481,12 @@ struct Assessment {
     stalled: Vec<String>,
 }
 
-/// Judges `asset`'s networks (see [`hold`] for the rule). A watermark the evaluation before did not
-/// record (none, or one recorded before 0142) is unknown, not stopped: a stale head is then not yet
-/// a stall, and the next evaluation decides.
+/// Judges `asset`'s networks (see [`hold`] for the rule). "The walk has stopped" is judged against
+/// `walked`, each network's watermark at the latest evaluation at least its lag bound old
+/// ([`walked_watermarks`]). With none (no such evaluation, or one recorded before 0142) it is
+/// unknown, not stopped: a stale head is then not yet a stall. Unknown can last (failures that
+/// record no watermark, a hold with no `held_heads`); the asset is held all the same, and paged
+/// `beyond-bound` at its blind bound.
 async fn assess(
     tx: &mut PgConnection,
     asset: &str,
@@ -1528,7 +1576,7 @@ async fn assess(
 ///
 /// A network is in a finality stall when either holds, and its walk has not moved meanwhile:
 /// - its latest final head is older than the network's lag bound by the clock, and the watermark
-///   has not moved since the evaluation before;
+///   has not moved since the latest evaluation at least that bound old;
 /// - the hold is older than that bound and the latest final head is still the one recorded when
 ///   the hold began (whatever its block time says), and the watermark has not moved since then.
 async fn hold(tx: &mut PgConnection, seen: &Seen<'_>, acts: &mut Acts) -> sqlx::Result<()> {

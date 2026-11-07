@@ -104,13 +104,19 @@ still see the lag, `NFR-6`), and what moves is the watermark. So, per network:
   observation still awaiting its outcome) is behind. Held; paged only once the asset has been blind for longer than its
   blind bound.
 - **Finality stall**, while the network's walk has also stopped: no final head recorded within the bound by the clock,
-  and the watermark has not moved since the evaluation before; or, once the asset has been held for longer than the
+  and the watermark has not moved since the latest evaluation at least that bound old (never one seconds old: a
+  restarted core's first tick, an asset just quarantined; a walk that moves slowly, such as the Kreivo endpoint's,
+  which moves its watermark once per chunk, is not taken for a stopped one); or, once the asset has been held for longer than the
   network's bound, the latest final head is still the one recorded when the hold began (`pauses.held_heads`, written
   for every hold, a cold start's and a recorded failure's included), and the watermark has not moved since. The second
   test does not rest on block timestamps, which can mislead the clock. A network on which no head was ever recorded is
   never a stall: nothing has been seen to stop. Held and paged at once.
 - A stale head while the walk still moves is catching up, held and paged only past the blind bound: the walk cannot pass
   the latest head, so once it reaches it and stops, a stall that is real pages.
+- "Unknown" (no evaluation at least a bound old that recorded the network's watermark, or a hold with no `held_heads`)
+  counts as not stopped, so a stale head is not yet a stall. Unknown can last: after repeated failures that record no
+  watermark, or with `held_heads = {}`. Such a stall is still held, and still paged, as `beyond-bound`, at the blind
+  bound.
 
 The core cannot tell a chain that stopped finalizing from nothing recording its heads (an endpoint stopped, both of its
 providers behind): both look like a final head that does not advance, and both page at once, since neither ends by
@@ -169,8 +175,10 @@ lifted as before.
   under the lock an asset's evaluations are recorded in time order. Every evaluation and every record of a failure takes
   the per-asset advisory lock `bezent/reserve-evaluation/<asset>` before it reads anything and holds it until it is
   recorded, so an evaluation decides on what is true when it gets the lock, and a hold and its lift follow the order the
-  evaluations are recorded in. A watermark the evaluation before did not record (none, or one recorded before 0142) is
-  unknown, not stopped: the first evaluation after the deploy does not page a stale head as a stall at once.
+  evaluations are recorded in. The lock is waited for at most 3 s (`lock_timeout`): past that another evaluation of the
+  asset is recording, and the turn is skipped, neither failed nor recorded. A watermark the latest evaluation at least
+  a bound old did not record (none, or one recorded before 0142) is unknown, not stopped: the first evaluation after
+  the deploy does not page a stale head as a stall at once.
   `held_heads` is best effort: if the heads cannot be read, the hold is recorded with none.
 - **The check.** Lag and staleness are no longer `Difference`s. An evaluation diverges only on a difference of value.
   Blind evaluations are incomplete, their reason naming each blind network and whether it is catching up or a
