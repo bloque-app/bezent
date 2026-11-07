@@ -168,7 +168,8 @@ lifted as before.
   `ac_e2_1_ac_e2_3_req_bk_1_a_value_difference_while_lagging_pauses_and_never_lifts_itself`,
   `ac_e2_3_inv_15_new_deposits_and_withdrawals_wait_while_held_and_move_on_when_it_lifts`, and the rewritten
   `nfr_5_ac_e2_3_…`, `req_ic_2_nfr_5_ac_e2_3_sf1_…` and `…_sf_b_…`), `services/ingress/tests/limits.rs`
-  (`ac_e2_3_a_blind_hold_refuses_new_requests_and_its_lift_admits_them`), and
+  (`ac_e2_3_a_blind_hold_refuses_new_requests_and_its_lift_admits_them`), `services/core/tests/conditions.rs`
+  (`ac_e2_3_a1b_a_hold_keeps_an_unsigned_intent_unsigned_until_the_core_lifts_it`: the signer refuses under a hold), and
   `crates/store/tests/reserve_check.rs` (`req_ic_2_req_gv_2_a0028_the_core_holds_only_while_blind_and_lifts_only_its_own_hold`).
 
 ## Open after the ruling
@@ -193,7 +194,16 @@ None of these is applied; each is the owner's.
    next pass close it. With the core down nothing is evaluated and no hold is placed, but nothing is ordered either; the
    ingress keeps taking requests, which wait at the core.
 7. **The observables.** `reserve_equation_outcome` is 2 for a blind evaluation, as for any incomplete one ("could not
-   be made"); `pauses_in_force` counts holds. Separate observables for holds are not built.
+   be made"); `pauses_in_force` counts holds. Separate observables for holds are not built. An infrastructure alarm on
+   either must wait out the blind bound, or it pages where the core does not (`deploy/runbooks/alerts.md`).
+8. **Behaviour that is stricter than before.** A transient failure to read (one evaluation incomplete) now holds new
+   work at once, for at least one evaluation period, where before it paused nothing until the bound. A blind
+   evaluation is incomplete, so a statement does not state it: a blind stretch longer than the statement's evaluation
+   age (15 minutes) ends in `statement-overdue`, where a lag used to be stated as a divergence.
+9. **Deployment.** Every service refuses to start unless the store's migrations are exactly its own, so a core and a
+   store on either side of 0142 cannot start together. A core already running when 0142 is applied can no longer record
+   a `REQ-IC-2` stall pause: its failed evaluation goes to the unrecorded path and pages `reserve-check-failed`. Apply
+   0142 and restart the core together.
 
 ## Identifier ledger
 
