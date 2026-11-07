@@ -1528,9 +1528,14 @@ async fn ac_e2_3_a_pass_runs_the_check_before_the_cycle(
     );
 }
 
-/// Amendment 0028: every evaluation of an asset takes the asset's advisory lock first, in its own
-/// transaction, so evaluations of one asset are recorded one after the other: held by another
-/// session, an evaluation waits; two at once record one hold, naming the first, and page once.
+/// Amendment 0028: every evaluation of an asset takes the asset's advisory lock before it reads
+/// anything, and holds it until it is recorded, so an evaluation decides on what is true when it
+/// gets the lock, and evaluations of one asset are decided and recorded one after the other. Here the
+/// heads are stale when the evaluation starts, another session holds the lock, and the endpoints
+/// catch up meanwhile: the evaluation, let through, sees the fresh heads and holds. (Were the lock
+/// taken only to record, it would have read the stale heads already, and recorded a blind
+/// evaluation after a fresher state.) Two evaluations at once record one hold, naming the first,
+/// and page once.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_ic_2_a0028_evaluations_of_an_asset_take_its_lock_and_run_one_at_a_time(
     options: PgPoolOptions,
@@ -1547,7 +1552,8 @@ async fn req_ic_2_a0028_evaluations_of_an_asset_take_its_lock_and_run_one_at_a_t
         .execute(&mut *other)
         .await
         .unwrap();
-    let evaluating = check.evaluate(ASSET, t0());
+    let late = t0() + Duration::hours(6);
+    let evaluating = check.evaluate(ASSET, late);
     tokio::pin!(evaluating);
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(500), &mut evaluating)
@@ -1555,12 +1561,20 @@ async fn req_ic_2_a0028_evaluations_of_an_asset_take_its_lock_and_run_one_at_a_t
             .is_err(),
         "the evaluation did not wait for the asset's lock"
     );
+    // While it waits, the endpoints catch up: fresh heads at its clock.
+    read_all(&w.admin, 6 * 3_600).await;
     other.rollback().await.unwrap();
-    assert_eq!(evaluating.await.unwrap().outcome, Outcome::Holds);
-    // Two at once, while the heads are stale: one hold, one page, both recorded.
+    let e = evaluating.await.unwrap();
+    assert_eq!(
+        e.outcome,
+        Outcome::Holds,
+        "decided on what it read before the lock: {e:?}"
+    );
+    assert_eq!(stops(&w).await, (0, 0));
+    // Two at once, while the heads are stale again: one hold, one page, both recorded.
     let (check2, readings2, pager2) = checker(&w);
     sync_chain(&w.admin, &readings2).await;
-    let at = t0() + Duration::hours(6);
+    let at = late + Duration::hours(6);
     let (a, b) = tokio::join!(check.evaluate(ASSET, at), check2.evaluate(ASSET, at));
     let (a, b) = (a.unwrap(), b.unwrap());
     assert_eq!(
@@ -1838,6 +1852,11 @@ async fn ac_e2_3_a0028_a_failed_read_keeps_the_lags_and_a_stale_head_pages_at_on
     read_all(&w.admin, 100).await;
     let (check, readings, pager) = checker(&w);
     sync_chain(&w.admin, &readings).await;
+    // An evaluation that holds records each network's watermark.
+    assert_eq!(
+        check.evaluate(ASSET, t0()).await.unwrap().outcome,
+        Outcome::Holds
+    );
     readings.chain().unreachable = true;
     let e = check
         .evaluate(ASSET, t0() + Duration::hours(6))
@@ -1968,4 +1987,165 @@ async fn ac_e2_3_a0028_the_first_tick_evaluates_every_asset(
     assert_eq!(restarted.tick(&clock).await.unwrap().len(), 1);
     clock.advance(Duration::seconds(10));
     assert!(restarted.tick(&clock).await.unwrap().is_empty());
+}
+
+/// Amendment 0028, the first evaluation after 0142 is deployed: the evaluation before it recorded no
+/// watermark (its lag JSON predates the field). A stale head then is not yet a finality stall (the
+/// walk is not known to have stopped): held, and not paged at once; the next evaluation, with a
+/// watermark to compare, decides, and pages the stall.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_a0028_after_the_deploy_an_unknown_watermark_is_not_a_stall_yet(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    fund(&w, 5, 1_000).await;
+    read_all(&w.admin, 100).await;
+    // The latest evaluation, as an older core recorded it: it held, with lags and no watermark.
+    let old_lag = json!({"block_number": 100, "lag": {"head_block_number": 100, "blocks": 0,
+        "seconds": 0, "head_age_seconds": 0, "bound_seconds": 60}});
+    sqlx::query(
+        "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut, points) \
+         VALUES ($1, $2, 'holds', 0, $3::text::jsonb)",
+    )
+    .bind(ASSET)
+    .bind(t0())
+    .bind(json!({ISSUING: old_lag, ORIGIN: old_lag}).to_string())
+    .execute(&w.admin)
+    .await
+    .unwrap();
+    let (check, readings, pager) = checker(&w);
+    sync_chain(&w.admin, &readings).await;
+    let e = check
+        .evaluate(ASSET, t0() + Duration::hours(6))
+        .await
+        .unwrap();
+    assert_eq!(e.outcome, Outcome::Incomplete, "{e:?}");
+    assert_eq!(
+        e.blind.get(ISSUING),
+        Some(&Blind::CatchingUp),
+        "{:?}",
+        e.blind
+    );
+    assert_eq!(stops(&w).await, (1, 0));
+    assert!(pager.kinds().is_empty(), "{:?}", pager.kinds());
+    let e = check
+        .evaluate(ASSET, t0() + Duration::hours(6) + Duration::minutes(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        e.blind.get(ISSUING),
+        Some(&Blind::FinalityStall),
+        "{:?}",
+        e.blind
+    );
+    assert_eq!(pager.kinds(), ["reserve-blind"]);
+    assert_eq!(pager.pages()[0].detail["why"], "finality-stall");
+}
+
+/// Amendment 0028: an asset with no evaluation at all (never seen by the reserve check: newly
+/// declared, or a store the check has not reached yet) is held: a final deposit waits as
+/// `CND-Paused`, with no row of `pauses`. The check's first evaluation that holds lets it go.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_a0028_an_asset_with_no_evaluation_at_all_is_held(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::unseen(options, connect).await;
+    assert_eq!(w.count("SELECT count(*) FROM reserve_evaluations").await, 0);
+    fund(&w, 5, 1_000_000).await;
+    read_all(&w.admin, 100_000).await;
+    let id = source_final_deposit_at(&w, 150).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    assert!(order(&w.admin, id, 1).await.is_none());
+    assert_eq!(w.count("SELECT count(*) FROM pauses").await, 0);
+    let (check, readings, _) = checker(&w);
+    sync_chain(&w.admin, &readings).await;
+    assert_eq!(
+        check.evaluate(ASSET, t0()).await.unwrap().outcome,
+        Outcome::Holds
+    );
+    w.settle(t0()).await;
+    assert!(
+        order(&w.admin, id, 1).await.is_some(),
+        "{:?}",
+        w.state(id).await
+    );
+}
+
+/// Amendment 0028: while the check cannot even list the assets, the core's gate holds every
+/// asset's new work in memory (`Unseen::all`), though each asset's latest evaluation held: a final
+/// deposit waits as `CND-Paused`, and moves on once the check lists them again.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_a0028_a_check_that_cannot_list_the_assets_holds_every_transfer(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    fund(&w, 5, 1_000_000).await;
+    read_all(&w.admin, 100_000).await;
+    let (check, readings, _) = checker(&w);
+    sync_chain(&w.admin, &readings).await;
+    assert_eq!(
+        check.evaluate(ASSET, t0()).await.unwrap().outcome,
+        Outcome::Holds
+    );
+    let id = source_final_deposit_at(&w, 150).await;
+    let core = w.restarted().await.watching(check.unseen());
+    exec(&w.admin, "REVOKE SELECT ON assets FROM bezent_core").await;
+    let clock = ManualClock::at(t0() + Duration::minutes(1));
+    assert!(check.tick(&clock).await.is_err());
+    exec(&w.admin, "GRANT SELECT ON assets TO bezent_core").await;
+    for _ in 0..3 {
+        core.cycle(t0()).await.unwrap();
+    }
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    assert!(order(&w.admin, id, 1).await.is_none());
+    sync_chain(&w.admin, &readings).await;
+    clock.advance(Duration::minutes(1));
+    check.tick(&clock).await.unwrap();
+    assert!(!check.unseen().all());
+    for _ in 0..3 {
+        core.cycle(t0()).await.unwrap();
+    }
+    assert!(
+        order(&w.admin, id, 1).await.is_some(),
+        "{:?}",
+        w.state(id).await
+    );
+}
+
+/// Amendment 0028: `held_heads` is best effort. When the final heads cannot be read (here the
+/// core may not read them), the evaluation is incomplete and the hold is still recorded in the
+/// store, with no held heads, so the signer sees it too; the check holds nothing in memory.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_a0028_a_hold_is_recorded_when_the_heads_cannot_be_read(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    fund(&w, 5, 1_000).await;
+    read_all(&w.admin, 100).await;
+    let (check, readings, _) = checker(&w);
+    sync_chain(&w.admin, &readings).await;
+    exec(&w.admin, "REVOKE SELECT ON final_heads FROM bezent_core").await;
+    let e = check.tick(&ManualClock::at(t0())).await.unwrap().remove(0);
+    assert_eq!(e.outcome, Outcome::Incomplete, "{e:?}");
+    assert!(e.reason.as_deref().unwrap().starts_with("store:"), "{e:?}");
+    assert_eq!(stops(&w).await, (1, 0));
+    let held: serde_json::Value = scalar(
+        &w.admin,
+        "SELECT held_heads FROM pauses WHERE kind = 'hold'",
+    )
+    .await;
+    assert_eq!(held, json!({}));
+    assert!(!check.unseen().holds(ASSET));
+    exec(&w.admin, "GRANT SELECT ON final_heads TO bezent_core").await;
 }

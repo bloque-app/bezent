@@ -230,19 +230,6 @@ impl Lag {
         self.behind_head() || self.head_stale()
     }
 
-    /// Why the check cannot see this network, if it cannot (amendment 0028). A stale final head
-    /// is a finality stall unless `walk_moved` (the network's watermark moved since the evaluation
-    /// before): then, as for a fresh head the point lags beyond the bound, our walk is catching up.
-    pub fn blind_given(&self, walk_moved: bool) -> Option<Blind> {
-        if self.head_stale() && !walk_moved {
-            Some(Blind::FinalityStall)
-        } else if self.stale() {
-            Some(Blind::CatchingUp)
-        } else {
-            None
-        }
-    }
-
     fn json(&self, point: Option<&FinalPoint>, state: Option<Blind>) -> Value {
         json!({
             "point_block_number": point.map(|p| p.block_number),
@@ -573,6 +560,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         let walked = previous_watermarks(previous.as_ref().map(|(_, p)| p));
         let bound = blind_bound(&mut tx, asset).await?;
         self.bounds().insert(asset.to_owned(), bound);
+        let assessment = assess(&mut tx, asset, now, &walked).await?;
         let reason = format!("the evaluation failed: {error}");
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, reason) \
@@ -603,7 +591,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                 points: &BTreeMap::new(),
                 lags: &BTreeMap::new(),
                 blind: &BTreeMap::new(),
-                walked: &walked,
+                assessment: &assessment,
                 bound,
                 values: &Value::Null,
             },
@@ -637,14 +625,24 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
     }
 
     async fn evaluated(&self, asset: &str, now: DateTime<Utc>) -> sqlx::Result<Evaluation> {
-        let mut conn = self.pool.acquire().await?;
-        let derivation = match self.derive(&mut conn, asset, now).await {
+        // One evaluation of an asset at a time, decided and recorded under one lock (amendment
+        // 0028): what an evaluation reads, the outcome it comes to and the hold it places or lifts
+        // follow the evaluations' ids. The reads run in a savepoint, so a store error while reading
+        // is an incomplete evaluation, recorded, not a failed one.
+        let mut tx = self.pool.begin().await?;
+        lock_asset(&mut tx, asset).await?;
+        let mut read = sqlx::Acquire::begin(&mut *tx).await?;
+        let mut broken = false;
+        let derivation = match self.derive(&mut read, asset, now).await {
             Ok(d) => d,
-            Err(e) => Derivation {
-                points: BTreeMap::new(),
-                lags: BTreeMap::new(),
-                terms: Err(format!("store: {e}")),
-            },
+            Err(e) => {
+                broken = true;
+                Derivation {
+                    points: BTreeMap::new(),
+                    lags: BTreeMap::new(),
+                    terms: Err(format!("store: {e}")),
+                }
+            }
         };
         let Derivation {
             points,
@@ -660,25 +658,33 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                     .collect();
                 // The book as the evaluation reads it: no entry committed later, whatever its id
                 // (review SF5; issue #42).
-                let read = match book::entry_cut(&mut conn).await {
+                let book = match book::entry_cut(&mut read).await {
                     Ok(cut) => {
-                        let terms = book::as_of(&mut conn, asset, &cuts, Some(&cut)).await;
+                        let terms = book::as_of(&mut read, asset, &cuts, Some(&cut)).await;
                         entry_cut = Some(cut);
                         terms
                     }
                     Err(e) => Err(e),
                 };
-                match read {
+                match book {
                     Ok(b) => (derived, b, None),
-                    Err(e) => (
-                        Derived::default(),
-                        Terms::default(),
-                        Some(format!("store: {e}")),
-                    ),
+                    Err(e) => {
+                        broken = true;
+                        (
+                            Derived::default(),
+                            Terms::default(),
+                            Some(format!("store: {e}")),
+                        )
+                    }
                 }
             }
             Err(why) => (Derived::default(), Terms::default(), Some(why)),
         };
+        if broken {
+            read.rollback().await?;
+        } else {
+            read.commit().await?;
+        }
         let mut differences = if reason.is_some() {
             Vec::new()
         } else {
@@ -712,19 +718,13 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         }
         // Every mismatch the endpoint ever recorded for the asset, from the durable flag: one
         // gone by the point read now is still a breach to raise (PR #50 review M1).
-        let mismatches = readings::supply_mismatches(&mut conn, asset).await?;
+        let mismatches = readings::supply_mismatches(&mut tx, asset).await?;
         let made = reason.is_none();
         let alerts = if made {
-            self.alerts(&mut conn, asset, &book_terms, now).await?
+            self.alerts(&mut tx, asset, &book_terms, now).await?
         } else {
             Vec::new()
         };
-        drop(conn);
-
-        let mut tx = self.pool.begin().await?;
-        // One evaluation of an asset at a time, recorded in the order it is decided in (amendment
-        // 0028): a hold and its lift follow the evaluations' ids.
-        lock_asset(&mut tx, asset).await?;
         let previous: Option<(String, Value, Value)> = sqlx::query_as(
             "SELECT outcome, alerts, points FROM reserve_evaluations WHERE asset = $1 \
              ORDER BY id DESC LIMIT 1",
@@ -733,18 +733,25 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         .fetch_optional(&mut *tx)
         .await?;
         let walked = previous_watermarks(previous.as_ref().map(|(_, _, p)| p));
+        let bound = blind_bound(&mut tx, asset).await?;
+        self.bounds().insert(asset.to_owned(), bound);
         // Review M2: a point too far behind its network's final head is no check at all; nor,
         // review MF2, is one on a network with no final head recorded within the bound by the
         // clock (a finality stall, an observer that stopped): mints there would go unseen.
         // Amendment 0028: that is blindness, not a difference of value. It never holds, and it
-        // holds the asset's routes; it diverges only if a value differs as well. A stale head is a
-        // finality stall only while the network's walk has not moved since the evaluation before.
+        // holds the asset's routes; it diverges only if a value differs as well. Which networks
+        // are in a finality stall is judged once ([`assess`]); the reason and the page say the same.
+        let assessment = assess(&mut tx, asset, now, &walked).await?;
         let blind: BTreeMap<String, Blind> = lags
             .iter()
-            .filter_map(|(n, l)| {
-                let moved = walked.get(n).is_some_and(|w| l.watermark > *w);
-                l.blind_given(moved).map(|b| (n.clone(), b))
-            })
+            .filter(|(_, l)| l.stale())
+            .map(|(n, _)| (n.clone(), Blind::CatchingUp))
+            .chain(
+                assessment
+                    .stalled
+                    .iter()
+                    .map(|n| (n.clone(), Blind::FinalityStall)),
+            )
             .collect();
         let reason = reason.or_else(|| {
             (differences.is_empty() && !blind.is_empty()).then(|| blind_reason(&blind, &lags))
@@ -754,8 +761,6 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
             (None, true) => Outcome::Holds,
             (None, false) => Outcome::Diverges,
         };
-        let bound = blind_bound(&mut tx, asset).await?;
-        self.bounds().insert(asset.to_owned(), bound);
         let points_json: serde_json::Map<String, Value> = points
             .iter()
             .map(|(n, p)| {
@@ -890,7 +895,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                     points: &points,
                     lags: &lags,
                     blind: &blind,
-                    walked: &walked,
+                    assessment: &assessment,
                     bound,
                     values: &values,
                 },
@@ -1252,8 +1257,8 @@ struct Seen<'a> {
     points: &'a BTreeMap<String, FinalPoint>,
     lags: &'a BTreeMap<String, Lag>,
     blind: &'a BTreeMap<String, Blind>,
-    /// Each network's watermark as the evaluation before recorded it.
-    walked: &'a BTreeMap<String, i64>,
+    /// What the store says of the asset's networks now ([`assess`]).
+    assessment: &'a Assessment,
     /// The asset's blind bound ([`blind_bound`]).
     bound: i64,
     values: &'a Value,
@@ -1349,25 +1354,27 @@ async fn net_states(
 fn blind_reason(blind: &BTreeMap<String, Blind>, lags: &BTreeMap<String, Lag>) -> String {
     let each: Vec<String> = blind
         .iter()
-        .map(|(network, b)| {
-            let lag = &lags[network];
-            match b {
-                Blind::FinalityStall => format!(
-                    "{network}: no final head recorded for {} s, beyond {} s: a finality stall, or \
-                     nothing records its heads",
-                    lag.head_age_seconds, lag.bound_seconds
-                ),
-                Blind::CatchingUp if lag.head_stale() => format!(
-                    "{network}: no final head recorded for {} s, beyond {} s, while the walk is \
-                     moving (watermark {}): catching up",
-                    lag.head_age_seconds, lag.bound_seconds, lag.watermark
-                ),
-                Blind::CatchingUp => format!(
-                    "{network}: the point lags the latest final head by {} s ({} blocks), beyond \
-                     {} s: catching up",
-                    lag.seconds, lag.blocks, lag.bound_seconds
-                ),
-            }
+        .map(|(network, b)| match (b, lags.get(network)) {
+            (Blind::FinalityStall, Some(lag)) if lag.head_stale() => format!(
+                "{network}: no final head recorded for {} s, beyond {} s, and the walk has \
+                 stopped: a finality stall, or nothing records its heads",
+                lag.head_age_seconds, lag.bound_seconds
+            ),
+            (Blind::FinalityStall, _) => format!(
+                "{network}: the latest final head is the one recorded when the hold began, and the \
+                 walk has stopped: a finality stall, or nothing records its heads"
+            ),
+            (Blind::CatchingUp, Some(lag)) if lag.head_stale() => format!(
+                "{network}: no final head recorded for {} s, beyond {} s, while the walk is not \
+                 known to have stopped (watermark {}): catching up",
+                lag.head_age_seconds, lag.bound_seconds, lag.watermark
+            ),
+            (Blind::CatchingUp, Some(lag)) => format!(
+                "{network}: the point lags the latest final head by {} s ({} blocks), beyond {} s: \
+                 catching up",
+                lag.seconds, lag.blocks, lag.bound_seconds
+            ),
+            (Blind::CatchingUp, None) => format!("{network}: catching up"),
         })
         .collect();
     format!(
@@ -1416,6 +1423,103 @@ fn lags_json(
     )
 }
 
+/// What the store says of an asset's networks at an evaluation, and which of them are in a
+/// finality stall (amendment 0028): one judgement, which the evaluation's reason and the hold's page
+/// both read.
+struct Assessment {
+    /// The asset's hold, if it has one: its id, the evaluation it began at, when, its held heads.
+    existing: Option<(i64, i64, DateTime<Utc>, Value)>,
+    /// Each network's latest final head and watermark now, as a hold records them; empty when
+    /// they could not be read (best effort: the hold is placed all the same).
+    heads_now: serde_json::Map<String, Value>,
+    /// The networks in a finality stall.
+    stalled: Vec<String>,
+}
+
+/// Judges `asset`'s networks (see [`hold`] for the rule). A watermark the evaluation before did not
+/// record (none, or one recorded before 0142) is unknown, not stopped: a stale head is then not yet
+/// a stall, and the next evaluation decides.
+async fn assess(
+    tx: &mut PgConnection,
+    asset: &str,
+    now: DateTime<Utc>,
+    walked: &BTreeMap<String, i64>,
+) -> sqlx::Result<Assessment> {
+    let existing: Option<(i64, i64, DateTime<Utc>, Value)> = sqlx::query_as(
+        "SELECT p.id, p.evaluation_id, v.evaluated_at, p.held_heads FROM pauses p \
+         JOIN reserve_evaluations v ON v.id = p.evaluation_id \
+         WHERE p.asset = $1 AND p.cause = 'blind'",
+    )
+    .bind(asset)
+    .fetch_optional(&mut *tx)
+    .await?;
+    // Best effort, in a savepoint: a read that fails here must not cost the durable hold.
+    let mut sp = sqlx::Acquire::begin(&mut *tx).await?;
+    let states = match net_states(&mut sp, asset).await {
+        Ok(states) => {
+            sp.commit().await?;
+            states
+        }
+        Err(e) => {
+            sp.rollback().await?;
+            tracing::warn!(asset, error = %e, "the asset's final heads could not be read for its hold");
+            BTreeMap::new()
+        }
+    };
+    let heads_now: serde_json::Map<String, Value> = states
+        .iter()
+        .map(|(n, st)| {
+            (
+                n.clone(),
+                json!({
+                    "head_block_number": st.head.map(|(b, _)| b),
+                    "head_block_time": st.head.map(|(_, t)| t.to_rfc3339()),
+                    "watermark": st.watermark,
+                }),
+            )
+        })
+        .collect();
+    let held_since = existing.as_ref().map(|(_, _, since, _)| *since);
+    let stalled = states
+        .iter()
+        .filter(|(network, st)| {
+            // Moved since `before`; an unknown `before` counts as moved (not known to have stopped).
+            let moved_since = |before: Option<i64>| match (before, st.watermark) {
+                (Some(b), Some(a)) => a > b,
+                (None, Some(_)) => true,
+                (_, None) => false,
+            };
+            let stale = st
+                .head
+                .is_some_and(|(_, t)| (now - t).num_seconds() > st.bound)
+                && !match walked.get(network.as_str()) {
+                    Some(w) => st.watermark.is_some_and(|a| a > *w),
+                    None => true,
+                };
+            let at_hold = existing
+                .as_ref()
+                .and_then(|(_, _, _, held)| held.get(network.as_str()));
+            let held_head = at_hold
+                .and_then(|h| h.get("head_block_number"))
+                .and_then(Value::as_i64);
+            let held_watermark = at_hold
+                .and_then(|h| h.get("watermark"))
+                .and_then(Value::as_i64);
+            let unchanged = held_since.is_some_and(|since| (now - since).num_seconds() > st.bound)
+                && held_head.is_some()
+                && held_head == st.head.map(|(b, _)| b)
+                && !moved_since(held_watermark);
+            stale || unchanged
+        })
+        .map(|(network, _)| network.clone())
+        .collect();
+    Ok(Assessment {
+        existing,
+        heads_now,
+        stalled,
+    })
+}
+
 /// Holds `asset`'s routes while the check cannot see it (amendment 0028; `REQ-IC-2`), within the
 /// evaluation's transaction: records the hold if there is none, naming the evaluation it begins at
 /// and each network's latest final head and watermark then (`held_heads`), and pages
@@ -1436,34 +1540,13 @@ async fn hold(tx: &mut PgConnection, seen: &Seen<'_>, acts: &mut Acts) -> sqlx::
         points,
         lags,
         blind,
-        walked,
+        assessment,
         bound,
         values,
     } = *seen;
-    let states = net_states(tx, asset).await?;
-    let existing: Option<(i64, i64, DateTime<Utc>, Value)> = sqlx::query_as(
-        "SELECT p.id, p.evaluation_id, v.evaluated_at, p.held_heads FROM pauses p \
-         JOIN reserve_evaluations v ON v.id = p.evaluation_id \
-         WHERE p.asset = $1 AND p.cause = 'blind'",
-    )
-    .bind(asset)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let held_now: serde_json::Map<String, Value> = states
-        .iter()
-        .map(|(n, st)| {
-            (
-                n.clone(),
-                json!({
-                    "head_block_number": st.head.map(|(b, _)| b),
-                    "head_block_time": st.head.map(|(_, t)| t.to_rfc3339()),
-                    "watermark": st.watermark,
-                }),
-            )
-        })
-        .collect();
-    let (hold_id, began, since, held) = match existing {
-        Some(h) => h,
+    let held_now = &assessment.heads_now;
+    let (hold_id, began, since, held) = match &assessment.existing {
+        Some(h) => h.clone(),
         None => {
             let id: Option<i64> = sqlx::query_scalar(
                 "INSERT INTO pauses (asset, cause, evaluation_id, held_heads) \
@@ -1502,34 +1585,7 @@ async fn hold(tx: &mut PgConnection, seen: &Seen<'_>, acts: &mut Acts) -> sqlx::
         }
     };
     let blind_seconds = (now - since).num_seconds();
-    let stalled: Vec<&String> = states
-        .iter()
-        .filter(|(network, st)| {
-            let watermark_now = st.watermark;
-            let moved_since = |w: Option<i64>| {
-                w.zip(watermark_now)
-                    .is_some_and(|(before, after)| after > before)
-            };
-            let stale = st
-                .head
-                .is_some_and(|(_, t)| (now - t).num_seconds() > st.bound)
-                && !moved_since(walked.get(network.as_str()).copied());
-            let at_hold = held.get(network.as_str());
-            let held_head = at_hold
-                .and_then(|h| h.get("head_block_number"))
-                .and_then(Value::as_i64);
-            let unchanged = blind_seconds > st.bound
-                && held_head.is_some()
-                && held_head == st.head.map(|(b, _)| b)
-                && !moved_since(
-                    at_hold
-                        .and_then(|h| h.get("watermark"))
-                        .and_then(Value::as_i64),
-                );
-            stale || unchanged
-        })
-        .map(|(network, _)| network)
-        .collect();
+    let stalled = &assessment.stalled;
     let why = if !stalled.is_empty() {
         "finality-stall"
     } else if blind_seconds > bound {

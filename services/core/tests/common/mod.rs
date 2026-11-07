@@ -223,6 +223,14 @@ where
 
 impl World {
     pub async fn new(options: PgPoolOptions, connect: PgConnectOptions) -> Self {
+        let w = Self::unseen(options, connect).await;
+        seen(&w.admin).await;
+        w
+    }
+
+    /// [`World::new`] with no evaluation of the asset at all: the reserve check has never seen it
+    /// (amendment 0028).
+    pub async fn unseen(options: PgPoolOptions, connect: PgConnectOptions) -> Self {
         let admin = bezent_store::login::guard(options)
             .connect_with(connect.clone())
             .await
@@ -332,7 +340,6 @@ pub async fn seed(pool: &PgPool) {
         ),
     )
     .await;
-    seen(pool).await;
 }
 
 /// Amendment 0028: the reserve check has seen every declared asset (a holding evaluation that was

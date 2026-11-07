@@ -95,9 +95,9 @@ asset in memory until an evaluation is recorded again, and, while the check cann
 
 Both endpoints record the network's **live** finalized head in `final_heads` (the EVM follower records the pair's final
 point at each step, with the vault's readings; the Kreivo endpoint records the finalized head with its supply readings).
-Neither records a head walked from history. Since this amendment both also record it again while they walk a backlog
-(every 15 s: the EVM follower between the ranges of one step, the Kreivo endpoint between the steps of a catch-up), so a
-long catch-up keeps the latest head fresh. So, per network:
+Neither records a head walked from history, and neither records one in the middle of a walk: while a long backlog is
+walked the latest head ages as it would without the walk (so `observer_lag_estimate_seconds` and the core's deadlines
+still see the lag, `NFR-6`), and what moves is the watermark. So, per network:
 
 - **Catching up**: the latest recorded final head is fresh by the clock (within the network's bound), and the point the
   check can read at lags it beyond the bound. The chain is finalizing; our reading of it (the walk's watermark, or an
@@ -164,9 +164,14 @@ lifted as before.
   recorded stay valid, and stay pauses. `operator_request_unpause` refuses a hold.
 - **Unseen means held.** `reserve_check_holds(asset)` (the latest evaluation, by id, holds and was made) is read by the
   core's gate and by the signer's `pause_holds_intent`: an asset for which it is false is held, whatever `pauses` says.
-  The latest evaluation is the latest by id everywhere (a new index), and every evaluation and every record of a failure
-  takes the per-asset advisory lock `bezent/reserve-evaluation/<asset>` first, so a hold and its lift follow the order
-  the evaluations are recorded in.
+  The latest evaluation is the latest by id in the check, the gate, the signer's read, the delete guard and
+  `ops_observables` (a new index); a statement still states the latest complete evaluation by time, as before, and
+  under the lock an asset's evaluations are recorded in time order. Every evaluation and every record of a failure takes
+  the per-asset advisory lock `bezent/reserve-evaluation/<asset>` before it reads anything and holds it until it is
+  recorded, so an evaluation decides on what is true when it gets the lock, and a hold and its lift follow the order the
+  evaluations are recorded in. A watermark the evaluation before did not record (none, or one recorded before 0142) is
+  unknown, not stopped: the first evaluation after the deploy does not page a stale head as a stall at once.
+  `held_heads` is best effort: if the heads cannot be read, the hold is recorded with none.
 - **The check.** Lag and staleness are no longer `Difference`s. An evaluation diverges only on a difference of value.
   Blind evaluations are incomplete, their reason naming each blind network and whether it is catching up or a
   finality stall. The hold is placed, and an incomplete evaluation's turn is logged, in the evaluation's transaction,
@@ -189,9 +194,6 @@ lifted as before.
   `supply-mismatch-pause` and the core's `key-compromise` name `class` `money-differs`.
 - **Order.** The core runs the reserve check before its cycle on each pass (`bezent_core_service::pass`); a check's
   first tick evaluates every asset.
-- **The endpoints.** The EVM follower records the live final point, with its readings, between the ranges of a step
-  every 15 s (`head_refresh`); the Kreivo endpoint records the supply at the finalized head between the steps of a
-  catch-up every 15 s (`observe::catch_up`).
 - **Observables.** `pauses_in_force` counts pauses only; `holds_in_force` and `hold_age_seconds` (per asset) count holds.
 - Tests: `services/core/tests/reserve_check.rs`
   (`ac_e2_3_req_ic_2_a_cold_start_with_every_term_zero_is_held_not_paused_and_lifts_itself`,
@@ -214,8 +216,12 @@ lifted as before.
   `ac_e2_3_a0028_an_evaluation_the_store_cannot_record_is_held_in_memory` and
   `ac_e2_3_a0028_the_first_tick_evaluates_every_asset` (`reserve_check.rs`);
   `ac_e2_3_a1b_an_asset_the_check_has_not_seen_is_held_with_no_hold_row` (`conditions.rs`);
-  `ac_e2_3_nfr_6_a_long_step_keeps_recording_the_live_final_head_between_ranges` (`services/evm-endpoint/tests/observe.rs`)
-  and `ac_e2_3_nfr_6_a_long_catch_up_records_the_finalized_head_between_steps` (`services/kreivo-endpoint/tests/observe.rs`).
+  `ac_e2_3_nfr_6_a_long_step_moves_the_watermark_and_records_only_its_own_head` (`services/evm-endpoint/tests/observe.rs`).
+  From the second review: `ac_e2_3_a0028_after_the_deploy_an_unknown_watermark_is_not_a_stall_yet`,
+  `ac_e2_3_a0028_an_asset_with_no_evaluation_at_all_is_held`,
+  `ac_e2_3_a0028_a_check_that_cannot_list_the_assets_holds_every_transfer` and
+  `ac_e2_3_a0028_a_hold_is_recorded_when_the_heads_cannot_be_read`; the lock test now fails if the lock is taken only to
+  record.
   Test fixtures that move value declare that the check has seen their assets (a holding evaluation recorded as made).
 
 ## Open after the ruling
@@ -237,8 +243,9 @@ None of these is applied; each is the owner's.
    condition (`REQ-IC-5`) is not ruled; nothing on the requester surface changed.
 6. **Residual windows.** An asset the check has not seen is held by the gate and the signer with or without a hold row,
    so a new asset, a restart and the moment after 0142 hold nothing open. What remains: a core whose gate holds an asset
-   in memory (the store refused the record) holds it only in that process; another core or a restart would not, until
-   its own first tick. The ingress does not read `reserve_check_holds`: it keeps taking requests for an asset not yet
+   in memory (the store refused the record) holds it only in that process. The signer does not see that hold (it reads
+   only the store), so an intent recorded before it may still be signed; another core or a restart would not hold it
+   either, until its own first tick. The ingress does not read `reserve_check_holds`: it keeps taking requests for an asset not yet
    seen, which wait at the core. With the core down nothing is evaluated, but nothing is ordered either.
 7. **The observables.** `reserve_equation_outcome` is 2 for a blind evaluation, as for any incomplete one ("could not
    be made"); `pauses_in_force` counts pauses only, `holds_in_force` and `hold_age_seconds` holds. An infrastructure
