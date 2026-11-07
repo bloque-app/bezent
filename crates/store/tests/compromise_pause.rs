@@ -260,9 +260,16 @@ async fn ac_i2_2_no_service_lifts_a_compromise_pause(pool: PgPool) {
             "UPDATE pauses SET asset = 'bUSDC'",
             "UPDATE pauses SET cause = NULL, alert_seq = NULL",
         ] {
+            // The core holds DELETE on `pauses` to lift its own blind hold (amendment 0028); the
+            // store's trigger refuses it every other row, this one included.
+            let expected = if role == bezent_store::CORE_ROLE && sql.starts_with("DELETE") {
+                bezent_store::REFUSAL_SQLSTATE
+            } else {
+                PRIVILEGE
+            };
             assert_eq!(
                 attempt(&service, sql).await.as_deref(),
-                Some(PRIVILEGE),
+                Some(expected),
                 "{role}: {sql}"
             );
         }

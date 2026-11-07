@@ -35,6 +35,9 @@ struct State {
     hang_balance: bool,
     balance_reads: Vec<At>,
     salt: u8,
+    /// Blocks the finalized head moves on by at each logs read: a chain that keeps finalizing
+    /// while a long step walks its backlog.
+    finalize_on_logs: Option<u64>,
 }
 
 /// The chain a mock provider answers from. Clones share it.
@@ -112,6 +115,11 @@ impl MockChain {
     /// Puts `h` at its height, as it is: two providers showing the same block.
     pub fn replace_with(&self, h: Header) {
         self.state().headers.insert(h.number, h);
+    }
+
+    /// Has the finalized head move on by `by` blocks (at most to the latest) at each logs read.
+    pub fn finalize_on_logs(&self, by: Option<u64>) {
+        self.state().finalize_on_logs = by;
     }
 
     /// Sets the finalized head.
@@ -326,9 +334,13 @@ impl Rpc for MockRpc {
 
     async fn logs(&self, q: &LogQuery) -> Result<Vec<Log>, RpcError> {
         self.chain.check()?;
-        let s = self.chain.state();
+        let mut s = self.chain.state();
         if let Some(r) = &s.fail_logs {
             return Err(RpcError(r.clone()));
+        }
+        if let Some(by) = s.finalize_on_logs {
+            let top = s.headers.last_key_value().map_or(0, |(n, _)| *n);
+            s.finalized = (s.finalized + by).min(top);
         }
         let mut out: Vec<Log> = s.logs.iter().filter(|l| q.matches(l)).cloned().collect();
         out.sort();

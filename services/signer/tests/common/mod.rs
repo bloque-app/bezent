@@ -367,14 +367,17 @@ impl Fixture {
     /// Builds the fixture.
     pub async fn new(pool: PgPoolOptions, connect: PgConnectOptions) -> Self {
         let admin = pool.connect_with(connect.clone()).await.unwrap();
-        // The declarations the signer reads: which token the fixture's asset is paid in.
+        // The declarations the signer reads: which token the fixture's asset is paid in, and that the
+        // reserve check has seen the asset (amendment 0028).
         sqlx::raw_sql(&format!(
             "INSERT INTO networks (network, role, address_format) VALUES \
                ('polygon-test', 'origin', 'evm'), ('kreivo-test', 'issuing', 'ss58'); \
              INSERT INTO assets (asset, precision, assurance_class, issuing_asset) VALUES \
                ('{ASSET}', 6, 'public', '{ISSUING_ASSET}'); \
              INSERT INTO admitted_tokens (network, token, asset, precision) VALUES \
-               ('polygon-test', '0x{}', '{ASSET}', 6)",
+               ('polygon-test', '0x{}', '{ASSET}', 6); \
+             INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+               VALUES ('{ASSET}', '2000-01-01T00:00:00Z', 'holds', 0)",
             hex::encode(TOKEN_ADDRESS)
         ))
         .execute(&admin)

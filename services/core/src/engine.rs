@@ -124,6 +124,9 @@ pub struct Core {
     settings: Settings,
     /// The late-mint check's count of failed cycles (issue #26).
     late_mint: std::sync::Arc<crate::late_mint::Watcher>,
+    /// What the reserve check could not even record (amendment 0028): assets held in memory, or
+    /// every asset while the check cannot list them.
+    unseen: std::sync::Arc<crate::reserve::check::Unseen>,
 }
 
 /// What a step did to a transfer.
@@ -273,7 +276,15 @@ impl Core {
             pool,
             settings,
             late_mint: Default::default(),
+            unseen: Default::default(),
         }
+    }
+
+    /// The core, holding new work of every asset the reserve check `unseen` names as one it could
+    /// not even record an evaluation of (amendment 0028; `ReserveCheck::unseen`).
+    pub fn watching(mut self, unseen: std::sync::Arc<crate::reserve::check::Unseen>) -> Self {
+        self.unseen = unseen;
+        self
     }
 
     /// The store pool.
@@ -1166,7 +1177,7 @@ impl Core {
         let Some((asset, network, direction)) = t.route() else {
             return Ok(None);
         };
-        let paused = Self::route_paused(conn, &asset, &network, direction).await?;
+        let paused = self.route_held(conn, &asset, &network, direction).await?;
         let held = paused && !self.attempt_signed(conn, t, attempt).await?;
         // REQ-BE-6: a reversal that took the surplus below its floor pauses new mints of the
         // asset until the attesting party restores the reserve (F-004).
@@ -1198,6 +1209,30 @@ impl Core {
             }
         }
         Ok(None)
+    }
+
+    /// Whether new work of the route waits (`REQ-GV-1`): a pause or a hold covers it, or, amendment
+    /// 0028, the reserve check has not seen the asset (its latest evaluation, by id, does not hold,
+    /// or there is none yet), whatever `pauses` says, or could not even record its evaluation.
+    async fn route_held(
+        &self,
+        conn: &mut PgConnection,
+        asset: &str,
+        network: &str,
+        direction: &str,
+    ) -> sqlx::Result<bool> {
+        Ok(Self::route_paused(conn, asset, network, direction).await?
+            || self.unseen.holds(asset)
+            || !Self::reserve_seen(conn, asset).await?)
+    }
+
+    /// Whether the reserve check has seen `asset`: its latest evaluation, by id, holds and was made
+    /// (`reserve_check_holds`, migration 0142; amendment 0028).
+    async fn reserve_seen(conn: &mut PgConnection, asset: &str) -> sqlx::Result<bool> {
+        sqlx::query_scalar("SELECT reserve_check_holds($1)")
+            .bind(asset)
+            .fetch_one(&mut *conn)
+            .await
     }
 
     /// Whether a pause covers the route (`REQ-GV-1`): a row that is silent on a dimension matches
@@ -1710,7 +1745,7 @@ impl Core {
             let in_flight_under_pause = self.attempt_signed(conn, t, attempt).await?
                 && match t.route() {
                     Some((asset, network, direction)) => {
-                        Self::route_paused(conn, &asset, &network, direction).await?
+                        self.route_held(conn, &asset, &network, direction).await?
                     }
                     None => false,
                 };
