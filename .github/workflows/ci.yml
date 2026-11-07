@@ -65,7 +65,9 @@ jobs:
 
   test:
     name: tests
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, whose pg_dump 18 writes `SET transaction_timeout`,
+    # which the PostgreSQL 16 server rejects in the restore drill (T-001-05). 24.04 ships client 16.
+    runs-on: ubuntu-24.04
     env:
       # Each store test creates its own database on this server (#[sqlx::test]).
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
