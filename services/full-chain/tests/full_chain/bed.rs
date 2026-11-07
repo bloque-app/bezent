@@ -933,6 +933,7 @@ impl Bed {
             max_range: 4,
             max_walk: 10_000,
             rung: 5,
+            concurrency: 4,
         }
     }
 
