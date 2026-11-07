@@ -26,6 +26,9 @@
 //! archive_rpc = ["wss://archive.example"] # history sources, tried in order (issue #49); see below
 //! max_walk = 200000                    # on a first start, at least the blocks from start_block to the head
 //! walk_concurrency = 32                # blocks read at once, applied in order (1 to 64)
+//! # [walk_skip]                        # skip stretches proven unchanged (notes/KREIVO-WALK-SKIP.md)
+//! # app = 5                            # the contract's app and licence in the contracts store
+//! # licence = 0
 //!
 //! [lane]                               # the delivery key's signing lane (REQ-EO-4)
 //! key = "kreivo-mint"
@@ -188,6 +191,10 @@ pub struct Config {
     /// request. 16 MiB by default; a block's events are far smaller.
     #[serde(default = "default_archive_max_response_bytes")]
     pub archive_max_response_bytes: u32,
+    /// Skip stretches of history proven unchanged at their two ends (`notes/KREIVO-WALK-SKIP.md`;
+    /// amendment 0027, a draft until ruled). Left out, every block is read.
+    #[serde(default)]
+    pub walk_skip: Option<WalkSkipConfig>,
     /// The delivery key's signing lane.
     pub lane: LaneConfig,
     /// The signer link.
@@ -197,6 +204,18 @@ pub struct Config {
     /// `/tmp/bezent-kreivo-endpoint.health`; a task whose root file system is read-only names a writable path here.
     #[serde(default)]
     pub health_file: Option<PathBuf>,
+}
+
+/// What a skipping walk needs to know besides the contract (`notes/KREIVO-WALK-SKIP.md`): the
+/// contract's app and licence in Kreivo's contracts store, whose `upgrade` can change the
+/// instance's code without Root.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalkSkipConfig {
+    /// The app's id (`ContractsStore::Apps`).
+    pub app: u32,
+    /// The licence's id: `ContractsStore::ContractAccount((app, licence))` must be the contract.
+    pub licence: u64,
 }
 
 /// The delivery key's signing lane (`REQ-EO-4`).
@@ -606,6 +625,22 @@ mod tests {
         c.archive_rpc.pop();
         c.light_client_depth = 256;
         assert!(c.check().is_err());
+    }
+
+    #[test]
+    fn walk_skip_is_off_unless_configured_with_the_contracts_app_and_licence() {
+        assert!(sample().walk_skip.is_none());
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/endpoint.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let with = |table: &str| {
+            let (top, lane) = text.split_once("[lane]").unwrap();
+            toml::from_str::<Config>(&format!("{top}{table}\n[lane]{lane}"))
+        };
+        let c = with("[walk_skip]\napp = 5\nlicence = 0\n").unwrap();
+        let w = c.walk_skip.unwrap();
+        assert_eq!((w.app, w.licence), (5, 0));
+        assert!(with("[walk_skip]\napp = 5\n").is_err());
+        assert!(with("[walk_skip]\napp = 5\nlicence = 0\nleaf = 4\n").is_err());
     }
 
     #[test]

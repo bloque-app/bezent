@@ -42,6 +42,13 @@ struct Block {
     redeemed: HashMap<(AccountId32, [u8; 32]), kreivo::Redemption>,
     /// Per local asset: the contract's own supply count, and the asset's issuance (issue #42).
     supply: HashMap<u32, (u128, u128)>,
+    /// The runtime's spec version that executed this block (a skip's F1).
+    spec: u32,
+    /// The digest of the contract's state (its event count, the references used, the
+    /// redemptions): what its child-trie root is to a skip (F2).
+    storage_root: [u8; 32],
+    /// The contracts store's app version (F3).
+    app_version: u32,
 }
 
 /// What a dry run answers.
@@ -98,11 +105,33 @@ struct State {
     /// Event reads in flight now, and the most at once.
     in_flight: usize,
     most_in_flight: usize,
+    /// The contracts store's app version from the next block on.
+    app_version: u32,
+    /// What [`Chain::end_state`] fails with at each block, if anything.
+    end_failures: HashMap<u64, ChainError>,
+    /// The blocks whose end state, and whose events, were read, in order.
+    end_log: Vec<u64>,
+    event_log: Vec<u64>,
+    /// How many blocks back `System::BlockHash` holds.
+    block_hash_count: u64,
 }
 
 /// Kreivo in memory. See the module documentation.
 pub struct FakeChain {
     state: Mutex<State>,
+}
+
+/// The digest of the contract's state at `block`, after `seq` events.
+fn contract_digest(seq: u64, block: &Block) -> [u8; 32] {
+    let mut used: Vec<_> = block.used.iter().collect();
+    used.sort();
+    let mut redeemed: Vec<_> = block
+        .redeemed
+        .iter()
+        .map(|(k, r)| (k, r.refunded))
+        .collect();
+    redeemed.sort();
+    blake2_256(&(seq, used, redeemed).encode())
 }
 
 fn hash_of(number: u64, parent: &[u8; 32]) -> [u8; 32] {
@@ -145,6 +174,9 @@ impl FakeChain {
                     used: HashSet::new(),
                     redeemed: HashMap::new(),
                     supply: HashMap::new(),
+                    spec: 134,
+                    storage_root: [0; 32],
+                    app_version: 1,
                 }],
                 finalized: 0,
                 pool: Vec::new(),
@@ -174,6 +206,11 @@ impl FakeChain {
                 slow_reads: false,
                 in_flight: 0,
                 most_in_flight: 0,
+                app_version: 1,
+                end_failures: HashMap::new(),
+                end_log: Vec::new(),
+                event_log: Vec::new(),
+                block_hash_count: 4_096,
             }),
         }
     }
@@ -400,6 +437,9 @@ impl FakeChain {
             used: parent.used.clone(),
             redeemed: parent.redeemed.clone(),
             supply: s.supply.clone(),
+            spec: s.version.spec_version,
+            storage_root: parent.storage_root,
+            app_version: s.app_version,
         };
         for reference in std::mem::take(&mut s.outside_uses) {
             block.used.insert(reference);
@@ -577,7 +617,44 @@ impl FakeChain {
                 data: event.encode_data(),
             });
         }
+        block.storage_root = contract_digest(s.seq, &block);
         s.blocks.push(block);
+    }
+
+    /// From the next block on, the contracts store's app has been published again (a skip's F3).
+    pub fn publish_app(&self) {
+        self.lock().app_version += 1;
+    }
+
+    /// Makes [`Chain::end_state`] at block `n` fail with `error`.
+    pub fn fail_end_state_at(&self, n: u64, error: ChainError) {
+        self.lock().end_failures.insert(n, error);
+    }
+
+    /// The blocks whose end state was read, in order.
+    pub fn end_reads(&self) -> Vec<u64> {
+        self.lock().end_log.clone()
+    }
+
+    /// The blocks whose events were read, in order.
+    pub fn event_reads(&self) -> Vec<u64> {
+        self.lock().event_log.clone()
+    }
+
+    /// Every event of the contract on the chain, as (block, event index, seq): what reading every
+    /// block records.
+    pub fn contract_events(&self) -> Vec<(u64, u32, u64)> {
+        let s = self.lock();
+        s.blocks
+            .iter()
+            .flat_map(|b| {
+                b.emitted.iter().map(move |e| {
+                    let seq =
+                        kreivo::decode_event(&e.topics, &e.data).map_or(u64::MAX, |e| e.seq());
+                    (b.header.block.number, e.index, seq)
+                })
+            })
+            .collect()
     }
 
     fn check(s: &State, block: &Block, x: &[u8]) -> Check {
@@ -767,6 +844,7 @@ impl Chain for FakeChain {
     async fn read_events(&self, at: &BlockRef) -> ChainResult<BlockEvents> {
         let slow = {
             let mut s = self.lock();
+            s.event_log.push(at.number);
             s.in_flight += 1;
             s.most_in_flight = s.most_in_flight.max(s.in_flight);
             s.slow_reads
@@ -802,6 +880,50 @@ impl Chain for FakeChain {
             read.emitted.clear();
         }
         Ok(read)
+    }
+
+    async fn proven_block_hash(&self, at: &BlockRef, number: u64) -> ChainResult<Option<[u8; 32]>> {
+        self.answer(|s| {
+            Self::block_at(s, at)?;
+            let held = number < at.number && at.number - number <= s.block_hash_count;
+            Ok(held.then(|| s.blocks[number as usize].header.block.hash))
+        })
+    }
+
+    async fn end_state(
+        &self,
+        at: &BlockRef,
+        subject: &crate::skip::Subject,
+    ) -> ChainResult<Option<crate::skip::EndState>> {
+        let mut s = self.lock();
+        s.end_log.push(at.number);
+        if s.unavailable {
+            return Err(ChainError::Unavailable("the fake chain is offline".into()));
+        }
+        if let Some(e) = s.end_failures.get(&at.number) {
+            return Err(e.clone());
+        }
+        let b = Self::block_at(&s, at)?;
+        let code_hash = s.code_hash;
+        let mut app = subject.code_hash.to_vec();
+        app.extend_from_slice(&b.app_version.to_le_bytes());
+        Ok(Some(crate::skip::EndState {
+            runtime: Some((parity_scale_codec::Compact(b.spec), "kreivo-parachain").encode()),
+            spec: Some(("kreivo-parachain".into(), b.spec)),
+            code: blake2_256(&b.spec.to_le_bytes()),
+            contract_info: code_hash.map(|h| h.to_vec()),
+            contract_code_hash: code_hash,
+            storage_root: Some(b.storage_root.to_vec()),
+            app_account: Some(s.contract),
+            app: Some(app),
+            app_code_hash: Some(subject.code_hash),
+            nonce: Some(b.nonces.get(&subject.lane).copied().unwrap_or(0)),
+            supplies: subject
+                .assets
+                .iter()
+                .map(|a| b.supply.get(a).map(|(_, issuance)| *issuance))
+                .collect(),
+        }))
     }
 
     async fn extrinsics(&self, at: &BlockRef) -> ChainResult<Vec<Vec<u8>>> {
