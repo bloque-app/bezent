@@ -962,24 +962,57 @@ fn own_header(at: &BlockRef, header: Header) -> ChainResult<Header> {
     Ok(header)
 }
 
+/// What [`read_at`] reads of a block: its `Timestamp::Now`, `System::Events` and
+/// `System::LastRuntimeUpgrade`, and the hash of its `:code` when the read carried it.
+pub type ProvenEvents = (crate::chain::Values, Option<runtime::CodeHash>);
+
+/// The keys [`read_at`] reads.
+fn event_keys() -> [Vec<u8>; 3] {
+    [
+        runtime::TIMESTAMP_NOW.to_vec(),
+        runtime::SYSTEM_EVENTS.to_vec(),
+        runtime::LAST_RUNTIME_UPGRADE.to_vec(),
+    ]
+}
+
 /// A block's `Timestamp::Now` and `System::Events`, read together (one proof from a history
 /// source) with its `System::LastRuntimeUpgrade` and the hash of its `:code` (its children's key),
 /// and decoded with the metadata of the runtime that `System::LastRuntimeUpgrade` names
 /// ([`runtime`]). A read that fails falls back to the other side; an answer that does not decode
 /// does not, since the bytes were proven: it is `Invalid`.
+#[cfg(test)]
 async fn events_at(
     history: &impl History,
     runtimes: &Runtimes,
     at: &BlockRef,
     contract: &AccountId32,
 ) -> ChainResult<BlockEvents> {
-    let keys = [
-        runtime::TIMESTAMP_NOW.to_vec(),
-        runtime::SYSTEM_EVENTS.to_vec(),
-        runtime::LAST_RUNTIME_UPGRADE.to_vec(),
-    ];
-    let (mut values, code) = history.storage_and_code_hash(at, &keys).await?;
+    let read = read_at(history, at).await?;
+    decode_at(history, runtimes, at, read, contract).await
+}
+
+/// The read half of [`events_at`]: proven values only, nothing remembered, so several blocks'
+/// reads may run at once.
+async fn read_at(history: &impl History, at: &BlockRef) -> ChainResult<ProvenEvents> {
+    let keys = event_keys();
+    let (values, code) = history.storage_and_code_hash(at, &keys).await?;
     if values.len() != keys.len() {
+        return Err(invalid("a storage read answered another number of keys"));
+    }
+    Ok((values, code))
+}
+
+/// The decode half of [`events_at`], in block order: the hash of `:code` the read proved is
+/// remembered for `at`'s children, and `at`'s runtime is told from its parent's (remembered when
+/// the parent was decoded).
+async fn decode_at(
+    history: &impl History,
+    runtimes: &Runtimes,
+    at: &BlockRef,
+    (mut values, code): ProvenEvents,
+    contract: &AccountId32,
+) -> ChainResult<BlockEvents> {
+    if values.len() != event_keys().len() {
         return Err(invalid("a storage read answered another number of keys"));
     }
     if let Some(code) = code {
@@ -1096,8 +1129,30 @@ impl Chain for LightChain {
         Ok(header)
     }
 
-    async fn events(&self, at: &BlockRef, contract: &AccountId32) -> ChainResult<BlockEvents> {
-        events_at(self, &self.runtimes, at, contract).await
+    /// From a history source by number (`chain_getBlockHash`), for old blocks only: the live
+    /// chain's headers stay the light client's.
+    async fn header_hint(&self, number: u64) -> Option<Header> {
+        if !self.old(number) {
+            return None;
+        }
+        let v = self.archive.header_at(number).await.ok()?;
+        self.learn(&v.header);
+        Some(v.header)
+    }
+
+    type EventsRead = ProvenEvents;
+
+    async fn read_events(&self, at: &BlockRef) -> ChainResult<ProvenEvents> {
+        read_at(self, at).await
+    }
+
+    async fn decode_events(
+        &self,
+        at: &BlockRef,
+        read: ProvenEvents,
+        contract: &AccountId32,
+    ) -> ChainResult<BlockEvents> {
+        decode_at(self, &self.runtimes, at, read, contract).await
     }
 
     async fn extrinsics(&self, at: &BlockRef) -> ChainResult<Vec<Vec<u8>>> {
@@ -2052,6 +2107,56 @@ mod runtime_tests {
             .unwrap();
         assert_eq!(history.probes(&block), 1);
         assert_eq!(history.reads(&block, runtime::CODE), 0);
+    }
+
+    #[tokio::test]
+    async fn walk_concurrency_reads_out_of_order_decode_as_one_at_a_time() {
+        // The block and its child read at once, the child's answer first, then decoded in order:
+        // the child's key is the hash the block's own read proved, as one at a time. No hash is
+        // asked alone, the code is read once, at the right parent.
+        let (block, parent) = blocks();
+        let (history, child) =
+            FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134)
+                .with_child(CODE_134, None);
+        let runtimes = Runtimes::new();
+        let second = read_at(&history, &child).await.unwrap();
+        let first = read_at(&history, &block).await.unwrap();
+        let a = decode_at(&history, &runtimes, &block, first, &contract()).await;
+        let b = decode_at(&history, &runtimes, &child, second, &contract()).await;
+        let one = Runtimes::new();
+        assert_eq!(a, events_at(&history, &one, &block, &contract()).await);
+        assert_eq!(b, events_at(&history, &one, &child, &contract()).await);
+        assert!(b.is_ok(), "{b:?}");
+        assert_eq!(history.probes(&block), 0);
+        assert_eq!(history.reads(&parent, runtime::CODE), 2);
+        assert_eq!(history.reads(&block, runtime::CODE), 0);
+    }
+
+    #[tokio::test]
+    async fn walk_concurrency_an_upgrade_inside_a_batch_is_told_from_the_parents_read() {
+        // The block's state holds another code: its child is the first block of that code. Read
+        // together, the child's read finishing first, the child is still decoded with the code
+        // the block's own read proved (read once, from the block's state), never with the code
+        // before it, and the failure is the child's.
+        let (block, _) = blocks();
+        let (history, child) =
+            FakeHistory::recorded(bytes(&fixture()["last_runtime_upgrade"]), CODE_134)
+                .with_child(b"another code, still named spec 134", None);
+        let runtimes = Runtimes::new();
+        let second = read_at(&history, &child).await.unwrap();
+        let first = read_at(&history, &block).await.unwrap();
+        assert!(
+            decode_at(&history, &runtimes, &block, first, &contract())
+                .await
+                .is_ok()
+        );
+        let got = decode_at(&history, &runtimes, &child, second, &contract()).await;
+        let Err(ChainError::Invalid(why)) = got else {
+            panic!("{got:?}");
+        };
+        assert!(why.contains("does not load"), "{why}");
+        assert_eq!(history.probes(&block), 0);
+        assert_eq!(history.reads(&block, runtime::CODE), 1);
     }
 
     #[tokio::test]
