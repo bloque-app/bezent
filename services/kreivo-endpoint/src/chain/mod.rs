@@ -179,6 +179,32 @@ pub trait Chain: Send + Sync {
         }
     }
 
+    /// The hash of block `number` as `System::BlockHash` holds it in the state of `at` (a block of
+    /// the finalized chain), proven under `at`'s verified header: the hash of `at`'s ancestor at that
+    /// height (`notes/KREIVO-WALK-SKIP.md`). `None` when that state does not hold it, or when the
+    /// chain cannot say (the default): the caller then walks headers.
+    fn proven_block_hash(
+        &self,
+        at: &BlockRef,
+        number: u64,
+    ) -> impl Future<Output = ChainResult<Option<[u8; 32]>>> + Send {
+        let _ = (at, number);
+        async { Ok(None) }
+    }
+
+    /// What the state of `at` holds of a skip's fingerprint ([`crate::skip::EndState`]), each value
+    /// proven and decoded with the runtime that wrote that state. `None` when the chain cannot say
+    /// (the default; the light client's side, which proves no `:code` hash): the stretch is then
+    /// read block by block.
+    fn end_state(
+        &self,
+        at: &BlockRef,
+        subject: &crate::skip::Subject,
+    ) -> impl Future<Output = ChainResult<Option<crate::skip::EndState>>> + Send {
+        let _ = (at, subject);
+        async { Ok(None) }
+    }
+
     /// The extrinsics of block `at`, as their bytes.
     fn extrinsics(&self, at: &BlockRef) -> impl Future<Output = ChainResult<Vec<Vec<u8>>>> + Send;
 

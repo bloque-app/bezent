@@ -26,6 +26,13 @@
 //! a read one at a time: a header is the one its child names, a value is proven under its block's
 //! verified header.
 //!
+//! **Stretches proven unchanged** (`[walk_skip]`, off unless configured; `notes/KREIVO-WALK-SKIP.md`,
+//! [`crate::skip`]): with a watermark, a rung is read by comparing a fingerprint of the state at
+//! its two ends, proven against verified headers. Equal ends hold no event of the contract and
+//! are recorded as read. Ends that differ are split, down to [`crate::skip::SKIP_LEAF`] blocks read
+//! as above. An end that cannot be told is read block by block, and a proof that does not verify
+//! is a gap.
+//!
 //! **Rungs** (issue #49): a first start is about 81,000 blocks behind. Walking them all back from the
 //! finalized head before reading any would lose the walk to its first late error or restart, so the
 //! backlog is read **a rung at a time**: a rung is the blocks from the watermark up to the next
@@ -48,6 +55,7 @@ use sqlx::PgPool;
 
 use crate::chain::{BlockRef, Chain, ChainError, ChainResult, Descent, ancestry_with};
 use crate::kreivo::{self, AccountId32, Backend, ContractEvent, Payout};
+use crate::skip::{self as proven, Fingerprint, Skip};
 
 /// How many headers a walk reads between two calls of its `progress` callback.
 pub const WALK_PROGRESS_EVERY: u64 = 256;
@@ -96,6 +104,34 @@ pub enum Step {
     Unavailable(String),
 }
 
+/// What a step read and recorded so far.
+#[derive(Default)]
+struct Progress {
+    first: Option<u64>,
+    last: Option<u64>,
+    observations: usize,
+}
+
+impl Progress {
+    fn read(&mut self, first: u64, last: u64) {
+        self.first.get_or_insert(first);
+        self.last = Some(last);
+    }
+
+    fn step(&self, finalized: &BlockRef) -> Step {
+        match (self.first, self.last) {
+            (Some(first), Some(last)) => Step::Read {
+                first,
+                last,
+                observations: self.observations,
+            },
+            _ => Step::CaughtUp {
+                watermark: finalized.number,
+            },
+        }
+    }
+}
+
 /// Follows one network's finalized head. See the module documentation.
 pub struct Follower<'a, C> {
     /// The chain.
@@ -119,6 +155,9 @@ pub struct Follower<'a, C> {
     /// The most blocks whose header or events are read at once (at least 1; see the module
     /// documentation).
     pub concurrency: usize,
+    /// Skip stretches proven unchanged at their two ends (`notes/KREIVO-WALK-SKIP.md`); `None`
+    /// reads every block.
+    pub skip: Option<&'a Skip>,
 }
 
 /// The default distance between anchors.
@@ -162,8 +201,40 @@ impl<C: Chain> Follower<'_, C> {
                 Err(e) => return self.gap(next, top, &finalized, e.to_string()).await,
             }
         };
+        let mut seq = match last_seq(self.pool, self.network, &self.contract).await? {
+            Some(s) => s + 1,
+            None => self.first_seq,
+        };
+        let mut done = Progress::default();
+        if let (Some(skip), Some(w)) = (self.skip, watermark)
+            && head.number > next
+            && let Some(step) = self
+                .skip_rung(skip, w, &head, &finalized, &mut seq, &mut done)
+                .await?
+        {
+            return Ok(step);
+        }
+        if let Some(gap) = self
+            .read_stretch(next, &head, &finalized, &mut seq, &mut done)
+            .await?
+        {
+            return Ok(gap);
+        }
+        Ok(done.step(&finalized))
+    }
+
+    /// Reads blocks `first` to `head` block by block and records them, in ranges of `max_range`:
+    /// the gap it stopped at, if it did.
+    async fn read_stretch(
+        &self,
+        first: u64,
+        head: &BlockRef,
+        finalized: &BlockRef,
+        seq: &mut u64,
+        done: &mut Progress,
+    ) -> Result<Option<Step>, sqlx::Error> {
         let concurrency = self.concurrency.max(1);
-        let blocks = match ancestry_with(self.chain, &head, next, self.max_walk, concurrency).await
+        let blocks = match ancestry_with(self.chain, head, first, self.max_walk, concurrency).await
         {
             Ok(Some(blocks)) => blocks,
             Ok(None) => {
@@ -171,19 +242,15 @@ impl<C: Chain> Follower<'_, C> {
                     "more than max_walk ({}) blocks behind the finalized head",
                     self.max_walk
                 );
-                return self.gap(next, head.number, &finalized, reason).await;
+                return Ok(Some(self.gap(first, head.number, finalized, reason).await?));
             }
             Err(e) => {
-                return self.gap(next, head.number, &finalized, e.to_string()).await;
+                return Ok(Some(
+                    self.gap(first, head.number, finalized, e.to_string())
+                        .await?,
+                ));
             }
         };
-        let mut seq = match last_seq(self.pool, self.network, &self.contract).await? {
-            Some(s) => s + 1,
-            None => self.first_seq,
-        };
-        let mut read = 0;
-        let mut first_read = None;
-        let mut last_read = None;
         // Up to `concurrency` reads in flight, answered in block order; dropped (and the reads
         // still in flight with it) at the first block that fails.
         let mut reads = futures_util::stream::iter(&blocks)
@@ -192,15 +259,15 @@ impl<C: Chain> Follower<'_, C> {
         for chunk in blocks.chunks(usize::try_from(self.max_range).unwrap_or(usize::MAX)) {
             let mut observations = Vec::new();
             let mut failed = None;
-            let mut done = 0;
+            let mut read = 0;
             for block in chunk {
                 let Some(events) = reads.next().await else {
                     unreachable!("one read per block");
                 };
-                match self.read_block(block, events, &mut seq).await {
+                match self.read_block(block, events, seq).await {
                     Ok(mut found) => {
                         observations.append(&mut found);
-                        done += 1;
+                        read += 1;
                     }
                     Err(reason) => {
                         failed = Some((block.number, reason));
@@ -208,36 +275,208 @@ impl<C: Chain> Follower<'_, C> {
                     }
                 }
             }
-            if done > 0 {
-                let (first, last) = (chunk[0].number, chunk[done - 1].number);
-                read += record_read(
+            if read > 0 {
+                let (first, last) = (chunk[0].number, chunk[read - 1].number);
+                done.observations += record_read(
                     self.pool,
                     self.network,
                     &self.contract,
                     first,
                     last,
-                    &finalized,
+                    finalized,
                     &observations,
                 )
                 .await?;
-                first_read.get_or_insert(first);
-                last_read = Some(last);
+                done.read(first, last);
             }
             if let Some((at, reason)) = failed {
                 let last = chunk.last().map_or(at, |b| b.number);
-                return self.gap(at, last, &finalized, reason).await;
+                return Ok(Some(self.gap(at, last, finalized, reason).await?));
             }
         }
-        Ok(match (first_read, last_read) {
-            (Some(first), Some(last)) => Step::Read {
-                first,
-                last,
-                observations: read,
+        Ok(None)
+    }
+
+    /// Reads the rung from the watermark `w` (exclusive) to `top` by proving stretches unchanged at
+    /// their two ends, splitting those whose ends differ down to [`Skip::leaf`] blocks, which are
+    /// read block by block (`notes/KREIVO-WALK-SKIP.md`). Stretches go to the store in block order.
+    /// `None` when it cannot start (the watermark's hash, or a fingerprint at either end, cannot be
+    /// had): the rung is then read block by block, as with no skip.
+    async fn skip_rung(
+        &self,
+        skip: &Skip,
+        w: u64,
+        top: &BlockRef,
+        finalized: &BlockRef,
+        seq: &mut u64,
+        done: &mut Progress,
+    ) -> Result<Option<Step>, sqlx::Error> {
+        let mut known = std::collections::HashMap::new();
+        if let Some((at, fp)) = skip.last() {
+            known.insert(at, Some(fp));
+        }
+        let low = match self.proven_ref(top, w).await {
+            Ok(Some(low)) => low,
+            Ok(None) | Err(ChainError::Unavailable(_)) => return Ok(None),
+            Err(e) => {
+                let reason = format!("skip: {e}");
+                return Ok(Some(self.gap(w + 1, top.number, finalized, reason).await?));
+            }
+        };
+        // Nothing to gain unless both ends can be told.
+        for end in [low, *top] {
+            match self.fingerprint_at(skip, &end, &mut known).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return Ok(None),
+                Err(e) => {
+                    let reason = format!("skip: {e}");
+                    return Ok(Some(self.gap(w + 1, top.number, finalized, reason).await?));
+                }
+            }
+        }
+        // Depth first, the lower half first: the store takes ranges only in order.
+        let mut stack = vec![(low, *top)];
+        while let Some((lo, hi)) = stack.pop() {
+            let ends = (
+                self.fingerprint_at(skip, &lo, &mut known).await,
+                self.fingerprint_at(skip, &hi, &mut known).await,
+            );
+            match ends {
+                (Err(e), _) | (_, Err(e)) => {
+                    let reason = format!("skip: {e}");
+                    return Ok(Some(
+                        self.gap(lo.number + 1, top.number, finalized, reason)
+                            .await?,
+                    ));
+                }
+                (Ok(Some(a)), Ok(Some(b))) if a == b => {
+                    if let Err(e) = self.record_unchanged(lo.number + 1, &hi, finalized).await? {
+                        let reason = format!("skip: {e}");
+                        return Ok(Some(
+                            self.gap(lo.number + 1, top.number, finalized, reason)
+                                .await?,
+                        ));
+                    }
+                    done.read(lo.number + 1, hi.number);
+                    continue;
+                }
+                (Ok(Some(_)), Ok(Some(_))) if hi.number - lo.number > skip.leaf.max(1) => {
+                    let mid = lo.number + (hi.number - lo.number) / 2;
+                    match self.proven_ref(top, mid).await {
+                        Ok(Some(m)) => {
+                            stack.push((m, hi));
+                            stack.push((lo, m));
+                            continue;
+                        }
+                        // No proven hash for it: this stretch is read block by block.
+                        Ok(None) | Err(ChainError::Unavailable(_)) => {}
+                        Err(e) => {
+                            let reason = format!("skip: {e}");
+                            return Ok(Some(
+                                self.gap(lo.number + 1, top.number, finalized, reason)
+                                    .await?,
+                            ));
+                        }
+                    }
+                }
+                // Ends that differ over a short stretch, or one that cannot be told.
+                _ => {}
+            }
+            if let Some(gap) = self
+                .read_stretch(lo.number + 1, &hi, finalized, seq, done)
+                .await?
+            {
+                return Ok(Some(gap));
+            }
+        }
+        if let Some(Some(fp)) = known.get(top) {
+            skip.remember(*top, fp.clone());
+        }
+        Ok(Some(done.step(finalized)))
+    }
+
+    /// The fingerprint of `at`'s state, from `known` or read: `None` when it cannot be told
+    /// (including a chain that did not answer: the stretch is then read block by block, which
+    /// meets the same failure as any read); an error when what was read does not verify.
+    async fn fingerprint_at(
+        &self,
+        skip: &Skip,
+        at: &BlockRef,
+        known: &mut std::collections::HashMap<BlockRef, Option<Fingerprint>>,
+    ) -> ChainResult<Option<Fingerprint>> {
+        if let Some(fp) = known.get(at) {
+            return Ok(fp.clone());
+        }
+        let fp = match self.chain.end_state(at, &skip.subject).await {
+            Ok(Some(state)) => match proven::fingerprint(&state, &skip.subject) {
+                Ok(fp) => Some(fp),
+                Err(why) => {
+                    tracing::debug!(network = self.network, block = at.number, %why, "skip: this end cannot be told; read block by block");
+                    None
+                }
             },
-            _ => Step::CaughtUp {
-                watermark: finalized.number,
-            },
-        })
+            Ok(None) => None,
+            Err(ChainError::Unavailable(why)) => {
+                tracing::debug!(network = self.network, block = at.number, %why, "skip: this end could not be read; read block by block");
+                None
+            }
+            Err(e) => return Err(e),
+        };
+        known.insert(*at, fp.clone());
+        Ok(fp)
+    }
+
+    /// Block `number` of the finalized chain, from the proven `System::BlockHash` in `at`'s state,
+    /// its header checked to be that block's; `None` when the state does not hold it.
+    async fn proven_ref(&self, at: &BlockRef, number: u64) -> ChainResult<Option<BlockRef>> {
+        let Some(hash) = self.chain.proven_block_hash(at, number).await? else {
+            return Ok(None);
+        };
+        let header = self.chain.header(&hash).await?;
+        if header.block.number != number || header.block.hash != hash {
+            return Err(ChainError::Invalid(format!(
+                "the hash block {} holds for block {number} is block {}'s header",
+                at.number, header.block.number
+            )));
+        }
+        Ok(Some(header.block))
+    }
+
+    /// Records blocks `first` to `last` as read with nothing in them, in ranges of `max_range`,
+    /// and anchors `last`, so anyone can make the same proof again from public data.
+    async fn record_unchanged(
+        &self,
+        first: u64,
+        last: &BlockRef,
+        finalized: &BlockRef,
+    ) -> Result<Result<(), ChainError>, sqlx::Error> {
+        // Anchored first: a hash that disagrees with one anchored earlier records nothing.
+        if let Err(e) = self.keep_anchor(last, finalized).await? {
+            return Ok(Err(e));
+        }
+        let width = self.max_range.max(1);
+        let mut from = first;
+        while from <= last.number {
+            let to = from.saturating_add(width - 1).min(last.number);
+            record_read(
+                self.pool,
+                self.network,
+                &self.contract,
+                from,
+                to,
+                finalized,
+                &[],
+            )
+            .await?;
+            from = to + 1;
+        }
+        tracing::debug!(
+            network = self.network,
+            first,
+            last = last.number,
+            "REQ-OB-3 (amendment 0027, draft): proven unchanged at both ends; recorded as read"
+        );
+        Ok(Ok(()))
     }
 
     /// The hash of the final block `number`, reached from `finalized` by parent hash: an anchor
@@ -283,6 +522,26 @@ impl<C: Chain> Follower<'_, C> {
                 "block {number} is above the finalized head {}",
                 finalized.number
             ))));
+        }
+        // With a skip, jump down by the hashes each anchor's state proves (`System::BlockHash`),
+        // one proof per rung, anchoring each multiple of `rung`; then walk headers for what the
+        // state does not hold (`notes/KREIVO-WALK-SKIP.md`).
+        if self.skip.is_some() {
+            while at.number > number {
+                let stop = ((at.number - 1) / rung * rung).max(number);
+                match self.proven_ref(&at, stop).await {
+                    Ok(Some(b)) => at = b,
+                    Ok(None) => break,
+                    Err(e) => return Ok(Err(e)),
+                }
+                if at.number == number || at.number.is_multiple_of(rung) {
+                    match self.keep_anchor(&at, finalized).await? {
+                        Ok(()) => {}
+                        Err(e) => return Ok(Err(e)),
+                    }
+                }
+                progress();
+            }
         }
         let mut walk = Descent::new(self.chain, at, number, concurrency);
         loop {

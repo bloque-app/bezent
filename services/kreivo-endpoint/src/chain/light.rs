@@ -50,6 +50,9 @@ use subxt::utils::H256;
 use subxt::{OnlineClient, PolkadotConfig};
 use tokio::sync::{mpsc, oneshot};
 
+#[path = "light_skip.rs"]
+mod skip;
+
 use super::archive::{Archive, Fail, Source, StartCheck};
 use super::runtime::{self, History, Runtimes};
 use super::watch::Watches;
@@ -1153,6 +1156,18 @@ impl Chain for LightChain {
         contract: &AccountId32,
     ) -> ChainResult<BlockEvents> {
         decode_at(self, &self.runtimes, at, read, contract).await
+    }
+
+    async fn proven_block_hash(&self, at: &BlockRef, number: u64) -> ChainResult<Option<[u8; 32]>> {
+        self.block_hash_in(at, number).await
+    }
+
+    async fn end_state(
+        &self,
+        at: &BlockRef,
+        subject: &crate::skip::Subject,
+    ) -> ChainResult<Option<crate::skip::EndState>> {
+        self.end_state_at(at, subject).await
     }
 
     async fn extrinsics(&self, at: &BlockRef) -> ChainResult<Vec<Vec<u8>>> {

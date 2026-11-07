@@ -135,6 +135,7 @@ mod run {
     use bezent_kreivo_endpoint::network;
     use bezent_kreivo_endpoint::observe::{Follower, Step, WALK_RUNG};
     use bezent_kreivo_endpoint::proof::Prover;
+    use bezent_kreivo_endpoint::skip::{Skip, Subject};
     use bezent_kreivo_endpoint::submit::{GateState, Lane, SignerLink, Submitter};
     use bezent_kreivo_endpoint::supply::{Recorded, Supplies};
 
@@ -203,6 +204,40 @@ mod run {
         network::check_contract(&chain, &contract, config.declared_code_hash()?)
             .await
             .map_err(|e| e.to_string())?;
+        // notes/KREIVO-WALK-SKIP.md: off unless `[walk_skip]` is configured (amendment 0027, draft).
+        let skip = match &config.walk_skip {
+            Some(w) => {
+                let (_, _, lane) = config.lane_account()?;
+                let assets: Vec<String> = sqlx::query_scalar(
+                    "SELECT issuing_asset FROM assets WHERE issuing_asset IS NOT NULL ORDER BY asset",
+                )
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| format!("the store: {e}"))?;
+                let assets = assets
+                    .iter()
+                    .map(
+                        |a| match bezent_kreivo_endpoint::kreivo::AssetId::parse(a) {
+                            Some(bezent_kreivo_endpoint::kreivo::AssetId::Here(i)) => Ok(i),
+                            None => Err(format!("{a} is not a local asset of the issuing network")),
+                        },
+                    )
+                    .collect::<Result<Vec<u32>, String>>()?;
+                tracing::info!(
+                    app = w.app,
+                    licence = w.licence,
+                    "the walk skips stretches proven unchanged (notes/KREIVO-WALK-SKIP.md)"
+                );
+                Some(Skip::new(Subject {
+                    contract,
+                    code_hash: config.declared_code_hash()?,
+                    app: (w.app, w.licence),
+                    lane,
+                    assets,
+                }))
+            }
+            None => None,
+        };
         let follower = Follower {
             chain: &chain,
             pool: &pool,
@@ -214,6 +249,7 @@ mod run {
             max_walk: config.max_walk,
             rung: WALK_RUNG.min(config.max_walk),
             concurrency: config.walk_concurrency,
+            skip: skip.as_ref(),
         };
         // Issue #49: start_block's hash is the finalized chain's, reached by parent hash from the
         // light client's head, not any source's word. A first start walks the backlog for it (its

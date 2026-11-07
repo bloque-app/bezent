@@ -226,6 +226,7 @@ impl Fixture {
             max_walk: 10_000,
             rung: 5,
             concurrency: 4,
+            skip: None,
         }
     }
 

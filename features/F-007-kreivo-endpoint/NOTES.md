@@ -380,6 +380,29 @@ plan, not a ruling; the ones marked **for review** are where the plan could be r
       give what reading one at a time gives, with no extra probe; an upgrade inside a window is told from the parent's
       read.
 
+43. **The walk skips stretches proven unchanged** (`[walk_skip]`, off unless configured; `notes/KREIVO-WALK-SKIP.md`;
+    `REQ-OB-3` as the draft amendment 0027 reads it, unruled). The walk derives one thing from old blocks: the
+    contract's events. Between two final blocks whose states hold the same fingerprint there is none, so the blocks
+    between them are recorded as read with nothing in them:
+    - **The fingerprint** (`skip::fingerprint`), read with proofs at each end and keyed and decoded with that end's own
+      runtime (`chain::light_skip`). It is made of: `LastRuntimeUpgrade` and the `:code` hash, which must be an audited
+      runtime (specs 134 and 136); `ContractInfoOf` with the pinned code hash, and the contract's child-trie root; the
+      contracts store's `ContractAccount((app, licence))` and `Apps(app)`, whose version rises with every publish, so no
+      store `upgrade` swapped the code and back; and, not load-bearing, the delivery account's nonce and each bridged
+      asset's supply.
+    - **The ends** are the watermark and the rung's top. Ends that differ are split in two. A stretch of at most
+      `SKIP_LEAF` (16) blocks is read block by block, and stretches go to the store in order. A midpoint's hash is
+      `System::BlockHash` proven in the top's state, with its header checked to be that block's. The walk down to a
+      rung's top jumps the same way, one proof per rung. Each skipped stretch's last block is anchored.
+    - **Fail closed.** An end that cannot be told (an unaudited runtime, the light client's side, a value absent, a
+      read that failed) is read block by block. A proof that does not verify is a gap.
+    - **Not seen**: Root on Kreivo swapping the contract's code and back, or rewriting its storage, within a stretch
+      (the note, §5). The full walk does not see a mint and a burn that net outside the contract either, since it
+      reads no `Assets` event.
+    - **Tests** (`tests/skip.rs`, `skip`): every scenario is checked against what reading every block records. They
+      cover a skipped stretch, an event found by bisection, the netting case, an upgrade and an unaudited runtime, a
+      store publish, a proof that does not verify (a gap), an end that cannot be read, and the mode left off.
+
 **Runbook** (first start on Kreivo mainnet): `start_block = 39867043`, `first_seq = 0`, `archive_max_response_bytes` left at
 its default or at least 8 MiB (the proof of a `:code` of about 2 MB is about 4 MB as hex; a lower value is refused at
 `--check` and at start, because a source could never serve a new runtime and the walk would stall), `archive_rpc` with the
