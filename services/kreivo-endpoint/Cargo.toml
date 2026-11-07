@@ -43,6 +43,8 @@ blake2 = "0.10"
 # Both are already in the tree under subxt.
 frame-metadata = { version = "23", default-features = false, features = ["current", "decode"] }
 scale-info = { version = "2", default-features = false, features = ["decode"] }
+# A bounded number of a walk's reads in flight, answered in block order. Already in the tree.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 hex = "0.4"
 parity-scale-codec = { version = "3", default-features = false, features = ["derive", "std"] }
 serde = { version = "1", features = ["derive"] }

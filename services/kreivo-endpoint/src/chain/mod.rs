@@ -27,6 +27,10 @@ pub mod watch;
 
 use std::future::Future;
 
+use futures_util::StreamExt;
+use futures_util::future::BoxFuture;
+use futures_util::stream::FuturesOrdered;
+
 use crate::kreivo::AccountId32;
 
 /// A block: its number and hash.
@@ -131,6 +135,9 @@ pub type Values = Vec<Option<Vec<u8>>>;
 
 /// Kreivo. See the module documentation.
 pub trait Chain: Send + Sync {
+    /// What [`Chain::read_events`] reads of a block: its proven values, not yet decoded.
+    type EventsRead: Send;
+
     /// The genesis hash of the chain the client follows (`AC-I4.1`).
     fn genesis(&self) -> impl Future<Output = ChainResult<[u8; 32]>> + Send;
 
@@ -146,13 +153,43 @@ pub trait Chain: Send + Sync {
     /// The header of the block with `hash`.
     fn header(&self, hash: &[u8; 32]) -> impl Future<Output = ChainResult<Header>> + Send;
 
+    /// A header a history source names as block `number`'s, whose bytes hash to its hash, but
+    /// **not known to be of the finalized chain**: a walk by parent hash ([`Descent`]) takes it
+    /// only as the header of the hash it expects there, so it can be asked for ahead of the walk.
+    /// `None` when there is none to ask (the default) or the source does not answer.
+    fn header_hint(&self, number: u64) -> impl Future<Output = Option<Header>> + Send {
+        let _ = number;
+        async { None }
+    }
+
+    /// The network half of [`Chain::events`]: what block `at`'s events are read from, proven,
+    /// and nothing else. Reads of several blocks may run at once; nothing they share changes.
+    fn read_events(
+        &self,
+        at: &BlockRef,
+    ) -> impl Future<Output = ChainResult<Self::EventsRead>> + Send;
+
+    /// The other half of [`Chain::events`]: `read`, of block `at`, decoded. Called in block
+    /// order, each block after its parent: a block's runtime is told from its parent's state.
+    fn decode_events(
+        &self,
+        at: &BlockRef,
+        read: Self::EventsRead,
+        contract: &AccountId32,
+    ) -> impl Future<Output = ChainResult<BlockEvents>> + Send;
+
     /// The events of block `at` that the endpoint reads: `contract`'s, and every extrinsic's
     /// result.
     fn events(
         &self,
         at: &BlockRef,
         contract: &AccountId32,
-    ) -> impl Future<Output = ChainResult<BlockEvents>> + Send;
+    ) -> impl Future<Output = ChainResult<BlockEvents>> + Send {
+        async move {
+            let read = self.read_events(at).await?;
+            self.decode_events(at, read, contract).await
+        }
+    }
 
     /// The extrinsics of block `at`, as their bytes.
     fn extrinsics(&self, at: &BlockRef) -> impl Future<Output = ChainResult<Vec<Vec<u8>>>> + Send;
@@ -212,6 +249,17 @@ pub async fn ancestry<C: Chain>(
     first: u64,
     limit: u64,
 ) -> ChainResult<Option<Vec<BlockRef>>> {
+    ancestry_with(chain, head, first, limit, 1).await
+}
+
+/// [`ancestry`], asking for up to `concurrency` headers ahead of the walk ([`Descent`]).
+pub async fn ancestry_with<C: Chain>(
+    chain: &C,
+    head: &BlockRef,
+    first: u64,
+    limit: u64,
+    concurrency: usize,
+) -> ChainResult<Option<Vec<BlockRef>>> {
     if first > head.number {
         return Ok(Some(Vec::new()));
     }
@@ -219,23 +267,80 @@ pub async fn ancestry<C: Chain>(
         return Ok(None);
     }
     let mut out = Vec::new();
-    let mut hash = head.hash;
-    let mut expected = head.number;
+    let mut walk = Descent::new(chain, *head, first, concurrency);
     loop {
-        let header = chain.header(&hash).await?;
-        if header.block.number != expected || header.block.hash != hash {
-            return Err(ChainError::Invalid(format!(
-                "the header asked for as block {expected} is block {}",
-                header.block.number
-            )));
-        }
+        let header = walk.next().await?;
         out.push(header.block);
-        if expected == first {
+        if header.block.number == first {
             break;
         }
-        expected -= 1;
-        hash = header.parent;
     }
     out.reverse();
     Ok(Some(out))
+}
+
+/// A walk down from a block of the finalized chain by parent hash, one header at a time, which
+/// asks for the headers of up to `concurrency` blocks below it ahead of the walk
+/// ([`Chain::header_hint`]: by number, from a history source). What is trusted is what a walk by
+/// parent hash trusts: block `n`'s header is the one whose hash its child names, verified as
+/// [`Chain::header`] verifies it. A hint is taken only when it is exactly that header (its hash and
+/// number); any other hint, or none, and the walk asks for that hash, as with no hints at all.
+pub struct Descent<'a, C> {
+    chain: &'a C,
+    /// The next block to read: the head, or the parent its verified child names.
+    at: Option<BlockRef>,
+    /// The next number to hint, if any: hints are asked for down to `floor`.
+    hinted: Option<u64>,
+    floor: u64,
+    concurrency: usize,
+    /// The hints asked for, in descending number from `at`'s.
+    hints: FuturesOrdered<BoxFuture<'a, Option<Header>>>,
+}
+
+impl<'a, C: Chain> Descent<'a, C> {
+    /// A walk from `head` (trusted), with hints down to `floor`. `concurrency` 1 asks for none.
+    pub fn new(chain: &'a C, head: BlockRef, floor: u64, concurrency: usize) -> Descent<'a, C> {
+        Descent {
+            chain,
+            at: Some(head),
+            hinted: (concurrency > 1).then_some(head.number),
+            floor,
+            concurrency,
+            hints: FuturesOrdered::new(),
+        }
+    }
+
+    /// The header of the next block down (the head first), verified to be the block the walk
+    /// expects.
+    pub async fn next(&mut self) -> ChainResult<Header> {
+        let at = self
+            .at
+            .ok_or_else(|| ChainError::Invalid("the walk went below the genesis".into()))?;
+        let mut hint = None;
+        if self.hinted.is_some() || !self.hints.is_empty() {
+            while self.hints.len() < self.concurrency
+                && let Some(n) = self.hinted.filter(|n| *n >= self.floor)
+            {
+                self.hints.push_back(Box::pin(self.chain.header_hint(n)));
+                self.hinted = n.checked_sub(1);
+            }
+            // The front of the queue is the hint for `at`'s number.
+            hint = self.hints.next().await.flatten();
+        }
+        let header = match hint {
+            Some(h) if h.block == at => h,
+            _ => self.chain.header(&at.hash).await?,
+        };
+        if header.block != at {
+            return Err(ChainError::Invalid(format!(
+                "the header asked for as block {} is block {}",
+                at.number, header.block.number
+            )));
+        }
+        self.at = at.number.checked_sub(1).map(|number| BlockRef {
+            number,
+            hash: header.parent,
+        });
+        Ok(header)
+    }
 }

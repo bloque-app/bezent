@@ -25,6 +25,7 @@
 //! database_url_file = "/run/secrets/bezent-kreivo-endpoint-db"
 //! archive_rpc = ["wss://archive.example"] # history sources, tried in order (issue #49); see below
 //! max_walk = 200000                    # on a first start, at least the blocks from start_block to the head
+//! walk_concurrency = 32                # blocks read at once, applied in order (1 to 64)
 //!
 //! [lane]                               # the delivery key's signing lane (REQ-EO-4)
 //! key = "kreivo-mint"
@@ -155,6 +156,12 @@ pub struct Config {
     /// The most blocks the endpoint walks back by parent hash in one look.
     #[serde(default = "default_max_walk")]
     pub max_walk: u64,
+    /// The most blocks whose header or events a walk reads at once, 1 to
+    /// [`MAX_WALK_CONCURRENCY`]: 32 by default. Answers are taken in block order, each verified
+    /// as one read alone is, and the first block that fails stops the walk there. 1 reads one
+    /// block at a time.
+    #[serde(default = "default_walk_concurrency")]
+    pub walk_concurrency: usize,
     /// History sources (issue #49): archive nodes' WebSocket JSON-RPC URLs (`ws://` or `wss://`),
     /// tried in order, the one that answered last first. Nothing they serve is trusted: headers
     /// are checked by hash, state by proof, bodies by extrinsics root. Required to run, not for
@@ -242,6 +249,9 @@ fn default_poll_ms() -> u64 {
 fn default_max_range() -> u64 {
     256
 }
+fn default_walk_concurrency() -> usize {
+    32
+}
 fn default_max_walk() -> u64 {
     4_096
 }
@@ -263,6 +273,11 @@ fn default_archive_max_response_bytes() -> u32 {
 /// of hex plus proof nodes; 8 MiB leaves it twice that to grow. Below it a source can never serve
 /// a runtime's code, every runtime not yet met is `Unavailable`, and the walk stalls on it.
 pub const MIN_ARCHIVE_MAX_RESPONSE_BYTES: u32 = 8 * 1024 * 1024;
+
+/// The most blocks a walk reads at once (`walk_concurrency`). Each holds at most one block's
+/// events proof (or header) in memory until its turn; a runtime's code is read one at a time,
+/// in order, whatever this is.
+pub const MAX_WALK_CONCURRENCY: usize = 64;
 
 /// A history source's URL for logs: scheme, host and port only. Credentials (`user:pass@`), the
 /// path (some providers put the API key there) and the query are left out.
@@ -353,6 +368,11 @@ impl Config {
         self.lane_account()?;
         if self.max_range == 0 || self.max_walk == 0 {
             return Err("max_range and max_walk must be positive".into());
+        }
+        if !(1..=MAX_WALK_CONCURRENCY).contains(&self.walk_concurrency) {
+            return Err(format!(
+                "walk_concurrency must be 1 to {MAX_WALK_CONCURRENCY}"
+            ));
         }
         if !(1..256).contains(&self.light_client_depth) || self.archive_timeout_ms == 0 {
             return Err("light_client_depth must be 1 to 255, archive_timeout_ms positive".into());
@@ -586,6 +606,16 @@ mod tests {
         c.archive_rpc.pop();
         c.light_client_depth = 256;
         assert!(c.check().is_err());
+    }
+
+    #[test]
+    fn walk_concurrency_is_32_by_default_and_1_to_64() {
+        let mut c = sample();
+        assert_eq!(c.walk_concurrency, 32);
+        for (n, ok) in [(0, false), (1, true), (64, true), (65, false)] {
+            c.walk_concurrency = n;
+            assert_eq!(c.check().is_ok(), ok, "walk_concurrency {n}");
+        }
     }
 
     #[test]

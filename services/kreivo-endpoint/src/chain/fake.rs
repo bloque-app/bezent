@@ -100,6 +100,14 @@ struct State {
     metadata_error: Option<ChainError>,
     /// What the contract's `roles()` answers; none fails the getter (issue #104).
     roles: Option<kreivo::Roles>,
+    /// Whether [`Chain::header_hint`] answers, and the blocks whose hint is a lie.
+    hints: bool,
+    lying_hints: HashSet<u64>,
+    /// Whether event reads take time, later blocks less, so that they finish out of order.
+    slow_reads: bool,
+    /// Event reads in flight now, and the most at once.
+    in_flight: usize,
+    most_in_flight: usize,
 }
 
 /// Kreivo in memory. See the module documentation.
@@ -176,6 +184,11 @@ impl FakeChain {
                 metadata: None,
                 metadata_error: None,
                 roles: None,
+                hints: false,
+                lying_hints: HashSet::new(),
+                slow_reads: false,
+                in_flight: 0,
+                most_in_flight: 0,
             }),
         }
     }
@@ -251,6 +264,24 @@ impl FakeChain {
     /// The number of every header asked for so far, in order (failed asks included).
     pub fn header_reads(&self) -> Vec<u64> {
         self.lock().header_log.clone()
+    }
+
+    /// Header hints by number are answered ([`Chain::header_hint`]); those of `lying` name another
+    /// block's header (one whose hash is not the chain's at that number).
+    pub fn set_hints(&self, on: bool, lying: &[u64]) {
+        let mut s = self.lock();
+        s.hints = on;
+        s.lying_hints = lying.iter().copied().collect();
+    }
+
+    /// Event reads take a few milliseconds, later blocks less, so they finish out of order.
+    pub fn set_slow_reads(&self, slow: bool) {
+        self.lock().slow_reads = slow;
+    }
+
+    /// The most event reads that were in flight at once.
+    pub fn most_in_flight(&self) -> usize {
+        self.lock().most_in_flight
     }
 
     /// Reads of block `n`'s events work again.
@@ -751,8 +782,32 @@ impl Chain for FakeChain {
         found.ok_or_else(|| ChainError::Unavailable("no such block".into()))
     }
 
-    async fn events(&self, at: &BlockRef, contract: &AccountId32) -> ChainResult<BlockEvents> {
-        self.answer(|s| {
+    async fn header_hint(&self, number: u64) -> Option<Header> {
+        let s = self.lock();
+        if !s.hints || s.unavailable {
+            return None;
+        }
+        let mut h = s.blocks.get(usize::try_from(number).ok()?)?.header;
+        if s.lying_hints.contains(&number) {
+            h.block.hash = hash_of(number, &[0xee; 32]);
+        }
+        Some(h)
+    }
+
+    /// The block's events, every contract's: [`Chain::decode_events`] keeps `contract`'s.
+    type EventsRead = BlockEvents;
+
+    async fn read_events(&self, at: &BlockRef) -> ChainResult<BlockEvents> {
+        let slow = {
+            let mut s = self.lock();
+            s.in_flight += 1;
+            s.most_in_flight = s.most_in_flight.max(s.in_flight);
+            s.slow_reads
+        };
+        if slow {
+            tokio::time::sleep(std::time::Duration::from_millis(8 - at.number % 8)).await;
+        }
+        let read = self.answer(|s| {
             if s.failing.contains(&at.number) {
                 return Err(ChainError::Unavailable(format!(
                     "the events of block {} cannot be read",
@@ -762,14 +817,24 @@ impl Chain for FakeChain {
             let b = Self::block_at(s, at)?;
             Ok(BlockEvents {
                 time_ms: b.time_ms,
-                emitted: if *contract == s.contract {
-                    b.emitted.clone()
-                } else {
-                    Vec::new()
-                },
+                emitted: b.emitted.clone(),
                 results: b.results.clone(),
             })
-        })
+        });
+        self.lock().in_flight -= 1;
+        read
+    }
+
+    async fn decode_events(
+        &self,
+        _at: &BlockRef,
+        mut read: BlockEvents,
+        contract: &AccountId32,
+    ) -> ChainResult<BlockEvents> {
+        if *contract != self.lock().contract {
+            read.emitted.clear();
+        }
+        Ok(read)
     }
 
     async fn extrinsics(&self, at: &BlockRef) -> ChainResult<Vec<Vec<u8>>> {
