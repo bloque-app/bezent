@@ -332,7 +332,21 @@ pub async fn seed(pool: &PgPool) {
         ),
     )
     .await;
+    seen(pool).await;
 }
+
+/// Amendment 0028: the reserve check has seen every declared asset (a holding evaluation that was
+/// made, sixteen minutes before [`t0`]: older than any statement states, within the hour a
+/// statement's grace allows), so the gate and the signer let new work through until a test's own
+/// evaluation says otherwise.
+pub async fn seen(pool: &PgPool) {
+    exec(pool, SEEN).await;
+}
+
+/// The statement [`seen`] runs, for fixtures that declare assets of their own.
+pub const SEEN: &str = "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+     SELECT a.asset, '2026-10-12T23:44:00Z', 'holds', 0 FROM assets a \
+     WHERE NOT EXISTS (SELECT 1 FROM reserve_evaluations v WHERE v.asset = a.asset)";
 
 pub fn hash(network: &str, block: i64) -> Vec<u8> {
     let mut h = vec![if network == ISSUING { 0xcc } else { 0xab }];

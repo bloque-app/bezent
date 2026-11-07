@@ -75,7 +75,9 @@ pub fn as_login(base: &PgConnectOptions, name: &str, password: &str) -> PgConnec
 
 /// The declarations the test networks need, and the requesters. Idempotent. A store seeded by an
 /// earlier sidecar gains what this one adds (the asset's issuing identity, the origin network's
-/// backend, the withdrawal route), and nothing it holds is changed.
+/// backend, the withdrawal route), and nothing it holds is changed. The sidecar runs no reserve
+/// check, so a store with no evaluation of the asset is given one that holds (amendment 0028: the
+/// core's gate and the signer hold an asset the check has not seen); TEST only, as the rest.
 pub async fn seed(owner: &PgPool, requesters: &[(String, String, String)]) -> Result<(), String> {
     let mut tx = owner.begin().await.map_err(|e| format!("store: {e}"))?;
     sqlx::raw_sql(&format!(
@@ -97,7 +99,10 @@ pub async fn seed(owner: &PgPool, requesters: &[(String, String, String)]) -> Re
            ('{ASSET}', '{ORIGIN}', 'withdrawal', 100, 1000000000, 10000000000, 86400, 100, '[]', 3600) \
            ON CONFLICT DO NOTHING; \
          INSERT INTO evm_endpoint_networks (login, network) VALUES \
-           ('{LOGIN_DRIVER_EVM}', '{ORIGIN}') ON CONFLICT DO NOTHING;"
+           ('{LOGIN_DRIVER_EVM}', '{ORIGIN}') ON CONFLICT DO NOTHING; \
+         INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+           SELECT '{ASSET}', now(), 'holds', 0 WHERE NOT EXISTS \
+             (SELECT 1 FROM reserve_evaluations WHERE asset = '{ASSET}');"
     ))
     .execute(&mut *tx)
     .await

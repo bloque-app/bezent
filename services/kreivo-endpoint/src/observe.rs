@@ -666,3 +666,45 @@ pub async fn record_gap(
     .await?;
     Ok(())
 }
+
+/// How often the running endpoint records the supply at the finalized head (and with it the head)
+/// between the steps of a catch-up (amendment 0028).
+pub const HEAD_REFRESH: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Walks to the finalized head: steps `follower` until it is caught up or a step does not read,
+/// and between steps, once `refresh` has passed since the last time, records the supply at the
+/// live finalized head with `supplies` (amendment 0028). The finalized head is recorded with it,
+/// so the network's latest final head stays fresh while a long backlog is walked, and the reserve
+/// check sees a walk catching up, not a finality stall. `None` records nothing until caught up.
+/// `on_read` runs after each step that read. Returns whether it caught up.
+pub async fn catch_up<C: Chain>(
+    follower: &Follower<'_, C>,
+    supplies: &crate::supply::Supplies<'_, C>,
+    refresh: Option<std::time::Duration>,
+    mut on_read: impl FnMut(),
+) -> Result<bool, sqlx::Error> {
+    let mut last = std::time::Instant::now();
+    loop {
+        match follower.step().await? {
+            Step::Read { .. } => {
+                on_read();
+                if refresh.is_some_and(|every| last.elapsed() >= every) {
+                    last = std::time::Instant::now();
+                    match supplies.record().await? {
+                        crate::supply::Recorded::Unavailable(why) => tracing::debug!(
+                            reason = %why,
+                            "the finalized head was not recorded between steps"
+                        ),
+                        crate::supply::Recorded::Conflict(n) => tracing::warn!(
+                            block = n,
+                            "REQ-OB-2: another hash is recorded at the finalized head's height"
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+            Step::CaughtUp { .. } => return Ok(true),
+            _ => return Ok(false),
+        }
+    }
+}

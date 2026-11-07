@@ -411,3 +411,53 @@ async fn issue_49_start_anchor_bounds_the_distance_still_to_walk(
         f.chain.block(1).hash
     );
 }
+
+/// Amendment 0028 (`NFR-6`, `REQ-IC-2`): a catch-up that walks a backlog in many steps records the
+/// finalized head (with the supply at it) between its steps, so the network's latest final head
+/// stays fresh while the walk catches up, however long the walk takes: the reserve check sees a
+/// walk catching up, not a finality stall. The chain finalizes on while it walks.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_nfr_6_a_long_catch_up_records_the_finalized_head_between_steps(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    f.chain.advance(12);
+    let supplies = bezent_kreivo_endpoint::supply::Supplies {
+        chain: &f.chain,
+        pool: &f.endpoint,
+        network: NETWORK,
+        contract: CONTRACT,
+        delivery: f.lane.account,
+    };
+    let follower = f.follower();
+    let mut reads = 0;
+    let caught_up = observe::catch_up(
+        &follower,
+        &supplies,
+        Some(std::time::Duration::ZERO),
+        || {
+            reads += 1;
+            // The chain finalizes on during the first steps, then stops, so the walk ends.
+            if reads <= 3 {
+                f.chain.advance(1);
+            }
+        },
+    )
+    .await
+    .unwrap();
+    assert!(caught_up);
+    assert!(reads >= 3, "{reads} steps");
+    let heads: Vec<i64> = sqlx::query_scalar(
+        "SELECT block_number FROM final_heads WHERE network = $1 ORDER BY block_number",
+    )
+    .bind(NETWORK)
+    .fetch_all(&f.endpoint)
+    .await
+    .unwrap();
+    // A head recorded after each step that read while the chain moved on (the same head again
+    // records nothing new), each the finalized head of its moment.
+    assert!(heads.len() >= 3, "{heads:?}");
+    assert!(heads.windows(2).all(|w| w[0] < w[1]), "{heads:?}");
+    assert!(*heads.first().unwrap() > 12, "{heads:?}");
+}

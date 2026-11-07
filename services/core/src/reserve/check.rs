@@ -97,6 +97,9 @@ use super::{Asset, FinalPoint, Item, Terms, book, coordinate_key, map_json, text
 use crate::refs;
 use crate::store::{self, Observation};
 
+/// The blind bound when the store cannot say (`networks.reserve_blind_page_seconds`' default).
+pub const DEFAULT_BLIND_PAGE_SECONDS: i64 = 600;
+
 /// How often each asset is evaluated: once a minute (`NFR-5`).
 pub fn period() -> Duration {
     Duration::minutes(1)
@@ -203,6 +206,10 @@ pub struct Lag {
     pub head_age_seconds: i64,
     /// The most either may be (`networks.reserve_point_lag_seconds`).
     pub bound_seconds: i64,
+    /// The block up to which the network is read without a hole (`observation_watermarks`): it
+    /// moves while the walk does, so a stale head with a moving walk is catching up, not a
+    /// finality stall (amendment 0028).
+    pub watermark: i64,
 }
 
 impl Lag {
@@ -223,12 +230,13 @@ impl Lag {
         self.behind_head() || self.head_stale()
     }
 
-    /// Why the check cannot see this network, if it cannot (amendment 0028): a stale final head
-    /// is a finality stall; a fresh one the point lags beyond the bound is our walk catching up.
-    pub fn blind(&self) -> Option<Blind> {
-        if self.head_stale() {
+    /// Why the check cannot see this network, if it cannot (amendment 0028). A stale final head
+    /// is a finality stall unless `walk_moved` (the network's watermark moved since the evaluation
+    /// before): then, as for a fresh head the point lags beyond the bound, our walk is catching up.
+    pub fn blind_given(&self, walk_moved: bool) -> Option<Blind> {
+        if self.head_stale() && !walk_moved {
             Some(Blind::FinalityStall)
-        } else if self.behind_head() {
+        } else if self.stale() {
             Some(Blind::CatchingUp)
         } else {
             None
@@ -243,6 +251,7 @@ impl Lag {
             "seconds": self.seconds,
             "head_age_seconds": self.head_age_seconds,
             "bound_seconds": self.bound_seconds,
+            "watermark": self.watermark,
             "state": state.map_or("current", Blind::as_str),
         })
     }
@@ -299,6 +308,39 @@ pub struct Evaluation {
     pub alerts: Vec<String>,
 }
 
+/// What the reserve check could not even record (amendment 0028), shared with the core's gate
+/// ([`crate::Core::watching`]): an asset whose failed evaluation the store refused is held in
+/// memory, and so is every asset while the check cannot list them. Nothing here is durable: a
+/// restarted core starts with nothing unseen, and the store's own rule (`reserve_check_holds`)
+/// holds what the check has not seen since.
+#[derive(Debug, Default)]
+pub struct Unseen {
+    all: std::sync::atomic::AtomicBool,
+    assets: Mutex<HashSet<String>>,
+}
+
+impl Unseen {
+    /// Whether new work of `asset` waits for the check.
+    pub fn holds(&self, asset: &str) -> bool {
+        self.all.load(std::sync::atomic::Ordering::SeqCst) || self.assets().contains(asset)
+    }
+
+    /// Whether the check could not list the assets at its last tick: every asset waits.
+    pub fn all(&self) -> bool {
+        self.all.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn set_all(&self, all: bool) {
+        self.all.store(all, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn assets(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.assets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// The reserve check over the core's pool, with the readings it makes and whom it pages.
 pub struct ReserveCheck<R, P> {
     pool: PgPool,
@@ -307,6 +349,12 @@ pub struct ReserveCheck<R, P> {
     /// Assets whose evaluation failed and could not even be recorded, since when, and whether the
     /// stall was paged: the store cannot hold the episode, so the check does (review SF1).
     unrecorded: Mutex<HashMap<String, (DateTime<Utc>, bool)>>,
+    /// What the gate must hold that the store could not (amendment 0028).
+    unseen: std::sync::Arc<Unseen>,
+    /// Whether no tick has listed the assets yet: the first evaluates every asset.
+    first: std::sync::atomic::AtomicBool,
+    /// Each asset's blind bound as last read, for a stall the store cannot be asked about.
+    bounds: Mutex<HashMap<String, i64>>,
 }
 
 /// What a re-derivation found, for the evaluation's record and the statement.
@@ -328,8 +376,13 @@ struct Derived {
 
 type Incomplete = String;
 
-/// The final points an evaluation rests on, how far each lags, and what was derived at them.
-type Points = (BTreeMap<String, FinalPoint>, BTreeMap<String, Lag>, Derived);
+/// The final points an evaluation rests on, how far each lags, and what was derived at them, or
+/// why it could not be (the points and lags found are kept: amendment 0028).
+struct Derivation {
+    points: BTreeMap<String, FinalPoint>,
+    lags: BTreeMap<String, Lag>,
+    terms: Result<Derived, Incomplete>,
+}
 
 impl<R: Readings, P: Pager> ReserveCheck<R, P> {
     /// The check over `pool` (the core's login), `readings` and `pager`.
@@ -339,7 +392,22 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
             readings,
             pager,
             unrecorded: Mutex::default(),
+            unseen: std::sync::Arc::default(),
+            first: std::sync::atomic::AtomicBool::new(true),
+            bounds: Mutex::default(),
         }
+    }
+
+    /// What the core's gate must hold that the store could not (amendment 0028): pass it to
+    /// [`crate::Core::watching`].
+    pub fn unseen(&self) -> std::sync::Arc<Unseen> {
+        self.unseen.clone()
+    }
+
+    fn bounds(&self) -> std::sync::MutexGuard<'_, HashMap<String, i64>> {
+        self.bounds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The readings it makes.
@@ -348,23 +416,36 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
     }
 
     /// Evaluates every asset whose last evaluation is at least [`period`] old by `clock`, and
-    /// returns the evaluations made (`NFR-5`). Each asset is evaluated on its own: one whose
-    /// evaluation fails is paged and recorded as incomplete when the store allows it, and the
-    /// others are still evaluated; an asset with an observation just quarantined is evaluated at
-    /// once (review M1). Only a store that cannot list the assets is an error.
+    /// returns the evaluations made (`NFR-5`). The first tick of a check evaluates every asset,
+    /// however recent its last evaluation (amendment 0028). Each asset is evaluated on its own:
+    /// one whose evaluation fails is recorded as incomplete and held when the store allows it, and
+    /// held in memory ([`Unseen`]) when it does not, and the others are still evaluated; an asset
+    /// with an observation just quarantined is evaluated at once (review M1). Only a store that
+    /// cannot list the assets is an error, and while it is every asset is held ([`Unseen::all`]).
     pub async fn tick(&self, clock: &impl Clock) -> sqlx::Result<Vec<Evaluation>> {
         let now = clock.now();
         let quarantined = self.post().await;
-        let assets: Vec<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
+        let assets: Vec<(String, Option<DateTime<Utc>>)> = match sqlx::query_as(
             "SELECT a.asset, (SELECT max(v.evaluated_at) FROM reserve_evaluations v \
                               WHERE v.asset = a.asset) \
              FROM assets a ORDER BY a.asset",
         )
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        {
+            Ok(a) => {
+                self.unseen.set_all(false);
+                a
+            }
+            Err(e) => {
+                self.unseen.set_all(true);
+                return Err(e);
+            }
+        };
+        let first = self.first.swap(false, std::sync::atomic::Ordering::SeqCst);
         let mut done = Vec::new();
         for (asset, last) in assets {
-            if (last.is_none_or(|l| now - l >= period()) || quarantined.contains(&asset))
+            if (first || last.is_none_or(|l| now - l >= period()) || quarantined.contains(&asset))
                 && let Some(e) = self.evaluate_or_page(&asset, now).await
             {
                 done.push(e);
@@ -392,6 +473,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         let error = match self.evaluated(asset, now).await {
             Ok(e) => {
                 self.unrecorded_episode().remove(asset);
+                self.unseen.assets().remove(asset);
                 return Some(e);
             }
             Err(e) => e.to_string(),
@@ -399,16 +481,24 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         match self.record_failure(asset, now, &error).await {
             Ok(acts) => {
                 self.unrecorded_episode().remove(asset);
+                self.unseen.assets().remove(asset);
                 self.act(&acts);
             }
             Err(r) => {
                 tracing::error!(asset, error = %r, "NFR-5: a failed evaluation could not be recorded");
+                // Nothing durable can be held: the core's gate holds the asset in memory.
+                self.unseen.assets().insert(asset.to_owned());
+                let bound = self
+                    .bounds()
+                    .get(asset)
+                    .copied()
+                    .unwrap_or(DEFAULT_BLIND_PAGE_SECONDS);
                 let (first, stall) = {
                     let mut episodes = self.unrecorded_episode();
                     let first = !episodes.contains_key(asset);
                     let (since, stall_paged) =
                         episodes.entry(asset.to_owned()).or_insert((now, false));
-                    let stall = !*stall_paged && now - *since > period();
+                    let stall = !*stall_paged && (now - *since).num_seconds() > bound;
                     *stall_paged |= stall;
                     (first, stall.then_some(*since))
                 };
@@ -416,8 +506,17 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                     self.pager.page(&Page {
                         kind: "reserve-check-failed".into(),
                         asset: asset.to_owned(),
-                        detail: json!({"spec": "NFR-5, REQ-IC-2", "asset": asset,
-                                       "error": error, "recorded": false}),
+                        detail: json!({
+                            "spec": "NFR-5, REQ-IC-2 (amendment 0028)",
+                            "class": "blind",
+                            "stop": "hold",
+                            "held_by": "the core's gate, in memory: the store refused to record the evaluation, so no hold could be recorded",
+                            "asset": asset,
+                            "error": error,
+                            "recorded": false,
+                            "values": Value::Null,
+                            "action": "the reserve equation could not be evaluated, nor the failure recorded: this core holds new work of the asset until it can; look at the store",
+                        }),
                     });
                 }
                 if let Some(since) = stall {
@@ -425,10 +524,17 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                         kind: "reserve-check-stalled".into(),
                         asset: asset.to_owned(),
                         detail: json!({
-                            "spec": "REQ-IC-2, NFR-5, INV-1",
+                            "spec": "REQ-IC-2, NFR-5, INV-1 (amendment 0028)",
+                            "class": "blind",
+                            "stop": "hold",
+                            "held_by": "the core's gate, in memory: the store refused to record the evaluation, so no hold could be recorded",
                             "asset": asset,
                             "incomplete_since": since.to_rfc3339(),
-                            "action": "the reserve equation could not be evaluated, nor the failure recorded, for longer than the bound; the store refused the pause too: pause the asset's routes by hand",
+                            "blind_seconds": (now - since).num_seconds(),
+                            "bound_seconds": bound,
+                            "recorded": false,
+                            "values": Value::Null,
+                            "action": "the reserve equation could not be evaluated, nor the failure recorded, for longer than the blind bound: this core holds new work of the asset in memory only, so another core, or a restart, would not; pause the asset's routes by hand if the store takes an operator's pause",
                         }),
                     });
                 }
@@ -456,13 +562,17 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         error: &str,
     ) -> sqlx::Result<Acts> {
         let mut tx = self.pool.begin().await?;
-        let previous: Option<String> = sqlx::query_scalar(
-            "SELECT outcome FROM reserve_evaluations WHERE asset = $1 \
-             ORDER BY evaluated_at DESC, id DESC LIMIT 1",
+        lock_asset(&mut tx, asset).await?;
+        let previous: Option<(String, Value)> = sqlx::query_as(
+            "SELECT outcome, points FROM reserve_evaluations WHERE asset = $1 \
+             ORDER BY id DESC LIMIT 1",
         )
         .bind(asset)
         .fetch_optional(&mut *tx)
         .await?;
+        let walked = previous_watermarks(previous.as_ref().map(|(_, p)| p));
+        let bound = blind_bound(&mut tx, asset).await?;
+        self.bounds().insert(asset.to_owned(), bound);
         let reason = format!("the evaluation failed: {error}");
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, reason) \
@@ -474,12 +584,13 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         .fetch_one(&mut *tx)
         .await?;
         let mut acts = Acts::default();
-        if previous.as_deref() != Some("incomplete") {
+        if previous.as_ref().is_none_or(|(o, _)| o != "incomplete") {
             acts.logged.push(Page {
                 kind: "reserve-check-failed".into(),
                 asset: asset.to_owned(),
                 detail: json!({"spec": "NFR-5, REQ-IC-2", "class": "blind", "stop": "hold",
-                               "asset": asset, "evaluation": id, "error": error}),
+                               "asset": asset, "evaluation": id, "error": error,
+                               "recorded": true, "values": Value::Null}),
             });
         }
         hold(
@@ -491,6 +602,9 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                 reason: &reason,
                 points: &BTreeMap::new(),
                 lags: &BTreeMap::new(),
+                blind: &BTreeMap::new(),
+                walked: &walked,
+                bound,
                 values: &Value::Null,
             },
             &mut acts,
@@ -524,13 +638,22 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
 
     async fn evaluated(&self, asset: &str, now: DateTime<Utc>) -> sqlx::Result<Evaluation> {
         let mut conn = self.pool.acquire().await?;
-        let derived = self
-            .derive(&mut conn, asset, now)
-            .await
-            .unwrap_or_else(|e| Err(format!("store: {e}")));
+        let derivation = match self.derive(&mut conn, asset, now).await {
+            Ok(d) => d,
+            Err(e) => Derivation {
+                points: BTreeMap::new(),
+                lags: BTreeMap::new(),
+                terms: Err(format!("store: {e}")),
+            },
+        };
+        let Derivation {
+            points,
+            lags,
+            terms,
+        } = derivation;
         let mut entry_cut = None;
-        let (points, lags, derived, book_terms, reason) = match derived {
-            Ok((points, lags, derived)) => {
+        let (derived, book_terms, reason) = match terms {
+            Ok(derived) => {
                 let cuts = points
                     .iter()
                     .map(|(n, p)| (n.clone(), p.block_number))
@@ -546,23 +669,15 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                     Err(e) => Err(e),
                 };
                 match read {
-                    Ok(b) => (points, lags, derived, b, None),
+                    Ok(b) => (derived, b, None),
                     Err(e) => (
-                        BTreeMap::new(),
-                        BTreeMap::new(),
                         Derived::default(),
                         Terms::default(),
                         Some(format!("store: {e}")),
                     ),
                 }
             }
-            Err(why) => (
-                BTreeMap::new(),
-                BTreeMap::new(),
-                Derived::default(),
-                Terms::default(),
-                Some(why),
-            ),
+            Err(why) => (Derived::default(), Terms::default(), Some(why)),
         };
         let mut differences = if reason.is_some() {
             Vec::new()
@@ -598,15 +713,6 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         // Every mismatch the endpoint ever recorded for the asset, from the durable flag: one
         // gone by the point read now is still a breach to raise (PR #50 review M1).
         let mismatches = readings::supply_mismatches(&mut conn, asset).await?;
-        // Review M2: a point too far behind its network's final head is no check at all; nor,
-        // review MF2, is one on a network with no final head recorded within the bound by the
-        // clock (a finality stall, an observer that stopped): mints there would go unseen.
-        // Amendment 0028: that is blindness, not a difference of value. It never holds, and it
-        // holds the asset's routes; it diverges only if a value differs as well.
-        let blind: BTreeMap<String, Blind> = lags
-            .iter()
-            .filter_map(|(n, l)| l.blind().map(|b| (n.clone(), b)))
-            .collect();
         let made = reason.is_none();
         let alerts = if made {
             self.alerts(&mut conn, asset, &book_terms, now).await?
@@ -614,6 +720,32 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
             Vec::new()
         };
         drop(conn);
+
+        let mut tx = self.pool.begin().await?;
+        // One evaluation of an asset at a time, recorded in the order it is decided in (amendment
+        // 0028): a hold and its lift follow the evaluations' ids.
+        lock_asset(&mut tx, asset).await?;
+        let previous: Option<(String, Value, Value)> = sqlx::query_as(
+            "SELECT outcome, alerts, points FROM reserve_evaluations WHERE asset = $1 \
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(asset)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let walked = previous_watermarks(previous.as_ref().map(|(_, _, p)| p));
+        // Review M2: a point too far behind its network's final head is no check at all; nor,
+        // review MF2, is one on a network with no final head recorded within the bound by the
+        // clock (a finality stall, an observer that stopped): mints there would go unseen.
+        // Amendment 0028: that is blindness, not a difference of value. It never holds, and it
+        // holds the asset's routes; it diverges only if a value differs as well. A stale head is a
+        // finality stall only while the network's walk has not moved since the evaluation before.
+        let blind: BTreeMap<String, Blind> = lags
+            .iter()
+            .filter_map(|(n, l)| {
+                let moved = walked.get(n).is_some_and(|w| l.watermark > *w);
+                l.blind_given(moved).map(|b| (n.clone(), b))
+            })
+            .collect();
         let reason = reason.or_else(|| {
             (differences.is_empty() && !blind.is_empty()).then(|| blind_reason(&blind, &lags))
         });
@@ -622,15 +754,8 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
             (None, true) => Outcome::Holds,
             (None, false) => Outcome::Diverges,
         };
-
-        let mut tx = self.pool.begin().await?;
-        let previous: Option<(String, Value)> = sqlx::query_as(
-            "SELECT outcome, alerts FROM reserve_evaluations WHERE asset = $1 \
-             ORDER BY evaluated_at DESC, id DESC LIMIT 1",
-        )
-        .bind(asset)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let bound = blind_bound(&mut tx, asset).await?;
+        self.bounds().insert(asset.to_owned(), bound);
         let points_json: serde_json::Map<String, Value> = points
             .iter()
             .map(|(n, p)| {
@@ -732,7 +857,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                         "evaluation": id,
                         "differences": differences.iter().map(Difference::json).collect::<Vec<_>>(),
                         "values": values,
-                        "lags": lags_json(&points, &lags),
+                        "lags": lags_json(&points, &lags, &blind),
                         "also_blind": blind.iter().map(|(n, b)| (n.clone(), json!(b.as_str()))).collect::<serde_json::Map<_, _>>(),
                         "action": "the money differs: the asset's routes are paused until two operators lift the pause (REQ-GV-2); transfers in flight are still observed",
                     }),
@@ -740,7 +865,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
             }
         }
         if outcome == Outcome::Incomplete
-            && previous.as_ref().is_none_or(|(o, _)| o != "incomplete")
+            && previous.as_ref().is_none_or(|(o, _, _)| o != "incomplete")
         {
             acts.logged.push(Page {
                 kind: "reserve-check-incomplete".into(),
@@ -748,7 +873,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                 detail: json!({"spec": "NFR-5, REQ-BK-1, REQ-IC-2", "class": "blind",
                                "stop": "hold", "asset": asset, "evaluation": id,
                                "reason": reason, "values": values,
-                               "lags": lags_json(&points, &lags)}),
+                               "lags": lags_json(&points, &lags, &blind)}),
             });
         }
         if outcome == Outcome::Incomplete || !blind.is_empty() {
@@ -764,6 +889,9 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                     reason: &why,
                     points: &points,
                     lags: &lags,
+                    blind: &blind,
+                    walked: &walked,
+                    bound,
                     values: &values,
                 },
                 &mut acts,
@@ -774,7 +902,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         }
         let before: BTreeSet<String> = previous
             .as_ref()
-            .and_then(|(_, a)| serde_json::from_value(a.clone()).ok())
+            .and_then(|(_, a, _)| serde_json::from_value(a.clone()).ok())
             .unwrap_or_default();
         for alert in alerts.iter().filter(|a| !before.contains(*a)) {
             acts.paged.push(Page {
@@ -844,22 +972,29 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         Ok(alerts)
     }
 
-    /// Re-derives every term of `asset` at one final point per network (`REQ-BK-8`).
+    /// Re-derives every term of `asset` at one final point per network (`REQ-BK-8`). The points
+    /// and lags found are kept when a reading then fails (amendment 0028: a stale final head on the
+    /// same evaluation is still a finality stall).
     async fn derive(
         &self,
         conn: &mut PgConnection,
         asset: &str,
         now: DateTime<Utc>,
-    ) -> sqlx::Result<Result<Points, Incomplete>> {
+    ) -> sqlx::Result<Derivation> {
+        let failed = |why: String| Derivation {
+            points: BTreeMap::new(),
+            lags: BTreeMap::new(),
+            terms: Err(why),
+        };
         let Some(a) = Asset::load(conn, asset).await? else {
-            return Ok(Err(format!("{asset} is not declared")));
+            return Ok(failed(format!("{asset} is not declared")));
         };
         let (Some(issuing), Some(issuing_asset), Some(issuing_ratio)) = (
             a.issuing_network.clone(),
             a.issuing_asset.clone(),
             a.issuing_ratio(),
         ) else {
-            return Ok(Err(format!(
+            return Ok(failed(format!(
                 "{asset} has no issuing network, issuing identity or precision ratio"
             )));
         };
@@ -871,20 +1006,48 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
                 .filter(|p| !p.attested())
                 .map(|p| p.network.clone()),
         );
+        let mut missing = None;
         for network in networks {
             match final_point(conn, &network, now).await? {
                 Ok((f, lag)) => {
                     points.insert(network.clone(), f);
                     lags.insert(network, lag);
                 }
-                Err(why) => return Ok(Err(why)),
+                Err(why) => {
+                    missing.get_or_insert(why);
+                }
             }
         }
-        let k = points[&issuing].clone();
+        let terms = match missing {
+            Some(why) => Err(why),
+            None => {
+                self.terms_at(conn, &a, &issuing, &issuing_asset, issuing_ratio, &points)
+                    .await?
+            }
+        };
+        Ok(Derivation {
+            points,
+            lags,
+            terms,
+        })
+    }
+
+    /// Every term of asset `a` at `points`, one per network (`REQ-BK-8`).
+    async fn terms_at(
+        &self,
+        conn: &mut PgConnection,
+        a: &Asset,
+        issuing: &str,
+        issuing_asset: &str,
+        issuing_ratio: u128,
+        points: &BTreeMap<String, FinalPoint>,
+    ) -> sqlx::Result<Result<Derived, Incomplete>> {
+        let asset = a.asset.as_str();
+        let k = points[issuing].clone();
 
         let mut d = Derived::default();
         // Supply (issuing network).
-        let supply = match self.readings.supply(&k, &issuing_asset).await {
+        let supply = match self.readings.supply(&k, issuing_asset).await {
             Ok(s) => s,
             Err(e) => return Ok(Err(format!("supply of {issuing_asset}: {e}"))),
         };
@@ -898,7 +1061,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         d.supply = json!({"amount": text(supply_book), "issuing_asset": issuing_asset,
                           "network_amount": supply.to_string(), "final_block": k});
         // INV-4 (PLAN DEC-16, 2026-10-15): the flag the endpoint recorded with this reading.
-        d.supply_mismatch = readings::supply_mismatch_at(conn, &k, &issuing_asset).await?;
+        d.supply_mismatch = readings::supply_mismatch_at(conn, &k, issuing_asset).await?;
 
         // Reserve, per position, and convertible holdings outside the equation (REQ-CV-4).
         for p in &a.positions {
@@ -964,12 +1127,12 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         }
 
         // Owed mints and owed payouts, item by item, from the final observations (REQ-BK-2).
-        if let Err(why) = owed(conn, &a, &issuing_asset, &points, &mut d).await? {
+        if let Err(why) = owed(conn, a, issuing_asset, points, &mut d).await? {
             return Ok(Err(why));
         }
         // Surplus is the one term no network shows: the balance the others imply (§5.3).
         d.terms.surplus = d.terms.implied_surplus();
-        Ok(Ok((points, lags, d)))
+        Ok(Ok(d))
     }
 }
 
@@ -1088,7 +1251,98 @@ struct Seen<'a> {
     reason: &'a str,
     points: &'a BTreeMap<String, FinalPoint>,
     lags: &'a BTreeMap<String, Lag>,
+    blind: &'a BTreeMap<String, Blind>,
+    /// Each network's watermark as the evaluation before recorded it.
+    walked: &'a BTreeMap<String, i64>,
+    /// The asset's blind bound ([`blind_bound`]).
+    bound: i64,
     values: &'a Value,
+}
+
+/// Takes the per-asset lock every evaluation and every record of a failure takes first, in its
+/// own transaction (amendment 0028), as the engine's locks do.
+async fn lock_asset(tx: &mut PgConnection, asset: &str) -> sqlx::Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("bezent/reserve-evaluation/{asset}"))
+        .execute(&mut *tx)
+        .await
+        .map(|_| ())
+}
+
+/// Each network's watermark as an evaluation's points recorded it (`points.<network>.lag`).
+fn previous_watermarks(points: Option<&Value>) -> BTreeMap<String, i64> {
+    points
+        .and_then(Value::as_object)
+        .map(|o| {
+            o.iter()
+                .filter_map(|(n, p)| {
+                    p.pointer("/lag/watermark")
+                        .and_then(Value::as_i64)
+                        .map(|w| (n.clone(), w))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The networks an asset rests on: the issuing network, when the asset is issued there, and its
+/// reserve networks (amendment 0028; never another asset's).
+const ASSET_NETWORKS: &str = "SELECT n.network FROM networks n \
+     WHERE (n.role = 'issuing' AND EXISTS (SELECT 1 FROM assets a \
+                                           WHERE a.asset = $1 AND a.issuing_asset IS NOT NULL)) \
+        OR n.network IN (SELECT r.network FROM reserves r WHERE r.asset = $1)";
+
+/// How long `asset` may be blind before a person is paged: the smallest
+/// `networks.reserve_blind_page_seconds` of its own networks.
+async fn blind_bound(tx: &mut PgConnection, asset: &str) -> sqlx::Result<i64> {
+    sqlx::query_scalar(&format!(
+        "SELECT COALESCE(min(n.reserve_blind_page_seconds), {DEFAULT_BLIND_PAGE_SECONDS})::bigint \
+         FROM networks n WHERE n.network IN ({ASSET_NETWORKS})"
+    ))
+    .bind(asset)
+    .fetch_one(&mut *tx)
+    .await
+}
+
+/// A network as the store has it now: its latest recorded final head (number, block time), its
+/// watermark and its lag bound.
+struct NetState {
+    head: Option<(i64, DateTime<Utc>)>,
+    watermark: Option<i64>,
+    bound: i64,
+}
+
+async fn net_states(
+    tx: &mut PgConnection,
+    asset: &str,
+) -> sqlx::Result<BTreeMap<String, NetState>> {
+    type Row = (String, Option<i64>, Option<DateTime<Utc>>, Option<i64>, i64);
+    let rows: Vec<Row> = sqlx::query_as(&format!(
+        "SELECT n.network, h.block_number, h.block_time, w.watermark, \
+                n.reserve_point_lag_seconds::bigint \
+         FROM networks n \
+         LEFT JOIN LATERAL (SELECT f.block_number, f.block_time FROM final_heads f \
+                            WHERE f.network = n.network ORDER BY f.block_number DESC LIMIT 1) h \
+                ON true \
+         LEFT JOIN observation_watermarks w ON w.network = n.network \
+         WHERE n.network IN ({ASSET_NETWORKS}) ORDER BY n.network"
+    ))
+    .bind(asset)
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(network, number, time, watermark, bound)| {
+            (
+                network,
+                NetState {
+                    head: number.zip(time),
+                    watermark,
+                    bound,
+                },
+            )
+        })
+        .collect())
 }
 
 /// Why an evaluation that saw every term alike is blind, in words (amendment 0028).
@@ -1102,6 +1356,11 @@ fn blind_reason(blind: &BTreeMap<String, Blind>, lags: &BTreeMap<String, Lag>) -
                     "{network}: no final head recorded for {} s, beyond {} s: a finality stall, or \
                      nothing records its heads",
                     lag.head_age_seconds, lag.bound_seconds
+                ),
+                Blind::CatchingUp if lag.head_stale() => format!(
+                    "{network}: no final head recorded for {} s, beyond {} s, while the walk is \
+                     moving (watermark {}): catching up",
+                    lag.head_age_seconds, lag.bound_seconds, lag.watermark
                 ),
                 Blind::CatchingUp => format!(
                     "{network}: the point lags the latest final head by {} s ({} blocks), beyond \
@@ -1145,18 +1404,29 @@ fn values_json(chain: &Terms, book: &Terms) -> Value {
 }
 
 /// Each network's point and lag, with whether the check can see it.
-fn lags_json(points: &BTreeMap<String, FinalPoint>, lags: &BTreeMap<String, Lag>) -> Value {
+fn lags_json(
+    points: &BTreeMap<String, FinalPoint>,
+    lags: &BTreeMap<String, Lag>,
+    blind: &BTreeMap<String, Blind>,
+) -> Value {
     Value::Object(
         lags.iter()
-            .map(|(n, l)| (n.clone(), l.json(points.get(n), l.blind())))
+            .map(|(n, l)| (n.clone(), l.json(points.get(n), blind.get(n).copied())))
             .collect(),
     )
 }
 
 /// Holds `asset`'s routes while the check cannot see it (amendment 0028; `REQ-IC-2`), within the
-/// evaluation's transaction: records the hold if there is none, naming the evaluation it begins at,
-/// and pages `reserve-blind` once per hold and reason, at once on a finality stall and otherwise
-/// once the asset has been blind for longer than its bound.
+/// evaluation's transaction: records the hold if there is none, naming the evaluation it begins at
+/// and each network's latest final head and watermark then (`held_heads`), and pages
+/// `reserve-blind` once per hold and reason: at once on a finality stall, and otherwise once the
+/// asset has been blind for longer than its bound.
+///
+/// A network is in a finality stall when either holds, and its walk has not moved meanwhile:
+/// - its latest final head is older than the network's lag bound by the clock, and the watermark
+///   has not moved since the evaluation before;
+/// - the hold is older than that bound and the latest final head is still the one recorded when
+///   the hold began (whatever its block time says), and the watermark has not moved since then.
 async fn hold(tx: &mut PgConnection, seen: &Seen<'_>, acts: &mut Acts) -> sqlx::Result<()> {
     let Seen {
         asset,
@@ -1165,28 +1435,48 @@ async fn hold(tx: &mut PgConnection, seen: &Seen<'_>, acts: &mut Acts) -> sqlx::
         reason,
         points,
         lags,
+        blind,
+        walked,
+        bound,
         values,
     } = *seen;
+    let states = net_states(tx, asset).await?;
     let existing: Option<(i64, i64, DateTime<Utc>, Value)> = sqlx::query_as(
-        "SELECT p.id, p.evaluation_id, v.evaluated_at, v.points FROM pauses p \
+        "SELECT p.id, p.evaluation_id, v.evaluated_at, p.held_heads FROM pauses p \
          JOIN reserve_evaluations v ON v.id = p.evaluation_id \
          WHERE p.asset = $1 AND p.cause = 'blind'",
     )
     .bind(asset)
     .fetch_optional(&mut *tx)
     .await?;
-    let (hold_id, began, since, began_points) = match existing {
+    let held_now: serde_json::Map<String, Value> = states
+        .iter()
+        .map(|(n, st)| {
+            (
+                n.clone(),
+                json!({
+                    "head_block_number": st.head.map(|(b, _)| b),
+                    "head_block_time": st.head.map(|(_, t)| t.to_rfc3339()),
+                    "watermark": st.watermark,
+                }),
+            )
+        })
+        .collect();
+    let (hold_id, began, since, held) = match existing {
         Some(h) => h,
         None => {
             let id: Option<i64> = sqlx::query_scalar(
-                "INSERT INTO pauses (asset, cause, evaluation_id) VALUES ($1, 'blind', $2) \
+                "INSERT INTO pauses (asset, cause, evaluation_id, held_heads) \
+                 VALUES ($1, 'blind', $2, $3::text::jsonb) \
                  ON CONFLICT (asset) WHERE cause = 'blind' DO NOTHING RETURNING id",
             )
             .bind(asset)
             .bind(evaluation)
+            .bind(Value::Object(held_now.clone()).to_string())
             .fetch_optional(&mut *tx)
             .await?;
-            // Another core recorded it a moment ago: the asset is held, and that one pages.
+            // Under the per-asset lock no other evaluation of the asset records one meanwhile;
+            // a hold already there (an owner's, a restore's) is the hold.
             let Some(id) = id else {
                 return Ok(());
             };
@@ -1203,37 +1493,43 @@ async fn hold(tx: &mut PgConnection, seen: &Seen<'_>, acts: &mut Acts) -> sqlx::
                     "since": now.to_rfc3339(),
                     "reason": reason,
                     "values": values,
-                    "lags": lags_json(points, lags),
+                    "lags": lags_json(points, lags, blind),
+                    "held_heads": held_now,
                     "action": "the reserve check cannot see the asset: new deposits and withdrawals of it are refused, transfers in flight are still observed, and the hold lifts itself once an evaluation holds; no difference of value is known",
                 }),
             });
-            (id, evaluation, now, Value::Null)
+            (id, evaluation, now, Value::Object(held_now.clone()))
         }
     };
     let blind_seconds = (now - since).num_seconds();
-    // A finality stall: no final head within the bound by the clock; or, held for longer than
-    // the network's bound, the latest final head is still the one recorded when the hold began
-    // (block times can mislead the clock; heads that do not advance cannot).
-    let stalled: Vec<&String> = lags
+    let stalled: Vec<&String> = states
         .iter()
-        .filter(|(network, lag)| {
-            lag.head_stale()
-                || (blind_seconds > lag.bound_seconds
-                    && began_points
-                        .get(network.as_str())
-                        .and_then(|p| p.pointer("/lag/head_block_number"))
-                        .and_then(Value::as_i64)
-                        == Some(lag.head_block_number))
+        .filter(|(network, st)| {
+            let watermark_now = st.watermark;
+            let moved_since = |w: Option<i64>| {
+                w.zip(watermark_now)
+                    .is_some_and(|(before, after)| after > before)
+            };
+            let stale = st
+                .head
+                .is_some_and(|(_, t)| (now - t).num_seconds() > st.bound)
+                && !moved_since(walked.get(network.as_str()).copied());
+            let at_hold = held.get(network.as_str());
+            let held_head = at_hold
+                .and_then(|h| h.get("head_block_number"))
+                .and_then(Value::as_i64);
+            let unchanged = blind_seconds > st.bound
+                && held_head.is_some()
+                && held_head == st.head.map(|(b, _)| b)
+                && !moved_since(
+                    at_hold
+                        .and_then(|h| h.get("watermark"))
+                        .and_then(Value::as_i64),
+                );
+            stale || unchanged
         })
         .map(|(network, _)| network)
         .collect();
-    let bound: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(min(n.reserve_blind_page_seconds), 600)::bigint FROM networks n \
-         WHERE n.role = 'issuing' OR n.network IN (SELECT r.network FROM reserves r WHERE r.asset = $1)",
-    )
-    .bind(asset)
-    .fetch_one(&mut *tx)
-    .await?;
     let why = if !stalled.is_empty() {
         "finality-stall"
     } else if blind_seconds > bound {
@@ -1253,7 +1549,7 @@ async fn hold(tx: &mut PgConnection, seen: &Seen<'_>, acts: &mut Acts) -> sqlx::
         return Ok(());
     }
     let action = if why == "finality-stall" {
-        "the asset's routes are held (new deposits and withdrawals refused; transfers in flight still observed): a network's final head is not advancing, a finality stall or nothing recording its heads; check the chain and its endpoint. No difference of value is known. The hold lifts itself once an evaluation holds; do not lift it by hand"
+        "the asset's routes are held (new deposits and withdrawals refused; transfers in flight still observed): a network's final head is not advancing and its walk has stopped, a finality stall or nothing recording its heads; check the chain and its endpoint. No difference of value is known. The hold lifts itself once an evaluation holds; do not lift it by hand"
     } else {
         "the reserve check has not seen the asset for longer than the bound: its routes are held (new deposits and withdrawals refused; transfers in flight still observed). No difference of value is known. Find why it cannot see (the reason, the lags); the hold lifts itself once an evaluation holds; do not lift it by hand"
     };
@@ -1275,7 +1571,9 @@ async fn hold(tx: &mut PgConnection, seen: &Seen<'_>, acts: &mut Acts) -> sqlx::
             "stalled_networks": stalled,
             "reason": reason,
             "values": values,
-            "lags": lags_json(points, lags),
+            "lags": lags_json(points, lags, blind),
+            "held_heads": held,
+            "heads_now": held_now,
             "action": action,
         }),
     });
@@ -1387,6 +1685,7 @@ async fn final_point(
             seconds: (latest_at - at).num_seconds().max(0),
             head_age_seconds: (now - latest_at).num_seconds().max(0),
             bound_seconds,
+            watermark,
         },
     )))
 }

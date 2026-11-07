@@ -7,7 +7,7 @@ id: reserve
 kind: pages
 covers: [REQ-IC-2, REQ-BK-1, REQ-BK-3, REQ-BK-8, REQ-BK-10, REQ-GV-2, NFR-5, NFR-6, INV-1, INV-4]
 pages: [reserve-divergence, reserve-blind, reserve-alert, reserve-check-incomplete, reserve-check-failed, reserve-check-stalled, supply-mismatch-pause, book-quarantine, reserve-hold, reserve-hold-lifted]
-observables: [reserve_equation_outcome, reserve_equation_age_seconds, reserve_amount, observer_lag_estimate_seconds, open_gaps, pauses_in_force]
+observables: [reserve_equation_outcome, reserve_equation_age_seconds, reserve_amount, observer_lag_estimate_seconds, open_gaps, pauses_in_force, holds_in_force, hold_age_seconds]
 tests: [services/core/tests/reserve_check.rs::ac_e2_3_req_ic_2_nfr_5_m2_an_evaluation_that_cannot_be_made_is_held_and_paged_past_the_bound, services/core/tests/reserve_check.rs::ac_e2_3_req_ic_2_a_cold_start_with_every_term_zero_is_held_not_paused_and_lifts_itself, services/core/tests/reserve_check.rs::inv_1_nfr_5_ac_e2_3_m2_a_walk_catching_up_is_held_never_a_divergence, services/core/tests/reserve_check.rs::inv_1_nfr_6_ac_e2_3_mf2_a_finality_stall_is_held_and_paged_at_once, services/core/tests/reserve_check.rs::ac_e2_1_ac_e2_3_req_bk_1_a_value_difference_while_lagging_pauses_and_never_lifts_itself, services/core/tests/reserve_check.rs::inv_1_req_ic_2_m1_an_observation_the_book_cannot_post_is_quarantined_paged_and_paused, crates/store/tests/reserve_check.rs::req_bk_1_req_ic_2_the_core_pauses_only_an_assets_routes_on_that_assets_divergence, services/core/tests/reserve_check.rs::ac_e2_1_a_divergence_pauses_the_assets_routes_keeps_observing_and_pages_a_human, services/core/tests/operations.rs::ac_i2_1_an_operators_pause_holds_new_work_in_each_scope_and_a_second_operator_lifts_it]
 exercised: no
 ---
@@ -27,9 +27,13 @@ final points and compared with the book, at zero tolerance, at least once a minu
   evaluation that holds. Nobody lifts it by hand: `operator_request_unpause` refuses it. A person is paged
   (`reserve-blind`) only once the asset has been blind for longer than its bound (`networks.reserve_blind_page_seconds`,
   default 600 s, the smallest of the asset's networks'), or at once on a finality stall.
+  Until the check has seen an asset (its latest evaluation, by id, holds and was made), the core's gate and the signer
+  hold it with or without a hold row: a new asset, and the first moments after a restart, wait for the first evaluation.
 - **A pause** (`class: money-differs`, `stop: pause`): **the money differs**, or the book could not post a movement, or
   the supply count and the issuance differ (`INV-4`). The core never lifts it: two operators do (`REQ-GV-2`). A
-  difference of value found while the check also lags is a pause (and a hold as well): a hold never masks money.
+  difference of value found while the check also lags is a pause (and a hold as well): a hold never masks a difference
+  the check can see. While it cannot read the terms at all, a difference may exist unseen; the hold stops new work
+  meanwhile.
 
 | Page | Meaning | What the core did |
 |---|---|---|
@@ -37,8 +41,8 @@ final points and compared with the book, at zero tolerance, at least once a minu
 | `supply-mismatch-pause` | The on-chain component's count of the asset differs from the issuance (`INV-4`). Also raises `key-compromise`. | paused the asset |
 | `book-quarantine` | An observation the book could not post was set aside; everything else is still posted and checked. | paused the asset it moves |
 | `reserve-blind` | The asset has been held blind for longer than its bound (`why: beyond-bound`), or a network's final head is not advancing (`why: finality-stall`: the chain stopped finalizing, or nothing records its heads). Carries `values`, `lags`, `reason`, `since`. No difference of value is known. | holds the asset; lifts the hold itself when an evaluation holds |
-| `reserve-check-failed` | The evaluation errored and the failure could not even be recorded, so nothing could be held. | nothing: hold the asset by hand (step 2) |
-| `reserve-check-stalled` | As above, for longer than the bound. | nothing: hold the asset by hand (step 2) |
+| `reserve-check-failed` | The evaluation errored and the failure could not even be recorded, so no hold could be recorded. `class: blind`, `recorded: false`. | holds the asset in this core's memory only |
+| `reserve-check-stalled` | As above, for longer than the blind bound. | holds it in memory only: pause the asset by hand if the store takes it (step 2) |
 | `reserve-alert` | Surplus is below its alert level or floor, a reversal is not restored within a business day, or the floor or level is not declared (`REQ-BK-10`, `REQ-BE-6`). | no (mints may pause: see below) |
 
 Recorded in the event log and the service's log (`recorded=<kind>`, a WARN line no page filter matches), never paged:
@@ -56,7 +60,8 @@ kind, with the differences itemised. `alerts.md` has the filter for each.
 ```sql
 SELECT metric, asset, network, value FROM ops_observables()
 WHERE metric IN ('reserve_equation_outcome', 'reserve_equation_age_seconds', 'reserve_amount',
-                 'observer_lag_estimate_seconds', 'open_gaps', 'pauses_in_force') ORDER BY metric, asset, network;
+                 'observer_lag_estimate_seconds', 'open_gaps', 'pauses_in_force', 'holds_in_force',
+                 'hold_age_seconds') ORDER BY metric, asset, network;
 SELECT id, asset, evaluated_at, outcome, reason, differences FROM reserve_evaluations
 ORDER BY id DESC LIMIT 10;
 SELECT id, asset, cause, kind, evaluation_id FROM pauses ORDER BY id;

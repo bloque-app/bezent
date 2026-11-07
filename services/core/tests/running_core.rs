@@ -181,6 +181,9 @@ async fn req_ic_2_dec_12_ac_e2_3_a_reading_the_providers_disagree_on_is_incomple
     let held = "SELECT count(*) FROM pauses WHERE asset = 'bUSDC' AND kind = 'hold'";
     let paused = "SELECT count(*) FROM pauses WHERE asset = 'bUSDC' AND kind = 'pause'";
     assert_eq!((w.count(held).await, w.count(paused).await), (1, 0));
+    // The chain keeps finalizing; the providers keep disagreeing.
+    let disagree = "DEC-12: the providers disagree on the balance: a answers 1000, b answers 1001";
+    recorded_at(&w, 320, 0, None, Some(disagree)).await;
     let e = check
         .evaluate(ASSET, t0() + Duration::minutes(2))
         .await
@@ -188,6 +191,7 @@ async fn req_ic_2_dec_12_ac_e2_3_a_reading_the_providers_disagree_on_is_incomple
     assert_eq!(e.outcome, Outcome::Incomplete);
     assert!(pager.kinds().is_empty(), "{:?}", pager.kinds());
     // Still unknown past the blind bound (ten minutes): one page, still a hold.
+    recorded_at(&w, 860, 0, None, Some(disagree)).await;
     check
         .evaluate(ASSET, t0() + Duration::minutes(11))
         .await

@@ -48,9 +48,11 @@ async fn evaluation(pool: &PgPool, asset: &str, outcome: &str) -> i64 {
     } else {
         "[]"
     };
+    // A holding evaluation that was made names the book entry it cut at (0142: only that one lifts
+    // a hold).
     sqlx::query_scalar(
-        "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, differences) \
-         VALUES ($1, now(), $2, $3::jsonb) RETURNING id",
+        "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, differences, book_entry_cut) \
+         VALUES ($1, now(), $2, $3::jsonb, CASE WHEN $2 = 'holds' THEN 0 END) RETURNING id",
     )
     .bind(asset)
     .bind(outcome)
@@ -458,7 +460,9 @@ async fn req_ic_2_req_gv_2_a0028_the_core_holds_only_while_blind_and_lifts_only_
     let other = incomplete(&pool, "asset-b").await;
     let blind = incomplete(&pool, "asset-a").await;
     let hold = |asset: &str, e: i64| {
-        format!("INSERT INTO pauses (asset, cause, evaluation_id) VALUES ('{asset}', 'blind', {e})")
+        format!(
+            "INSERT INTO pauses (asset, cause, evaluation_id, held_heads) VALUES ('{asset}', 'blind', {e}, '{{}}')"
+        )
     };
     // A hold names an evaluation of its own asset that did not hold.
     for sql in [hold("asset-a", held), hold("asset-a", other)] {
@@ -514,8 +518,24 @@ async fn req_ic_2_req_gv_2_a0028_the_core_holds_only_while_blind_and_lifts_only_
             .as_deref(),
         refused
     );
-    // Once an evaluation holds, the core lifts its hold, and still no pause.
+    // A holding evaluation that names no book cut was not made (0142): it lifts nothing.
+    exec(
+        &pool,
+        "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome) \
+         VALUES ('asset-a', now(), 'holds')",
+    )
+    .await;
+    assert_eq!(
+        as_role(&pool, core, "DELETE FROM pauses WHERE cause = 'blind'")
+            .await
+            .as_deref(),
+        refused
+    );
+    assert!(!flag(&pool, "SELECT reserve_check_holds('asset-a')").await);
+    // Once an evaluation that was made holds, the core lifts its hold, and still no pause.
     evaluation(&pool, "asset-a", "holds").await;
+    assert!(flag(&pool, "SELECT reserve_check_holds('asset-a')").await);
+    assert!(!flag(&pool, "SELECT reserve_check_holds('asset-b')").await);
     exec(&pool, "INSERT INTO pauses (asset) VALUES ('asset-a')").await;
     for sql in [
         "DELETE FROM pauses WHERE cause = 'REQ-BK-1'",
@@ -524,6 +544,37 @@ async fn req_ic_2_req_gv_2_a0028_the_core_holds_only_while_blind_and_lifts_only_
     ] {
         assert_eq!(as_role(&pool, core, sql).await.as_deref(), refused, "{sql}");
     }
+    // The observables keep them apart (0142): one hold, two pauses (the divergence's, the
+    // operator's), and the hold's age.
+    let metric = |name: &str| {
+        format!(
+            "SELECT value::bigint FROM ops_observables() WHERE metric = '{name}' AND asset IS NULL"
+        )
+    };
+    assert_eq!(
+        text(
+            &pool,
+            &format!("SELECT ({})::text", metric("holds_in_force"))
+        )
+        .await,
+        "1"
+    );
+    assert_eq!(
+        text(
+            &pool,
+            &format!("SELECT ({})::text", metric("pauses_in_force"))
+        )
+        .await,
+        "2"
+    );
+    assert!(
+        flag(
+            &pool,
+            "SELECT EXISTS (SELECT 1 FROM ops_observables() \
+                         WHERE metric = 'hold_age_seconds' AND asset = 'asset-a')"
+        )
+        .await
+    );
     // An operator does not lift a hold by hand: it lifts itself (amendment 0028).
     let alice = operator_login(&pool, OPERATORS[0]).await;
     let err = sqlx::query("SELECT operator_request_unpause($1, 'looks harmless')")

@@ -336,7 +336,15 @@ pub struct Follower<'a, R> {
     pub start_block: u64,
     /// The most blocks one range covers.
     pub max_range: u64,
+    /// How often, during one step's ranges, the live final point is recorded again, with its
+    /// readings (amendment 0028): a step that walks a long backlog keeps the network's latest
+    /// final head fresh, so the reserve check sees a walk catching up, not a finality stall.
+    /// `None` records it only at the step's start.
+    pub head_refresh: Option<std::time::Duration>,
 }
+
+/// How often the running endpoint records the live final point between ranges.
+pub const HEAD_REFRESH: std::time::Duration = std::time::Duration::from_secs(15);
 
 impl<R: Rpc> Follower<'_, R> {
     /// Reads from the watermark to the final point, or to the first range it cannot read.
@@ -345,72 +353,8 @@ impl<R: Rpc> Follower<'_, R> {
             Ok(h) => h,
             Err(e) => return Ok(Step::Unavailable(e.to_string())),
         };
-        {
-            // Issue #42: the vault's balances at the head, read before the head is recorded and
-            // recorded with it, in one transaction, so a final point the reserve check picks has
-            // its readings (REQ-BK-8, NFR-5). A head already read is not read again; a head the
-            // payout prover recorded first, with no readings, is read now, or the check would
-            // find no reading at the latest final point while a payout is in flight and pause
-            // the asset (PR #50 review M4).
-            let (readings, fee) = if store::head_read(self.pool, self.network, &head).await? {
-                (Vec::new(), None)
-            } else {
-                (
-                    reserve::readings(self.pair, &self.watch, head.number).await,
-                    // Issue #14: the delivery account's fee position, read at the same point and
-                    // recorded with it. A read that fails is an unknown reading, never an error.
-                    Some(fee::read(self.pair, self.watch.delivery, head.number).await),
-                )
-            };
-            let mut tx = self.pool.begin().await?;
-            if let Head::Conflict(stored) = store::final_head(&mut tx, self.network, &head).await? {
-                return Ok(Step::Unavailable(format!(
-                    "REQ-OB-2: block {} is final at {} here, and {} is recorded",
-                    head.number,
-                    head.hash,
-                    hex0x(&stored)
-                )));
-            }
-            store::record_readings(&mut tx, self.network, &head, &readings).await?;
-            if let Some(f) = &fee {
-                // A fee position is not the head: if it cannot be written (a table not yet
-                // migrated, a grant or a guard that drifted), a savepoint takes back only it, and
-                // the head and the readings commit. Only a failure of the savepoint itself, the
-                // connection, is the step's.
-                let mut sp = sqlx::Acquire::begin(&mut *tx).await?;
-                match store::record_fee_position(&mut sp, self.network, &head, f).await {
-                    Ok(()) => sp.commit().await?,
-                    Err(e) => {
-                        sp.rollback().await?;
-                        tracing::error!(
-                            network = self.network,
-                            block = head.number,
-                            error = %e,
-                            "REQ-ST-6: the delivery account's fee position could not be recorded; \
-                             the head and the reserve readings are recorded without it, and \
-                             fee_position_age_seconds grows until it can be"
-                        );
-                    }
-                }
-            }
-            tx.commit().await?;
-            if let Some(f) = fee.as_ref().filter(|f| f.amount.is_none()) {
-                tracing::warn!(
-                    network = self.network,
-                    block = head.number,
-                    reason = f.unknown_reason.as_deref().unwrap_or_default(),
-                    "REQ-ST-6: the delivery account's fee position is unknown at this final head"
-                );
-            }
-            for r in readings.iter().filter(|r| r.amount.is_none()) {
-                tracing::warn!(
-                    network = self.network,
-                    block = head.number,
-                    token = %r.subject,
-                    reason = r.unknown_reason.as_deref().unwrap_or_default(),
-                    "REQ-BK-8: a balance at the vault is unknown at this final head"
-                );
-            }
+        if let Some(conflict) = self.record_head(&head).await? {
+            return Ok(Step::Unavailable(conflict));
         }
         let watermark = store::watermark(self.pool, self.network).await?;
         let mut next = watermark.map_or(self.start_block, |w| w + 1);
@@ -420,12 +364,16 @@ impl<R: Rpc> Follower<'_, R> {
             });
         }
         let (first, mut recorded) = (next, 0);
+        let mut refreshed = std::time::Instant::now();
         while next <= head.number {
             let last = head.number.min(next.saturating_add(self.max_range - 1));
             match self.read_range(next, last).await {
                 Ok(found) => {
                     recorded += self.record_read(next, last, &head, &found).await?;
                     next = last + 1;
+                    if next <= head.number {
+                        self.refresh_head(&head, &mut refreshed).await?;
+                    }
                 }
                 Err(reason) => {
                     tracing::warn!(
@@ -449,6 +397,107 @@ impl<R: Rpc> Follower<'_, R> {
             last: head.number,
             observations: recorded,
         })
+    }
+
+    /// Records `head`, a final point, with the vault's readings and the fee position at it, in one
+    /// transaction; `Some` is the conflict with another hash at its height (`REQ-OB-2`), when
+    /// nothing was recorded.
+    async fn record_head(&self, head: &Header) -> Result<Option<String>, sqlx::Error> {
+        // Issue #42: the vault's balances at the head, read before the head is recorded and
+        // recorded with it, in one transaction, so a final point the reserve check picks has
+        // its readings (REQ-BK-8, NFR-5). A head already read is not read again; a head the
+        // payout prover recorded first, with no readings, is read now, or the check would
+        // find no reading at the latest final point while a payout is in flight and pause
+        // the asset (PR #50 review M4).
+        let (readings, fee) = if store::head_read(self.pool, self.network, head).await? {
+            (Vec::new(), None)
+        } else {
+            (
+                reserve::readings(self.pair, &self.watch, head.number).await,
+                // Issue #14: the delivery account's fee position, read at the same point and
+                // recorded with it. A read that fails is an unknown reading, never an error.
+                Some(fee::read(self.pair, self.watch.delivery, head.number).await),
+            )
+        };
+        let mut tx = self.pool.begin().await?;
+        if let Head::Conflict(stored) = store::final_head(&mut tx, self.network, head).await? {
+            return Ok(Some(format!(
+                "REQ-OB-2: block {} is final at {} here, and {} is recorded",
+                head.number,
+                head.hash,
+                hex0x(&stored)
+            )));
+        }
+        store::record_readings(&mut tx, self.network, head, &readings).await?;
+        if let Some(f) = &fee {
+            // A fee position is not the head: if it cannot be written (a table not yet
+            // migrated, a grant or a guard that drifted), a savepoint takes back only it, and
+            // the head and the readings commit. Only a failure of the savepoint itself, the
+            // connection, is the step's.
+            let mut sp = sqlx::Acquire::begin(&mut *tx).await?;
+            match store::record_fee_position(&mut sp, self.network, head, f).await {
+                Ok(()) => sp.commit().await?,
+                Err(e) => {
+                    sp.rollback().await?;
+                    tracing::error!(
+                        network = self.network,
+                        block = head.number,
+                        error = %e,
+                        "REQ-ST-6: the delivery account's fee position could not be recorded; \
+                         the head and the reserve readings are recorded without it, and \
+                         fee_position_age_seconds grows until it can be"
+                    );
+                }
+            }
+        }
+        tx.commit().await?;
+        if let Some(f) = fee.as_ref().filter(|f| f.amount.is_none()) {
+            tracing::warn!(
+                network = self.network,
+                block = head.number,
+                reason = f.unknown_reason.as_deref().unwrap_or_default(),
+                "REQ-ST-6: the delivery account's fee position is unknown at this final head"
+            );
+        }
+        for r in readings.iter().filter(|r| r.amount.is_none()) {
+            tracing::warn!(
+                network = self.network,
+                block = head.number,
+                token = %r.subject,
+                reason = r.unknown_reason.as_deref().unwrap_or_default(),
+                "REQ-BK-8: a balance at the vault is unknown at this final head"
+            );
+        }
+        Ok(None)
+    }
+
+    /// Between ranges: records the live final point again, when it has moved past `head` and
+    /// [`Self::head_refresh`] has passed since `last` (amendment 0028). A read that fails, or a
+    /// conflict, is logged and the step goes on: it changes nothing the step reads.
+    async fn refresh_head(
+        &self,
+        head: &Header,
+        last: &mut std::time::Instant,
+    ) -> Result<(), sqlx::Error> {
+        let Some(every) = self.head_refresh else {
+            return Ok(());
+        };
+        if last.elapsed() < every {
+            return Ok(());
+        }
+        *last = std::time::Instant::now();
+        match self.pair.final_point().await {
+            Ok(live) if live.number > head.number => {
+                if let Some(conflict) = self.record_head(&live).await? {
+                    tracing::warn!(network = self.network, conflict = %conflict, "the live final point was not recorded between ranges");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!(network = self.network, error = %e, "the live final point was not read between ranges")
+            }
+        }
+        Ok(())
     }
 
     /// The vault's logs in blocks `first` to `last`, the same from both providers, each at the
