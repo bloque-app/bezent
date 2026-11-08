@@ -55,6 +55,7 @@ kind exists on `develop` at this commit.
 | `reserve-check-stalled` | reserve check (only when the failure could not be recorded, so nothing is held) | `pages/reserve.md` | yes | yes (ObserverLagPages) |
 | `reserve-check-incomplete` | reserve check: since amendment 0028 recorded only (`recorded=`), never paged | `pages/reserve.md` | yes | yes (ObserverLagPages), and now matches nothing |
 | `reserve-check-failed` | reserve check (paged only when the failure could not be recorded; otherwise recorded only) | `pages/reserve.md` | yes | yes (ObserverLagPages) |
+| `reserve-divergence-unconfirmed` | reserve check: a first reading of a difference of value (amendment 0028, the second reading); recorded only (`recorded=`), never paged | `pages/reserve.md` | yes | no, and none wanted |
 | `reserve-hold` | reserve check: a hold placed (amendment 0028); recorded only (`recorded=`), never paged | `pages/reserve.md` | yes | no, and none wanted |
 | `reserve-hold-lifted` | reserve check: a hold lifted by an evaluation that holds; recorded only, never paged | `pages/reserve.md` | yes | no, and none wanted |
 | `key-compromise` | reserve check (supply mismatch); the core's signals step (every other alert) | `pages/key-compromise.md` | yes | yes (KeyCompromisePages), but before `F-014` only the supply-mismatch case ever logged it |

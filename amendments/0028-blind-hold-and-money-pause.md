@@ -136,7 +136,7 @@ itself. The classification decides only when a person is paged, never whether wo
 - **`REQ-BK-1`**: "Any difference of value, to the smallest unit, MUST pause the asset's routes and page a human
   (`REQ-IC-2`). An evaluation that cannot be made, or that rests on a point too far behind its network's final head, is
   not a divergence: it holds the asset's routes (`REQ-IC-2`). A hold never masks a difference of value the evaluation
-  can see: one found while the check also lags is a pause as well."
+  can see: one found while the check also lags is a pause as well." The second reading (below) adds: "A difference of value closes the asset's routes at once; the pause and the page need it seen twice, at a newer final point on every network."
 - **`REQ-GV-2`**, appended: "The one exception is a hold (`REQ-IC-2`): bezent lifts it itself once an evaluation of the
   reserve equation holds, and no person lifts it by hand. A pause is never lifted by bezent."
 - **`REQ-IC-2`**: split in two. On a condition that shows value is wrong or unexplained (a divergence in the reserve
@@ -283,6 +283,33 @@ None of these is applied; each is the owner's.
    a `REQ-IC-2` stall pause: its failed evaluation goes to the unrecorded path and pages `reserve-check-failed`. It can
    still raise a `REQ-BK-1` pause from a lag (its own code counts a lag as a divergence), which then needs the two-login
    lift as before. Apply 0142 and restart the core together.
+
+## The second reading (ruling of 2026-11-08)
+
+**Ruling.** @pandres95, 2026-11-08, detailed by the KSM Operator on his delegation: "A second reading is always
+necessary — not because nodes lie, but because they're not always up-to-date, and node-scoped forks happen."
+
+- **A single anomalous reading of an asset holds signing for it, silently.** No change: `reserve_check_holds(asset)`
+  (migration 0142) is false unless the latest evaluation by id is `holds` with a book cut, so one `diverges`
+  evaluation closes the core's gate and the signer's `pause_holds_intent`. The evaluation is logged as
+  `reserve-divergence-unconfirmed` (`class: money-differs`, `stop: hold`), not paged.
+- **The `REQ-BK-1` pause and the `reserve-divergence` page need the same difference of value seen twice:** the asset's
+  previous evaluation by id also `diverges`, and the current one rests on a newer final point on every network. Compared
+  per network on `reserve_evaluations.points`: newer is a strictly higher block number, or a strictly higher final head
+  (`lag.head_block_number`), than the previous evaluation's point for that network. Two evaluations at the same
+  points are one reading seen twice and do not pause. A network the previous evaluation has no point for is not newer.
+  The pause is raised once, as before, and lifted by two operators.
+- **Blind never pauses by itself** (unchanged), and the hold lifts itself at a fresh `holds` evaluation (unchanged).
+- **`INV-4` (supply mismatch) stays immediate.** The mismatch is read from a durable flag, so one gone by the point read
+  now is still a breach to raise (PR #50 review M1); the evaluation can `hold` while the `INV-4` pause is due, and
+  deferring that pause would leave signing open. The `key-compromise` alert is a compromise alarm with its own dedupe
+  and is untouched, as are `REQ-IC-4` (migration 0095), operator pauses (0091) and the book's quarantine.
+- **A different node** will also be required for the second reading once a second node exists (#103). That is not part of
+  this round: today both readings may come from the same endpoint.
+
+**Known limit, not built.** A flapping D, H, D, H (diverges, holds, diverges, holds) never pauses: the previous
+evaluation of each `diverges` is a `holds`. It fails closed during each D, so signing is never open on a difference.
+Follow-up: count divergences over a window, not only consecutive ones.
 
 ## Identifier ledger
 

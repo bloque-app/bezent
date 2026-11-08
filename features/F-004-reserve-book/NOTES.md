@@ -336,6 +336,12 @@ needed the two-login lift. Items 6, 16 and 17 above describe the behaviour befor
     The core cannot tell a stalled chain from nothing recording heads and pages both at once. When a reading fails the
     points and lags already found are kept, so the rule still applies.
 37. **Order.** `bezent_core_service::pass` (used by `main.rs`) runs the reserve check before the cycle.
+38. **The second reading** (amendment 0028, ruling of 2026-11-08). One `diverges` evaluation closes the gate (decision 34)
+    and is logged as `reserve-divergence-unconfirmed`; the `REQ-BK-1` pause and the `reserve-divergence` page need the
+    asset's previous evaluation by id to have diverged too, at points strictly older on every network (`newer_points`:
+    a higher block number or a higher `lag.head_block_number`). `INV-4` stays immediate: its flag outlives the point, so
+    the evaluation may hold while the pause is due. A flapping D, H, D, H never pauses (fails closed on each D): follow-up.
+    A different node for the second reading waits for #103.
 
 ## Review items left open (PR #40 review, 2026-10-14)
 

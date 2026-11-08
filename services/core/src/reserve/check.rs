@@ -23,9 +23,11 @@
 //!    and checks that the surplus the networks imply is the surplus the book records and is not
 //!    negative (`REQ-BK-3`).
 //!
-//! Any difference is a divergence: the money differs, so the asset's routes pause (a `pauses` row
-//! the store lets the core write for this cause only) and a human is paged (`REQ-BK-1`,
-//! `REQ-IC-2`, `AC-E2.1`). Transfers in flight keep being observed and booked; only new work stops
+//! Any difference is a divergence: the money differs, so the asset's routes close at once (the
+//! gate and the signer read the latest evaluation), and, once a second reading at a newer final
+//! point on every network differs as well (amendment 0028), the routes pause (a `pauses` row the
+//! store lets the core write for this cause only) and a human is paged (`REQ-BK-1`, `REQ-IC-2`,
+//! `AC-E2.1`). Transfers in flight keep being observed and booked; only new work stops
 //! (`INV-15`). Lifting the pause is the operator's, by two logins (`REQ-GV-2`). Surplus below its
 //! alert level, below its floor, or a reversal not restored within a business day alerts
 //! (`REQ-BK-10`, `REQ-BE-6`); so does a floor or alert level not declared.
@@ -729,8 +731,8 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         } else {
             Vec::new()
         };
-        let previous: Option<(String, Value)> = sqlx::query_as(
-            "SELECT outcome, alerts FROM reserve_evaluations WHERE asset = $1 \
+        let previous: Option<(String, Value, Value)> = sqlx::query_as(
+            "SELECT outcome, alerts, points FROM reserve_evaluations WHERE asset = $1 \
              ORDER BY id DESC LIMIT 1",
         )
         .bind(asset)
@@ -840,7 +842,36 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
             .await?,
             logged: Vec::new(),
         };
-        if outcome == Outcome::Diverges {
+        // Amendment 0028, the second reading: one `diverges` evaluation already closes the gate
+        // (`reserve_check_holds`) and holds signing, silently. The two-person pause and its page
+        // need the same difference of value seen twice: the asset's previous evaluation by id
+        // diverged too, and this one rests on a newer final point on every network (a node can
+        // be behind, or on its own fork).
+        let confirmed = outcome == Outcome::Diverges
+            && previous
+                .as_ref()
+                .is_some_and(|(o, _, p)| o == "diverges" && newer_points(p, &points, &lags));
+        if outcome == Outcome::Diverges
+            && !confirmed
+            && previous.as_ref().is_none_or(|(o, _, _)| o != "diverges")
+        {
+            acts.logged.push(Page {
+                    kind: "reserve-divergence-unconfirmed".into(),
+                    asset: asset.to_owned(),
+                    detail: json!({
+                        "spec": "REQ-BK-1, REQ-IC-2, AC-E2.1",
+                        "class": "money-differs",
+                        "stop": "hold",
+                        "asset": asset,
+                        "evaluation": id,
+                        "differences": differences.iter().map(Difference::json).collect::<Vec<_>>(),
+                        "values": values,
+                        "lags": lags_json(&points, &lags, &blind),
+                        "action": "a first reading differs: signing is held; the pause and the page wait for a second reading at a newer final point",
+                    }),
+                });
+        }
+        if confirmed {
             let paused: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM pauses WHERE asset = $1 AND cause = 'REQ-BK-1')",
             )
@@ -874,7 +905,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
             }
         }
         if outcome == Outcome::Incomplete
-            && previous.as_ref().is_none_or(|(o, _)| o != "incomplete")
+            && previous.as_ref().is_none_or(|(o, _, _)| o != "incomplete")
         {
             acts.logged.push(Page {
                 kind: "reserve-check-incomplete".into(),
@@ -911,7 +942,7 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         }
         let before: BTreeSet<String> = previous
             .as_ref()
-            .and_then(|(_, a)| serde_json::from_value(a.clone()).ok())
+            .and_then(|(_, a, _)| serde_json::from_value(a.clone()).ok())
             .unwrap_or_default();
         for alert in alerts.iter().filter(|a| !before.contains(*a)) {
             acts.paged.push(Page {
@@ -1143,6 +1174,31 @@ impl<R: Readings, P: Pager> ReserveCheck<R, P> {
         d.terms.surplus = d.terms.implied_surplus();
         Ok(Ok(d))
     }
+}
+
+/// Whether `points` are newer than the ones a previous evaluation recorded (`prev`, its `points`
+/// column) on every network: a strictly higher block number, or a strictly higher final head
+/// (amendment 0028, the second reading). A network the previous evaluation has no point for, or
+/// no points at all, is not newer: there is nothing to have moved past.
+fn newer_points(
+    prev: &Value,
+    points: &BTreeMap<String, FinalPoint>,
+    lags: &BTreeMap<String, Lag>,
+) -> bool {
+    !points.is_empty()
+        && points.iter().all(|(n, p)| {
+            let Some(before) = prev.get(n) else {
+                return false;
+            };
+            let block = before.get("block_number").and_then(Value::as_i64);
+            let head = before
+                .pointer("/lag/head_block_number")
+                .and_then(Value::as_i64);
+            block.is_some_and(|b| p.block_number > b)
+                || head
+                    .zip(lags.get(n))
+                    .is_some_and(|(h, l)| l.head_block_number > h)
+        })
 }
 
 /// The key-compromise path of a supply mismatch (`INV-4`; PLAN `DEC-16`, 2026-10-15; PR #50 review

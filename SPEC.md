@@ -607,7 +607,7 @@ The **reserve equation** is:
 final points, continuously (`NFR-5`). Any difference of value, to the smallest unit, MUST pause the asset's
 routes and page a human (`REQ-IC-2`). An evaluation that cannot be made, or that rests on a point too far
 behind its network's final head, is not a divergence: it holds the asset's routes (`REQ-IC-2`). A hold never
-masks a difference of value the evaluation can see: one found while the check also lags is a pause as well.
+masks a difference of value the evaluation can see: one found while the check also lags is a pause as well. A difference of value closes the asset's routes at once; the pause and the page need it seen twice, at a newer final point on every network (amendment 0028, "The second reading").
 
 **`REQ-BK-2`** InTransit, OwedMint and OwedPayout MUST each be itemised: a list of the transfers and
 venue deliveries that make it up, never a residual.

@@ -511,7 +511,8 @@ lock.
   holds. It pages `reserve-blind` once it outlasts `networks.reserve_blind_page_seconds` (default 600 s, the smallest of
   the asset's networks'), or at once on a finality stall: no final head within the bound by the clock, or the same latest
   final head since the hold began, in either case while the network's walk has stopped. A difference of value found while
-  the check lags is a pause and a hold. Until the check has seen an asset (its latest evaluation, by id, holds and was
+  the check lags is a pause and a hold, once a second reading at a newer final point on every network differs as well
+  (the first closes the gate and holds signing, and is only logged as `reserve-divergence-unconfirmed`). Until the check has seen an asset (its latest evaluation, by id, holds and was
   made: `reserve_check_holds`), the core's gate and the signer hold it with or without a hold row. The core runs the
   check before its cycle, and a check's first tick evaluates every asset. A stale head while the walk's watermark moves
   is a catch-up, not a finality stall; the endpoints' head recording is unchanged.

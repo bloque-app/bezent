@@ -9,7 +9,7 @@ mod common;
 
 use bezent_core_service::refs::{self, Coordinate};
 use bezent_core_service::reserve::book::{self, Cost, Report};
-use bezent_core_service::reserve::check::{Blind, Clock, Outcome};
+use bezent_core_service::reserve::check::{Blind, Clock, Outcome, ReserveCheck};
 use bezent_core_service::reserve::coordinate_key;
 use bezent_core_service::reserve::readings::AttestedPosition;
 use chrono::{Duration, Utc};
@@ -175,7 +175,21 @@ async fn ac_e2_1_a_divergence_pauses_the_assets_routes_keeps_observing_and_pages
         "{:?}",
         e.differences
     );
-    // The asset's routes pause, and a human is paged once (REQ-IC-2).
+    // One reading is not yet a pause nor a page (amendment 0028, the second reading): it is logged,
+    // and the gate is already closed.
+    assert_eq!(
+        w.count("SELECT count(*) FROM pauses WHERE cause = 'REQ-BK-1'")
+            .await,
+        0
+    );
+    assert!(pager.kinds().is_empty());
+    assert_eq!(logged(&w, "reserve-divergence-unconfirmed").await, 1);
+    // The next reading, at a newer final point, differs too: the asset's routes pause, and a human
+    // is paged once (REQ-IC-2).
+    clock.advance(Duration::minutes(1));
+    read_all(&w.admin, 160).await;
+    let e = check.tick(&clock).await.unwrap().remove(0);
+    assert_eq!(e.outcome, Outcome::Diverges);
     assert_eq!(
         w.count(&format!(
             "SELECT count(*) FROM pauses WHERE asset = '{ASSET}' AND network IS NULL \
@@ -206,6 +220,7 @@ async fn ac_e2_1_a_divergence_pauses_the_assets_routes_keeps_observing_and_pages
     assert_eq!(w.state(id).await.0, "Completed");
     // Still apart a minute later: evaluated, recorded, not paged again while the pause stands.
     clock.advance(Duration::minutes(1));
+    read_all(&w.admin, 220).await;
     let again = check.tick(&clock).await.unwrap().remove(0);
     assert_eq!(again.outcome, Outcome::Diverges);
     assert_eq!(pager.kinds(), ["reserve-divergence"]);
@@ -251,6 +266,13 @@ async fn req_bk_1_a_mint_no_deposit_explains_diverges_on_supply(
         "{:?}",
         e.differences
     );
+    assert!(pager.kinds().is_empty(), "one reading is not yet a page");
+    read_all(&w.admin, 160).await;
+    let e = check
+        .evaluate(ASSET, t0() + Duration::minutes(1))
+        .await
+        .unwrap();
+    assert_eq!(e.outcome, Outcome::Diverges);
     assert_eq!(pager.kinds(), ["reserve-divergence"]);
 }
 
@@ -1412,6 +1434,14 @@ async fn ac_e2_1_ac_e2_3_req_bk_1_a_value_difference_while_lagging_pauses_and_ne
         "only differences of value: {:?}",
         e.differences
     );
+    // The first reading holds signing and stops there (amendment 0028, the second reading).
+    assert_eq!(stops(&w).await, (1, 0), "held, not yet paused");
+    assert!(pager.kinds().is_empty());
+    // The second, at a newer final point, pauses and pages.
+    clock.advance(Duration::minutes(1));
+    read_all(&w.admin, 1_060).await;
+    let e = check.tick(&clock).await.unwrap().remove(0);
+    assert_eq!(e.outcome, Outcome::Diverges, "{e:?}");
     assert_eq!(stops(&w).await, (1, 1), "paused, and held as well");
     assert_eq!(
         w.count(&format!(
@@ -1429,7 +1459,7 @@ async fn ac_e2_1_ac_e2_3_req_bk_1_a_value_difference_while_lagging_pauses_and_ne
         page["values"]["reserve"][ORIGIN],
         json!({"chain": "999", "book": "1000"})
     );
-    assert_eq!(page["lags"][ISSUING]["seconds"], 980);
+    assert_eq!(page["lags"][ISSUING]["seconds"], 1_040);
     // The walk catches up and the reserve is back: the check sees and holds, so the hold lifts;
     // the pause stands, evaluation after evaluation.
     decide(&w.admin, pending, "withdrawn", 1_060).await;
@@ -1645,9 +1675,16 @@ async fn ac_e2_3_req_bk_1_a_divergence_the_check_can_see_keeps_an_existing_hold(
     assert!(e.blind.is_empty(), "{:?}", e.blind);
     assert_eq!(
         stops(&w).await,
-        (1, 1),
-        "the hold stays: that evaluation did not hold"
+        (1, 0),
+        "the hold stays: that evaluation did not hold; one reading does not pause"
     );
+    read_all(&w.admin, 6 * 3_600 + 90).await;
+    let e = check
+        .evaluate(ASSET, at + Duration::seconds(90))
+        .await
+        .unwrap();
+    assert_eq!(e.outcome, Outcome::Diverges, "{e:?}");
+    assert_eq!(stops(&w).await, (1, 1), "the second reading pauses");
     *readings
         .chain()
         .reserve
@@ -1660,6 +1697,148 @@ async fn ac_e2_3_req_bk_1_a_divergence_the_check_can_see_keeps_an_existing_hold(
         .unwrap();
     assert_eq!(e.outcome, Outcome::Holds, "{e:?}");
     assert_eq!(stops(&w).await, (0, 1));
+}
+
+/// The world of the second-reading tests (amendment 0028): a funded asset whose reserve address
+/// shows one unit less than the book, read to block 100.
+async fn one_unit_short(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) -> (
+    World,
+    ReserveCheck<FakeReadings, FakePager>,
+    FakeReadings,
+    FakePager,
+) {
+    let w = World::new(options, connect).await;
+    fund(&w, 5, 1_000).await;
+    read_all(&w.admin, 100).await;
+    let (check, readings, pager) = checker(&w);
+    sync_chain(&w.admin, &readings).await;
+    *readings
+        .chain()
+        .reserve
+        .get_mut(&(TOKEN.to_owned(), RESERVE.to_owned()))
+        .unwrap() -= 1;
+    (w, check, readings, pager)
+}
+
+/// Whether the gate is open for `ASSET` (`reserve_check_holds`, migration 0142).
+async fn gate_open(w: &World) -> bool {
+    scalar(&w.admin, &format!("SELECT reserve_check_holds('{ASSET}')")).await
+}
+
+/// Amendment 0028, the second reading: one `diverges` evaluation closes the gate and holds
+/// signing, silently. It raises no pause and no page; it is only logged.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_bk_1_a0028_one_diverges_closes_the_gate_and_neither_pauses_nor_pages(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let (w, check, _readings, pager) = one_unit_short(options, connect).await;
+    let e = check.evaluate(ASSET, t0()).await.unwrap();
+    assert_eq!(e.outcome, Outcome::Diverges);
+    assert!(!gate_open(&w).await, "the gate is closed");
+    assert_eq!(
+        w.count("SELECT count(*) FROM pauses WHERE cause = 'REQ-BK-1'")
+            .await,
+        0
+    );
+    assert!(pager.kinds().is_empty());
+    assert_eq!(logged(&w, "reserve-divergence-unconfirmed").await, 1);
+    assert_eq!(logged(&w, "reserve-divergence").await, 0);
+}
+
+/// Two consecutive `diverges` at newer final points: one pause, one page, and a third at a still
+/// newer point adds neither.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_bk_1_a0028_two_diverges_at_newer_points_pause_once_and_page_once(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let (w, check, _readings, pager) = one_unit_short(options, connect).await;
+    check.evaluate(ASSET, t0()).await.unwrap();
+    assert_eq!(
+        w.count("SELECT count(*) FROM pauses WHERE cause = 'REQ-BK-1'")
+            .await,
+        0
+    );
+    read_all(&w.admin, 160).await;
+    let e = check
+        .evaluate(ASSET, t0() + Duration::minutes(1))
+        .await
+        .unwrap();
+    assert_eq!(e.outcome, Outcome::Diverges);
+    assert!(!gate_open(&w).await);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM pauses WHERE asset = '{ASSET}' AND cause = 'REQ-BK-1' \
+               AND evaluation_id = {}",
+            e.id
+        ))
+        .await,
+        1
+    );
+    assert_eq!(pager.kinds(), ["reserve-divergence"]);
+    read_all(&w.admin, 220).await;
+    check
+        .evaluate(ASSET, t0() + Duration::minutes(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        w.count("SELECT count(*) FROM pauses WHERE cause = 'REQ-BK-1'")
+            .await,
+        1
+    );
+    assert_eq!(pager.kinds(), ["reserve-divergence"]);
+}
+
+/// Two `diverges` at the same point are one reading seen twice: the same node, not a second
+/// look. No pause, and the gate stays closed.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_bk_1_a0028_two_diverges_at_the_same_point_do_not_pause(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let (w, check, _readings, pager) = one_unit_short(options, connect).await;
+    check.evaluate(ASSET, t0()).await.unwrap();
+    let e = check
+        .evaluate(ASSET, t0() + Duration::minutes(1))
+        .await
+        .unwrap();
+    assert_eq!(e.outcome, Outcome::Diverges);
+    assert!(!gate_open(&w).await);
+    assert_eq!(
+        w.count("SELECT count(*) FROM pauses WHERE cause = 'REQ-BK-1'")
+            .await,
+        0
+    );
+    assert!(pager.kinds().is_empty());
+}
+
+/// `diverges` then `holds`: the gate opens by itself and no pause was ever raised.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_bk_1_a0028_diverges_then_holds_opens_the_gate_with_no_pause(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let (w, check, readings, pager) = one_unit_short(options, connect).await;
+    check.evaluate(ASSET, t0()).await.unwrap();
+    assert!(!gate_open(&w).await);
+    *readings
+        .chain()
+        .reserve
+        .get_mut(&(TOKEN.to_owned(), RESERVE.to_owned()))
+        .unwrap() += 1;
+    read_all(&w.admin, 160).await;
+    let e = check
+        .evaluate(ASSET, t0() + Duration::minutes(1))
+        .await
+        .unwrap();
+    assert_eq!(e.outcome, Outcome::Holds, "{e:?}");
+    assert!(gate_open(&w).await);
+    assert_eq!(stops(&w).await, (0, 0));
+    assert!(pager.kinds().is_empty());
 }
 
 /// Amendment 0028, `held_heads`: a hold records each network's latest final head when it is

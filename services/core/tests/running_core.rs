@@ -141,10 +141,18 @@ async fn req_bk_8_nfr_5_the_running_check_reads_what_the_endpoints_recorded_at_i
         e.reason
     );
 
-    // A balance the endpoint read differently from the book diverges: paused and paged.
+    // A balance the endpoint read differently from the book diverges: the gate closes, and the
+    // pause and the page wait for a second reading at a newer point (amendment 0028).
     recorded_at(&w, 400, 0, Some(999), None).await;
     let e = check
         .evaluate(ASSET, t0() + Duration::seconds(40))
+        .await
+        .unwrap();
+    assert_eq!(e.outcome, Outcome::Diverges);
+    assert!(!pager.kinds().contains(&"reserve-divergence".to_owned()));
+    recorded_at(&w, 450, 0, Some(999), None).await;
+    let e = check
+        .evaluate(ASSET, t0() + Duration::seconds(50))
         .await
         .unwrap();
     assert_eq!(e.outcome, Outcome::Diverges);

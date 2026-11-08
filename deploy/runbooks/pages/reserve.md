@@ -6,7 +6,7 @@ SPDX-License-Identifier: CC-BY-4.0
 id: reserve
 kind: pages
 covers: [REQ-IC-2, REQ-BK-1, REQ-BK-3, REQ-BK-8, REQ-BK-10, REQ-GV-2, NFR-5, NFR-6, INV-1, INV-4]
-pages: [reserve-divergence, reserve-blind, reserve-alert, reserve-check-incomplete, reserve-check-failed, reserve-check-stalled, supply-mismatch-pause, book-quarantine, reserve-hold, reserve-hold-lifted]
+pages: [reserve-divergence, reserve-blind, reserve-alert, reserve-check-incomplete, reserve-check-failed, reserve-check-stalled, supply-mismatch-pause, book-quarantine, reserve-hold, reserve-hold-lifted, reserve-divergence-unconfirmed]
 observables: [reserve_equation_outcome, reserve_equation_age_seconds, reserve_amount, observer_lag_estimate_seconds, open_gaps, pauses_in_force, holds_in_force, hold_age_seconds]
 tests: [services/core/tests/reserve_check.rs::ac_e2_3_req_ic_2_nfr_5_m2_an_evaluation_that_cannot_be_made_is_held_and_paged_past_the_bound, services/core/tests/reserve_check.rs::ac_e2_3_req_ic_2_a_cold_start_with_every_term_zero_is_held_not_paused_and_lifts_itself, services/core/tests/reserve_check.rs::inv_1_nfr_5_ac_e2_3_m2_a_walk_catching_up_is_held_never_a_divergence, services/core/tests/reserve_check.rs::inv_1_nfr_6_ac_e2_3_mf2_a_finality_stall_is_held_and_paged_at_once, services/core/tests/reserve_check.rs::ac_e2_1_ac_e2_3_req_bk_1_a_value_difference_while_lagging_pauses_and_never_lifts_itself, services/core/tests/reserve_check.rs::inv_1_req_ic_2_m1_an_observation_the_book_cannot_post_is_quarantined_paged_and_paused, crates/store/tests/reserve_check.rs::req_bk_1_req_ic_2_the_core_pauses_only_an_assets_routes_on_that_assets_divergence, services/core/tests/reserve_check.rs::ac_e2_1_a_divergence_pauses_the_assets_routes_keeps_observing_and_pages_a_human, services/core/tests/operations.rs::ac_i2_1_an_operators_pause_holds_new_work_in_each_scope_and_a_second_operator_lifts_it]
 exercised: no
@@ -37,7 +37,7 @@ final points and compared with the book, at zero tolerance, at least once a minu
 
 | Page | Meaning | What the core did |
 |---|---|---|
-| `reserve-divergence` | A term or an item differs between the networks and the book, or surplus is negative. Carries `values`, `lags` and `also_blind`. | paused the asset (`REQ-BK-1`) |
+| `reserve-divergence` | A term or an item differs between the networks and the book, or surplus is negative. Carries `values`, `lags` and `also_blind`. Paged only when a second reading, at a newer final point on every network, differs too (amendment 0028); the first is `reserve-divergence-unconfirmed`. | paused the asset (`REQ-BK-1`) |
 | `supply-mismatch-pause` | The on-chain component's count of the asset differs from the issuance (`INV-4`). Also raises `key-compromise`. | paused the asset |
 | `book-quarantine` | An observation the book could not post was set aside; everything else is still posted and checked. | paused the asset it moves |
 | `reserve-blind` | The asset has been held blind for longer than its bound (`why: beyond-bound`), or a network's final head is not advancing (`why: finality-stall`: the chain stopped finalizing, or nothing records its heads). Carries `values`, `lags`, `reason`, `since`. No difference of value is known. | holds the asset; lifts the hold itself when an evaluation holds |
@@ -47,7 +47,7 @@ final points and compared with the book, at zero tolerance, at least once a minu
 
 Recorded in the event log and the service's log (`recorded=<kind>`, a WARN line no page filter matches), never paged:
 `reserve-hold` (a hold was placed), `reserve-hold-lifted` (an evaluation held and the hold was lifted, with how long it
-lasted), `reserve-check-incomplete` (the evaluations turned incomplete) and `reserve-check-failed` when the failure was
+lasted), `reserve-check-incomplete` (the evaluations turned incomplete), `reserve-divergence-unconfirmed` (a first reading of a difference of value: signing is held, nothing is paused or paged until a second reading at a newer final point differs too) and `reserve-check-failed` when the failure was
 recorded (the asset is then held).
 
 ## Pages
