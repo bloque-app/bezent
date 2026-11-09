@@ -47,4 +47,12 @@ item is ruled as recommended. Sizes are rough, for one engineer with agents, rev
 |---|---|---|---|
 | T-018-18 | Deploy `DirectedDeposit` on Polygon mainnet; declaration (`REQ-AS-11`); endpoint configuration; verifier passes | `REQ-AS-11`, `REQ-GV-3` | Verifier green against mainnet; address published with the vault |
 | T-018-19 | Runbooks: a return that fails, spam against the caps, pausing the directing code, an `UnpairedDirection` | `REQ-IC-6`, `NFR-9` | Each exercised on the test bed |
-| T-018-20 | Round trip from `bridge.bloque.network`: a 1 USDC deposit, then 9 more, mint, redeem 10 (the redemption minimum, Open 14), payout; one return exercised | `M-6` | Every leg at its coordinate, the reserve check at zero divergence throughout, the statement shows it |
+| T-018-20 | Round trip from `bridge.bloque.network`: a 1 USDC deposit, mint, redeem the 1 bUSDC (production's redemption minimum is 1 bUSDC, Open 14), payout; one return exercised | `M-6` | Every leg at its coordinate, the reserve check at zero divergence throughout, the statement shows it |
+
+## Milestone 5 — evmhot sweeps through the directing contract (S, in evmhot, outside this repository)
+
+Ruled by @pandres95, 2026-11-08 (plan, part 5). Until it is done, Swaps binds sweeps by coordinate, as today.
+
+| ID | Task | Traces | Done when |
+|---|---|---|---|
+| T-018-21 | evmhot sweeps each deposit address by calling `DirectedDeposit.deposit` from that address (`depositWithPermit`, or `approve` then `deposit`), naming the user's Kreivo account as recipient, instead of a plain transfer into the vault; balances above the maximum are swept in several calls | `REQ-IN-10`, `AC-A6.1`, `AC-A6.6` | On the test bed, a sweep is one directed arrival, minted for the recipient it names with no deposit request; a sweep outside the limits reverts and moves nothing; Swaps no longer binds sweeps by coordinate |
