@@ -14,7 +14,7 @@ keep `INV-2`, `INV-6`, `INV-10` and `INV-14` (plan `DEC-21` and `DEC-22`, propos
 
 ## What it builds
 
-Four parts, in this order. Each is a milestone of the feature (sizes in `tasks.md`).
+Five parts, in this order. Each is a milestone of the feature (sizes in `tasks.md`).
 
 ### 1. The contract: `contracts/evm/src/DirectedDeposit.sol`
 
@@ -150,6 +150,22 @@ UI copy says **bezent**.
   account.
 - **Licence:** Open 12 (recommended GPL-3.0-or-later).
 
+### 5. evmhot sweeps through the directing contract
+
+Ruled by @pandres95, 2026-11-08: Bloque's evmhot hot-wallet service sweeps each user's deposit address by calling the
+directing contract's `deposit` from that address (`depositWithPermit`, or `approve` and then `deposit`), instead of a
+plain transfer into the vault. Each sweep then names its Kreivo recipient on chain, in the same transaction as the
+value, and is a directed arrival: it becomes a deposit by itself (part 3) and needs no requester to bind it.
+
+- **Until then**, a sweep stays a plain transfer, and Swaps binds it by coordinate as today (amendment 0029, A3).
+- **The work is evmhot's**, outside this repository. bezent needs nothing new for it beyond parts 1 to 3: the sweep's
+  `Transfer` pairs with its `Directed` log like any other.
+- **What follows from the rule.** The funder is the deposit address, so a sweep that can never be minted is returned
+  there (A5), to an address evmhot controls. A sweep must lie within the contract's limits (1 to 50 000 USDC), so a
+  larger balance is swept in several calls and a smaller one waits. If the directed share and count cap (Open 5 and 6)
+  are ruled, they count sweeps too unless the ruling says otherwise; the figures recommended there were sized for web
+  app users alone.
+
 ## Not now
 
 Gas sponsorship (Open 13); ERC-7930 recipients (`NOTES.md`, "Recipient format"); other networks or assets (Base and
@@ -171,6 +187,8 @@ sufficient (Open 7).
   log is never an arrival; the reserve check stays at zero divergence through all of it (`INV-1`).
 - **Web app:** on Amoy and the zombienet test bed, a user with only a browser wallet deposits, sees the mint, redeems
   and sees the payout; a recipient that cannot receive is refused before signing.
-- **Mainnet (`M-6`):** a round trip from the web app (deposit, mint, redeem, payout) starting with a 1 USDC deposit;
-  the redemption minimum is 10 bUSDC, so 9 more are deposited and 10 redeemed (amendment 0029, Open 14); one return exercised,
-  with the caps in force and the new runbooks exercised (`NFR-9`).
+- **Mainnet (`M-6`):** a round trip from the web app (deposit, mint, redeem, payout) of 1 USDC; production's
+  redemption minimum is 1 bUSDC, so the 1 bUSDC minted is redeemed whole (amendment 0029, Open 14); one return
+  exercised, with the caps in force and the new runbooks exercised (`NFR-9`).
+- **evmhot sweeps:** a sweep from a deposit address through the directing contract is minted for the recipient it
+  names, with no deposit request from Swaps.

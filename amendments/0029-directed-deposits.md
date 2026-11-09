@@ -88,7 +88,7 @@ any arrival.
 
 | Arrival at the reserve | Who decides its destination | How it becomes a deposit |
 |---|---|---|
-| A plain transfer (Swaps, an evmhot sweep, anyone) | A requester, one of whose declared senders is its funder (`REQ-PN-3`) | Unchanged: a deposit request names its coordinate (`REQ-RQ-3`) |
+| A plain transfer (Swaps, an evmhot sweep until it goes through the directing code, anyone; `F-018` plan, part 5) | A requester, one of whose declared senders is its funder (`REQ-PN-3`) | Unchanged: a deposit request names its coordinate (`REQ-RQ-3`) |
 | A directed arrival | Its funder, in the same transaction | By itself (A2). **No requester may bind it**: a deposit request, or a requester's refund request (`REQ-RQ-6`), naming its coordinate is refused `ERR-SourceNotFound` ("does not hold a movement bezent can bind"), and binds nothing. The one transfer besides its deposit that may name it is its return, which bezent orders itself, to its funder (A5) |
 
 - A directed arrival is never also a plain arrival. On Polygon the vault receives one `Transfer` log per directed
@@ -350,10 +350,12 @@ Each is one question for @pandres95, with a recommendation.
 13. **Gas for users with no POL.** Should the first release sponsor Polygon gas (a relayer of EIP-3009 authorisations,
     or an ERC-4337 paymaster)? *Recommended: no.* A relayer means pulling from an `owner` who is not the caller, which
     reopens front-running and the refund destination. Revisit after `M-6`.
-14. **The 1 USDC mainnet test and the redemption minimum.** The bUSDC redemption minimum is 10 bUSDC
-    (`config/bounds.example.toml`, `redeem_minimum = 10_000_000`), so 1 bUSDC cannot be redeemed. Should the mainnet
-    test deposit 1 USDC, then 9 more, and redeem 10, rather than lower the minimum? *Recommended: yes.* That keeps the
-    bounds as configured and still proves a deposit at the route's 1 USDC minimum.
+14. **The 1 USDC mainnet test and the redemption minimum.** *Corrected: no longer a question.* The first
+    draft read the redemption minimum from `config/bounds.example.toml` (`redeem_minimum = 10_000_000`, 10 bUSDC) and
+    proposed depositing 9 more USDC to redeem 10. That file is an example. Production's bUSDC redemption minimum is
+    **1 bUSDC**, set by governance referendum 74, and a 1 bUSDC redemption succeeded on mainnet on 2026-11-09. So the
+    mainnet test deposits 1 USDC, mints 1 bUSDC and redeems it whole, with no top-up, and still proves a deposit at
+    the route's 1 USDC minimum.
 
 ## Identifier ledger
 
