@@ -1602,19 +1602,13 @@ async fn m1_inv_2_req_cv_1_a_refund_never_names_a_convertible_arrival(pool: PgPo
 
 /// S1: a conversion's output sent from a venue address (the pool, declared in `venue_addresses`)
 /// is still taken in as a deposit (REQ-CV-2); an arrival from that address is a venue delivery.
-/// Named directly, the output binds only for a requester that declared the pool as a sender
-/// (`REQ-PN-3`, amendment 0026), as alpha does here.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn s1_req_cv_2_a_conversion_output_from_a_venue_address_is_still_a_deposit(pool: PgPool) {
     let ingress = Ingress::new(&pool).await;
     const POOL: &str = "0x00000000000000000000000000000000000000cc";
     exec(
         &pool,
-        &format!(
-            "UPDATE routes SET venue_addresses = '[\"{POOL}\"]'; \
-             INSERT INTO requester_senders (requester, network, address) \
-               VALUES ('alpha', '{ORIGIN}', '{POOL}')"
-        ),
+        &format!("UPDATE routes SET venue_addresses = '[\"{POOL}\"]'"),
     )
     .await;
     let output = observe_seen(

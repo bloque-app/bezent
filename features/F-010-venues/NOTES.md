@@ -59,12 +59,6 @@ destination is the request's. Grants are per kind (`REQ-PN-2`). So:
 Nothing in this pull request closes or hides that. It needs its own decision (amendment 0018, "The exposure the binding
 rules do not close"), and none of the options there closes it for ordinary arrivals.
 
-**Since amendment 0026** (`d-requester-arrivals`, 2026-11-06: "Bind by sender"; migration 0135): a deposit binds only an
-arrival whose sender is one of its requester's declared senders (`REQ-PN-3`). The test above is now
-`services/ingress/tests/bind_by_sender.rs` and states the opposite. An output named directly is sent from the pool, so it
-binds only for a requester that declared the pool (do not); one named through a convertible deposit is covered by the
-check on that deposit's arrival. Naming another party's output for one's own awaiting deposit stays open (0026, Open 1).
-
 ## What waited (amendment 0018, proposed)
 
 The spec did not say which convertible arrival a conversion's output belongs to, or what object holds

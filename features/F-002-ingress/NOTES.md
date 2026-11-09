@@ -348,20 +348,3 @@ Still open, each larger than a fix in this PR:
   receiver that holds every request open delays every other requester by up to that. To do: export the lag (the head
   minus `webhook_cursor.after`, and the age of the oldest pending delivery) where the other services' metrics go, and
   run attempts per requester with their own concurrency so one receiver cannot hold the batch.
-
-## Follow-up, issue #98: bind arrivals by sender (SPEC v0.5.9, amendment 0026)
-
-Ruled `d-requester-arrivals`, 2026-11-06: "Bind by sender". A deposit binds only an arrival sent from one of its
-requester's declared senders (`REQ-PN-3`, `REQ-IN-3`, `AC-A2.5`).
-
-- `decide_deposit` reads the observation's `sender` with the source and asks the store's `sender_declared()` for the
-  request's requester. A miss is `ERR-SenderNotDeclared`: a transfer in `Refused`, bound to nothing. The check comes
-  after the source is found, at the reserve and not a funding top-up (so a reserve's or a venue's delivery stays
-  `ERR-SourceNotFound`), and before consumption (so another requester learns nothing of whether the arrival is bound).
-- `POST /v0/deposits/conversion` is unchanged: the output is sent by the pool and is bound through the deposit whose
-  convertible arrival was checked, by that deposit's requester only. An output named directly through `POST
-  /v0/deposits` is checked like any arrival: it binds only for a requester that declared the pool.
-- The store (migration 0135) refuses the answer that binds a deposit for a requester that did not declare its sender,
-  whoever writes it (`intake_answers_guard_sender`), as a backstop.
-- The test fixtures declare `FUNDER` for alpha and beta (`tests/common`); `tests/bind_by_sender.rs` declares senders of
-  its own and is what `requester_binding_today.rs` became.

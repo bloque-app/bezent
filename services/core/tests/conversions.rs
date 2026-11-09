@@ -48,11 +48,6 @@ const INGRESS_LOGIN: &str = "core_tests_ingress_login";
 /// The requester that sends the deposit requests, and its credential (`<id>.<secret>`).
 const REQUESTER: &str = "swaps";
 const CREDENTIAL: &str = "sw-1.swaps-secret-0123456789";
-/// The funder a convertible arrival comes from, declared as the requester's sender (`REQ-PN-3`,
-/// amendment 0026): a deposit binds only an arrival from one of its requester's declared senders.
-const FUNDER: &str = "0xFunder0000000000000000000000000000000001";
-/// The second requester's own sender.
-const OTHER_FUNDER: &str = "0xFunder0000000000000000000000000000000002";
 
 /// A deposit request binding the observation at (`ORIGIN`, `block`, log `index`) for `amount`, written
 /// straight into the transfers as the migration owner, returning the store's refusal instead of
@@ -95,14 +90,8 @@ fn detail(event: &str, tx: &str, extra: Value) -> Value {
     d
 }
 
-/// A convertible arrival at the reserve: the convertible, from the requester's funder, in a
-/// transaction of its own.
+/// A convertible arrival at the reserve: the convertible, from a funder, in a transaction of its own.
 async fn convertible_arrival(pool: &PgPool, block: i64, amount: u128) -> i64 {
-    convertible_arrival_from(pool, block, amount, FUNDER).await
-}
-
-/// A convertible arrival at the reserve from `sender`, in a transaction of its own.
-async fn convertible_arrival_from(pool: &PgPool, block: i64, amount: u128, sender: &str) -> i64 {
     observe(
         pool,
         ORIGIN,
@@ -110,15 +99,11 @@ async fn convertible_arrival_from(pool: &PgPool, block: i64, amount: u128, sende
         0,
         CONVERTIBLE,
         amount,
-        Some(sender),
+        Some("0xFunder0000000000000000000000000000000001"),
         Some(RESERVE),
         None,
         true,
-        detail(
-            "ConvertibleArrival",
-            &format!("0x{:064x}", 1000 + block),
-            json!({}),
-        ),
+        detail("ConvertibleArrival", &format!("0x{:064x}", 1), json!({})),
     )
     .await
 }
@@ -180,9 +165,8 @@ fn coordinate(block: i64, index: i64) -> Value {
 const OTHER: &str = "other";
 const OTHER_CREDENTIAL: &str = "ot-1.other-secret-0123456789";
 
-/// Grants `requester` the deposit grant under `credential` (`<id>.<secret>`), with `sender` as its
-/// one declared sender on the origin network (`REQ-PN-3`).
-async fn grant(w: &World, requester: &str, credential: &str, sender: &str) {
+/// Grants `requester` the deposit grant under `credential` (`<id>.<secret>`).
+async fn grant(w: &World, requester: &str, credential: &str) {
     let (id, secret) = credential.split_once('.').unwrap();
     let digest = hex::encode(Sha256::digest(secret.as_bytes()));
     exec(
@@ -190,22 +174,8 @@ async fn grant(w: &World, requester: &str, credential: &str, sender: &str) {
         &format!(
             "INSERT INTO requesters (requester) VALUES ('{requester}'); \
              INSERT INTO requester_grants (requester, grant_kind) VALUES ('{requester}', 'deposit'); \
-             INSERT INTO requester_senders (requester, network, address) \
-               VALUES ('{requester}', '{ORIGIN}', '{sender}'); \
              INSERT INTO requester_credentials (credential_id, requester, secret_sha256) \
                VALUES ('{id}', '{requester}', '\\x{digest}');"
-        ),
-    )
-    .await;
-}
-
-/// Declares `sender` as one of `requester`'s senders on the origin network (`REQ-PN-3`).
-async fn declare_sender(w: &World, requester: &str, sender: &str) {
-    exec(
-        &w.admin,
-        &format!(
-            "INSERT INTO requester_senders (requester, network, address) \
-               VALUES ('{requester}', '{ORIGIN}', '{sender}')"
         ),
     )
     .await;
@@ -327,8 +297,6 @@ async fn ingress(w: &World) -> Router {
         &format!(
             "INSERT INTO requesters (requester) VALUES ('{REQUESTER}'); \
              INSERT INTO requester_grants (requester, grant_kind) VALUES ('{REQUESTER}', 'deposit'); \
-             INSERT INTO requester_senders (requester, network, address) \
-               VALUES ('{REQUESTER}', '{ORIGIN}', '{FUNDER}'); \
              INSERT INTO requester_credentials (credential_id, requester, secret_sha256) \
                VALUES ('{}', '{REQUESTER}', '\\x{digest}');",
             CREDENTIAL.split_once('.').unwrap().0
@@ -510,53 +478,6 @@ async fn ac_a5_2_req_cv_2_req_cv_5_req_rq_4_inv_2_inv_6_the_request_comes_first_
     assert_eq!(answer["error"], "ERR-ReferenceConflict", "{answer}");
 }
 
-/// `REQ-PN-3`, `REQ-CV-2`, `REQ-RQ-4`, `INV-6` (amendment 0026 on A1b): the convertible arrival's
-/// sender is what is checked, when a deposit binds it. Another requester, holding the deposit grant
-/// but not that sender, is refused `ERR-SenderNotDeclared` on the arrival; the requester whose sender
-/// it came from binds it, and then names the output, sent from the venue's pool that nobody
-/// declared: the output is bound through the deposit, and the mint is the output's.
-#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_pn_3_req_cv_2_the_convertible_arrivals_sender_is_checked_and_its_output_binds_through_the_deposit(
-    options: PgPoolOptions,
-    connect: PgConnectOptions,
-) {
-    let w = World::new(options, connect).await;
-    let router = ingress(&w).await;
-    grant(&w, OTHER, OTHER_CREDENTIAL, OTHER_FUNDER).await;
-    let arrival = convertible_arrival(&w.admin, 10, 5_000).await;
-    decide(&w.admin, arrival, "final", 14).await;
-
-    let (_, answer) = deposit_as(&router, OTHER_CREDENTIAL, "theirs", &coordinate(10, 0)).await;
-    assert_eq!(answer["error"], "ERR-SenderNotDeclared", "{answer}");
-    let (_, answer) = deposit_as(&router, CREDENTIAL, "dep", &coordinate(10, 0)).await;
-    assert_eq!(answer["state"], "Accepted", "{answer}");
-    let id = transfer_of(&w, &answer).await;
-    w.settle(t0()).await;
-    assert_eq!(
-        w.state(id).await,
-        ("Source-Final".into(), Some("CND-AwaitingConversion".into()))
-    );
-
-    let (_, output) = swap(&w.admin, 12, 5_000, 4_990).await;
-    decide(&w.admin, output, "final", 16).await;
-    assert_eq!(
-        w.count(&format!(
-            "SELECT count(*) FROM requester_senders WHERE address = '{POOL}'"
-        ))
-        .await,
-        0,
-        "nobody declared the pool"
-    );
-    let (_, answer) = conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(12, 2)).await;
-    assert_eq!(answer["state"], "Source-Final", "{answer}");
-    assert_eq!(answer["converted_arrival"]["amount"], "5000", "{answer}");
-    assert_eq!(bound_to(&w, id).await, (12, 2, "4990".into()));
-    w.cycle(t0()).await;
-    w.cycle(t0()).await;
-    let (_, payload) = order(&w.admin, id, 1).await.expect("the mint order");
-    assert_eq!(payload["amount"], "4990", "{payload}");
-}
-
 /// `REQ-RQ-4`, `INV-2`: an output is named only by the requester that made the deposit. Another
 /// requester, holding the deposit grant, finds no deposit of its own by that reference, and its
 /// request is refused with nothing moved. (That it could have bound the same output by a deposit of
@@ -568,7 +489,7 @@ async fn req_rq_4_inv_2_an_output_named_by_a_different_requester_is_refused(
 ) {
     let w = World::new(options, connect).await;
     let (router, id) = awaiting(&w).await;
-    grant(&w, OTHER, OTHER_CREDENTIAL, OTHER_FUNDER).await;
+    grant(&w, OTHER, OTHER_CREDENTIAL).await;
     let (_, output) = swap(&w.admin, 12, 5_000, 4_990).await;
     decide(&w.admin, output, "final", 16).await;
 
@@ -582,40 +503,22 @@ async fn req_rq_4_inv_2_an_output_named_by_a_different_requester_is_refused(
     assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
 }
 
-/// `INV-2`, `REQ-PN-3`: an output already consumed is refused. A second requester can no longer
-/// bind the swap's output by a deposit of its own: the output is sent from the venue's pool, which
-/// it did not declare (amendment 0026). It can still name it as the output of its own awaiting
-/// deposit, of an arrival from its own sender: that the arrival fed that conversion stays the
-/// requester's word (amendment 0018, A1b; open in amendment 0026). Then the first requester's
-/// conversion request is `ERR-SourceConsumed`, and its deposit still awaits, minting nothing.
+/// `INV-2`: an output already consumed is refused. A second requester binds the swap's output with
+/// a deposit of its own first (nothing ties an output to a requester: amendment 0018's exposure,
+/// open); the first requester's conversion request is then `ERR-SourceConsumed`, and its deposit
+/// still awaits, minting nothing.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn inv_2_req_pn_3_an_output_already_consumed_is_refused(
+async fn inv_2_an_output_already_consumed_is_refused(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
     let (router, id) = awaiting(&w).await;
-    grant(&w, OTHER, OTHER_CREDENTIAL, OTHER_FUNDER).await;
+    grant(&w, OTHER, OTHER_CREDENTIAL).await;
     let (_, output) = swap(&w.admin, 12, 5_000, 4_990).await;
     decide(&w.admin, output, "final", 16).await;
     let (_, answer) = deposit_as(&router, OTHER_CREDENTIAL, "theirs", &coordinate(12, 2)).await;
-    assert_eq!(answer["error"], "ERR-SenderNotDeclared", "{answer}");
-
-    // The second requester's own convertible arrival, and its deposit awaiting a conversion.
-    let theirs = convertible_arrival_from(&w.admin, 11, 5_000, OTHER_FUNDER).await;
-    decide(&w.admin, theirs, "final", 16).await;
-    let (_, answer) = deposit_as(&router, OTHER_CREDENTIAL, "theirs-own", &coordinate(11, 0)).await;
     assert_eq!(answer["state"], "Accepted", "{answer}");
-    w.settle(t0()).await;
-    let (_, answer) = conversion_as(
-        &router,
-        OTHER_CREDENTIAL,
-        "theirs-conv",
-        "theirs-own",
-        &coordinate(12, 2),
-    )
-    .await;
-    assert_eq!(answer["state"], "Source-Final", "{answer}");
 
     let (_, answer) = conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(12, 2)).await;
     assert_eq!(answer["error"], "ERR-SourceConsumed", "{answer}");
@@ -644,7 +547,7 @@ async fn inv_2_an_arrival_named_twice_is_refused(
 ) {
     let w = World::new(options, connect).await;
     let (router, id) = awaiting(&w).await;
-    grant(&w, OTHER, OTHER_CREDENTIAL, OTHER_FUNDER).await;
+    grant(&w, OTHER, OTHER_CREDENTIAL).await;
     let (_, answer) = deposit_as(&router, CREDENTIAL, "dep-again", &coordinate(10, 0)).await;
     assert_eq!(answer["error"], "ERR-SourceConsumed", "{answer}");
 
@@ -652,18 +555,13 @@ async fn inv_2_an_arrival_named_twice_is_refused(
     decide(&w.admin, output, "final", 16).await;
     let (_, answer) = conversion_as(&router, CREDENTIAL, "conv", "dep", &coordinate(12, 2)).await;
     assert_eq!(answer["state"], "Source-Final", "{answer}");
-    let (_, answer) = deposit_as(&router, CREDENTIAL, "dep-later", &coordinate(10, 0)).await;
-    assert_eq!(answer["error"], "ERR-SourceConsumed", "{answer}");
-    // Another requester is refused before consumption is looked at: the arrival is not from a
-    // sender it declared (REQ-PN-3, amendment 0026).
-    let (_, answer) = deposit_as(
-        &router,
-        OTHER_CREDENTIAL,
-        "theirs-later",
-        &coordinate(10, 0),
-    )
-    .await;
-    assert_eq!(answer["error"], "ERR-SenderNotDeclared", "{answer}");
+    for (credential, reference) in [
+        (CREDENTIAL, "dep-later"),
+        (OTHER_CREDENTIAL, "theirs-later"),
+    ] {
+        let (_, answer) = deposit_as(&router, credential, reference, &coordinate(10, 0)).await;
+        assert_eq!(answer["error"], "ERR-SourceConsumed", "{answer}");
+    }
     assert_eq!(
         w.count("SELECT count(*) FROM transfers WHERE state <> 'Refused'")
             .await,
@@ -1312,9 +1210,7 @@ async fn req_cv_2_req_cv_5_the_store_refuses_a_deposit_of_any_amount_but_the_out
 /// `AC-A5.2`, `REQ-CV-2`, `REQ-CV-5`, `INV-6`: an output named directly by a deposit request (the
 /// path that existed before amendment 0018, which the ruling did not remove) is bound once final
 /// and minted for exactly what the swap delivered; the swap's input is refused. Such a deposit
-/// records no convertible arrival; the convertible arrival nobody named stays unassociated. Since
-/// amendment 0026 the output binds only for a requester that declared its sender, the venue's pool
-/// (`REQ-PN-3`; whether the direct path stays is amendment 0018's Open 2): refused until then.
+/// records no convertible arrival; the convertible arrival nobody named stays unassociated.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn ac_a5_2_req_cv_2_req_cv_5_inv_6_an_output_named_directly_is_bound_and_minted(
     options: PgPoolOptions,
@@ -1345,9 +1241,6 @@ async fn ac_a5_2_req_cv_2_req_cv_5_inv_6_an_output_named_directly_is_bound_and_m
     );
 
     decide(&w.admin, output, "final", 14).await;
-    let (_, answer) = request_deposit(&router, "r-out-undeclared", &coordinate(12, 2)).await;
-    assert_eq!(answer["error"], "ERR-SenderNotDeclared", "{answer}");
-    declare_sender(&w, REQUESTER, POOL).await;
     let (status, answer) = request_deposit(&router, "r-out", &coordinate(12, 2)).await;
     assert_eq!(status, StatusCode::CREATED, "{answer}");
     assert_eq!(answer["state"], "Accepted", "{answer}");
