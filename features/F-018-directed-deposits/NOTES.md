@@ -47,7 +47,7 @@ signature, straight to the token. That makes a plain arrival with no direction, 
 are safe, but the deposit is lost to the user until the operator releases it. `receiveWithAuthorization` requires the
 payee to be the caller, so the funds would pass through the contract, and the vault's `Transfer` would come from the
 contract instead of the user. With permit, the token moves from the user to the vault in one `transferFrom`, the
-`Transfer` log's `from` is the funder (as amendment 0026 reads a sender), and a front-run permit only sets an
+`Transfer` log's `from` is the funder (the funder, as the endpoint reads a sender), and a front-run permit only sets an
 allowance the contract then uses.
 
 ## Recipient format: `bytes32`, not ERC-7930

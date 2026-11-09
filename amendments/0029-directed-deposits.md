@@ -5,12 +5,16 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0029 — a deposit that names its own destination needs no requester
 
-**Status:** **Proposed**, 2026-11-08. Nothing here is applied: `SPEC.md` and `PLAN.md` are unchanged, and every text below
-is a proposal. The direction is @pandres95's ruling in chat, 2026-11-08 (below); the design that carries it out, and
-every item under "Open", wait for his ruling.
+**Status:** **Proposed**, 2026-11-08; **Open 1, 2 and 3 ruled by @pandres95 on the decision form, 2026-11-09**
+(`d-0029-window`, `d-0029-unreceivable`, `d-0029-return-approver`; see "Open"). Nothing here is applied: `SPEC.md` and
+`PLAN.md` are unchanged, and every text below is a proposal, with those three rulings written into it. The direction is
+@pandres95's ruling in chat, 2026-11-08 (below); the design that carries it out, and every other item under "Open", wait
+for his ruling. Amendment 0026 (a deposit binds only an arrival from its requester's declared senders) is withdrawn
+(`d-0026-holdout`, ruled 2026-11-09), so nothing below relies on it.
 **Target:** `SPEC.md` v0.5.11 and `PLAN.md` v0.6.10, as pull request #112 (amendment 0028) leaves them; v0.5.10 and
 v0.6.9 on `develop` today. If applied, `SPEC.md` v0.5.12 and `PLAN.md` v0.6.11; if another amendment takes those
-versions first, this one takes what is next.
+versions first, this one takes what is next. The withdrawal of amendment 0026 (the revert of pull request #100) takes
+`SPEC.md` v0.5.11 and `PLAN.md` v0.6.10 too; whichever of it and #112 merges second renumbers.
 **Date:** 2026-11-08
 **Needs:** a ruling on the design (A1 to A6) and on each item under "Open". The feature that builds it is `F-018`
 (`features/F-018-directed-deposits/`). Numbered 0029 because 0027 and 0028 are taken by open pull requests (#111, #112).
@@ -37,8 +41,11 @@ Read on `develop` at `cb9872f`:
 - **A requester names it.** A final arrival waits as `CND-Unassociated` until a requester binds it by coordinate
   (`REQ-IN-3`, `REQ-RQ-3`; the ingress's `POST /v0/deposits`). Where the deposit goes is a requester fact (§4.2, the
   first row; §4.3, "Can the requester send someone else's deposit to the wrong place? Yes").
-- **Only the right requester may name it.** Amendment 0026 limits binding to an arrival whose funder is one of the
-  requester's declared senders (`REQ-PN-3`, `ERR-SenderNotDeclared`). A person with no requester has no way in.
+- **Only a requester may name it.** Any requester holding the deposit grant may bind an arrival by its coordinate
+  (`REQ-RQ-3`). Amendment 0026 would have limited that to an arrival whose funder is one of the requester's declared
+  senders; it is withdrawn (`d-0026-holdout`, 2026-11-09), because the swap service must keep binding evmhot sweeps by
+  coordinate, and evmhot's senders are thousands of per-user addresses. This amendment's directed deposits are the path
+  that replaces it. A person with no requester has no way in.
 - **Withdrawals are already open.** Anyone holding a bridged asset may redeem it on the issuing network (§7.F,
   "Redeem: Anyone"; `US-B5`). Only the way in needs opening.
 
@@ -61,8 +68,9 @@ On Polygon (the plan's part, `DEC-21` below), the directing code is a small cont
 `features/F-018-directed-deposits/plan.md` has the interface.
 
 Because the funder names the destination in the call that moves its own value, nobody else can bind the arrival to
-another destination: there is no window between arrival and request for anyone to use. The binding problem that
-amendment 0026 solves for plain transfers does not arise.
+another destination: there is no window between arrival and request for anyone to use. The binding problem of plain
+transfers (amendment 0018's exposure; amendment 0026 would have closed it by declared senders and is withdrawn) does
+not arise.
 
 ### A2. Becoming a deposit without a request
 
@@ -78,25 +86,26 @@ A final directed arrival becomes a deposit by itself. It begins at `Source-Final
 
 Nothing in the request surface opens. `REQ-PN-1` still holds: a directed arrival is not a request. bezent creates the
 deposit from its own observation, and the store refuses a directed deposit whose destination or refund destination is
-not the observed one (the store-layer check of `F-018`, as amendment 0026's `BZ001` backs the ingress).
+not the observed one (the store-layer check of `F-018`, which backs the core's rule at the store).
 
 From `Source-Final` on, the deposit is an ordinary deposit: every rule of §5.5, every bound of §7.F, the conditions of
 §10, review (§5.9) and the reserve book (§5.3). It counts as `OwedMint` from its finality until its mint is final, like
 any arrival.
 
-### A3. Coexisting with requesters and amendment 0026
+### A3. Coexisting with requesters
 
 | Arrival at the reserve | Who decides its destination | How it becomes a deposit |
 |---|---|---|
-| A plain transfer (Swaps, an evmhot sweep until it goes through the directing code, anyone; `F-018` plan, part 5) | A requester, one of whose declared senders is its funder (`REQ-PN-3`) | Unchanged: a deposit request names its coordinate (`REQ-RQ-3`) |
+| A plain transfer (Swaps, an evmhot sweep until it goes through the directing code, anyone; `F-018` plan, part 5) | A requester, by the coordinate its deposit request names; there is no sender rule (amendment 0026 is withdrawn) | Unchanged: a deposit request names its coordinate (`REQ-RQ-3`) |
 | A directed arrival | Its funder, in the same transaction | By itself (A2). **No requester may bind it**: a deposit request, or a requester's refund request (`REQ-RQ-6`), naming its coordinate is refused `ERR-SourceNotFound` ("does not hold a movement bezent can bind"), and binds nothing. The one transfer besides its deposit that may name it is its return, which bezent orders itself, to its funder (A5) |
 
 - A directed arrival is never also a plain arrival. On Polygon the vault receives one `Transfer` log per directed
   deposit, whose `from` is the user. The endpoint classifies that log as a directed arrival when the directing code's
-  event pairs with it (A4), so a requester that declared the user's address as a sender (0026) still cannot bind it.
+  event pairs with it (A4), so no requester can bind it, whatever it claims.
   One movement is one observation, consumed once (`INV-2`, `INV-10`).
-- The directing code is never a declared sender, and never needs to be: it is not the `from` of any transfer into the
-  vault. Amendment 0026's Open 4 (shared contracts as senders) does not reach it.
+- There are no declared senders: amendment 0026 is withdrawn (`d-0026-holdout`, 2026-11-09). The swap service keeps
+  binding evmhot's sweeps by coordinate, as today, until they go through the directing code (`F-018` plan, part 5); that
+  path, and not a sender rule, is what makes directed deposits the way in that needs no requester.
 - A plain transfer to the vault keeps needing a requester. A person who sends USDC to the vault directly, without the
   directing code, has made an unassociated arrival (`REQ-IN-6`). The web app never does that.
 
@@ -125,8 +134,8 @@ value moves") is met where it can be, in the directing code, and everything else
 |---|---|---|
 | Below the route's minimum (1 USDC), above its per-transfer maximum (50 000 USDC), a zero recipient, the code paused (A6) | The directing code: the call reverts | **Nothing moves.** `REQ-LM-2` literally. No refund needed, no gas spent by bezent |
 | The route or asset paused, or held by the reserve check (amendment 0028), the Kreivo mint window or supply ceiling spent (`CND-MintWindow`), the delivery account's fee position (`CND-FeeShort`) | The core and the contract's dry run, as today | **Waits** in the named condition and resumes by itself (`REQ-GV-1`, `REQ-LM-3`). `REQ-LM-3` says a mint-window shortfall MUST NOT start a refund, so the brief's "refused by the Kreivo contract's bounds refunds" is not proposed for these |
-| Over what the route's window (120 000 USDC a day) has left | The core, when it creates the deposit | **Open 1.** Proposed: waits, under a new `CND-DepositWindow`, and resumes as the window rolls over, first come first served by coordinate. The alternative is the return below |
-| The issuing network refuses the mint because of its destination (`CND-DestinationRefused`; on Kreivo, a recipient with no provider) | The contract's dry run, as today | Retried until the route's deadline, then `Needs-Review` (`REQ-IN-9`, unchanged). If the user makes the account able to receive in time (the web app says how), it mints. **Open 2** covers what a review can do with it |
+| Over what the route's window (120 000 USDC a day) has left | The core, when it creates the deposit | **Waits** (Open 1, ruled 2026-11-09, `d-0029-window`: "Wait"), under a new `CND-DepositWindow`, and resumes as the window rolls over, first come first served by coordinate. It is not returned |
+| The issuing network refuses the mint because of its destination (`CND-DestinationRefused`; on Kreivo, a recipient with no provider) | The contract's dry run, as today | Retried until the route's deadline, then `Needs-Review` (`REQ-IN-9`, unchanged). If the user makes the account able to receive in time (the web app says how), it mints. Failing that, a review may resolve it into a refund to its funder, with a second approver (Open 2, ruled 2026-11-09, `d-0029-unreceivable`: "Yes", below) |
 | **Can never be minted**: the route's limits changed so that the amount is outside them; the recipient is one bezent refuses by rule (the issuing network's on-chain component, a declared ledger contract account, `DEC-15`); the route no longer declared | The core, when it creates the deposit | **Returned to its funder** (below) |
 
 **The return** reuses the refund of an unassociated arrival (`REQ-RQ-6`, bridge reference `bz-u-…`): a transfer of its
@@ -138,7 +147,14 @@ reference and its own proofs of non-execution (`REQ-NX-*`). It differs in two po
    afterwards) holds, because the rule chose it before the value moved.
 2. **Approval.** `REQ-IN-6` and `REQ-RQ-6` require a second approver to release an unassociated arrival. For a return
    the destination is not anyone's choice, so the second approver guards nothing that the rule does not already fix.
-   **Open 3** asks whether it may run without one.
+   **Ruled (Open 3, 2026-11-09, `d-0029-return-approver`: "Yes"): a return needs no second approver.** Returns count
+   against the directed count cap (Open 6), and an alert fires past a threshold.
+
+**The review edge.** A directed deposit in `Needs-Review` for `CND-DestinationRefused`, held from `Source-Final`, with no
+mint ever signed, may resolve into `Refunding` (a refund to its funder, `REQ-RF-2`) by a recorded resolution that a second
+approver approves (`REQ-RV-2`, `REQ-GV-5`; Open 2, ruled 2026-11-09, `d-0029-unreceivable`: "Yes"). It is one new edge,
+`Source-Final → Refunding`, for a directed deposit only; it rests on the deposit being closed to minting (amendment 0014's
+reading), and it does not apply to a requester-bound deposit. The refund is paid as the return above is, to the funder.
 
 How it fits the existing refund rules:
 
@@ -233,8 +249,9 @@ Guardrail 1 holds: no network, token, standard or product is named below.
   keep from being minted MUST wait in the named condition that applies (§10), and resume by itself. One that can never
   be minted under the route's current declaration, or whose destination bezent refuses by rule, MUST be returned to its
   funder by a refund of an unassociated arrival (`REQ-RQ-6`) that bezent orders itself, with its funder as destination
-  [and with a second approver, if Open 3 says so]. Only the issuing network's refusal of a destination waits for review
-  instead (`REQ-IN-9`).
+  and with no second approver (Open 3, ruled). Only the issuing network's refusal of a destination waits for review
+  instead (`REQ-IN-9`); a review of that kind MAY resolve into a refund to the funder (Open 2, ruled, §5.4), with a
+  second approver.
 - **`REQ-IN-6`:** the release by refund also covers "or, for a directed arrival, its return to its funder
   (`REQ-IN-11`)".
 - **`REQ-RF-2`:** "The refund destination of a deposit MUST be given in its request, or, for a directed deposit, be its
@@ -247,7 +264,7 @@ Guardrail 1 holds: no network, token, standard or product is named below.
 - **`REQ-ST-8` (new, if Open 8 says yes):** the state, named conditions and coordinates of a directed deposit, and of
   a withdrawal, MUST be readable by anyone, without authentication, by the arrival's coordinate or the redemption's
   on-chain reference. The answer MUST NOT carry anything a requester supplied.
-- **§10, new condition `CND-DepositWindow` (if Open 1 says park):** "A directed deposit over what its route's window,
+- **§10, new condition `CND-DepositWindow` (Open 1, ruled: wait):** "A directed deposit over what its route's window,
   or its directed share, has left; resumes by itself as the window rolls over, in the order of arrival."
 - **`US-A6` (new):** "As **anyone**, value I send to a reserve through its directing code is minted for the destination
   I named once it cannot be taken back, without any requester."
@@ -263,12 +280,15 @@ Guardrail 1 holds: no network, token, standard or product is named below.
   - `AC-A6.5` Given an amount the directing code's limits refuse, Then nothing moves (`REQ-LM-2`).
   - `AC-A6.6` Given the transfer into the reserve of a directed arrival, Then it is one observation, consumed once, and
     never a plain arrival (`INV-2`, `INV-10`).
+- **§5.4, one new edge (Open 2, ruled):** a directed deposit in `Needs-Review` held from `Source-Final` for
+  `CND-DestinationRefused`, with no mint ever signed, MAY be resolved into `Refunding`, to its funder, by a recorded
+  resolution with a second approver (`REQ-RV-2`, `REQ-GV-5`). No other deposit gains it.
 - **`DEF-5`:** "Automatic return of unassociated arrivals to their sender, **except a directed arrival's return to its
   funder (`REQ-IN-11`)**."
 - **§15:** Epic A gains `US-A6`; its principal requirements gain `REQ-IN-10`, `REQ-IN-11` and `REQ-AS-11`.
 
-`REQ-PN-1`, `REQ-PN-3`, `REQ-RQ-7`, `REQ-AR-*`, `REQ-BK-*`, the invariants and the transition table are unchanged,
-unless Open 2 adds an edge.
+`REQ-PN-1`, `REQ-RQ-7`, `REQ-AR-*`, `REQ-BK-*` and the invariants are unchanged. (`REQ-PN-3` is withdrawn by amendment
+0026's withdrawal and is not touched here.) The transition table gains the one edge of Open 2.
 
 ## Proposed text for `PLAN.md`
 
@@ -299,18 +319,21 @@ unless Open 2 adds an edge.
 
 ## Open
 
-Each is one question for @pandres95, with a recommendation.
+Each is one question for @pandres95, with a recommendation. Open 1, 2 and 3 are ruled (2026-11-09); the rest wait.
 
-1. **Window.** Should a directed deposit over what the route's window has left wait for the window to roll over, rather
+1. **Window.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-window`): "Wait".** A directed deposit over
+   what the route's window has left waits for it to roll over (`CND-DepositWindow`); it is not returned. *Question as put:* Should a directed deposit over what the route's window has left wait for the window to roll over, rather
    than be returned? *Recommended: wait* (`CND-DepositWindow`). Your brief said return. Waiting costs no gas, keeps
    `REQ-LM-3`'s stance for every bound that clears itself, and a griefer who fills the window only delays others. It
    does not make bezent pay a return for each of them.
-2. **A recipient that can never receive.** Should a directed deposit in review for `CND-DestinationRefused`, with no
+2. **A recipient that can never receive.** **Ruled by @pandres95 on the decision form, 2026-11-09
+   (`d-0029-unreceivable`): "Yes".** A refund edge, with a second approver (A5, "The review edge"). *Question as put:* Should a directed deposit in review for `CND-DestinationRefused`, with no
    mint ever signed, be able to resolve into a refund to its funder? Today `Source-Final → Refunding` is not an edge
    (`crates/core/src/state.rs`, `edge`), so such a deposit stays in review until its recipient can receive.
    *Recommended: yes*, as one new edge for directed deposits only, with a second approver, resting on the deposit being
    closed to minting (amendment 0014's reading).
-3. **Second approver for a return.** May bezent return a never-mintable directed arrival to its funder without a
+3. **Second approver for a return.** **Ruled by @pandres95 on the decision form, 2026-11-09
+   (`d-0029-return-approver`): "Yes".** A return needs no second approver (A5). *Question as put:* May bezent return a never-mintable directed arrival to its funder without a
    second approver? *Recommended: yes*, because the destination is fixed by rule. Returns count against the directed
    count cap (Open 6), and an alert fires past a threshold.
 4. **A pause on the directing code.** Should `DirectedDeposit` carry a pause switch (an immutable `pauser` alone, an
@@ -361,8 +384,8 @@ Each is one question for @pandres95, with a recommendation.
 
 | Action | Identifiers |
 |---|---|
-| Added, if ruled | §2 "Directed arrival", §2 "Directing code", `REQ-AS-11`, `REQ-IN-10`, `REQ-IN-11`, `US-A6`, `AC-A6.1`–`AC-A6.6`; `REQ-ST-8` (Open 8); `CND-DepositWindow` (Open 1); in the plan `DEC-21`, `DEC-22`, `F-018`, `M-6`, `T-018-*` |
-| Revised, if ruled | §1.2, §1.4, §3 (funder), §4.2 (first row), §4.3 (new row), `REQ-IN-3`, `REQ-IN-6`, `REQ-RF-2`, `REQ-RQ-3`, `REQ-LM-1`, `REQ-ST-1`, `DEF-5`, §15; the §5.4 table if Open 2 says yes; in the plan `DEC-8`, `DEC-9`, `DEC-15`, §4, §5 |
+| Added, if ruled | §2 "Directed arrival", §2 "Directing code", `REQ-AS-11`, `REQ-IN-10`, `REQ-IN-11`, `US-A6`, `AC-A6.1`–`AC-A6.6`; `REQ-ST-8` (Open 8); `CND-DepositWindow` (Open 1, ruled); in the plan `DEC-21`, `DEC-22`, `F-018`, `M-6`, `T-018-*` |
+| Revised, if ruled | §1.2, §1.4, §3 (funder), §4.2 (first row), §4.3 (new row), `REQ-IN-3`, `REQ-IN-6`, `REQ-RF-2`, `REQ-RQ-3`, `REQ-LM-1`, `REQ-ST-1`, `DEF-5`, §15; the §5.4 table (Open 2, ruled yes); in the plan `DEC-8`, `DEC-9`, `DEC-15`, §4, §5 |
 
 None of the new identifiers was used before. `REQ-RQ-10` is avoided because amendment 0016 (pull request #66) proposes
 it, and `AC-E2.3` is taken by amendment 0028 (pull request #112).
