@@ -34,7 +34,7 @@ jobs:
     env:
       EVM_OUT: ${{ github.workspace }}/e2e/evm/.run
       # Pull requests from forks get no secrets: the public archive endpoints below stand in.
-      POLYGON_RPC_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.drpc.org' }}
+      POLYGON_RPC_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.gateway.tenderly.co' }}
       BASE_RPC_URL: ${{ secrets.BASE_RPC_URL || 'https://mainnet.base.org' }}
       BSC_RPC_URL: ${{ secrets.BSC_RPC_URL || 'https://bsc-mainnet.public.blastapi.io' }}
     steps:
