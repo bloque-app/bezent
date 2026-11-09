@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # F-018 — notes
 
-**Status: Proposed.** Research for amendment 0029, which is not ruled.
+**Status: Proposed.** Research for amendment 0029, whose Open 1 to 13 are ruled (2026-11-09) and which is not applied.
 
 The facts this design rests on, as checked on 2026-11-08, and the choices made among standards and wallets. Not
 normative: amendment 0029 proposes, `SPEC.md` and `PLAN.md` decide. Removed when F-018 is built and its decisions are
@@ -71,15 +71,17 @@ and needs no upgrade path.
 |---|---|---|---|---|
 | **Talisman** | Listed (`TalismanSociety/chaindata`, `pub/v3/chains/byId/kreivo.json`) | Yes, any extrinsic through the injected-extension interface | KSM | Needs KSM at or above the existential deposit |
 | **SubWallet** | Listed (`Koniverse/SubWallet-ChainList`, slug `kreivo`, address prefix 2, KSM, status `ACTIVE`, providers `wss://kreivo.io/` and `wss://kreivo.kippu.rocks/`) | Yes, as above | KSM | As above |
-| **Polkadot.js extension** | Any chain, once the app supplies metadata | Yes, as above | KSM | As above |
-| **Virto (`<virto-connect>`, papi-signers' `KreivoPassSigner`)** | Built for Kreivo: accounts of `pallet-pass`, with passkeys (WebAuthn) as devices | `KreivoPassSigner` implements polkadot-api's `PolkadotSigner`, so in principle any transaction. Not yet shown for `Contracts.call` | None from the user: memberships of a community carry a gas tank (Virto's forum post, 2025-04-08) | **Unverified**: whether a pass account has a provider and can hold a non-sufficient asset |
+| **Polkadot.js extension** | Any chain, once the app supplies metadata; Kreivo's custom signed extensions must be registered in the polkadot.js initialisation metadata (Open 9) | Yes, as above | KSM | As above |
+| **Virto (`<virto-connect>`, papi-signers' `KreivoPassSigner`)** (out for now: Open 9, ruled) | Built for Kreivo: accounts of `pallet-pass`, with passkeys (WebAuthn) as devices | `KreivoPassSigner` implements polkadot-api's `PolkadotSigner`, so in principle any transaction. Not yet shown for `Contracts.call` | None from the user: memberships of a community carry a gas tank (Virto's forum post, 2025-04-08) | **Unverified**: whether a pass account has a provider and can hold a non-sufficient asset |
 
 **The usability question** is not signing. It is that bUSDC is "not sufficient" (`DEC-7`), so a mint to an account with
 no provider is refused (`research/03`, `UnavailableConsumer`), and every extension user also needs KSM for fees. A
 plain user with only USDC on Polygon cannot get bUSDC on Kreivo, and cannot redeem it, without first getting some KSM.
-Virto removes both needs if its pass accounts carry a provider and its memberships pay fees. That is the spike
-(T-018-16, amendment 0029 Open 9). Until it passes, the web app leads with the extensions, checks the recipient before a
-deposit, and says plainly that a little KSM is needed.
+Virto would remove both needs if its pass accounts carry a provider and its memberships pay fees; that stays
+unverified. @pandres95 ruled (amendment 0029, Open 9, 2026-11-09) that passkeys and Virto are out for now and the spike
+(T-018-16) is dropped. The web app uses the extensions, checks the recipient before a deposit, and says plainly that a
+little KSM is needed. His note: for these wallets to work with the polkadot.js interface, Kreivo's custom signed
+extensions must be registered in the polkadot.js initialisation metadata (plan part 4, `T-018-15`).
 
 Sources: [Virto's forum post](https://forum.polkadot.network/t/try-out-virto-connect-transact-without-wallets-or-tokens/12440),
 [papi-signers' `KreivoPassSigner`](https://virto-network.github.io/papi-signers/api/signer/src/classes/KreivoPassSigner.html),
@@ -89,7 +91,7 @@ Sources: [Virto's forum post](https://forum.polkadot.network/t/try-out-virto-con
 
 Cloudflare Workers with static assets, not Pages. Both serve a static app. Cloudflare's own migration guide (updated
 2026-10-12) says Workers has "a distinctly broader set of features" than Pages and does not deprecate Pages. Workers
-leaves room for a rate-limiting front to the public status route (amendment 0029, Open 8) in the same deployment.
+leaves room for a rate-limiting front to the public status route (amendment 0029, Open 8, ruled yes) in the same deployment.
 `bridge.bloque.network` is the working name.
 
 ## Smaller choices

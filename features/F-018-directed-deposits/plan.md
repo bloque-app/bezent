@@ -5,9 +5,10 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # F-018 — Directed deposits and the bridge web app
 
-**Status: Proposed.** Nothing here is built or ruled. It is the feature that would carry out amendment 0029, which is
-itself proposed. Milestone `M-6` (proposed; amendment 0029, Open 10). Would serve `US-A6`, `AC-A6.1`–`AC-A6.6`,
-`REQ-AS-11`, `REQ-IN-10`, `REQ-IN-11`, `REQ-RN-5`, `REQ-LM-2`, `REQ-ST-1`, `REQ-ST-8` (if ruled), `US-B5`, and would
+**Status: Proposed.** Nothing here is built. It is the feature that would carry out amendment 0029, which is itself
+proposed and not applied; its Open 1 to 13 are ruled (2026-11-09). Folded into milestone `M-4` (amendment 0029, Open 10,
+ruled: no `M-6`). Would serve `US-A6`, `AC-A6.1`–`AC-A6.6`,
+`REQ-AS-11`, `REQ-IN-10`, `REQ-IN-11`, `REQ-RN-5`, `REQ-LM-2`, `REQ-ST-1`, `REQ-ST-8`, `US-B5`, and would
 keep `INV-2`, `INV-6`, `INV-10` and `INV-14` (plan `DEC-21` and `DEC-22`, proposed; `DEC-8`, `DEC-9`, `DEC-10`,
 `DEC-12`, `DEC-15`). Read amendment 0029 first, then `F-008` NOTES ("Deployment", "The two roles") and `F-009` NOTES
 (decisions 2, 4, 5, 7). `NOTES.md` here records the facts checked for this design.
@@ -27,21 +28,17 @@ contract DirectedDeposit {
     address public immutable reserve;   // the vault (the Safe of DEC-10)
     uint256 public immutable minimum;   // the route's minimum, 1 USDC = 1_000_000
     uint256 public immutable maximum;   // the route's per-transfer maximum, 50 000 USDC; ≤ the Kreivo per-transfer maximum
-    address public immutable pauser;    // Open 4: may pause, alone
-    address public immutable unpauser;  // Open 4: a multi-signature account; may unpause
-    bool public paused;
 
     event Directed(address indexed sender, uint256 amount, bytes32 indexed recipient);
 
     function deposit(uint256 amount, bytes32 recipient) external;
     function depositWithPermit(uint256 amount, bytes32 recipient, uint256 deadline, uint8 v, bytes32 r, bytes32 s) external;
     function depositWithPermit(uint256 amount, bytes32 recipient, uint256 deadline, bytes calldata signature) external; // EIP-1271 wallets
-    function pause() external;    // pauser only
-    function unpause() external;  // unpauser only
+    // No pause, no owner, no admin function (Open 4, ruled).
 }
 ```
 
-- **Order inside a call:** check `!paused`, `minimum ≤ amount ≤ maximum`, `recipient != 0`. For the permit forms, call
+- **Order inside a call:** check `minimum ≤ amount ≤ maximum`, `recipient != 0`. For the permit forms, call
   `try token.permit(msg.sender, address(this), amount, deadline, …)`, then require
   `token.allowance(msg.sender, address(this)) ≥ amount` whether or not the `try` succeeded, so a front-run permit costs
   nothing. Then `token.transferFrom(msg.sender, reserve, amount)` (checked return), then `emit Directed`. Nothing comes
@@ -55,9 +52,8 @@ contract DirectedDeposit {
   one is paused.
 - **Deployment** follows `F-008`. A one-time deployment key deploys it with plain `CREATE` and holds no role
   afterwards. `script/DeployDirected.s.sol` reads `config/polygon.json` (token, vault, limits) and refuses: a `maximum`
-  above the route's or the Kreivo per-transfer maximum; a `minimum` below the route's; a `pauser` or `unpauser` that is
-  the deployer, a vault owner, the delivery key, the conversion key or the guardian; a `pauser` equal to the
-  `unpauser`. `VerifyVault` grows `checkDirected`: runtime code equal to the repository's build with these immutables,
+  above the route's or the Kreivo per-transfer maximum; a `minimum` below the route's. There is no
+  role to give: the contract has no pause and no owner (Open 4, ruled). `VerifyVault` grows `checkDirected`: runtime code equal to the repository's build with these immutables,
   `token` and `reserve` equal to the vault's configuration, and the limits equal to the route's.
 - **Licence:** `Apache-2.0 OR MIT`, as the rest of `contracts/evm`.
 
@@ -102,7 +98,7 @@ contract DirectedDeposit {
   observation's. A second call for the same coordinate is a no-op (`INV-2`).
 - **The core's directed intake**, in the cycle where it reads new final observations. For each `directed_arrival`, in
   coordinate order:
-  1. Is it mintable under the route as declared now (minimum, maximum, the directed share and count cap if ruled), and
+  1. Is it mintable under the route as declared now (minimum, maximum; no share and no count cap: Open 5 and 6, ruled), and
      is the recipient off the refused list (the Kreivo contract's account, the `DEC-15` ledger accounts)?
   2. If so, call `directed_deposit`. From there it is an ordinary deposit (mint order, dry run, conditions, deadline,
      review). Over the window: it waits in `CND-DepositWindow` and resumes as the window rolls over (Open 1, ruled: wait); it is not returned.
@@ -111,12 +107,14 @@ contract DirectedDeposit {
      the core, with no second approver (Open 3, ruled 2026-11-09).
 - **Review** (Open 2, ruled yes, 2026-11-09): one new edge for a directed deposit only, a resolution from `Needs-Review` held at
   `Source-Final` into `Refunding` with a second approver, when no mint attempt of it was ever signed.
-- **The public status route** (Open 8, if ruled). A second listener in `services/ingress`, with no credential, serving
+- **The public status route** (Open 8, ruled yes). A second listener in `services/ingress`, with no credential, serving
   `GET /v0/public/deposits/by-coordinate` and `GET /v0/public/withdrawals/by-redemption`: state, named conditions,
   coordinates, finality and times, for directed deposits and for withdrawals only. Never a request reference, a
   requester, a callback or an extra. Rate-limited in front, at Cloudflare.
 - **Statement and published addresses:** the directing contract is listed beside the vault (`REQ-AS-11`, §7.E).
-- **Alerts** (`F-014`): directed mints and returns per window against the caps; the KSM float (amendment 0025);
+- **Alerts** (`F-014`): directed mints and returns per day against thresholds, and how much of the route's window
+  directed deposits take (alerts only: there is no count cap and no share, Open 5 and 6, ruled); the KSM float
+  (amendment 0025);
   an `UnpairedDirection` (which should never happen with the declared code) pages.
 
 ### 4. The web app: `apps/bridge/`
@@ -125,16 +123,18 @@ A static, client-only TypeScript app on **Cloudflare Workers static assets**, th
 It holds no key and no secret, and has no server code except the static asset handler (`NOTES.md`, "Hosting").
 UI copy says **bezent**.
 
-- **Deposit (EVM).** Discover wallets with EIP-6963 (MetaMask, Rabby and others); switch to chain 137. Read `minimum`,
-  `maximum` and `paused` from the contract, and the route's state from the public route (or chain only, if Open 8 is
-  no). Take the recipient from the connected Kreivo wallet, or from a pasted SS58 address with checksum and prefix 2
+- **Deposit (EVM).** Discover wallets with EIP-6963 (MetaMask, Rabby and others); switch to chain 137. Read `minimum`
+  and `maximum` from the contract, and the route's state from the public route (Open 8). Take the recipient from the connected Kreivo wallet, or from a pasted SS58 address with checksum and prefix 2
   checked. Never take raw hex. Before signing, read the recipient's account on Kreivo through the light client, and
-  refuse one that cannot receive a non-sufficient asset (no provider), saying what to do (Open 7). Sign an EIP-2612
+  refuse one that cannot receive a non-sufficient asset (no provider), saying what to do (Open 7, ruled: bUSDC stays not sufficient). Sign an EIP-2612
   permit for **exactly** the amount, with the domain read from the token (`name()`, `version()`, chain id, the token's
   address; `NOTES.md`). Send `depositWithPermit`. Fallback, for a wallet that cannot sign typed data: `approve`
   exactly the amount, then `deposit`.
-- **Redeem (Kreivo).** Connect Talisman, SubWallet or Polkadot.js through the injected-extension interface. Virto
-  comes after the spike (Open 9). Show the bUSDC (`Here(101)`) balance and the contract's redemption minimum and pause
+- **Redeem (Kreivo).** Connect Talisman, SubWallet or Polkadot.js through the injected-extension interface. Passkey
+  accounts (Virto) are out for now and there is no spike (Open 9, ruled). **Requirement (Open 9):** to make these wallets
+  work with the polkadot.js interface, Kreivo's custom signed extensions are registered in the polkadot.js
+  initialisation metadata (the API's initialisation, before any signing), so that the extensions can build and sign
+  Kreivo's extrinsics. The test bed shows it for each wallet (`T-018-15`). Show the bUSDC (`Here(101)`) balance and the contract's redemption minimum and pause
   state. The payout address defaults to the connected EVM account. Pick a random 32-byte reference (`REQ-PV-2`: never
   sequential). Call the contract's `redeem(asset, amount, backend, payout, reference)`. To redeem a whole balance,
   `utility.batch_all` of `assets.approve_transfer` and `redeem`, since the plain pull keeps the account alive
@@ -148,7 +148,9 @@ UI copy says **bezent**.
 - **Defence.** A reproducible build whose hash is published with each release; a strict CSP; no third-party script or
   analytics; the contract's address pinned in the build and shown; the recipient shown as SS58 beside the connected
   account.
-- **Licence:** Open 12 (recommended GPL-3.0-or-later).
+- **Licence:** `Apache-2.0 OR MIT` (Open 12, ruled 2026-11-09; the row for `docs/oss/LICENSING.md` is in amendment
+  0029). The app ships smoldot, GPL-3.0-or-later with the Classpath exception: check that this is compatible, and
+  record it, before the first release.
 
 ### 5. evmhot sweeps through the directing contract
 
@@ -164,23 +166,24 @@ deposit by itself (part 3) and needs no requester to bind it.
   `Transfer` pairs with its `Directed` log like any other.
 - **What follows from the rule.** The funder is the deposit address, so a sweep that can never be minted is returned
   there (A5), to an address evmhot controls. A sweep must lie within the contract's limits (1 to 50 000 USDC), so a
-  larger balance is swept in several calls and a smaller one waits. If the directed share and count cap (Open 5 and 6)
-  are ruled, they count sweeps too unless the ruling says otherwise; the figures recommended there were sized for web
-  app users alone.
+  larger balance is swept in several calls and a smaller one waits. There is no share and no count cap (Open 5 and 6,
+  ruled), so sweeps are bound by the route's window and the contract's limits alone, and count toward the alerts on
+  directed mints.
 
 ## Not now
 
-Gas sponsorship (Open 13); ERC-7930 recipients (`NOTES.md`, "Recipient format"); other networks or assets (Base and
+Gas sponsorship (Open 13, ruled: no); passkey and Virto accounts (Open 9, ruled: out for now); a pause on the directing
+code (Open 4, ruled: none); ERC-7930 recipients (`NOTES.md`, "Recipient format"); other networks or assets (Base and
 BNB Chain would each need their own directing contract and route); any custodial way in; making bUSDC
-sufficient (Open 7).
+sufficient (Open 7, ruled: not now).
 
 ## Done when
 
 - **Contract:** Foundry fork tests on Polygon at the pinned block show that a deposit moves exactly `amount` from the
   caller to the vault with `Directed` right after the `Transfer` (`AC-A6.6`, `REQ-RN-5`); below the minimum, above the
-  maximum, a zero recipient and a paused contract revert and move nothing (`AC-A6.5`); a front-run permit does not stop
-  the deposit; the bytes-signature permit works from a Safe as depositor; the contract never holds a balance;
-  `pause` only by the `pauser` and `unpause` only by the `unpauser`; the verifier accepts the deployment and refuses a
+  maximum, and a zero recipient revert and move nothing (`AC-A6.5`); a front-run permit does not stop
+  the deposit; the bytes-signature permit works from a Safe as depositor; the contract never holds a balance
+  and has no pause, owner or admin function; the verifier accepts the deployment and refuses a
   changed immutable.
 - **Endpoint and core:** a directed arrival is one observation at the `Transfer`'s coordinate, never also an `Arrival`
   (`AC-A6.6`); a requester's deposit or refund naming it is `ERR-SourceNotFound` (`AC-A6.2`); it becomes a deposit
@@ -189,8 +192,9 @@ sufficient (Open 7).
   log is never an arrival; the reserve check stays at zero divergence through all of it (`INV-1`).
 - **Web app:** on Amoy and the zombienet test bed, a user with only a browser wallet deposits, sees the mint, redeems
   and sees the payout; a recipient that cannot receive is refused before signing.
-- **Mainnet (`M-6`):** a round trip from the web app (deposit, mint, redeem, payout) of 1 USDC; production's
-  redemption minimum is 1 bUSDC, so the 1 bUSDC minted is redeemed whole (amendment 0029, Open 14); one return
-  exercised, with the caps in force and the new runbooks exercised (`NFR-9`).
+- **Mainnet (`M-4`):** a value-moving release under amendment 0024 (Open 11, ruled), inside the 48-hour soak of
+  `DEC-19`. A round trip from the web app (deposit, mint, redeem, payout) of 1 USDC; production's redemption minimum
+  is 1 bUSDC, so the 1 bUSDC minted is redeemed whole (amendment 0029, Open 14); one return exercised, with the alerts
+  in force and the new runbooks exercised (`NFR-9`).
 - **evmhot sweeps:** a sweep from a deposit address through the directing contract is minted for the recipient it
   names, with no deposit request from Swaps.

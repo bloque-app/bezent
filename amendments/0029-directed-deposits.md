@@ -5,18 +5,19 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0029 — a deposit that names its own destination needs no requester
 
-**Status:** **Proposed**, 2026-11-08; **Open 1, 2 and 3 ruled by @pandres95 on the decision form, 2026-11-09**
-(`d-0029-window`, `d-0029-unreceivable`, `d-0029-return-approver`; see "Open"). Nothing here is applied: `SPEC.md` and
-`PLAN.md` are unchanged, and every text below is a proposal, with those three rulings written into it. The direction is
-@pandres95's ruling in chat, 2026-11-08 (below); the design that carries it out, and every other item under "Open", wait
-for his ruling. Amendment 0026 (a deposit binds only an arrival from its requester's declared senders) is withdrawn
+**Status:** **Proposed**, 2026-11-08; **Open 1 to 13 ruled by @pandres95 on the decision form, 2026-11-09**
+(`d-0029-window` to `d-0029-gas`; see "Open"; Open 14 is corrected and is no longer a question). Nothing here is
+applied: `SPEC.md` and `PLAN.md` are unchanged, and every text below is a proposal, with those rulings written into it.
+The direction is @pandres95's ruling in chat, 2026-11-08 (below); the design that carries it out waits for his
+sign-off. Amendment 0026 (a deposit binds only an arrival from its requester's declared senders) is withdrawn
 (`d-0026-holdout`, ruled 2026-11-09), so nothing below relies on it.
 **Target:** `SPEC.md` v0.5.11 and `PLAN.md` v0.6.10, as pull request #112 (amendment 0028) leaves them; v0.5.10 and
-v0.6.9 on `develop` today. If applied, `SPEC.md` v0.5.12 and `PLAN.md` v0.6.11; if another amendment takes those
+v0.6.9 on `develop` today. The plan's side lands inside milestone `M-4` (Open 10, ruled): no milestone is added, so
+the plan's §5 table keeps its six rows, and `M-4` gains `F-018` and its criteria. If applied, `SPEC.md` v0.5.12 and `PLAN.md` v0.6.11; if another amendment takes those
 versions first, this one takes what is next. The withdrawal of amendment 0026 (the revert of pull request #100) takes
 `SPEC.md` v0.5.11 and `PLAN.md` v0.6.10 too; whichever of it and #112 merges second renumbers.
 **Date:** 2026-11-08
-**Needs:** a ruling on the design (A1 to A6) and on each item under "Open". The feature that builds it is `F-018`
+**Needs:** a ruling on the design (A1 to A6); each item under "Open" is ruled. The feature that builds it is `F-018`
 (`features/F-018-directed-deposits/`). Numbered 0029 because 0027 and 0028 are taken by open pull requests (#111, #112).
 **Rationale in one line:** today a deposit is minted only when a declared requester binds the arrival, because a plain
 transfer to the reserve carries no destination; if the funder names the destination in the same transaction as the
@@ -64,7 +65,7 @@ proof of reserves is unchanged (`REQ-BK-5`, `REQ-BK-6`).
 
 On Polygon (the plan's part, `DEC-21` below), the directing code is a small contract, `DirectedDeposit`. It
 `transferFrom`s USDC from `msg.sender` straight to the vault, then emits `Directed(sender, amount, recipient)`, with
-`recipient` a Kreivo account as `bytes32`. Its limits are immutable, it has no owner, and it cannot be upgraded.
+`recipient` a Kreivo account as `bytes32`. Its limits are immutable, it has no owner and no pause switch, and it cannot be upgraded.
 `features/F-018-directed-deposits/plan.md` has the interface.
 
 Because the funder names the destination in the call that moves its own value, nobody else can bind the arrival to
@@ -82,7 +83,7 @@ A final directed arrival becomes a deposit by itself. It begins at `Source-Final
 - its refund destination its funder, the account the token moved out of, which is the directing code's caller;
 - no requester, and no request reference. The coordinate stands in for the request reference wherever one is used to
   find the transfer (`REQ-ST-1`, `REQ-ST-2`). `REQ-RQ-8` already answers status by coordinate, but only to an
-  authenticated requester (`/v0/transfers/by-coordinate`), so it does not serve a depositor who is not one (Open 8).
+  authenticated requester (`/v0/transfers/by-coordinate`), so it does not serve a depositor who is not one (Open 8, ruled yes: `REQ-ST-8`).
 
 Nothing in the request surface opens. `REQ-PN-1` still holds: a directed arrival is not a request. bezent creates the
 deposit from its own observation, and the store refuses a directed deposit whose destination or refund destination is
@@ -132,7 +133,7 @@ value moves") is met where it can be, in the directing code, and everything else
 
 | Case | Where it is caught | Outcome |
 |---|---|---|
-| Below the route's minimum (1 USDC), above its per-transfer maximum (50 000 USDC), a zero recipient, the code paused (A6) | The directing code: the call reverts | **Nothing moves.** `REQ-LM-2` literally. No refund needed, no gas spent by bezent |
+| Below the route's minimum (1 USDC), or above its per-transfer maximum (50 000 USDC), or a zero recipient | The directing code: the call reverts | **Nothing moves.** `REQ-LM-2` literally. No refund needed, no gas spent by bezent |
 | The route or asset paused, or held by the reserve check (amendment 0028), the Kreivo mint window or supply ceiling spent (`CND-MintWindow`), the delivery account's fee position (`CND-FeeShort`) | The core and the contract's dry run, as today | **Waits** in the named condition and resumes by itself (`REQ-GV-1`, `REQ-LM-3`). `REQ-LM-3` says a mint-window shortfall MUST NOT start a refund, so the brief's "refused by the Kreivo contract's bounds refunds" is not proposed for these |
 | Over what the route's window (120 000 USDC a day) has left | The core, when it creates the deposit | **Waits** (Open 1, ruled 2026-11-09, `d-0029-window`: "Wait"), under a new `CND-DepositWindow`, and resumes as the window rolls over, first come first served by coordinate. It is not returned |
 | The issuing network refuses the mint because of its destination (`CND-DestinationRefused`; on Kreivo, a recipient with no provider) | The contract's dry run, as today | Retried until the route's deadline, then `Needs-Review` (`REQ-IN-9`, unchanged). If the user makes the account able to receive in time (the web app says how), it mints. Failing that, a review may resolve it into a refund to its funder, with a second approver (Open 2, ruled 2026-11-09, `d-0029-unreceivable`: "Yes", below) |
@@ -147,8 +148,8 @@ reference and its own proofs of non-execution (`REQ-NX-*`). It differs in two po
    afterwards) holds, because the rule chose it before the value moved.
 2. **Approval.** `REQ-IN-6` and `REQ-RQ-6` require a second approver to release an unassociated arrival. For a return
    the destination is not anyone's choice, so the second approver guards nothing that the rule does not already fix.
-   **Ruled (Open 3, 2026-11-09, `d-0029-return-approver`: "Yes"): a return needs no second approver.** Returns count
-   against the directed count cap (Open 6), and an alert fires past a threshold.
+   **Ruled (Open 3, 2026-11-09, `d-0029-return-approver`: "Yes"): a return needs no second approver.** There is no
+   count cap on returns (Open 6, ruled); an alert fires past a threshold.
 
 **The review edge.** A directed deposit in `Needs-Review` for `CND-DestinationRefused`, held from `Source-Final`, with no
 mint ever signed, may resolve into `Refunding` (a refund to its funder, `REQ-RF-2`) by a recorded resolution that a second
@@ -172,14 +173,14 @@ How it fits the existing refund rules:
 - **Costs.** A return's network cost goes against surplus, like any payout (`REQ-BK-4`), and draws on the vault's
   delivery allowance, the same allowance withdrawals use (`REQ-KY-3`). See "New exposures".
 
-### A6. The pause on the directing code
+### A6. No pause on the directing code
 
-Proposed (**Open 4**): the code carries one switch, `paused`, and nothing else. An immutable `pauser` may set it, alone
-(`REQ-GV-2`: pausing by one party). An immutable `unpauser`, a multi-signature account, may clear it (`REQ-GV-2`:
-unpausing by several). Neither can move value or change a limit. Rotating either key means deploying new code. This
-stops value flowing into a vault that is itself under attack, which bezent's own pause cannot do: bezent's pause only
-parks directed deposits after their value has arrived. The alternative is no switch at all, an ownerless contract
-whose only stop is bezent's pause and the web app.
+**Ruled (Open 4, 2026-11-09, `d-0029-pause`): no pause.** `DirectedDeposit` carries no switch, no `pauser` and no
+`unpauser`, and nothing on it can stop it. @pandres95's note: "Given that the contract sweeps itself to the Safe, a
+pauser here is moot, unless the pause happens chain-side." The contract in pull request #121 already has none. bezent's
+own pause still parks a directed deposit after its value has arrived (`REQ-GV-1`), and the web app can stop offering
+the deposit; neither stops value reaching the vault, which is accepted. A stop that is wanted later happens chain-side,
+not in this code.
 
 ## What stays as it is
 
@@ -204,12 +205,12 @@ in what it costs **bezent**, not the attacker.
 
 | Exposure | What it costs | Mitigation |
 |---|---|---|
-| **Spam at the minimum.** Many 1 USDC deposits | Each new mint reference takes about 0.0067 KSM of storage deposit from the Kreivo delivery account (`DEC-18`), plus its fee. A full window at 1 USDC is 120 000 mints, about 800 KSM a day. Each redemption back costs a Polygon payout | A **count cap** per window on directed mints (Open 6), the fee-position page (amendment 0025), and the option of a higher directed minimum. The count cap bounds the KSM drain at cap × 0.0067 a day |
-| **Window exhaustion.** Directed deposits fill the route's 120 000 window and Swaps' deposits are refused `ERR-WindowExceeded` | Swaps' service, not value | A **directed share** of the window (Open 5): directed deposits may use at most part of it, and the rest stays for requesters. The same share bounds how much of the Kreivo mint window directed mints can take |
-| **Return spam and the shared allowance.** Returns draw on the vault's delivery allowance, which withdrawals need too | Withdrawals wait in `CND-PayoutWindow` | Returns happen only for what can never mint (A5), which a well-behaved web app never sends. Returns count against the same count cap and raise an alert past a threshold |
+| **Spam at the minimum.** Many 1 USDC deposits | Each new mint reference takes about 0.0067 KSM of storage deposit from the Kreivo delivery account (`DEC-18`), plus its fee. A full window at 1 USDC is 120 000 mints, about 800 KSM a day. Each redemption back costs a Polygon payout | **Alerts only** (Open 6, ruled 2026-11-09, `d-0029-count`: no count cap): directed mints per day against a threshold, and the fee-position page (amendment 0025). Nothing bounds the drain except the route's window and the delivery account's KSM float, so the exposure stays open and is kept visible here |
+| **Window exhaustion.** Directed deposits fill the route's 120 000 window and Swaps' deposits are refused `ERR-WindowExceeded` | Swaps' service, not value | None in the design (Open 5, ruled 2026-11-09, `d-0029-share`: no separate share of the window for directed deposits). Directed deposits and requesters' share the one window, first come first served by coordinate (Open 1), and an alert watches how much of the window directed deposits take |
+| **Return spam and the shared allowance.** Returns draw on the vault's delivery allowance, which withdrawals need too | Withdrawals wait in `CND-PayoutWindow` | Returns happen only for what can never mint (A5), which a well-behaved web app never sends. Returns raise an alert past a threshold; there is no cap (Open 6, ruled) |
 | **Refund gas.** Each return is a Polygon transaction paid from the delivery lane | POL, against surplus | As above; a return of a directed deposit is rare by construction |
 | **Bad recipients.** Zero; the Kreivo contract's own account; a declared ledger contract account (`DEC-15`, refused at intake today, and this path has no intake); a well-formed account nobody holds; an account with no provider | From nothing to the whole deposit | Zero reverts in the code. bezent's refused list leads to a return (A5). No provider leads to `CND-DestinationRefused`, and the web app checks first (below). An account nobody holds cannot be detected by anyone: the web app takes the recipient only from a connected Kreivo wallet, or from a pasted SS58 address with checksum and prefix 2 checked, and never from raw hex |
-| **A recipient with no provider.** bUSDC is "not sufficient" (`DEC-7`), so a mint to an account holding no KSM, or with no other provider, is refused. A fresh account is the common case for a new user | The deposit waits and then needs review | **Open 7.** The web app reads the recipient's account before signing and refuses one that cannot receive. `REQ-IN-9` binds bezent, not the web app. The lasting fix is a governance choice: make bUSDC sufficient, or have the user's account created with a provider (the Virto spike) |
+| **A recipient with no provider.** bUSDC is "not sufficient" (`DEC-7`), so a mint to an account holding no KSM, or with no other provider, is refused. A fresh account is the common case for a new user | The deposit waits and then needs review | **Open 7, ruled 2026-11-09 (`d-0029-sufficient`): not now.** The web app reads the recipient's account before signing and refuses one that cannot receive. `REQ-IN-9` binds bezent, not the web app. Making bUSDC sufficient is a governance act and is not taken now |
 | **Permit front-running.** Anyone can submit a signed permit before the deposit does, so the deposit's own `permit` reverts | One failed transaction: the user's gas | The code calls `permit` inside `try`, then checks the allowance, and goes on if it is enough. It always pulls from `msg.sender`, never from an `owner` argument, so a front-run permit gives the front-runner nothing |
 | **Stray tokens.** USDC sent straight to the directing code | Lost: the code has no owner and no way out | Stated plainly. The web app never does it. A permissionless sweep to the vault was considered and left out: it would make an arrival nobody can direct |
 | **A compromised web app.** The page could name another recipient | The user's deposit | The wallet shows the call and the typed data, and the app shows the recipient as SS58 next to the connected account. The build is reproducible and its hash published, with a strict CSP, no third-party scripts and no backend secret. The contract's address is published with the reserve addresses (`REQ-AS-11` below) |
@@ -257,15 +258,13 @@ Guardrail 1 holds: no network, token, standard or product is named below.
 - **`REQ-RF-2`:** "The refund destination of a deposit MUST be given in its request, or, for a directed deposit, be its
   funder (`REQ-IN-10`). bezent MUST NOT choose it afterwards."
 - **`REQ-RQ-3`:** add "A coordinate holding a directed arrival is refused (`ERR-SourceNotFound`)."
-- **`REQ-LM-1`:** add "A route MAY declare a share of its window, and a count per window, for directed arrivals."
-  [Open 5, Open 6]
 - **`REQ-ST-1`:** "Given only a request reference, or for a directed deposit the coordinate of its arrival, anyone
   MUST be able to find …".
-- **`REQ-ST-8` (new, if Open 8 says yes):** the state, named conditions and coordinates of a directed deposit, and of
+- **`REQ-ST-8` (new; Open 8, ruled yes):** the state, named conditions and coordinates of a directed deposit, and of
   a withdrawal, MUST be readable by anyone, without authentication, by the arrival's coordinate or the redemption's
   on-chain reference. The answer MUST NOT carry anything a requester supplied.
-- **§10, new condition `CND-DepositWindow` (Open 1, ruled: wait):** "A directed deposit over what its route's window,
-  or its directed share, has left; resumes by itself as the window rolls over, in the order of arrival."
+- **§10, new condition `CND-DepositWindow` (Open 1, ruled: wait):** "A directed deposit over what its route's window
+  has left; resumes by itself as the window rolls over, in the order of arrival."
 - **`US-A6` (new):** "As **anyone**, value I send to a reserve through its directing code is minted for the destination
   I named once it cannot be taken back, without any requester."
   - `AC-A6.1` Given a final directed arrival, Then a deposit exists at `Source-Final` with the recorded destination and
@@ -296,7 +295,7 @@ Guardrail 1 holds: no network, token, standard or product is named below.
   directed arrivals; Polygon first, for bUSDC. It pulls USDC from `msg.sender` to the vault with `transferFrom` in the
   same call as the event; supports EIP-2612 `permit` (one signature), including the bytes-signature form for contract
   wallets (FiatToken 2.2); takes the recipient as `bytes32`; limits immutable and equal to the route's; no owner, no
-  upgrade, no proxy; the pause of A6 if ruled. Deployed by a one-time deployment key that holds no role afterwards, as
+  upgrade, no proxy; no pause (Open 4, ruled). Deployed by a one-time deployment key that holds no role afterwards, as
   the vault's glue is (`DEC-10`, `F-008` NOTES, "Deployment"); `VerifyVault` grows a check of its runtime code
   (immutables included) against the repository's build for the configuration. *Serves:* `REQ-RN-5`, `REQ-AS-11`,
   `REQ-IN-10`, `REQ-LM-2`, `REQ-GV-3`. *Cost:* one more contract of ours in the path of value, which needs review
@@ -306,20 +305,30 @@ Guardrail 1 holds: no network, token, standard or product is named below.
 - **`DEC-15`:** add that the refused list of ledger contract accounts also applies to directed recipients, as a return.
 - **`DEC-22` (new), the bridge web app.** A static, client-only web app (`apps/bridge/`) on Cloudflare Workers static
   assets, at the working name `bridge.bloque.network`: deposit with an EVM wallet (EIP-6963 discovery; MetaMask and
-  similar), redeem with a Kreivo wallet (Talisman, SubWallet or Polkadot.js first; Virto's passkey accounts after a
-  spike), status from public chain data, and the public status route if Open 8 is ruled yes. It holds no key and no
-  secret. *Serves:* `US-A6`, `US-B5`, `REQ-ST-1`. *Cost:* a public front end to keep and to defend against phishing.
-- **§4, new row `F-018`:** "Directed deposits and the bridge web app | `M-6` | directed arrivals, their returns and the
+  similar), redeem with a Kreivo wallet through a browser extension (Talisman, SubWallet or Polkadot.js; passkey accounts, Virto's,
+  are out for now: Open 9, ruled), status from public chain data, and the public status route (Open 8, ruled yes). To
+  work with the polkadot.js interface, those wallets need Kreivo's custom signed extensions **registered in the
+  polkadot.js initialisation metadata**; that is a requirement of the app (Open 9, @pandres95's note; `T-018-15`). It
+  holds no key and no secret. *Serves:* `US-A6`, `US-B5`, `REQ-ST-1`. *Cost:* a public front end to keep and to defend against phishing.
+- **§4, new row `F-018`:** "Directed deposits and the bridge web app | `M-4` | directed arrivals, their returns and the
   public way in (`US-A6`, `REQ-IN-10`, `REQ-IN-11`, `REQ-AS-11`) | the EVM endpoint, the core and the contract (`F-009`,
   `F-003`, `F-006`)".
-- **§5, new milestone `M-6` (Open 10):** "Permissionless deposits | Anyone bridges USDC on Polygon to bUSDC on Kreivo
-  and back from a web page, with no requester | `F-018` | A round trip from the web app on mainnet starting with a
-  1 USDC deposit (Open 14), a directed
-  return exercised, the spam caps in force, and every new runbook exercised". After `M-4`.
+- **§5, `M-4` (Open 10, ruled 2026-11-09, `d-0029-milestone`: fold into `M-4`; no `M-6`):** the row's features gain
+  `F-018`, and its criteria gain "Anyone bridges USDC on Polygon to bUSDC on Kreivo and back from the web app, with no
+  requester: a round trip on mainnet starting with a 1 USDC deposit (Open 14), a directed return exercised, the alerts
+  for directed mints and returns in force, and every new runbook exercised". `M-4` then depends on `F-018` as well;
+  the order in time (bUSDC first) is otherwise unchanged. The release that opens directed deposits on mainnet is a
+  value-moving release under amendment 0024 (Open 11, ruled), so it runs inside the 48-hour soak of `DEC-19`.
+- **`DEC-20` and `docs/oss/LICENSING.md` (Open 12, ruled):** the table gains the row below. It departs from the
+  recommendation and from `DEC-20`'s "GPL wherever possible", so `DEC-20` gains a line saying why.
+
+  | Part | Path | Licence | Why |
+  |---|---|---|---|
+  | The bridge web app | `apps/bridge/**` | **Apache-2.0 OR MIT** | @pandres95, 2026-11-09 (amendment 0029, Open 12): permissive, as the reusable crates. It ships smoldot (GPL-3.0-or-later with the Classpath exception, §4): to be checked before the first release (Open 12) |
 
 ## Open
 
-Each is one question for @pandres95, with a recommendation. Open 1, 2 and 3 are ruled (2026-11-09); the rest wait.
+Each is one question for @pandres95, with a recommendation. Open 1 to 13 are ruled (2026-11-09, by @pandres95 on the decision form); Open 14 is corrected.
 
 1. **Window.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-window`): "Wait".** A directed deposit over
    what the route's window has left waits for it to roll over (`CND-DepositWindow`); it is not returned. *Question as put:* Should a directed deposit over what the route's window has left wait for the window to roll over, rather
@@ -334,45 +343,59 @@ Each is one question for @pandres95, with a recommendation. Open 1, 2 and 3 are 
    closed to minting (amendment 0014's reading).
 3. **Second approver for a return.** **Ruled by @pandres95 on the decision form, 2026-11-09
    (`d-0029-return-approver`): "Yes".** A return needs no second approver (A5). *Question as put:* May bezent return a never-mintable directed arrival to its funder without a
-   second approver? *Recommended: yes*, because the destination is fixed by rule. Returns count against the directed
-   count cap (Open 6), and an alert fires past a threshold.
-4. **A pause on the directing code.** Should `DirectedDeposit` carry a pause switch (an immutable `pauser` alone, an
-   immutable multi-signature `unpauser` to lift it)? *Recommended: yes.* It is the only thing that stops value flowing
-   into a vault under attack. The `pauser` should be a key of its own on Polygon (`REQ-KY-4`), not the Kreivo pause
-   key.
-5. **Directed share of the window.** Should directed deposits be limited to a share of the route's window?
-   *Recommended: yes, 20 000 USDC a day to start*, so that the other 100 000 stays for Swaps and directed mints take at
-   most that much of the Kreivo mint window. Raise it from what the first weeks show.
-6. **Count cap.** Should directed deposits also be capped in number per window? *Recommended: yes, 200 a day to start.*
-   Each new mint reference costs the delivery account about 0.0067 KSM of storage deposit, so 200 cost at most about
-   1.3 KSM a day. Without a cap, a full window at the 1 USDC minimum would cost about 800 KSM.
-7. **bUSDC sufficiency.** Should governance make bUSDC a sufficient asset on Kreivo, so that a fresh account can
-   receive it without KSM? *Recommended: not now.* Ship with the web app's check, which refuses a recipient that cannot
-   receive and tells the user how to fix it. Decide after the Virto spike (Open 9) shows whether passkey accounts carry
-   a provider. Sufficiency is a governance act with its own dust and spam trade-offs.
-8. **Public status route.** Should the ingress serve an unauthenticated, read-only status route for directed deposits
-   and withdrawals (`REQ-ST-8`)? *Recommended: yes*, as a separate listener, rate-limited at Cloudflare, answering by
-   coordinate or redemption reference only, never by request reference, and never with a requester's fields. Chain data
-   alone shows the happy path (deposit, then mint, by the derived reference), but not a condition (waiting for the
-   window, a pause, a hold, review), which is exactly what a user needs to see. `/v0/transfers/by-coordinate` cannot
-   serve this today: it sits behind a requester's credential.
-9. **Which Kreivo wallet to lead with.** Should the first release lead with browser extensions (Talisman, SubWallet,
-   Polkadot.js) and add Virto's passkey accounts once a spike proves them? *Recommended: yes.* The extensions can sign
-   a contract call today, and both Talisman and SubWallet list Kreivo. But they need KSM for fees and for the
-   provider. Virto's `KreivoPassSigner` (papi-signers) is the plain-user path: no seed phrase, fees from a membership's
-   gas tank. It still has to show it can sign `Contracts.call` to `redeem`, that a pass account can hold bUSDC, and who
-   grants the membership. A two-to-three-day spike settles all three.
-10. **Milestone.** Is `F-018` a new milestone, `M-6`, after `M-4`? *Recommended: yes.* It needs bUSDC live, and nothing
-    in `M-4` needs it. No `M-6` exists on GitHub yet, so the pull request carries none until this is ruled.
-11. **Release class.** Is the release that opens directed deposits on mainnet a value-moving release under amendment
-    0024? *Recommended: yes.* It adds no asset or network, but it opens a new way for value in, so it gets the full gate,
-    with the mainnet round trip (Open 14) run inside its soak.
-12. **Licence of the web app.** Which licence does `apps/bridge/` take? *Recommended: GPL-3.0-or-later*, by
-    @pandres95's rule for `DEC-20` (the GPL wherever it is possible). It also ships smoldot, which is GPL with the
-    Classpath exception. `docs/oss/LICENSING.md` gains the row.
-13. **Gas for users with no POL.** Should the first release sponsor Polygon gas (a relayer of EIP-3009 authorisations,
-    or an ERC-4337 paymaster)? *Recommended: no.* A relayer means pulling from an `owner` who is not the caller, which
-    reopens front-running and the refund destination. Revisit after `M-6`.
+   second approver? *Recommended: yes*, because the destination is fixed by rule. There is no count
+   cap on returns (Open 6, ruled); an alert fires past a threshold.
+4. **A pause on the directing code.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-pause`): "No
+   pause".** `DirectedDeposit` carries no switch (A6). His note: "Given that the contract sweeps itself to the Safe, a
+   pauser here is moot, unless the pause happens chain-side." The contract in #121 already has none. *Question as put:*
+   Should `DirectedDeposit` carry a pause switch (an immutable `pauser` alone, an immutable multi-signature `unpauser`
+   to lift it)? *Recommended: yes*; not followed.
+5. **Directed share of the window.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-share`): "No
+   separate share".** Directed deposits share the route's window with requesters; no part of it is reserved. *Question
+   as put:* Should directed deposits be limited to a share of the route's window? *Recommended: yes, 20 000 USDC a
+   day to start*; not followed.
+6. **Count cap.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-count`): "No count cap".** The
+   storage-deposit exposure (about 0.0067 KSM per new mint reference) stays visible under "New exposures", mitigated by
+   alerts only. *Question as put:* Should directed deposits also be capped in number per window? *Recommended: yes,
+   200 a day to start*; not followed.
+7. **bUSDC sufficiency.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-sufficient`): "Not now".**
+   bUSDC stays not sufficient; the web app's check refuses a recipient that cannot receive and says how to fix it.
+   *Question as put:* Should governance make bUSDC a sufficient asset on Kreivo, so that a fresh account can receive it
+   without KSM? *Recommended: not now.*
+8. **Public status route.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-status`): "Yes".** The
+   ingress serves an unauthenticated, read-only status route for directed deposits and withdrawals (`REQ-ST-8`), as a
+   separate listener, rate-limited at Cloudflare, answering by coordinate or redemption reference only, never by request
+   reference, and never with a requester's fields. *Question as put:* Should the ingress serve such a route?
+   *Recommended: yes.* Chain data alone shows the happy path (deposit, then mint, by the derived reference), but not a
+   condition (waiting for the window, a hold, review), which is exactly what a user needs to see.
+   `/v0/transfers/by-coordinate` cannot serve this today: it sits behind a requester's credential.
+9. **Which Kreivo wallet to lead with.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-wallet`):
+   "Extensions first"** (Talisman, SubWallet, Polkadot.js) for the redeem. **Passkeys and Virto are out for now**: the
+   Virto spike is dropped from this feature (`T-018-16` is retired). His note: to make these wallets work with the
+   polkadot.js interface, Kreivo's custom signed extensions must be registered in the polkadot.js initialisation
+   metadata. That is a requirement of the app, in the plan (`DEC-22`, `F-018` plan part 4) and in `T-018-15`. The
+   extensions need KSM for fees and for the provider, which the web app says plainly. *Question as put:* Should the
+   first release lead with browser extensions and add Virto's passkey accounts once a spike proves them?
+   *Recommended: yes*; followed for the extensions, and the spike is not run now.
+10. **Milestone.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-milestone`): "Fold into M-4"**, not a
+    new `M-6`. Every `M-6` in this amendment and in `F-018` now reads `M-4`. *Question as put:* Is `F-018` a new
+    milestone, `M-6`, after `M-4`? *Recommended: yes*; not followed. A consequence to note: `M-4` now also waits on
+    `F-018`.
+11. **Release class.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-release`): "Yes".** The release
+    that opens directed deposits on mainnet is a value-moving release under amendment 0024: the full gate, with the
+    mainnet round trip (Open 14) run inside its soak. *Question as put:* Is it a value-moving release under amendment
+    0024? *Recommended: yes.*
+12. **Licence of the web app.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-licence`):
+    "Apache-2.0 / MIT"** for `apps/bridge/`, which differs from the recommendation (GPL-3.0-or-later, by his rule for
+    `DEC-20`). The row for `docs/oss/LICENSING.md` is: `The bridge web app | apps/bridge/** | Apache-2.0 OR MIT`
+    (proposed text for the plan, above). **To check:** the app ships smoldot, which is GPL-3.0-or-later with the
+    Classpath exception (`docs/oss/LICENSING.md` §4); whether shipping it inside an Apache-2.0 OR MIT bundle is
+    compatible has to be confirmed before the first release, and recorded in `docs/oss/LICENSING.md`. *Question as
+    put:* Which licence does `apps/bridge/` take?
+13. **Gas for users with no POL.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-gas`): "No".** The
+    first release sponsors no Polygon gas. A relayer means pulling from an `owner` who is not the caller, which
+    reopens front-running and the refund destination. *Question as put:* Should the first release sponsor Polygon gas?
+    *Recommended: no.* Revisit after the first release.
 14. **The 1 USDC mainnet test and the redemption minimum.** *Corrected: no longer a question.* The first
     draft read the redemption minimum from `config/bounds.example.toml` (`redeem_minimum = 10_000_000`, 10 bUSDC) and
     proposed depositing 9 more USDC to redeem 10. That file is an example. Production's bUSDC redemption minimum is
@@ -384,8 +407,8 @@ Each is one question for @pandres95, with a recommendation. Open 1, 2 and 3 are 
 
 | Action | Identifiers |
 |---|---|
-| Added, if ruled | §2 "Directed arrival", §2 "Directing code", `REQ-AS-11`, `REQ-IN-10`, `REQ-IN-11`, `US-A6`, `AC-A6.1`–`AC-A6.6`; `REQ-ST-8` (Open 8); `CND-DepositWindow` (Open 1, ruled); in the plan `DEC-21`, `DEC-22`, `F-018`, `M-6`, `T-018-*` |
-| Revised, if ruled | §1.2, §1.4, §3 (funder), §4.2 (first row), §4.3 (new row), `REQ-IN-3`, `REQ-IN-6`, `REQ-RF-2`, `REQ-RQ-3`, `REQ-LM-1`, `REQ-ST-1`, `DEF-5`, §15; the §5.4 table (Open 2, ruled yes); in the plan `DEC-8`, `DEC-9`, `DEC-15`, §4, §5 |
+| Added, if ruled | §2 "Directed arrival", §2 "Directing code", `REQ-AS-11`, `REQ-IN-10`, `REQ-IN-11`, `US-A6`, `AC-A6.1`–`AC-A6.6`; `REQ-ST-8` (Open 8, ruled); `CND-DepositWindow` (Open 1, ruled); in the plan `DEC-21`, `DEC-22`, `F-018`, `T-018-*` (`T-018-16`, the Virto spike, is retired by Open 9 and not reused); no `M-6` (Open 10, ruled) |
+| Revised, if ruled | §1.2, §1.4, §3 (funder), §4.2 (first row), §4.3 (new row), `REQ-IN-3`, `REQ-IN-6`, `REQ-RF-2`, `REQ-RQ-3`, `REQ-ST-1`, `DEF-5`, §15; the §5.4 table (Open 2, ruled yes); in the plan `DEC-8`, `DEC-9`, `DEC-15`, `DEC-20` (a line), §4, §5 (`M-4`); `docs/oss/LICENSING.md` (one row) |
 
 None of the new identifiers was used before. `REQ-RQ-10` is avoided because amendment 0016 (pull request #66) proposes
 it, and `AC-E2.3` is taken by amendment 0028 (pull request #112).
