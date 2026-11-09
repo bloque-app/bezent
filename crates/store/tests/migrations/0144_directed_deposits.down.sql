@@ -10,7 +10,9 @@ DROP FUNCTION intake_answers_guard_directed();
 DROP TRIGGER transfers_guard_directed ON transfers;
 DROP FUNCTION transfers_guard_directed();
 DROP FUNCTION address_matches(TEXT, TEXT, TEXT);
+DROP FUNCTION refund_reference(TEXT, BIGINT, BYTEA, position_kind, BIGINT);
 DROP FUNCTION deposit_reference(TEXT, BIGINT, BYTEA, position_kind, BIGINT);
+DROP FUNCTION coordinate_digest(TEXT, BIGINT, BYTEA, position_kind, BIGINT);
 DROP FUNCTION reference_tagged(TEXT, BYTEA[]);
 
 CREATE OR REPLACE FUNCTION source_bindable(
