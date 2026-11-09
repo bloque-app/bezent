@@ -39,6 +39,11 @@ fn account() -> B256 {
     B256::repeat_byte(0x5e)
 }
 
+/// The original depositor the caller names: not the sender (`d-refund-dest-swaps`).
+fn refund() -> Address {
+    Address::repeat_byte(0xb0)
+}
+
 fn tx(n: u8) -> B256 {
     B256::repeat_byte(n)
 }
@@ -54,6 +59,34 @@ fn directed_log(
     amount: U256,
     recipient: B256,
 ) {
+    directed_log_refund(
+        c,
+        number,
+        log_index,
+        tx,
+        from,
+        sender,
+        amount,
+        recipient,
+        refund(),
+    );
+}
+
+/// `Directed(sender, amount, recipient, refund)`: the amount, then the refund address, in data.
+#[allow(clippy::too_many_arguments)]
+fn directed_log_refund(
+    c: &MockChain,
+    number: u64,
+    log_index: u64,
+    tx: B256,
+    from: Address,
+    sender: Address,
+    amount: U256,
+    recipient: B256,
+    refund: Address,
+) {
+    let mut data = amount.to_be_bytes::<32>().to_vec();
+    data.extend_from_slice(refund.into_word().as_slice());
     c.log(
         number,
         log_index,
@@ -61,7 +94,7 @@ fn directed_log(
         u64::from(tx[0]),
         from,
         vec![evm::DIRECTED_TOPIC, sender.into_word(), recipient],
-        amount.to_be_bytes::<32>().to_vec(),
+        data,
     );
 }
 
@@ -138,6 +171,9 @@ async fn ac_a6_6_a_pair_is_one_directed_arrival_at_the_transfers_coordinate_and_
     assert_eq!(detail["direction_log"], 5);
     assert_eq!(detail["directing"], directing().to_checksum(None));
     assert_eq!(detail["recipient"], format!("0x{}", "5e".repeat(32)));
+    // The refund address the caller named is recorded, and it is not the sender.
+    assert_eq!(detail["refund"], refund().to_checksum(None));
+    assert_ne!(refund(), depositor());
     // The reserve is still the recipient column, as an arrival's.
     let recipient: Option<String> =
         sqlx::query_scalar("SELECT recipient FROM observations WHERE kind = 'directed_arrival'")
@@ -444,6 +480,68 @@ async fn ac_a6_6_a_directed_log_with_no_valid_pair_is_unpaired_and_never_an_arri
             .await,
         9
     );
+}
+
+/// `d-refund-dest-swaps`: the pair is an arrival only with a refund the contract could have emitted. A
+/// zero refund, the vault and the directing contract are the addresses it refuses, so a `Directed` log
+/// naming one is an anomaly (`UnpairedDirection`), never an arrival and never bindable. A refund that is
+/// the sender is fine.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn d_refund_dest_swaps_a_refused_refund_is_unpaired_and_a_named_one_is_recorded(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let (f, block) = declared(pool, connect).await;
+    let amount = U256::from(700);
+    let cases = [
+        (1u8, Address::ZERO),
+        (2, vault()),
+        (3, directing()),
+        (4, depositor()),
+    ];
+    for (i, (n, refund)) in cases.into_iter().enumerate() {
+        let at = 2 * i as u64;
+        transfer_log(
+            &f.chain,
+            block,
+            at,
+            tx(n),
+            usdc(),
+            depositor(),
+            vault(),
+            amount,
+        );
+        directed_log_refund(
+            &f.chain,
+            block,
+            at + 1,
+            tx(n),
+            directing(),
+            depositor(),
+            amount,
+            account(),
+            refund,
+        );
+    }
+    f.advance(2);
+    caught_up(&f).await;
+    let rows = rows(&f).await;
+    let got: Vec<_> = rows.iter().map(|r| (r.1, r.3.clone())).collect();
+    let want = [
+        (0, "Arrival"),
+        (1, "UnpairedDirection"),
+        (2, "Arrival"),
+        (3, "UnpairedDirection"),
+        (4, "Arrival"),
+        (5, "UnpairedDirection"),
+        (6, "DirectedArrival"),
+    ];
+    let want: Vec<_> = want.into_iter().map(|(i, e)| (i, e.to_owned())).collect();
+    assert_eq!(got, want);
+    // The sender may be its own refund: recorded as named.
+    assert_eq!(rows[6].7["refund"], depositor().to_checksum(None));
+    // The refused ones keep the refund in the detail, for the page that follows.
+    assert_eq!(rows[5].7["refund"], directing().to_checksum(None));
 }
 
 /// `DEC-12`: a pair one provider does not report whole is a gap, and nothing of it is recorded.
