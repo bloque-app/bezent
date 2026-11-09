@@ -114,6 +114,41 @@ mod tests {
         assert_ne!(deposit(&coordinate(0)), unassociated_refund(&coordinate(0)));
     }
 
+    /// `REQ-IN-3`, `REQ-IN-10`: the store derives a directed deposit's bridge reference in SQL
+    /// (`deposit_reference()`, migration 0144, which `directed_deposit()` writes). These vectors are
+    /// pinned in `crates/store/tests/directed_deposits.rs` as well, so the two never drift.
+    #[test]
+    fn req_in_10_deposit_reference_vectors_the_store_derives_the_same() {
+        let at = |network: &str, block: u64, hash: Vec<u8>, position: Position| Coordinate {
+            network: NetworkId::new(network).unwrap(),
+            block_number: block,
+            block_hash: BlockHash::new(hash),
+            position,
+        };
+        assert_eq!(
+            deposit(&at("origin-a", 7, vec![0xaa], Position::Log(0))),
+            "bz-d-f974333c8ffbef8f6e0e9b3bd970def281dd7767"
+        );
+        // A 32-byte hash, a large block number and the largest log index (a u32's four bytes).
+        assert_eq!(
+            deposit(&at(
+                "polygon",
+                96_983_980,
+                vec![0x11; 32],
+                Position::Log(u32::MAX)
+            )),
+            "bz-d-668330a314e9d999ee65c91f51fb6dedd62becfe"
+        );
+        assert_eq!(
+            deposit(&at("origin-a", 7, vec![0xaa], Position::Log(1))),
+            "bz-d-071b8b19756a50ad5929639577cdea067cc85a88"
+        );
+        assert_eq!(
+            deposit(&at("origin-a", 1, vec![0xab, 1], Position::Transaction(3))),
+            "bz-d-d1321a13639f570b72f526e3b141f8770dbcd76b"
+        );
+    }
+
     #[test]
     fn req_id_4_refused_bridge_reference_is_scoped_to_the_requester() {
         assert_ne!(refused("a", "r1"), refused("b", "r1"));
