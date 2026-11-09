@@ -464,6 +464,15 @@ mod tests {
         let mut dirty = directed_data.clone();
         dirty[32] = 1;
         assert_eq!(decode_directed(&topics, &dirty), None);
+        // The last of those twelve bytes (index 43 of the data) counts too.
+        let mut dirty_last = directed_data.clone();
+        dirty_last[43] = 1;
+        assert_eq!(decode_directed(&topics, &dirty_last), None);
+        // A third data word is not the shape.
+        let mut long = directed_data.clone();
+        long.extend_from_slice(&[0; 32]);
+        assert_eq!(long.len(), 96);
+        assert_eq!(decode_directed(&topics, &long), None);
         let r = B256::repeat_byte(9);
         assert_eq!(decode_reference(&[REFERENCE_TOPIC, r], &[]), Some(r));
         assert_eq!(decode_reference(&[REFERENCE_TOPIC, r], &[0]), None);
