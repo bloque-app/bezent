@@ -140,6 +140,8 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "attempts_unproven(bigint)",
             "bezent_applied_migrations()",
             "bezent_writer_holds(text,oid)",
+            // F-018 (migration 0144): the core's deposit for a final directed arrival.
+            "directed_deposit(text,bigint,bytea,position_kind,bigint)",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
             "ops_observables()",

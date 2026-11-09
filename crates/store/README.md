@@ -119,7 +119,7 @@ Who may **call** what (EXECUTE; the functions that run as the owner are marked *
 
 | Role | Calls |
 |---|---|
-| core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
+| core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `directed_deposit` *definer* (0144: the deposit of a final directed arrival), `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
 | ingress | `source_bindable`, `funding_arrival`, `sender_declared` (0135), `bezent_writer_holds` |
 | Kreivo endpoint, EVM endpoint | `bezent_writer_holds`, `bezent_endpoint_writer`, `bezent_evm_endpoint_writer`, `bezent_row_network`, `observation_kind_on_network`, `observation_kind_for_event`, `observation_writer_covers` (the guards' helpers, which run as the inserting login) |
 | signer | `attempt_gate_open` *definer*, `pause_holds_intent` *definer* (0125: whether a pause holds a signing intent whose attempt has no signature, amendment 0022 A1b), `statement_place_refusal` *definer* |
@@ -167,6 +167,20 @@ The audit of PR #56 added these (0049), for every login but the owner:
 - A bound deposit's destination is on the issuing network and its refund destination on its arrival's
   network; an unassociated arrival's refund pays out on the arrival's network; neither is accepted
   otherwise.
+
+Since 0144 (F-018 T-018-06, amendment 0029), whoever writes it, the owner included: a directed arrival (`directed_arrival`, 0143)
+is bound by no request. `source_bindable()` keeps `deposit` and `refund` false for it, so the ingress's lookup never offers it
+(`ERR-SourceNotFound`), and has two further purposes, `directed_deposit` and `directed_return`, each true for a directed arrival and
+for nothing else. A transfer bound to one is the core's deposit or the core's return, written by the core's login (or the owner's):
+the deposit by `directed_deposit()`, at `Source-Final`, with a bridge reference derived from the coordinate, the observation's
+`detail.recipient` as destination on the issuing network, its `detail.refund` as refund destination on the arrival's network, and no
+intake row; the return (the refund of an unassociated arrival) to the observed `detail.refund`, with no refund destination of its
+own. Any other destination, refund destination or writer is refused, as is a refund that is empty, the zero address, a reserve
+address or the directing contract (compared without case on an `evm` network), and no request's answer names such a transfer. An
+`unpaired_direction` is bound by nothing. A deposit made this way carries a `request_reference` that is a label of its coordinate
+(`directed:<network>:<block>:<hash>:<kind>:<index>`), since the column is not null; the requests' readers reach a transfer through
+`intake_answers`, so none of them reads it. `transfers_source_bindable()` became `SECURITY DEFINER` (it only reads) so the core, which
+may not call the coordinate lock, binds without a wider grant.
 
 Since 0135 (amendment 0026, `d-requester-arrivals`), whoever writes it, the owner included: the answer that binds a
 deposit to its request (no error, not a conversion's answer) is refused unless the observation at the deposit's source
