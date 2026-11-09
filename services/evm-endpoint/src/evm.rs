@@ -33,6 +33,9 @@ sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
     /// The reference emitter's only event (F-008, `ReferenceEmitter.sol`).
     event Reference(bytes32 indexed ref);
+    /// The directing contract's only event (F-018, `DirectedDeposit.sol`): `sender` moved `amount`
+    /// into the reserve for `recipient`, a 32-byte account on the issuing network.
+    event Directed(address indexed sender, uint256 amount, bytes32 indexed recipient);
     /// ERC-20 `transfer`.
     function transfer(address to, uint256 amount) external returns (bool);
     /// ERC-20 `balanceOf`.
@@ -62,6 +65,8 @@ sol! {
 pub const TRANSFER_TOPIC: B256 = Transfer::SIGNATURE_HASH;
 /// `Reference(bytes32)`.
 pub const REFERENCE_TOPIC: B256 = Reference::SIGNATURE_HASH;
+/// `Directed(address,uint256,bytes32)`.
+pub const DIRECTED_TOPIC: B256 = Directed::SIGNATURE_HASH;
 
 /// The EIP-2718 type of an EIP-1559 transaction.
 pub const EIP1559: u8 = 2;
@@ -279,6 +284,19 @@ pub fn decode_transfer(topics: &[B256], data: &[u8]) -> Option<(Address, Address
     Some((from, to, U256::from_be_slice(data)))
 }
 
+/// A decoded `Directed(address,uint256,bytes32)` log: the sender, the amount and the recipient.
+/// Three topics and one data word, the sender's topic an address (twelve zero bytes first).
+pub fn decode_directed(topics: &[B256], data: &[u8]) -> Option<(Address, U256, B256)> {
+    if topics.len() != 3 || topics[0] != DIRECTED_TOPIC || data.len() != 32 {
+        return None;
+    }
+    let sender = Address::from_word(topics[1]);
+    if sender.into_word() != topics[1] {
+        return None;
+    }
+    Some((sender, U256::from_be_slice(data), topics[2]))
+}
+
 /// A decoded `Reference(bytes32)` log.
 pub fn decode_reference(topics: &[B256], data: &[u8]) -> Option<B256> {
     (topics.len() == 2 && topics[0] == REFERENCE_TOPIC && data.is_empty()).then_some(topics[1])
@@ -411,6 +429,19 @@ mod tests {
         // ERC-721 shape (four topics, no data) is not an ERC-20 transfer.
         assert_eq!(
             decode_transfer(&[topics[0], topics[1], topics[2], B256::ZERO], &[]),
+            None
+        );
+        // F-018: a `Directed` log decodes only in its shape.
+        let recipient = B256::repeat_byte(7);
+        let topics = [DIRECTED_TOPIC, from.into_word(), recipient];
+        assert_eq!(
+            decode_directed(&topics, &data),
+            Some((from, U256::from(5), recipient))
+        );
+        assert_eq!(decode_directed(&topics, &[]), None);
+        assert_eq!(decode_directed(&topics[..2], &data), None);
+        assert_eq!(
+            decode_directed(&[DIRECTED_TOPIC, B256::repeat_byte(1), recipient], &data),
             None
         );
         let r = B256::repeat_byte(9);
