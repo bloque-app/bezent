@@ -155,7 +155,9 @@ UI copy says **bezent**.
 Ruled by @pandres95, 2026-11-08: Bloque's evmhot hot-wallet service sweeps each user's deposit address by calling the
 directing contract's `deposit` from that address (`depositWithPermit`, or `approve` and then `deposit`), instead of a
 plain transfer into the vault. Each sweep then names its Kreivo recipient on chain, in the same transaction as the
-value, and is a directed arrival: it becomes a deposit by itself (part 3) and needs no requester to bind it.
+value: a Bloque Kreivo account set per chain and token in evmhot's configuration (which one is @pandres95's call), with
+Swaps attributing each sweep to its user from the deposit address. A sweep is a directed arrival: it becomes a
+deposit by itself (part 3) and needs no requester to bind it.
 
 - **Until then**, a sweep stays a plain transfer, and Swaps binds it by coordinate as today (amendment 0029, A3).
 - **The work is evmhot's**, outside this repository. bezent needs nothing new for it beyond parts 1 to 3: the sweep's
