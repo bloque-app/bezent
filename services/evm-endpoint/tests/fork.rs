@@ -140,7 +140,7 @@ impl Net {
 
 sol! {
     /// `DirectedDeposit` (F-018, `contracts/evm/src/DirectedDeposit.sol`).
-    function deposit(uint256 amount, bytes32 recipient) external;
+    function deposit(uint256 amount, bytes32 recipient, address refund) external;
     struct Call3 {
         address target;
         bool allowFailure;
@@ -218,6 +218,9 @@ async fn fork_ac_a6_6_a_real_directed_deposit_is_one_directed_arrival_at_the_tra
             let depositor: Address = DEPOSITOR.parse().unwrap();
             let multicall: Address = MULTICALL3.parse().unwrap();
             let recipient = B256::repeat_byte(0x5e);
+            // The original depositors the callers name (`d-refund-dest-swaps`): neither is the funder.
+            let refund_a = Address::repeat_byte(0xb1);
+            let refund_b = Address::repeat_byte(0xb2);
             let usdc = |n: u64| U256::from(n) * U256::from(1_000_000u64);
             let send = |from: Address, to: Address, data: Vec<u8>| {
                 json!({"from": from, "to": to, "data": format!("0x{}", hex::encode(data)),
@@ -245,6 +248,7 @@ async fn fork_ac_a6_6_a_real_directed_deposit_is_one_directed_arrival_at_the_tra
                     depositCall {
                         amount: usdc(10),
                         recipient,
+                        refund: refund_a,
                     }
                     .abi_encode(),
                 ))
@@ -272,6 +276,7 @@ async fn fork_ac_a6_6_a_real_directed_deposit_is_one_directed_arrival_at_the_tra
                         depositCall {
                             amount: usdc(5),
                             recipient,
+                            refund: refund_b,
                         }
                         .abi_encode(),
                     ),
@@ -280,6 +285,7 @@ async fn fork_ac_a6_6_a_real_directed_deposit_is_one_directed_arrival_at_the_tra
                         depositCall {
                             amount: usdc(7),
                             recipient: B256::repeat_byte(0x6f),
+                            refund: refund_b,
                         }
                         .abi_encode(),
                     ),
@@ -339,6 +345,10 @@ async fn fork_ac_a6_6_a_real_directed_deposit_is_one_directed_arrival_at_the_tra
             );
             assert_eq!(rows[1].5["recipient"], format!("0x{}", "5e".repeat(32)));
             assert_eq!(rows[2].5["recipient"], format!("0x{}", "6f".repeat(32)));
+            // The refund address each caller named, and not the funder.
+            assert_eq!(rows[0].5["refund"], refund_a.to_checksum(None));
+            assert_eq!(rows[1].5["refund"], refund_b.to_checksum(None));
+            assert_eq!(rows[2].5["refund"], refund_b.to_checksum(None));
             // Each is at its Transfer's coordinate: the Directed log is the very next log, and the
             // batch's two pairs are adjacent, four logs apart at most.
             for r in &rows[..3] {

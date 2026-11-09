@@ -34,8 +34,9 @@ sol! {
     /// The reference emitter's only event (F-008, `ReferenceEmitter.sol`).
     event Reference(bytes32 indexed ref);
     /// The directing contract's only event (F-018, `DirectedDeposit.sol`): `sender` moved `amount`
-    /// into the reserve for `recipient`, a 32-byte account on the issuing network.
-    event Directed(address indexed sender, uint256 amount, bytes32 indexed recipient);
+    /// into the reserve for `recipient`, a 32-byte account on the issuing network. `refund` is the
+    /// original depositor the caller named, where a return goes (`d-refund-dest-swaps`).
+    event Directed(address indexed sender, uint256 amount, bytes32 indexed recipient, address refund);
     /// ERC-20 `transfer`.
     function transfer(address to, uint256 amount) external returns (bool);
     /// ERC-20 `balanceOf`.
@@ -65,7 +66,7 @@ sol! {
 pub const TRANSFER_TOPIC: B256 = Transfer::SIGNATURE_HASH;
 /// `Reference(bytes32)`.
 pub const REFERENCE_TOPIC: B256 = Reference::SIGNATURE_HASH;
-/// `Directed(address,uint256,bytes32)`.
+/// `Directed(address,uint256,bytes32,address)`.
 pub const DIRECTED_TOPIC: B256 = Directed::SIGNATURE_HASH;
 
 /// The EIP-2718 type of an EIP-1559 transaction.
@@ -284,17 +285,23 @@ pub fn decode_transfer(topics: &[B256], data: &[u8]) -> Option<(Address, Address
     Some((from, to, U256::from_be_slice(data)))
 }
 
-/// A decoded `Directed(address,uint256,bytes32)` log: the sender, the amount and the recipient.
-/// Three topics and one data word, the sender's topic an address (twelve zero bytes first).
-pub fn decode_directed(topics: &[B256], data: &[u8]) -> Option<(Address, U256, B256)> {
-    if topics.len() != 3 || topics[0] != DIRECTED_TOPIC || data.len() != 32 {
+/// A decoded `Directed(address,uint256,bytes32,address)` log: the sender, the amount, the recipient and
+/// the refund address. Three topics and two data words (the amount, then the refund address), the
+/// sender's topic and the refund word each an address (twelve zero bytes first).
+pub fn decode_directed(topics: &[B256], data: &[u8]) -> Option<(Address, U256, B256, Address)> {
+    if topics.len() != 3 || topics[0] != DIRECTED_TOPIC || data.len() != 64 {
         return None;
     }
     let sender = Address::from_word(topics[1]);
     if sender.into_word() != topics[1] {
         return None;
     }
-    Some((sender, U256::from_be_slice(data), topics[2]))
+    let refund_word = B256::from_slice(&data[32..]);
+    let refund = Address::from_word(refund_word);
+    if refund.into_word() != refund_word {
+        return None;
+    }
+    Some((sender, U256::from_be_slice(&data[..32]), topics[2], refund))
 }
 
 /// A decoded `Reference(bytes32)` log.
@@ -431,19 +438,32 @@ mod tests {
             decode_transfer(&[topics[0], topics[1], topics[2], B256::ZERO], &[]),
             None
         );
-        // F-018: a `Directed` log decodes only in its shape.
+        // F-018: a `Directed` log decodes only in its shape, refund address included.
         let recipient = B256::repeat_byte(7);
+        let refund = Address::repeat_byte(3);
         let topics = [DIRECTED_TOPIC, from.into_word(), recipient];
+        let mut directed_data = data.to_vec();
+        directed_data.extend_from_slice(refund.into_word().as_slice());
         assert_eq!(
-            decode_directed(&topics, &data),
-            Some((from, U256::from(5), recipient))
+            decode_directed(&topics, &directed_data),
+            Some((from, U256::from(5), recipient, refund))
         );
+        // The refund is not the sender: the caller named it (`d-refund-dest-swaps`).
+        assert_ne!(refund, from);
         assert_eq!(decode_directed(&topics, &[]), None);
-        assert_eq!(decode_directed(&topics[..2], &data), None);
+        assert_eq!(decode_directed(&topics, &data), None); // the old, refund-less shape
+        assert_eq!(decode_directed(&topics[..2], &directed_data), None);
         assert_eq!(
-            decode_directed(&[DIRECTED_TOPIC, B256::repeat_byte(1), recipient], &data),
+            decode_directed(
+                &[DIRECTED_TOPIC, B256::repeat_byte(1), recipient],
+                &directed_data
+            ),
             None
         );
+        // A refund word with its twelve leading bytes not zero is not an address.
+        let mut dirty = directed_data.clone();
+        dirty[32] = 1;
+        assert_eq!(decode_directed(&topics, &dirty), None);
         let r = B256::repeat_byte(9);
         assert_eq!(decode_reference(&[REFERENCE_TOPIC, r], &[]), Some(r));
         assert_eq!(decode_reference(&[REFERENCE_TOPIC, r], &[0]), None);
