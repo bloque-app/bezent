@@ -5,7 +5,9 @@ pragma solidity 0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {Vm} from "forge-std/Vm.sol";
 
+import {DeployDirected} from "./DeployDirected.s.sol";
 import {DeployVault} from "./DeployVault.s.sol";
+import {DirectedDeposit} from "../src/DirectedDeposit.sol";
 import {ReferenceEmitter} from "../src/ReferenceEmitter.sol";
 import {ReferencedTransferUnwrapper} from "../src/ReferencedTransferUnwrapper.sol";
 import {VaultGuard, MIN_COOLDOWN, MAX_COOLDOWN, MIN_EXPIRATION, MAX_EXPIRATION} from "../src/VaultGuard.sol";
@@ -29,6 +31,10 @@ import {ISafe, IRoles, IRolesEvents, IDelay} from "../src/interfaces/External.so
 ///
 /// The first parameters are the ones the deployment took (config/vault.example.env); the addresses are the
 /// deployment's output.
+///
+/// With DIRECTED_DEPOSIT=<address> (F-018, T-018-03), it also checks the vault's directing code (`checkDirected`):
+/// the runtime code of this repository's `DirectedDeposit` built for this vault and config/<NETWORK>.json's
+/// `directed` limits, byte for byte, immutables included.
 ///
 /// Roles keeps its permissions in mappings that cannot be listed, so the check replays every event each of
 /// the two Roles modifiers (the vault's and the guardian's) has emitted since its creation (VAULT_FROM_BLOCK must be at or before the block that created it;
@@ -95,6 +101,11 @@ contract VerifyVault is Script {
             vm.envOr("VAULT_LOG_RANGE", uint256(10_000))
         );
         check(deploy, cfg, gov, d, logs, guardianLogs);
+        address directed = vm.envOr("DIRECTED_DEPOSIT", address(0));
+        if (directed != address(0)) {
+            checkDirected(new DeployDirected().load(cfg.network), cfg, d, directed);
+            console.log("VerifyVault: directing code matches its configuration:", directed);
+        }
         console.log(
             "VerifyVault: vault matches its configuration; Roles events replayed:",
             logs.length + guardianLogs.length
@@ -449,6 +460,32 @@ contract VerifyVault is Script {
         require(
             d.guard.codehash == address(new VaultGuard(d.roles, d.delay, d.guardianRoles)).codehash,
             "VerifyVault: guard code"
+        );
+    }
+
+    /// F-018 (plan DEC-21, proposed): reverts unless `directed` is this repository's `DirectedDeposit` for the
+    /// vault `d`, the vault's origin token and the route's limits in `dcfg`, and its maximum is within the Kreivo
+    /// per-transfer maximum. The reads name what differs; the code hash pins everything else.
+    function checkDirected(
+        DeployDirected.Config memory dcfg,
+        DeployVault.NetworkConfig memory cfg,
+        DeployVault.Deployment memory d,
+        address directed
+    ) public {
+        require(dcfg.token == cfg.originToken, "VerifyVault: directed token is not the vault's origin token");
+        require(
+            dcfg.maximum <= dcfg.kreivoPerTransferMax,
+            "VerifyVault: directed maximum above the Kreivo per-transfer maximum"
+        );
+        DirectedDeposit dd = DirectedDeposit(directed);
+        require(address(dd.token()) == cfg.originToken, "VerifyVault: directed token");
+        require(dd.reserve() == d.safe, "VerifyVault: directed reserve");
+        require(dd.minimum() == dcfg.minimum, "VerifyVault: directed minimum");
+        require(dd.maximum() == dcfg.maximum, "VerifyVault: directed maximum");
+        require(
+            directed.codehash
+                == address(new DirectedDeposit(cfg.originToken, d.safe, dcfg.minimum, dcfg.maximum)).codehash,
+            "VerifyVault: directed code"
         );
     }
 
