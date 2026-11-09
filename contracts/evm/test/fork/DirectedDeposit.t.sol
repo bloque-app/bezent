@@ -38,12 +38,18 @@ interface ICompatibilityFallbackHandler {
 
 /// Two deposits in one transaction, from one contract caller.
 contract TwoDeposits {
-    function run(address usdc, DirectedDeposit directed, uint256 a, bytes32 ra, uint256 b, bytes32 rb)
-        external
-    {
+    function run(
+        address usdc,
+        DirectedDeposit directed,
+        uint256 a,
+        bytes32 ra,
+        uint256 b,
+        bytes32 rb,
+        address refundTo
+    ) external {
         IUSDC(usdc).approve(address(directed), a + b);
-        directed.deposit(a, ra);
-        directed.deposit(b, rb);
+        directed.deposit(a, ra, refundTo);
+        directed.deposit(b, rb, refundTo);
     }
 }
 
@@ -53,7 +59,7 @@ contract TwoDeposits {
 /// the verifier. The depositors' keys are fresh (`makeAddrAndKey`): the test mnemonic's addresses past VaultFork's
 /// carry EIP-7702 delegations on Polygon at the pinned block, so USDC would check their permits with EIP-1271.
 contract DirectedDepositForkTest is VaultFork {
-    event Directed(address indexed sender, uint256 amount, bytes32 indexed recipient);
+    event Directed(address indexed sender, uint256 amount, bytes32 indexed recipient, address refund);
 
     bytes32 internal constant TRANSFER = keccak256("Transfer(address,address,uint256)");
     bytes32 internal constant APPROVAL = keccak256("Approval(address,address,uint256)");
@@ -66,6 +72,8 @@ contract DirectedDepositForkTest is VaultFork {
     address internal constant FALLBACK_HANDLER = 0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99;
     bytes32 internal constant RECIPIENT = keccak256("a Kreivo account");
 
+    /// The original depositor the caller names: not the caller (d-refund-dest-swaps).
+    address internal refundTo = makeAddr("bezent.directed.original-depositor");
     DeployDirected internal deployScript;
     DeployDirected.Config internal dcfg;
     DirectedDeposit internal directed;
@@ -115,10 +123,10 @@ contract DirectedDepositForkTest is VaultFork {
         uint256 before = usdc.balanceOf(user);
         vm.recordLogs();
         vm.prank(user);
-        directed.deposit(amount, RECIPIENT);
+        directed.deposit(amount, RECIPIENT, refundTo);
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertEq(logs.length, 2);
-        assertPair(logs, 1, user, amount, RECIPIENT);
+        assertPair(logs, 1, user, amount, RECIPIENT, refundTo);
         assertEq(usdc.balanceOf(user), before - amount);
         assertEq(usdc.balanceOf(d.safe), amount);
         assertNoBalance();
@@ -131,12 +139,12 @@ contract DirectedDepositForkTest is VaultFork {
         (uint8 v, bytes32 r, bytes32 s) = sign(userKey, user, amount, block.timestamp + 1 hours);
         vm.recordLogs();
         vm.prank(user);
-        directed.depositWithPermit(amount, RECIPIENT, block.timestamp + 1 hours, v, r, s);
+        directed.depositWithPermit(amount, RECIPIENT, refundTo, block.timestamp + 1 hours, v, r, s);
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertEq(logs.length, 3);
         assertEq(logs[0].emitter, cfg.originToken);
         assertEq(logs[0].topics[0], APPROVAL);
-        assertPair(logs, 2, user, amount, RECIPIENT);
+        assertPair(logs, 2, user, amount, RECIPIENT, refundTo);
         assertEq(usdc.balanceOf(d.safe), amount);
         assertEq(usdc.allowance(user, address(directed)), 0);
         assertNoBalance();
@@ -150,7 +158,7 @@ contract DirectedDepositForkTest is VaultFork {
         vm.prank(frontRunner);
         usdc.permit(user, address(directed), 1e6, deadline, v, r, s);
         vm.prank(user);
-        directed.depositWithPermit(1e6, RECIPIENT, deadline, v, r, s);
+        directed.depositWithPermit(1e6, RECIPIENT, refundTo, deadline, v, r, s);
         assertEq(usdc.balanceOf(d.safe), 1e6);
         assertNoBalance();
     }
@@ -162,7 +170,7 @@ contract DirectedDepositForkTest is VaultFork {
         deal(cfg.originToken, frontRunner, 1e6);
         vm.prank(frontRunner);
         vm.expectRevert(DirectedDeposit.AllowanceTooLow.selector);
-        directed.depositWithPermit(1e6, RECIPIENT, deadline, v, r, s);
+        directed.depositWithPermit(1e6, RECIPIENT, refundTo, deadline, v, r, s);
         assertEq(usdc.balanceOf(d.safe), 0);
         assertEq(usdc.nonces(user), 0);
     }
@@ -172,14 +180,14 @@ contract DirectedDepositForkTest is VaultFork {
         (uint8 v, bytes32 r, bytes32 s) = sign(uint256(keccak256("not the user")), user, 1e6, deadline);
         vm.prank(user);
         vm.expectRevert(DirectedDeposit.AllowanceTooLow.selector);
-        directed.depositWithPermit(1e6, RECIPIENT, deadline, v, r, s);
+        directed.depositWithPermit(1e6, RECIPIENT, refundTo, deadline, v, r, s);
     }
 
     function test_DEC_21_bytesPermitFromEoa() public {
         uint256 deadline = block.timestamp + 1 hours;
         (uint8 v, bytes32 r, bytes32 s) = sign(userKey, user, 1e6, deadline);
         vm.prank(user);
-        directed.depositWithPermit(1e6, RECIPIENT, deadline, abi.encodePacked(r, s, v));
+        directed.depositWithPermit(1e6, RECIPIENT, refundTo, deadline, abi.encodePacked(r, s, v));
         assertEq(usdc.balanceOf(d.safe), 1e6);
         assertNoBalance();
     }
@@ -208,9 +216,9 @@ contract DirectedDepositForkTest is VaultFork {
 
         vm.recordLogs();
         vm.prank(wallet);
-        directed.depositWithPermit(1e6, RECIPIENT, deadline, abi.encodePacked(r, s, v));
+        directed.depositWithPermit(1e6, RECIPIENT, refundTo, deadline, abi.encodePacked(r, s, v));
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertPair(logs, logs.length - 1, wallet, 1e6, RECIPIENT);
+        assertPair(logs, logs.length - 1, wallet, 1e6, RECIPIENT, refundTo);
         assertEq(usdc.balanceOf(d.safe), 1e6);
         assertEq(usdc.balanceOf(wallet), 0);
         assertNoBalance();
@@ -223,11 +231,11 @@ contract DirectedDepositForkTest is VaultFork {
         deal(cfg.originToken, address(batch), 3e6);
         bytes32 other = keccak256("another Kreivo account");
         vm.recordLogs();
-        batch.run(cfg.originToken, directed, 1e6, RECIPIENT, 2e6, other);
+        batch.run(cfg.originToken, directed, 1e6, RECIPIENT, 2e6, other, refundTo);
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertEq(logs.length, 5); // Approval, Transfer, Directed, Transfer, Directed
-        assertPair(logs, 2, address(batch), 1e6, RECIPIENT);
-        assertPair(logs, 4, address(batch), 2e6, other);
+        assertPair(logs, 2, address(batch), 1e6, RECIPIENT, refundTo);
+        assertPair(logs, 4, address(batch), 2e6, other, refundTo);
         assertEq(usdc.balanceOf(d.safe), 3e6);
         assertNoBalance();
     }
@@ -237,11 +245,17 @@ contract DirectedDepositForkTest is VaultFork {
         vm.startPrank(user);
         usdc.approve(address(directed), type(uint256).max);
         vm.expectRevert(DirectedDeposit.BelowMinimum.selector);
-        directed.deposit(1e6 - 1, RECIPIENT);
+        directed.deposit(1e6 - 1, RECIPIENT, refundTo);
         vm.expectRevert(DirectedDeposit.AboveMaximum.selector);
-        directed.deposit(50_000e6 + 1, RECIPIENT);
+        directed.deposit(50_000e6 + 1, RECIPIENT, refundTo);
         vm.expectRevert(DirectedDeposit.ZeroRecipient.selector);
-        directed.deposit(1e6, bytes32(0));
+        directed.deposit(1e6, bytes32(0), refundTo);
+        vm.expectRevert(DirectedDeposit.ZeroRefund.selector);
+        directed.deposit(1e6, RECIPIENT, address(0));
+        vm.expectRevert(DirectedDeposit.RefundIsReserve.selector);
+        directed.deposit(1e6, RECIPIENT, d.safe);
+        vm.expectRevert(DirectedDeposit.RefundIsSelf.selector);
+        directed.deposit(1e6, RECIPIENT, address(directed));
         vm.stopPrank();
         assertEq(usdc.balanceOf(d.safe), 0);
         assertNoBalance();
@@ -330,12 +344,16 @@ contract DirectedDepositForkTest is VaultFork {
         assertEq(usdc.balanceOf(address(directed)), 0);
     }
 
-    /// `logs[i]` is `Directed(sender, amount, recipient)` from the contract, and `logs[i - 1]` USDC's
+    /// `logs[i]` is `Directed(sender, amount, recipient, refund)` from the contract, and `logs[i - 1]` USDC's
     /// `Transfer(sender, vault, amount)`.
-    function assertPair(Vm.Log[] memory logs, uint256 i, address sender, uint256 amount, bytes32 recipient)
-        internal
-        view
-    {
+    function assertPair(
+        Vm.Log[] memory logs,
+        uint256 i,
+        address sender,
+        uint256 amount,
+        bytes32 recipient,
+        address refund
+    ) internal view {
         Vm.Log memory t = logs[i - 1];
         assertEq(t.emitter, cfg.originToken);
         assertEq(t.topics[0], TRANSFER);
@@ -347,6 +365,8 @@ contract DirectedDepositForkTest is VaultFork {
         assertEq(dl.topics[0], Directed.selector);
         assertEq(address(uint160(uint256(dl.topics[1]))), sender);
         assertEq(dl.topics[2], recipient);
-        assertEq(abi.decode(dl.data, (uint256)), amount);
+        (uint256 a, address rf) = abi.decode(dl.data, (uint256, address));
+        assertEq(a, amount);
+        assertEq(rf, refund);
     }
 }
