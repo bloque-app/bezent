@@ -6,14 +6,15 @@ SPDX-License-Identifier: CC-BY-4.0
 # Amendment 0028 — when the reserve check cannot see, it holds; when the money differs, it pauses
 
 **Status:** **Ruled by @pandres95 in chat, 2026-11-07: "Yes, write the amendment and build it."**, in reply to the
-proposal below. Applied to `SPEC.md` v0.5.11 (§2 "Hold", `REQ-BK-1`, `REQ-GV-2`, `REQ-IC-2`, `NFR-5`, `NFR-6`,
-`AC-E2.1`, `AC-E2.3`, §10 `CND-Paused`); `PLAN.md` v0.6.10 binds it (`DEC-16`). Built by migration 0142 and the core.
+proposal below. Applied to `SPEC.md` v0.5.12 (§2 "Hold", `REQ-BK-1`, `REQ-GV-2`, `REQ-IC-2`, `NFR-5`, `NFR-6`,
+`AC-E2.1`, `AC-E2.3`, §10 `CND-Paused`); `PLAN.md` v0.6.11 binds it (`DEC-16`). Built by migration 0142 and the core.
 The items under "Open after the ruling" stay open.
-**Target:** `SPEC.md` v0.5.10
+**Target:** `SPEC.md` v0.5.11
 **Date:** 2026-11-07
 **Needs:** nothing further for the ruling. Each item under "Open after the ruling" needs a decision of its own.
-Numbered 0028 because 0027 is reserved for the draft of pull request #111. If #111 takes `SPEC.md` v0.5.11 or `PLAN.md`
-v0.6.10 first, this one renumbers its versions to what is next. Migration 0142.
+Numbered 0028 because 0027 is reserved for the draft of pull request #111. This one first took `SPEC.md` v0.5.11 and
+`PLAN.md` v0.6.10; pull request #123 (the revert of #100) took those, so it renumbered to v0.5.12 and v0.6.11.
+Migration 0142.
 **Rationale in one line:** the reserve check paused an asset in the same way, and needed the same two-login lift,
 whether it could not see the networks or the money actually differed, so a start-up with every term at zero read as an
 alarm and held the bridge until two people acted.
@@ -129,7 +130,7 @@ The core cannot tell a chain that stopped finalizing from nothing recording its 
 providers behind): both look like a final head that does not advance, and both page at once, since neither ends by
 itself. The classification decides only when a person is paged, never whether work is held.
 
-## Applied text (`SPEC.md` v0.5.11)
+## Applied text (`SPEC.md` v0.5.12)
 
 - **§2** "Hold" (new): what the reserve check places on an asset's routes while it cannot see the asset; it stops new
   work as a pause does, and is lifted by bezent itself once an evaluation holds.
