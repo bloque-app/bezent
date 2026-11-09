@@ -94,8 +94,8 @@ contract DirectedDeposit {
 - **`directed_deposit(coordinate)`**, a `SECURITY DEFINER` function the core's login calls. It creates the deposit at
   `Source-Final`: bridge reference `bz-d-…` from the coordinate (the same derivation as `refs::deposit`), destination
   from the observation's `detail.recipient`, refund destination from its `sender`, and no intake row. The schema allows
-  that: `intake_answers` points at `transfers` (migration 0010), not the other way, and 0135's sender guard checks only
-  a transfer that has an answer. What has to be checked before building is every reader that assumes a deposit has a
+  that: `intake_answers` points at `transfers` (migration 0010), not the other way, and no sender guard applies to a deposit
+  with no request (amendment 0026 is withdrawn). What has to be checked before building is every reader that assumes a deposit has a
   request: webhooks, `by-request` queries, the sequenced log's requester field, the core's lookup of a refund
   destination. Each must treat "no answer" as a directed deposit and never as an error. A trigger refuses,
   whoever writes, a transfer bound to a `directed_arrival` whose destination or refund destination differs from the
@@ -105,11 +105,11 @@ contract DirectedDeposit {
   1. Is it mintable under the route as declared now (minimum, maximum, the directed share and count cap if ruled), and
      is the recipient off the refused list (the Kreivo contract's account, the `DEC-15` ledger accounts)?
   2. If so, call `directed_deposit`. From there it is an ordinary deposit (mint order, dry run, conditions, deadline,
-     review). Over the window: `CND-DepositWindow` (Open 1) or a return.
+     review). Over the window: it waits in `CND-DepositWindow` and resumes as the window rolls over (Open 1, ruled: wait); it is not returned.
   3. If not, record the arrival as unassociated with its owner, close it to minting, and order its return. That is a
      refund of an unassociated arrival (`bz-u-…`, `refs::unassociated_refund`) to the observed `sender`, recorded by
-     the core, with or without a second approver (Open 3).
-- **Review** (Open 2, if ruled): one new edge for a directed deposit only, a resolution from `Needs-Review` held at
+     the core, with no second approver (Open 3, ruled 2026-11-09).
+- **Review** (Open 2, ruled yes, 2026-11-09): one new edge for a directed deposit only, a resolution from `Needs-Review` held at
   `Source-Final` into `Refunding` with a second approver, when no mint attempt of it was ever signed.
 - **The public status route** (Open 8, if ruled). A second listener in `services/ingress`, with no credential, serving
   `GET /v0/public/deposits/by-coordinate` and `GET /v0/public/withdrawals/by-redemption`: state, named conditions,
