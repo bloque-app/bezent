@@ -350,13 +350,13 @@ Each is one question for @pandres95, with a recommendation. Open 1 to 13 are rul
    `REQ-LM-3`'s stance for every bound that clears itself, and a griefer who fills the window only delays others. It
    does not make bezent pay a return for each of them.
 2. **A recipient that can never receive.** **Ruled by @pandres95 on the decision form, 2026-11-09
-   (`d-0029-unreceivable`): "Yes".** A refund edge, with a second approver (A5, "The review edge"). *Question as put:* Should a directed deposit in review for `CND-DestinationRefused`, with no
+   (`d-0029-unreceivable`): "Yes" (the refund goes to the refund address the directing call names, `d-refund-dest-swaps`, 2026-11-09).** A refund edge, with a second approver (A5, "The review edge"). *Question as put:* Should a directed deposit in review for `CND-DestinationRefused`, with no
    mint ever signed, be able to resolve into a refund to its funder? Today `Source-Final → Refunding` is not an edge
    (`crates/core/src/state.rs`, `edge`), so such a deposit stays in review until its recipient can receive.
    *Recommended: yes*, as one new edge for directed deposits only, with a second approver, resting on the deposit being
    closed to minting (amendment 0014's reading).
 3. **Second approver for a return.** **Ruled by @pandres95 on the decision form, 2026-11-09
-   (`d-0029-return-approver`): "Yes".** A return needs no second approver (A5). *Question as put:* May bezent return a never-mintable directed arrival to its funder without a
+   (`d-0029-return-approver`): "Yes" (the refund goes to the refund address the directing call names, `d-refund-dest-swaps`, 2026-11-09).** A return needs no second approver (A5). *Question as put:* May bezent return a never-mintable directed arrival to its funder without a
    second approver? *Recommended: yes*, because the destination is fixed by rule. There is no count
    cap on returns (Open 6, ruled); an alert fires past a threshold.
 4. **A pause on the directing code.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-pause`): "No
