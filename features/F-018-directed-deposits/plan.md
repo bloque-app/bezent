@@ -29,24 +29,28 @@ contract DirectedDeposit {
     uint256 public immutable minimum;   // the route's minimum, 1 USDC = 1_000_000
     uint256 public immutable maximum;   // the route's per-transfer maximum, 50 000 USDC; ≤ the Kreivo per-transfer maximum
 
-    event Directed(address indexed sender, uint256 amount, bytes32 indexed recipient);
+    event Directed(address indexed sender, uint256 amount, bytes32 indexed recipient, address refund);
 
-    function deposit(uint256 amount, bytes32 recipient) external;
-    function depositWithPermit(uint256 amount, bytes32 recipient, uint256 deadline, uint8 v, bytes32 r, bytes32 s) external;
-    function depositWithPermit(uint256 amount, bytes32 recipient, uint256 deadline, bytes calldata signature) external; // EIP-1271 wallets
+    function deposit(uint256 amount, bytes32 recipient, address refund) external;
+    function depositWithPermit(uint256 amount, bytes32 recipient, address refund, uint256 deadline, uint8 v, bytes32 r, bytes32 s) external;
+    function depositWithPermit(uint256 amount, bytes32 recipient, address refund, uint256 deadline, bytes calldata signature) external; // EIP-1271 wallets
     // No pause, no owner, no admin function (Open 4, ruled).
 }
 ```
 
-- **Order inside a call:** check `minimum ≤ amount ≤ maximum`, `recipient != 0`. For the permit forms, call
+- **Order inside a call:** check `minimum ≤ amount ≤ maximum`, `recipient != 0`, `refund != 0`, `refund != reserve`, `refund != address(this)`. For the permit forms, call
   `try token.permit(msg.sender, address(this), amount, deadline, …)`, then require
   `token.allowance(msg.sender, address(this)) ≥ amount` whether or not the `try` succeeded, so a front-run permit costs
   nothing. Then `token.transferFrom(msg.sender, reserve, amount)` (checked return), then `emit Directed`. Nothing comes
   between the transfer and the event, so the `Transfer` log is always the one right before `Directed`.
 - **Never holds value.** The token moves from the caller to the vault, so no balance passes through the contract. It has
   no `receive` and no `fallback`, and no sweep (amendment 0029, "Stray tokens").
-- **Always `msg.sender`.** The permit's owner, the `from` of the transfer and the event's `sender` are all the caller.
-  No function takes an owner or a refund address.
+- **Value always from `msg.sender`; the refund address is named.** The permit's owner, the `from` of the transfer and the
+  event's `sender` are all the caller. No function takes an owner. Every function takes the `refund` address, the original
+  depositor, which is where a return goes (the owner's ruling `d-refund-dest-swaps`, 2026-11-09: "The original depositing
+  address. That's a contract flaw. The depositing contract should pass on the information about the original
+  depositor."). The funder chooses it, so bezent never chooses a refund destination (`REQ-RF-2`). It reverts on a zero
+  refund, the vault and the contract itself, each with its own custom error.
 - **No owner, no upgrade, no proxy.** Changing any limit, the token, the vault or a key means deploying a new contract
   at a new address, then a new declaration (`REQ-AS-11`) and an endpoint configuration that watches both until the old
   one is paused.
@@ -65,7 +69,7 @@ contract DirectedDeposit {
   `Directed` log pairs with the log right before it when that log is the admitted token's `Transfer` with `from` equal
   to the event's `sender`, `to` the vault, and `value` equal to its `amount`, above zero, in the same transaction. The
   pair is one observation, at the `Transfer` log's coordinate, of a new kind `directed_arrival`, with
-  `detail = { directing: <address>, direction_log: <index>, recipient: <0x…32 bytes> }`. The `Transfer` is not also
+  `detail = { directing: <address>, direction_log: <index>, recipient: <0x…32 bytes>, refund: <address> }`. The `Transfer` is not also
   recorded as an `Arrival`. A `Directed` log that does not pair is `UnpairedDirection` (recorded, never an arrival,
   never bindable). Every other rule of decision 4 stands.
 - **Finality and dedupe:** unchanged. Only final blocks are recorded (decision 2); the two providers must agree on the
@@ -81,15 +85,15 @@ contract DirectedDeposit {
   `transfers_source_bindable` for **every** writer, migration 0034) gets one carve-out per purpose, and no other:
   - purpose `deposit`: a `directed_arrival` is bindable only by a transfer that `directed_deposit()` writes, with no
     intake answer, its destination equal to the observation's `detail.recipient` and its refund destination equal to
-    its `sender`;
+    its `detail.refund`;
   - purpose `refund` (an unassociated arrival's, `refund_of` empty): a `directed_arrival` is bindable only by the
-    core's return, with no intake answer, its destination equal to the observation's `sender`;
+    core's return, with no intake answer, its destination equal to the observation's `detail.refund`;
   - `unpaired_direction`: bindable by nothing.
   A transfer that names a `directed_arrival` and has an intake answer (that is, any requester's) is refused, whoever
   writes.
 - **`directed_deposit(coordinate)`**, a `SECURITY DEFINER` function the core's login calls. It creates the deposit at
   `Source-Final`: bridge reference `bz-d-…` from the coordinate (the same derivation as `refs::deposit`), destination
-  from the observation's `detail.recipient`, refund destination from its `sender`, and no intake row. The schema allows
+  from the observation's `detail.recipient`, refund destination from its `detail.refund`, and no intake row. The store refuses a refund of the zero address, the vault or the directing contract, as the destination guard does. The schema allows
   that: `intake_answers` points at `transfers` (migration 0010), not the other way, and no sender guard applies to a deposit
   with no request (amendment 0026 is withdrawn). What has to be checked before building is every reader that assumes a deposit has a
   request: webhooks, `by-request` queries, the sequenced log's requester field, the core's lookup of a refund
@@ -103,7 +107,7 @@ contract DirectedDeposit {
   2. If so, call `directed_deposit`. From there it is an ordinary deposit (mint order, dry run, conditions, deadline,
      review). Over the window: it waits in `CND-DepositWindow` and resumes as the window rolls over (Open 1, ruled: wait); it is not returned.
   3. If not, record the arrival as unassociated with its owner, close it to minting, and order its return. That is a
-     refund of an unassociated arrival (`bz-u-…`, `refs::unassociated_refund`) to the observed `sender`, recorded by
+     refund of an unassociated arrival (`bz-u-…`, `refs::unassociated_refund`) to the observed `detail.refund`, recorded by
      the core, with no second approver (Open 3, ruled 2026-11-09).
 - **Review** (Open 2, ruled yes, 2026-11-09): one new edge for a directed deposit only, a resolution from `Needs-Review` held at
   `Source-Final` into `Refunding` with a second approver, when no mint attempt of it was ever signed.
@@ -164,8 +168,10 @@ deposit by itself (part 3) and needs no requester to bind it.
 - **Until then**, a sweep stays a plain transfer, and Swaps binds it by coordinate as today (amendment 0029, A3).
 - **The work is evmhot's**, outside this repository. bezent needs nothing new for it beyond parts 1 to 3: the sweep's
   `Transfer` pairs with its `Directed` log like any other.
-- **What follows from the rule.** The funder is the deposit address, so a sweep that can never be minted is returned
-  there (A5), to an address evmhot controls. A sweep must lie within the contract's limits (1 to 50 000 USDC), so a
+- **What follows from the rule.** The funder is the deposit address, but the refund is the original depositor that evmhot
+  names in the call (`d-refund-dest-swaps`), so a sweep that can never be minted is returned there (A5), and never back
+  to a deposit address that would sweep it again. A sweep that mixes several senders has no single original depositor
+  (amendment 0029, Open 15, to the owner, not ruled). A sweep must lie within the contract's limits (1 to 50 000 USDC), so a
   larger balance is swept in several calls and a smaller one waits. There is no share and no count cap (Open 5 and 6,
   ruled), so sweeps are bound by the route's window and the contract's limits alone, and count toward the alerts on
   directed mints.
@@ -181,14 +187,14 @@ sufficient (Open 7, ruled: not now).
 
 - **Contract:** Foundry fork tests on Polygon at the pinned block show that a deposit moves exactly `amount` from the
   caller to the vault with `Directed` right after the `Transfer` (`AC-A6.6`, `REQ-RN-5`); below the minimum, above the
-  maximum, and a zero recipient revert and move nothing (`AC-A6.5`); a front-run permit does not stop
+  maximum, a zero recipient, a zero refund, a refund equal to the vault and a refund equal to the contract revert and move nothing (`AC-A6.5`); `Directed` carries the refund;  a front-run permit does not stop
   the deposit; the bytes-signature permit works from a Safe as depositor; the contract never holds a balance
   and has no pause, owner or admin function; the verifier accepts the deployment and refuses a
   changed immutable.
 - **Endpoint and core:** a directed arrival is one observation at the `Transfer`'s coordinate, never also an `Arrival`
   (`AC-A6.6`); a requester's deposit or refund naming it is `ERR-SourceNotFound` (`AC-A6.2`); it becomes a deposit
-  minted for the recorded recipient, with the funder as refund destination (`AC-A6.1`); a pause, a hold and the mint
-  window park it (`AC-A6.3`); a never-mintable one is returned once, to its funder (`AC-A6.4`); an unpaired `Directed`
+  minted for the recorded recipient, with the refund address its caller named as refund destination (`AC-A6.1`); a pause, a hold and the mint
+  window park it (`AC-A6.3`); a never-mintable one is returned once, to its refund address (`AC-A6.4`); an unpaired `Directed`
   log is never an arrival; the reserve check stays at zero divergence through all of it (`INV-1`).
 - **Web app:** on Amoy and the zombienet test bed, a user with only a browser wallet deposits, sees the mint, redeems
   and sees the payout; a recipient that cannot receive is refused before signing.

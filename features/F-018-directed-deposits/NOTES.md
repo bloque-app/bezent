@@ -96,8 +96,19 @@ leaves room for a rate-limiting front to the public status route (amendment 0029
 
 ## Smaller choices
 
-- `Directed(address indexed sender, uint256 amount, bytes32 indexed recipient)`: the sender and recipient are topics, so
-  a wallet or the status page can filter by either. The amount stays in data.
+- `Directed(address indexed sender, uint256 amount, bytes32 indexed recipient, address refund)`: the sender and recipient
+  are topics, so a wallet or the status page can filter by either. The amount and the refund address stay in data.
+- The refund destination is named by the caller, not taken from `msg.sender` (`d-refund-dest-swaps`, owner, 2026-11-09:
+  "The original depositing address. That's a contract flaw. The depositing contract should pass on the information about
+  the original depositor. If not doing it, that's a flaw."). evmhot's sweeps are called from its HD deposit addresses, so
+  `msg.sender` would loop a refund into another sweep.
+- The original sender may be an exchange's shared hot wallet (SPEC `DEF-5` risk: returning there can lose the value),
+  and the owner has ruled that the refund goes to the original depositor all the same (`d-refund-dest-swaps`).
+- **Open question, to the owner, not ruled (amendment 0029, Open 15):** a single sweep can mix funds from several
+  senders, because evmhot sweeps full balances and sub-minimum dust accumulates. A deposit has one refund address, so the
+  original depositor is undefined. Recommended: one directed call per inbound transfer, refund = that transfer's sender;
+  sub-minimum transfers are never combined across senders; dust from different senders stays in the deposit address. Not
+  applied anywhere.
 - Pairing at the `Transfer` log's coordinate, not the `Directed` log's: the arrival is the token's movement, as for
   every other arrival (`REQ-RN-3`). The reserve book and the existing bridge reference derivation then need no change.
 - The recipient is public on Polygon, next to the depositor's address. That is the user's own choice, and an account id
