@@ -359,6 +359,9 @@ pub struct Fixture {
     pub declarations: Declarations,
     /// The convertibles.
     pub convertibles: Vec<(Address, Address)>,
+    /// The declared directing contracts and their first blocks (F-018). Empty unless a test
+    /// declares one.
+    pub directing: Vec<(Address, u64)>,
 }
 
 impl Fixture {
@@ -400,6 +403,7 @@ impl Fixture {
             link,
             declarations: declarations(),
             convertibles: vec![(usdt0(), pool_address())],
+            directing: Vec::new(),
         }
     }
 
@@ -415,6 +419,7 @@ impl Fixture {
                 declarations: &self.declarations,
                 convertibles: &self.convertibles,
                 delivery: self.lane.address,
+                directing: &self.directing,
             },
             start_block: 1,
             max_range: 4,
