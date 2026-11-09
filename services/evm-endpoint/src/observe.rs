@@ -33,6 +33,8 @@
 //! | `ConversionInput` | the vault's `Transfer` of a convertible to its declared pool, in such a transaction | the conversion's input |
 //! | `ConvertibleArrival` | an admitted convertible's `Transfer` into the vault | itemised, never reserve (`REQ-CV-4`) |
 //! | `OtherArrival` | any other token's `Transfer` into the vault | unassociated, with an owner (`REQ-IN-6`) |
+//! | `DirectedArrival` | an admitted origin token's `Transfer` into the vault, **immediately** followed in the same transaction by a declared directing contract's `Directed` log naming the same sender and amount (F-018, `AC-A6.6`) | one observation at the `Transfer`'s coordinate, never also an `Arrival`; sender, amount, and in the detail the issuing network's recipient and the refund address the caller named (`d-refund-dest-swaps`) |
+//! | `UnpairedDirection` | a declared directing contract's `Directed` log with no such `Transfer` before it | an anomaly: recorded at the log, never an arrival, never bindable |
 //! | `Payout` | the vault's `Transfer` of an origin token, amount above zero, to an address that is not the vault, **immediately** followed in the same transaction by the emitter's `Reference` | a payout leg: reference, token, amount, sender and recipient from the transfer (`INV-14`, `AC-C1.3`; F-008 NOTES) |
 //! | `Outflow`, `ZeroTransfer`, `SelfTransfer` | any other `Transfer` out of the vault | never a payout; a self transfer has no `recipient` column (it is in the detail), so no deposit can bind it |
 //! | `UnpairedReference` | an emitter's `Reference` not paired as above (a bare emit) | never a payout |
@@ -49,7 +51,7 @@ use alloy::primitives::{Address, B256, U256};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use crate::evm::{self, REFERENCE_TOPIC, TRANSFER_TOPIC};
+use crate::evm::{self, DIRECTED_TOPIC, REFERENCE_TOPIC, TRANSFER_TOPIC};
 use crate::fee;
 use crate::network::Declarations;
 use crate::pair::{Pair, Read};
@@ -87,6 +89,8 @@ pub struct Observed {
 pub fn kind(event: &str) -> &'static str {
     match event {
         "Arrival" => "arrival",
+        "DirectedArrival" => "directed_arrival",
+        "UnpairedDirection" => "unpaired_direction",
         "OtherArrival" => "other_arrival",
         "ConvertibleArrival" => "convertible_arrival",
         "Conversion" => "conversion_output",
@@ -112,6 +116,9 @@ pub struct Watch<'a> {
     /// The delivery account (the lane's address), whose native balance is the network's fee
     /// position (`REQ-ST-6`, [`crate::fee`]).
     pub delivery: Address,
+    /// The declared directing contracts and the first block whose `Directed` events count
+    /// (F-018). Empty by default, and empty changes nothing.
+    pub directing: &'a [(Address, u64)],
 }
 
 /// An address as bezent writes it: the store's spelling for the vault and the admitted tokens,
@@ -170,6 +177,50 @@ impl Watch<'_> {
                 .then_some(from)
             })
             .collect();
+        // F-018: the `Directed` logs of a declared directing contract (from its first block), and
+        // for each the `Transfer` it pairs with: the log right before it, the admitted token's
+        // transfer from its sender to the vault of its amount, above zero, and not a conversion's
+        // output. The pair is read once, at the transfer.
+        let is_directed = |l: &Log| {
+            l.topics.first() == Some(&DIRECTED_TOPIC)
+                && self.directing.iter().any(|(a, _)| *a == l.address)
+        };
+        let directed_counts = |l: &Log| {
+            self.directing
+                .iter()
+                .any(|(a, from)| *a == l.address && l.block_number >= *from)
+        };
+        let mut pair_of: BTreeMap<usize, (usize, B256, Address)> = BTreeMap::new();
+        for (d, l) in logs.iter().enumerate() {
+            if !(is_directed(l) && directed_counts(l)) {
+                continue;
+            }
+            let Some((sender, amount, recipient, refund)) =
+                evm::decode_directed(&l.topics, &l.data)
+            else {
+                continue;
+            };
+            let Some(t) = d.checked_sub(1) else { continue };
+            let (before, Some((from, to, value))) = (&logs[t], transfers[t]) else {
+                continue;
+            };
+            if before.log_index + 1 == l.log_index
+                && before.tx_hash == l.tx_hash
+                && self.declarations.tokens.contains_key(&before.address)
+                && from == sender
+                && to == self.vault
+                && value == amount
+                && !amount.is_zero()
+                && !converted_from.contains(&from)
+                // The guards the contract applies, and the store applies again: never a zero
+                // refund, the vault, or the directing contract itself (`d-refund-dest-swaps`).
+                && !refund.is_zero()
+                && refund != self.vault
+                && refund != l.address
+            {
+                pair_of.insert(t, (d, recipient, refund));
+            }
+        }
         let payout_at = |i: usize| -> Option<B256> {
             let (l, (from, to, amount)) = (&logs[i], transfers[i]?);
             let next = logs.get(i + 1)?;
@@ -217,6 +268,37 @@ impl Watch<'_> {
                 out.push(o);
                 continue;
             }
+            if is_directed(l) {
+                if !directed_counts(l) || pair_of.values().any(|(d, _, _)| *d == i) {
+                    // Before the declaration's first block, read as nothing; or paired, and
+                    // recorded at its transfer.
+                    continue;
+                }
+                o.event = "UnpairedDirection";
+                o.detail["directing"] = json!(l.address.to_checksum(None));
+                match evm::decode_directed(&l.topics, &l.data) {
+                    Some((sender, amount, recipient, refund)) => {
+                        o.sender = Some(spell(self, sender));
+                        o.amount = amount_text(amount);
+                        if o.amount.is_none() {
+                            o.detail["amount_text"] = json!(amount.to_string());
+                        }
+                        o.detail["recipient"] = json!(hex0x(recipient.as_slice()));
+                        o.detail["refund"] = json!(refund.to_checksum(None));
+                        o.detail["reason"] = json!(
+                            "no admitted-token transfer from the sender to the vault of this \
+                             amount immediately before it, or a refund the contract refuses"
+                        );
+                    }
+                    None => {
+                        o.detail["reason"] = json!("not a Directed event in its shape");
+                        o.detail["topics"] = json!(l.topics);
+                        o.detail["data"] = json!(hex0x(&l.data));
+                    }
+                }
+                out.push(o);
+                continue;
+            }
             let Some((from, to, value)) = transfers[i] else {
                 o.event = "UndecodedTransfer";
                 o.detail["topics"] = json!(l.topics);
@@ -240,7 +322,16 @@ impl Watch<'_> {
                 o.detail["to"] = json!(spell(self, to));
                 "SelfTransfer"
             } else if to == self.vault {
-                if admitted && converted_from.contains(&from) {
+                if let Some(&(d, recipient, refund)) = pair_of.get(&i) {
+                    // F-018: a directed arrival, at this transfer's coordinate, and not an
+                    // `Arrival`. The recipient column stays the reserve, as an arrival's; the
+                    // issuing network's recipient is in the detail.
+                    o.detail["directing"] = json!(logs[d].address.to_checksum(None));
+                    o.detail["direction_log"] = json!(logs[d].log_index);
+                    o.detail["recipient"] = json!(hex0x(recipient.as_slice()));
+                    o.detail["refund"] = json!(refund.to_checksum(None));
+                    "DirectedArrival"
+                } else if admitted && converted_from.contains(&from) {
                     let input = logs.iter().zip(&transfers).find(|(il, it)| {
                         matches!(it, Some((f, t, _)) if *f == self.vault && *t == from
                             && self.pool_of(il.address) == Some(from))
@@ -476,6 +567,16 @@ impl<R: Rpc> Follower<'_, R> {
                 topics: vec![Some(REFERENCE_TOPIC)],
             },
         ];
+        let mut queries = queries.to_vec();
+        if !w.directing.is_empty() {
+            // F-018: the directing contracts' `Directed` logs, and only when any is declared.
+            queries.push(LogQuery {
+                from: first,
+                to: last,
+                address: w.directing.iter().map(|(a, _)| *a).collect(),
+                topics: vec![Some(DIRECTED_TOPIC)],
+            });
+        }
         let mut logs: BTreeMap<(u64, u64), Log> = BTreeMap::new();
         for q in &queries {
             for l in self.pair.logs(q).await.map_err(|e| e.to_string())? {

@@ -100,6 +100,9 @@ async fn m1_inv_2_nothing_without_an_explicit_bindable_kind_binds(pool: PgPool) 
         Some("conversion_input"),
         Some("self_transfer"),
         Some("transaction"),
+        // F-018, T-018-05: recorded, and bound by nothing until T-018-06's carve-outs.
+        Some("directed_arrival"),
+        Some("unpaired_direction"),
     ];
     for (i, kind) in never.into_iter().enumerate() {
         let block = 10 + i64::try_from(i).unwrap();
@@ -401,6 +404,61 @@ async fn req_ob_6_inv_2_each_endpoint_records_only_its_own_networks_kinds(pool: 
         REFUSED
     );
     assert_eq!(as_role(&pool, kreivo, &outcome("issuing")).await, None);
+}
+
+/// F-018, T-018-05 (migration 0143): `directed_arrival` and `unpaired_direction` are kinds of an
+/// origin network, written by its endpoint with their events and no others; the issuing network
+/// records neither.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a6_6_the_directing_kinds_are_an_origin_networks_and_agree_with_their_events(
+    pool: PgPool,
+) {
+    declarations(&pool).await;
+    for (i, kind) in ["directed_arrival", "unpaired_direction"]
+        .into_iter()
+        .enumerate()
+    {
+        let block = 1 + i64::try_from(i).unwrap();
+        exec(&pool, &observation_sql("origin-a", block, kind)).await;
+        assert_refused(&pool, &observation_sql("issuing", block, kind), "REQ-OB-6").await;
+        assert_eq!(
+            as_role(
+                &pool,
+                bezent_store::KREIVO_ENDPOINT_ROLE,
+                &observation_sql("issuing", block, kind)
+            )
+            .await
+            .as_deref(),
+            REFUSED,
+            "{kind}"
+        );
+    }
+    // The event and the kind agree: the guard names the event's kind.
+    for (n, (event, kind)) in [
+        ("DirectedArrival", "directed_arrival"),
+        ("UnpairedDirection", "unpaired_direction"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let base = 10 + 2 * i64::try_from(n).unwrap();
+        let sql = |block: i64, kind: &str| {
+            format!(
+                "INSERT INTO observations (network, block_number, block_hash, block_time, \
+                   position_kind, position_index, token, amount, recipient, executed, kind, detail) \
+                 VALUES ('origin-a', {block}, '\\x07', '2026-10-13T00:00:00Z', 'log', 1, 'token-a', 1, \
+                   '{RESERVE}', TRUE, '{kind}', '{{\"event\": \"{event}\"}}')"
+            )
+        };
+        exec(&pool, &sql(base, kind)).await;
+        assert_refused(&pool, &sql(base + 1, "arrival"), "REQ-OB-6").await;
+    }
+    // The old kinds keep their events.
+    let kind: String = sqlx::query_scalar("SELECT observation_kind_for_event('Arrival')")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(kind, "arrival");
 }
 
 /// No function of 0034 is PUBLIC's; the services keep the ones their triggers run as them.

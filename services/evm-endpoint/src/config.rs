@@ -37,6 +37,10 @@
 //! token = "0x…"
 //! pool = "0x…"
 //!
+//! [[directing]]            # F-018 (amendment 0029, proposed): directing code, empty by default
+//! address = "0x…"          # the DirectedDeposit contract; its `Directed` events are read
+//! from_block = 95400000    # events below this block are not read as directing
+//!
 //! [lane]                   # REQ-EO-4: one lane, the delivery key's nonce sequence
 //! key = "polygon-payout"
 //! public_key = "0x02…"
@@ -106,6 +110,17 @@ pub struct Convertible {
     pub token: String,
     /// The declared pool.
     pub pool: String,
+}
+
+/// Directing code declared for the vault (F-018, amendment 0029, proposed): the contract whose
+/// `Directed` event, paired with the `Transfer` right before it, makes a directed arrival.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Directing {
+    /// The directing contract.
+    pub address: String,
+    /// The first block whose `Directed` events count. Earlier ones are read as nothing.
+    pub from_block: u64,
 }
 
 /// The delivery key's lane.
@@ -225,6 +240,9 @@ pub struct Config {
     /// The convertibles.
     #[serde(default)]
     pub convertibles: Vec<Convertible>,
+    /// The directing code declared for the vault. Empty by default, and empty changes nothing.
+    #[serde(default)]
+    pub directing: Vec<Directing>,
     /// The lane.
     pub lane: LaneConfig,
     /// The gas bounds.
@@ -269,6 +287,8 @@ pub struct Checked {
     pub lane_address: Address,
     /// The convertibles and their pools.
     pub convertibles: Vec<(Address, Address)>,
+    /// The directing contracts and the first block whose events count.
+    pub directing: Vec<(Address, u64)>,
     /// The highest `maxFeePerGas`.
     pub max_fee_per_gas: u128,
 }
@@ -418,6 +438,28 @@ impl Config {
                 address("convertibles.pool", &c.pool)?,
             ));
         }
+        let mut directing: Vec<(Address, u64)> = Vec::new();
+        for d in &self.directing {
+            let a = address("directing.address", &d.address)?;
+            if directing.iter().any(|(x, _)| *x == a) {
+                return Err(format!("directing.address: {a} is declared twice"));
+            }
+            if [
+                vault,
+                contracts.roles,
+                contracts.emitter,
+                contracts.multisend,
+                lane_address,
+            ]
+            .contains(&a)
+                || convertibles.iter().any(|(t, p)| *t == a || *p == a)
+            {
+                return Err(format!(
+                    "directing.address: {a} is the vault, one of its contracts, the lane or a convertible"
+                ));
+            }
+            directing.push((a, d.from_block));
+        }
         let max_fee_per_gas: u128 = self
             .gas
             .max_fee_per_gas
@@ -433,6 +475,7 @@ impl Config {
             lane_public_key,
             lane_address,
             convertibles,
+            directing,
             max_fee_per_gas,
         })
     }
@@ -618,6 +661,32 @@ mod tests {
                 .unwrap_err()
                 .contains("statement_timeout_ms")
         );
+    }
+
+    /// F-018, T-018-05: directing code is empty by default; a declared one is parsed, and a
+    /// duplicate, a bad address or one of the vault's own contracts is refused.
+    #[test]
+    fn ac_a6_6_directing_is_empty_by_default_and_checked_when_declared() {
+        let c = Config::parse(FIXTURE).unwrap();
+        assert!(c.directing.is_empty());
+        assert!(c.check().unwrap().directing.is_empty());
+        let one = "[[directing]]\naddress = \"0x00000000000000000000000000000000000d1ec7\"\nfrom_block = 95400100\n";
+        let with = |extra: &str| format!("{FIXTURE}\n{extra}");
+        let c = Config::parse(&with(one)).unwrap();
+        let checked = c.check().unwrap();
+        assert_eq!(checked.directing.len(), 1);
+        assert_eq!(checked.directing[0].1, 95_400_100);
+        // Declared twice.
+        assert!(Config::parse(&with(&format!("{one}{one}"))).is_err());
+        // Not an address.
+        let bad = one.replace("0x00000000000000000000000000000000000d1ec7", "0xnope");
+        assert!(Config::parse(&with(&bad)).is_err());
+        // The vault itself.
+        let vault = Config::parse(FIXTURE).unwrap().vault;
+        let bad = one.replace("0x00000000000000000000000000000000000d1ec7", &vault);
+        assert!(Config::parse(&with(&bad)).is_err());
+        // An unknown key.
+        assert!(Config::parse(&with(&format!("{one}owner = \"x\"\n"))).is_err());
     }
 
     #[test]

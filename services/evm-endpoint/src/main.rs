@@ -182,6 +182,7 @@ async fn run(config: Config) -> Result<(), String> {
             declarations: &declarations,
             convertibles: &checked.convertibles,
             delivery: checked.lane_address,
+            directing: &checked.directing,
         },
         start_block: config.start_block,
         max_range: config.max_range,
