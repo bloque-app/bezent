@@ -57,6 +57,20 @@ CREATE FUNCTION reference_tagged(p_tag TEXT, p_fields BYTEA[]) RETURNS BYTEA
                      FROM unnest(p_fields) WITH ORDINALITY AS u(f, ord)), ''::bytea))
 $$;
 
+CREATE FUNCTION coordinate_digest(
+    p_network TEXT, p_block BIGINT, p_hash BYTEA, p_kind position_kind, p_index BIGINT)
+    RETURNS BYTEA
+    LANGUAGE sql IMMUTABLE
+    SET search_path = pg_catalog, public
+    AS $$
+    SELECT reference_tagged('bezent/coordinate/v0', ARRAY[
+        convert_to(p_network, 'UTF8'),
+        int8send(p_block),
+        p_hash,
+        convert_to(p_kind::text, 'UTF8'),
+        substring(int8send(p_index) from 5 for 4)])
+$$;
+
 CREATE FUNCTION deposit_reference(
     p_network TEXT, p_block BIGINT, p_hash BYTEA, p_kind position_kind, p_index BIGINT)
     RETURNS TEXT
@@ -64,14 +78,25 @@ CREATE FUNCTION deposit_reference(
     SET search_path = pg_catalog, public
     AS $$
     SELECT 'bz-d-' || encode(substring(reference_tagged('bezent/deposit/v0', ARRAY[
-        reference_tagged('bezent/coordinate/v0', ARRAY[
-            convert_to(p_network, 'UTF8'),
-            int8send(p_block),
-            p_hash,
-            convert_to(p_kind::text, 'UTF8'),
-            substring(int8send(p_index) from 5 for 4)])
+        coordinate_digest(p_network, p_block, p_hash, p_kind, p_index)
     ]) from 1 for 20), 'hex')
 $$;
+
+CREATE FUNCTION refund_reference(
+    p_network TEXT, p_block BIGINT, p_hash BYTEA, p_kind position_kind, p_index BIGINT)
+    RETURNS TEXT
+    LANGUAGE sql IMMUTABLE
+    SET search_path = pg_catalog, public
+    AS $$
+    SELECT 'bz-u-' || encode(substring(reference_tagged('bezent/refund/v0', ARRAY[
+        coordinate_digest(p_network, p_block, p_hash, p_kind, p_index)
+    ]) from 1 for 20), 'hex')
+$$;
+
+COMMENT ON FUNCTION refund_reference(TEXT, BIGINT, BYTEA, position_kind, BIGINT) IS
+    'REQ-RQ-6, REQ-IN-11: the bridge reference of the refund of the unassociated arrival at a '
+    'coordinate (the return of a directed arrival), derived as '
+    'services/ingress/src/refs.rs::unassociated_refund derives it. A test pins vectors in both.';
 
 COMMENT ON FUNCTION deposit_reference(TEXT, BIGINT, BYTEA, position_kind, BIGINT) IS
     'REQ-IN-3, REQ-IN-10: the bridge reference of the deposit that binds the arrival at a coordinate, '
@@ -413,6 +438,14 @@ BEGIN
             USING ERRCODE = 'BZ001';
     END IF;
 
+    -- No request answered with this transfer may rebind it onto a directed arrival: the answer
+    -- guard below sees inserts only, so an update of an answered transfer is refused here (A3).
+    IF TG_OP = 'UPDATE' AND EXISTS (SELECT 1 FROM intake_answers a WHERE a.transfer_id = NEW.id) THEN
+        RAISE EXCEPTION '% % refused: a request already answers this transfer, and no request binds or reaches a directed arrival (REQ-IN-10, AC-A6.2, INV-2)',
+            NEW.kind, NEW.bridge_reference
+            USING ERRCODE = 'BZ001';
+    END IF;
+
     SELECT n.address_format INTO origin_fmt FROM networks n WHERE n.network = o.network;
     refund := o.detail ->> 'refund';
     recipient := o.detail ->> 'recipient';
@@ -421,6 +454,18 @@ BEGIN
     -- directing contract refuses too: zero, the vault, the directing contract itself (REQ-IN-10).
     IF refund IS NULL OR refund = '' THEN
         RAISE EXCEPTION '% % refused: the directed arrival it is bound to records no refund address (REQ-IN-10, REQ-RF-2)',
+            NEW.kind, NEW.bridge_reference
+            USING ERRCODE = 'BZ001';
+    END IF;
+    -- A detail with no recipient or no directing contract is no directed arrival's: the directing
+    -- check below compares nothing when the key is missing, so it is refused here, not passed.
+    IF recipient IS NULL OR recipient = '' THEN
+        RAISE EXCEPTION '% % refused: the directed arrival it is bound to records no recipient (REQ-IN-10, INV-2)',
+            NEW.kind, NEW.bridge_reference
+            USING ERRCODE = 'BZ001';
+    END IF;
+    IF o.detail ->> 'directing' IS NULL OR o.detail ->> 'directing' = '' THEN
+        RAISE EXCEPTION '% % refused: the directed arrival it is bound to records no directing contract (REQ-IN-10, REQ-RF-2)',
             NEW.kind, NEW.bridge_reference
             USING ERRCODE = 'BZ001';
     END IF;
@@ -467,6 +512,13 @@ BEGIN
            OR NOT address_matches(origin_fmt, NEW.destination, refund)
            OR num_nonnulls(NEW.refund_destination_network, NEW.refund_destination) > 0 THEN
             RAISE EXCEPTION 'refund % refused: the return of a directed arrival is paid on its network to the refund address its arrival recorded, and nowhere else (REQ-IN-11, REQ-RF-2, AC-A6.4)',
+                NEW.bridge_reference
+                USING ERRCODE = 'BZ001';
+        END IF;
+        IF NEW.bridge_reference IS DISTINCT FROM refund_reference(
+               NEW.source_network, NEW.source_block_number, NEW.source_block_hash,
+               NEW.source_position_kind, NEW.source_position_index) THEN
+            RAISE EXCEPTION 'refund % refused: the return of a directed arrival has the bridge reference derived from its arrival''s coordinate (REQ-IN-11, REQ-RQ-6)',
                 NEW.bridge_reference
                 USING ERRCODE = 'BZ001';
         END IF;
@@ -523,7 +575,7 @@ CREATE TRIGGER intake_answers_guard_directed
 --
 -- Begins at Source-Final, as a requester-bound deposit does (REQ-IN-3), with the milestone of the
 -- final head its observation was decided at. Returns the deposit's id: the new one, or, when the
--- coordinate already has its deposit, that one (INV-2); NULL when something else binds the
+-- coordinate already has its live deposit, that one (INV-2), and a named refusal when it is dead; NULL when something else binds the
 -- coordinate (its return). The triggers above and 0046, 0048, 0049, 0080 check what it writes, as
 -- they check any writer's.
 
@@ -544,6 +596,7 @@ DECLARE
     final_at  TIMESTAMPTZ;
     reference TEXT;
     made      BIGINT;
+    dead      transfer_state;
 BEGIN
     SELECT relowner INTO owner_oid FROM pg_class WHERE oid = 'public.transfers'::regclass;
     IF NOT (pg_has_role(writer, owner_oid, 'USAGE') OR pg_has_role(writer, 'bezent_core', 'USAGE')) THEN
@@ -609,8 +662,16 @@ BEGIN
     IF made IS NOT NULL THEN
         RETURN made;
     END IF;
-    -- Nothing was made: the coordinate has its deposit already (INV-2), or something else binds it.
-    SELECT t.id INTO made FROM transfers t WHERE t.bridge_reference = reference AND t.kind = 'deposit';
+    -- Nothing was made: the coordinate has its deposit already (INV-2), or something else binds it
+    -- (NULL). A deposit that is Refused, Withdrawn, Expired or Refunded is no deposit of this arrival
+    -- to answer with: it is refused by name, not returned as if it were live.
+    SELECT t.id, t.state INTO made, dead
+    FROM transfers t WHERE t.bridge_reference = reference AND t.kind = 'deposit';
+    IF made IS NOT NULL AND dead IN ('Refused', 'Withdrawn', 'Expired', 'Refunded') THEN
+        RAISE EXCEPTION 'directed_deposit refused: the coordinate''s deposit is % and no longer live; it is not returned as the arrival''s deposit (REQ-IN-10, INV-2)',
+            dead
+            USING ERRCODE = 'BZ001';
+    END IF;
     RETURN made;
 END
 $$;
@@ -626,7 +687,9 @@ COMMENT ON FUNCTION directed_deposit(TEXT, BIGINT, BYTEA, position_kind, BIGINT)
 
 REVOKE EXECUTE ON FUNCTION
     reference_tagged(TEXT, BYTEA[]),
+    coordinate_digest(TEXT, BIGINT, BYTEA, position_kind, BIGINT),
     deposit_reference(TEXT, BIGINT, BYTEA, position_kind, BIGINT),
+    refund_reference(TEXT, BIGINT, BYTEA, position_kind, BIGINT),
     address_matches(TEXT, TEXT, TEXT),
     transfers_guard_directed(),
     intake_answers_guard_directed(),

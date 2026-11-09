@@ -148,6 +148,15 @@ fn return_sql(reference: &str, block: i64, destination: &str) -> String {
     )
 }
 
+/// The derived `bz-u-` reference of the return of the directed arrival at `block`.
+async fn return_reference(pool: &PgPool, block: i64) -> String {
+    sqlx::query_scalar("SELECT refund_reference('origin-a', $1, '\\xaa', 'log', 1)")
+        .bind(block)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 /// `REQ-IN-3`, `REQ-IN-10`: `deposit_reference()` derives the bridge reference as
 /// `services/ingress/src/refs.rs::deposit` does, byte for byte. The three vectors are pinned in
 /// `refs.rs` as well (`req_in_10_deposit_reference_vectors_the_store_derives_the_same`): a block
@@ -193,6 +202,61 @@ async fn req_in_10_the_bridge_reference_the_store_derives_is_the_one_the_ingress
     ] {
         let derived: String =
             sqlx::query_scalar("SELECT deposit_reference($1, $2, $3::text::bytea, $4, $5)")
+                .bind(network)
+                .bind(block)
+                .bind(&hash)
+                .bind(kind)
+                .bind(index)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(derived, expected, "{network} {block} {hash} {kind} {index}");
+    }
+}
+
+/// `REQ-RQ-6`, `REQ-IN-11`: `refund_reference()` derives the return's bridge reference as
+/// `services/ingress/src/refs.rs::unassociated_refund` does; the same four coordinates are pinned in
+/// `refs.rs` (`req_in_11_refund_reference_vectors_the_store_derives_the_same`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_11_the_return_reference_the_store_derives_is_the_one_the_ingress_derives(
+    pool: PgPool,
+) {
+    for (network, block, hash, kind, index, expected) in [
+        (
+            "origin-a",
+            7_i64,
+            "\\xaa".to_owned(),
+            "log",
+            0_i64,
+            "bz-u-785300f9639f00608a29c3f84a185865db732118",
+        ),
+        (
+            "origin-a",
+            7,
+            "\\xaa".to_owned(),
+            "log",
+            1,
+            "bz-u-38661c655e8905bb6befb155263552f8bd0d1000",
+        ),
+        (
+            "polygon",
+            96_983_980,
+            format!("\\x{}", "11".repeat(32)),
+            "log",
+            4_294_967_295,
+            "bz-u-32a768ecd707102dccbf4e9ddc6156624b235afe",
+        ),
+        (
+            "origin-a",
+            1,
+            "\\xab01".to_owned(),
+            "transaction",
+            3,
+            "bz-u-00c2a6caea37e16941afee596e77c4dc6dee27a5",
+        ),
+    ] {
+        let derived: String =
+            sqlx::query_scalar("SELECT refund_reference($1, $2, $3::text::bytea, $4, $5)")
                 .bind(network)
                 .bind(block)
                 .bind(&hash)
@@ -616,13 +680,30 @@ async fn ac_a6_4_the_core_returns_a_directed_arrival_only_to_the_observed_refund
     .await;
     assert_eq!(count_transfers(&pool).await, 0);
 
+    // A return whose bridge reference is not the one derived from the coordinate is refused, for the
+    // core's login and the owner (a `bz-u-` of another coordinate included).
+    let of_block_8 = return_reference(&pool, 8).await;
+    for (what, reference) in [
+        ("a made-up reference", "bz-u-0000".to_owned()),
+        ("the reference of another coordinate", of_block_8),
+        ("a deposit's reference", VECTOR_REFERENCE_7.to_owned()),
+    ] {
+        let sql = return_sql(&reference, 7, REFUND);
+        let err = sqlx::raw_sql(&sql).execute(&core).await.expect_err(what);
+        assert_refusal(&err, "REQ-IN-11", what);
+        assert_refused(&pool, &sql, "REQ-IN-11").await;
+    }
+    assert_eq!(count_transfers(&pool).await, 0);
+
     // To the observed refund address, by the core's own login (no function: T-018-08 writes it).
-    exec_as(&core, &return_sql("bz-u-ok", 7, REFUND)).await;
+    let reference_7 = return_reference(&pool, 7).await;
+    let reference_8 = return_reference(&pool, 8).await;
+    exec_as(&core, &return_sql(&reference_7, 7, REFUND)).await;
     assert_eq!(count_transfers(&pool).await, 1);
     // The coordinate has its return: its deposit is not made (a no-op), and a second return is
     // refused as a duplicate (INV-2).
     assert_eq!(directed_deposit(&core, 7).await.unwrap(), None);
-    let err = sqlx::raw_sql(&return_sql("bz-u-twice", 7, REFUND))
+    let err = sqlx::raw_sql(&return_sql(&reference_7, 7, REFUND))
         .execute(&core)
         .await
         .expect_err("a second return");
@@ -630,7 +711,7 @@ async fn ac_a6_4_the_core_returns_a_directed_arrival_only_to_the_observed_refund
 
     // The other way: with a deposit at the coordinate, no return is made.
     directed_deposit(&core, 8).await.unwrap().expect("deposit");
-    let err = sqlx::raw_sql(&return_sql("bz-u-late", 8, REFUND))
+    let err = sqlx::raw_sql(&return_sql(&reference_8, 8, REFUND))
         .execute(&core)
         .await
         .expect_err("a return of a deposited arrival");
@@ -688,6 +769,205 @@ async fn req_rf_2_a_zero_vault_or_directing_refund_is_refused(pool: PgPool) {
         "no refund",
     );
     assert_eq!(count_transfers(&pool).await, 0);
+}
+
+/// `REQ-IN-10`, `REQ-RF-2`: an observation whose detail lacks the refund address, the recipient or
+/// the directing contract (the key missing, or null) binds nothing: the directing check compares
+/// nothing when its key is missing, so the guard refuses the arrival instead of passing it.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_10_a_detail_missing_refund_recipient_or_directing_is_refused(pool: PgPool) {
+    declarations(&pool).await;
+    let core = login(&pool, "dd_core_j_for_tests", bezent_store::CORE_ROLE).await;
+    let mut block = 40_i64;
+    for key in ["refund", "recipient", "directing"] {
+        for how in ["missing", "null"] {
+            block += 1;
+            let mut keys = vec![
+                ("directing", DIRECTING),
+                ("recipient", RECIPIENT),
+                ("refund", REFUND),
+            ];
+            keys.retain(|(k, _)| *k != key || how == "null");
+            let pairs: String = keys
+                .iter()
+                .map(|(k, v)| {
+                    if *k == key {
+                        format!(", '{k}', NULL::text")
+                    } else {
+                        format!(", '{k}', '{v}'::text")
+                    }
+                })
+                .collect();
+            // The observations are append-only: the detail is written as it should be read.
+            let id: i64 = sqlx::query_scalar(&format!(
+                "INSERT INTO observations (network, block_number, block_hash, block_time, \
+                     position_kind, position_index, token, amount, sender, recipient, executed, \
+                     kind, detail) \
+                 VALUES ('origin-a', {block}, '\\xaa', '{BLOCK_TIME}'::timestamptz, 'log', 1, \
+                     'token-a', {AMOUNT}, '0xfunder', '{RESERVE}', TRUE, 'directed_arrival', \
+                     jsonb_build_object('event', 'DirectedArrival', 'direction_log', 2{pairs})) \
+                 RETURNING id"
+            ))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            make_final(&pool, id, block).await;
+            let what = format!("{key} {how}");
+            let err = directed_deposit(&core, block).await.expect_err(&what);
+            assert_refusal(&err, "REQ-IN-10", &what);
+            assert_refused(
+                &pool,
+                &deposit_sql(&deposit_ref(&pool, block).await, block, RECIPIENT, REFUND),
+                "REQ-IN-10",
+            )
+            .await;
+            assert_refused(
+                &pool,
+                &return_sql(&return_reference(&pool, block).await, block, REFUND),
+                "REQ-IN-10",
+            )
+            .await;
+        }
+    }
+    assert_eq!(count_transfers(&pool).await, 0);
+}
+
+async fn deposit_ref(pool: &PgPool, block: i64) -> String {
+    sqlx::query_scalar("SELECT deposit_reference('origin-a', $1, '\\xaa', 'log', 1)")
+        .bind(block)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// `INV-2`: two connections binding the same coordinate at once, the core's deposit against the
+/// core's return: the coordinate's lock serialises them, exactly one binds, and the other finds it
+/// consumed (the deposit call answers nothing; a second return is a duplicate).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_2_a_concurrent_double_bind_on_the_coordinate_lock_binds_exactly_once(pool: PgPool) {
+    declarations(&pool).await;
+    final_directed(&pool, 7).await;
+    let first = login(&pool, "dd_core_k1_for_tests", bezent_store::CORE_ROLE).await;
+    let second = login(&pool, "dd_core_k2_for_tests", bezent_store::CORE_ROLE).await;
+    let reference = return_reference(&pool, 7).await;
+
+    // The first holds the coordinate (its return inserted, not yet committed) while the second
+    // asks for the deposit: that call waits on the lock, and finds the return when it is committed.
+    let mut tx = first.begin().await.unwrap();
+    exec_tx(&mut tx, &return_sql(&reference, 7, REFUND)).await;
+    let waiting = tokio::spawn(async move { directed_deposit(&second, 7).await });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !waiting.is_finished(),
+        "the second did not wait on the coordinate's lock"
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(waiting.await.unwrap().unwrap(), None);
+    assert_eq!(count_transfers(&pool).await, 1);
+    assert_eq!(
+        text(&pool, "SELECT kind::text FROM transfers").await,
+        "refund"
+    );
+
+    // And the plain race: both ask for the deposit at once on another coordinate; one makes it
+    // and the other answers the same id, so there is exactly one.
+    final_directed(&pool, 8).await;
+    let (a, b) = tokio::join!(directed_deposit(&first, 8), {
+        let pool = pool.clone();
+        async move {
+            let late = login(&pool, "dd_core_k3_for_tests", bezent_store::CORE_ROLE).await;
+            directed_deposit(&late, 8).await
+        }
+    });
+    let (a, b) = (
+        a.unwrap().expect("a deposit"),
+        b.unwrap().expect("a deposit"),
+    );
+    assert_eq!(a, b);
+    assert_eq!(
+        text(
+            &pool,
+            "SELECT count(*)::text FROM transfers WHERE kind = 'deposit'"
+        )
+        .await,
+        "1"
+    );
+}
+
+/// `REQ-IN-10`, `AC-A6.2`: the answer guard sees inserts only, so the binding guard refuses the
+/// owner's update that would move an already-answered deposit onto a directed arrival.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a6_2_an_update_binding_an_answered_deposit_to_a_directed_arrival_is_refused(
+    pool: PgPool,
+) {
+    declarations(&pool).await;
+    final_directed(&pool, 7).await;
+    let reference = deposit_ref(&pool, 7).await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO requesters (requester) VALUES ('alpha'); \
+             INSERT INTO intake (request_reference, requester, kind, body, body_digest) \
+               VALUES ('ref-1', 'alpha', 'deposit', '{{}}', '\\x01'); \
+             INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+                 destination_network, destination, refund_destination_network, \
+                 refund_destination, state) \
+               VALUES ('{reference}', 'ref-1', 'deposit', 'asset-a', {AMOUNT}, 'issuing', \
+                 '{RECIPIENT}', 'origin-a', '{REFUND}', 'Received'); \
+             INSERT INTO intake_answers (intake_id, transfer_id, bridge_reference) \
+               SELECT i.id, t.id, t.bridge_reference FROM intake i, transfers t \
+               WHERE i.request_reference = 'ref-1' AND t.bridge_reference = '{reference}'"
+        ),
+    )
+    .await;
+    // Every field the observation records: only the answer stands in the way.
+    assert_refused(
+        &pool,
+        &format!(
+            "UPDATE transfers SET source_network = 'origin-a', source_block_number = 7, \
+                 source_block_hash = '\\xaa', source_position_kind = 'log', \
+                 source_position_index = 1 WHERE bridge_reference = '{reference}'"
+        ),
+        "REQ-IN-10",
+    )
+    .await;
+    assert!(
+        flag(
+            &pool,
+            "SELECT source_network IS NULL FROM transfers WHERE kind = 'deposit'"
+        )
+        .await
+    );
+}
+
+/// `INV-2`, `REQ-IN-10`: when the coordinate's deposit exists but is no longer live (Refused,
+/// Withdrawn, Expired, Refunded), `directed_deposit()` does not answer its id as if it were the
+/// arrival's live deposit: it refuses by name. A live one (here, `Source-Final`) still answers.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn inv_2_directed_deposit_answers_a_live_deposit_and_refuses_a_dead_one(pool: PgPool) {
+    declarations(&pool).await;
+    final_directed(&pool, 7).await;
+    let core = login(&pool, "dd_core_l_for_tests", bezent_store::CORE_ROLE).await;
+    let id = directed_deposit(&core, 7).await.unwrap().expect("deposit");
+    assert_eq!(directed_deposit(&core, 7).await.unwrap(), Some(id));
+    for state in ["Refused", "Withdrawn", "Expired", "Refunded"] {
+        exec(
+            &pool,
+            &format!(
+                "ALTER TABLE transfers DISABLE TRIGGER USER; \
+                 UPDATE transfers SET state = '{state}' WHERE id = {id}; \
+                 ALTER TABLE transfers ENABLE TRIGGER USER"
+            ),
+        )
+        .await;
+        let err = directed_deposit(&core, 7).await.expect_err(state);
+        assert_refusal(&err, "REQ-IN-10", state);
+        assert!(
+            err.as_database_error().unwrap().message().contains(state),
+            "{err}"
+        );
+    }
+    assert_eq!(count_transfers(&pool).await, 1);
 }
 
 /// `AC-A6.6`: an `unpaired_direction` is bindable by nothing: not by a deposit, not by a refund, not

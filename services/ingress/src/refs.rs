@@ -149,6 +149,41 @@ mod tests {
         );
     }
 
+    /// `REQ-RQ-6`, `REQ-IN-11`: the store derives the return of a directed arrival's bridge reference
+    /// in SQL (`refund_reference()`, migration 0144, which the guard checks a `bz-u-` row against).
+    /// The same vectors, coordinates as for `bz-d-`, are pinned in
+    /// `crates/store/tests/directed_deposits.rs`, so the two never drift.
+    #[test]
+    fn req_in_11_refund_reference_vectors_the_store_derives_the_same() {
+        let at = |network: &str, block: u64, hash: Vec<u8>, position: Position| Coordinate {
+            network: NetworkId::new(network).unwrap(),
+            block_number: block,
+            block_hash: BlockHash::new(hash),
+            position,
+        };
+        assert_eq!(
+            unassociated_refund(&at("origin-a", 7, vec![0xaa], Position::Log(0))),
+            "bz-u-785300f9639f00608a29c3f84a185865db732118"
+        );
+        assert_eq!(
+            unassociated_refund(&at("origin-a", 7, vec![0xaa], Position::Log(1))),
+            "bz-u-38661c655e8905bb6befb155263552f8bd0d1000"
+        );
+        assert_eq!(
+            unassociated_refund(&at(
+                "polygon",
+                96_983_980,
+                vec![0x11; 32],
+                Position::Log(u32::MAX)
+            )),
+            "bz-u-32a768ecd707102dccbf4e9ddc6156624b235afe"
+        );
+        assert_eq!(
+            unassociated_refund(&at("origin-a", 1, vec![0xab, 1], Position::Transaction(3))),
+            "bz-u-00c2a6caea37e16941afee596e77c4dc6dee27a5"
+        );
+    }
+
     #[test]
     fn req_id_4_refused_bridge_reference_is_scoped_to_the_requester() {
         assert_ne!(refused("a", "r1"), refused("b", "r1"));
