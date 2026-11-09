@@ -141,18 +141,29 @@ async fn req_bk_8_nfr_5_the_running_check_reads_what_the_endpoints_recorded_at_i
         e.reason
     );
 
-    // A balance the endpoint read differently from the book diverges: paused and paged.
+    // A balance the endpoint read differently from the book diverges: the gate closes, and the
+    // pause and the page wait for a second reading at a newer point (amendment 0028).
     recorded_at(&w, 400, 0, Some(999), None).await;
     let e = check
         .evaluate(ASSET, t0() + Duration::seconds(40))
         .await
         .unwrap();
     assert_eq!(e.outcome, Outcome::Diverges);
+    assert!(!pager.kinds().contains(&"reserve-divergence".to_owned()));
+    recorded_at(&w, 450, 0, Some(999), None).await;
+    let e = check
+        .evaluate(ASSET, t0() + Duration::seconds(50))
+        .await
+        .unwrap();
+    assert_eq!(e.outcome, Outcome::Diverges);
     assert!(pager.kinds().contains(&"reserve-divergence".to_owned()));
 }
 
+/// `DEC-12`, amendment 0028: a reading the providers disagree on is unknown, so the evaluation is
+/// incomplete: the asset's routes are held at once (never paused: nothing is known to differ), and
+/// a person is paged once the hold outlasts the blind bound (`REQ-IC-2`, `AC-E2.3`).
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_ic_2_dec_12_a_reading_the_providers_disagree_on_is_incomplete_and_pauses_past_the_bound(
+async fn req_ic_2_dec_12_ac_e2_3_a_reading_the_providers_disagree_on_is_incomplete_and_held(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -175,23 +186,26 @@ async fn req_ic_2_dec_12_a_reading_the_providers_disagree_on_is_incomplete_and_p
         "{:?}",
         e.reason
     );
-    assert_eq!(
-        w.count("SELECT count(*) FROM pauses WHERE asset = 'bUSDC'")
-            .await,
-        0
-    );
-    // Still unknown past the network's bound (a minute): the asset's routes pause (REQ-IC-2).
+    let held = "SELECT count(*) FROM pauses WHERE asset = 'bUSDC' AND kind = 'hold'";
+    let paused = "SELECT count(*) FROM pauses WHERE asset = 'bUSDC' AND kind = 'pause'";
+    assert_eq!((w.count(held).await, w.count(paused).await), (1, 0));
+    // The chain keeps finalizing; the providers keep disagreeing.
+    let disagree = "DEC-12: the providers disagree on the balance: a answers 1000, b answers 1001";
+    recorded_at(&w, 320, 0, None, Some(disagree)).await;
     let e = check
         .evaluate(ASSET, t0() + Duration::minutes(2))
         .await
         .unwrap();
     assert_eq!(e.outcome, Outcome::Incomplete);
-    assert_eq!(
-        w.count("SELECT count(*) FROM pauses WHERE asset = 'bUSDC' AND cause = 'REQ-IC-2'")
-            .await,
-        1
-    );
-    assert!(pager.kinds().contains(&"reserve-check-stalled".to_owned()));
+    assert!(pager.kinds().is_empty(), "{:?}", pager.kinds());
+    // Still unknown past the blind bound (ten minutes): one page, still a hold.
+    recorded_at(&w, 860, 0, None, Some(disagree)).await;
+    check
+        .evaluate(ASSET, t0() + Duration::minutes(11))
+        .await
+        .unwrap();
+    assert_eq!((w.count(held).await, w.count(paused).await), (1, 0));
+    assert_eq!(pager.kinds(), ["reserve-blind"]);
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]

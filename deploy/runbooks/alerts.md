@@ -51,9 +51,13 @@ kind exists on `develop` at this commit.
 | `supply-mismatch-pause` | reserve check | `pages/reserve.md` | yes | yes (ReservePages) |
 | `reserve-alert` | reserve check | `pages/reserve.md` | yes | yes (ReservePages) |
 | `book-quarantine` | reserve book | `pages/reserve.md` | yes | yes (ReservePages) |
-| `reserve-check-stalled` | reserve check | `pages/reserve.md` | yes | yes (ObserverLagPages) |
-| `reserve-check-incomplete` | reserve check | `pages/reserve.md` | yes | yes (ObserverLagPages) |
-| `reserve-check-failed` | reserve check | `pages/reserve.md` | yes | yes (ObserverLagPages) |
+| `reserve-blind` | reserve check (amendment 0028: the asset held blind beyond its bound, or a finality stall) | `pages/reserve.md` | yes | **no**: the filter must be added |
+| `reserve-check-stalled` | reserve check (only when the failure could not be recorded, so nothing is held) | `pages/reserve.md` | yes | yes (ObserverLagPages) |
+| `reserve-check-incomplete` | reserve check: since amendment 0028 recorded only (`recorded=`), never paged | `pages/reserve.md` | yes | yes (ObserverLagPages), and now matches nothing |
+| `reserve-check-failed` | reserve check (paged only when the failure could not be recorded; otherwise recorded only) | `pages/reserve.md` | yes | yes (ObserverLagPages) |
+| `reserve-divergence-unconfirmed` | reserve check: a first reading of a difference of value (amendment 0028, the second reading); recorded only (`recorded=`), never paged | `pages/reserve.md` | yes | no, and none wanted |
+| `reserve-hold` | reserve check: a hold placed (amendment 0028); recorded only (`recorded=`), never paged | `pages/reserve.md` | yes | no, and none wanted |
+| `reserve-hold-lifted` | reserve check: a hold lifted by an evaluation that holds; recorded only, never paged | `pages/reserve.md` | yes | no, and none wanted |
 | `key-compromise` | reserve check (supply mismatch); the core's signals step (every other alert) | `pages/key-compromise.md` | yes | yes (KeyCompromisePages), but before `F-014` only the supply-mismatch case ever logged it |
 | `lane-use-unknown` | EVM endpoint (the lane detectors, amendment 0022 P2); a log line only, once an hour per lane and read | `pages/key-compromise.md` | yes | **no** |
 | `statement-overdue` | statements | `pages/statements.md` | yes | yes (StatementPages) |
@@ -95,7 +99,7 @@ deployment):
 |---|---|---|
 | `observer_lag_estimate_seconds` | above 60 s for a network (alert); missing data is a breach. An **estimate** (see below) | `NFR-6` |
 | `reserve_equation_age_seconds` | older than three evaluations (the check runs each minute) | `NFR-5` |
-| `reserve_equation_outcome` | not 0 | `INV-1` |
+| `reserve_equation_outcome` | 1 (diverges) at once; 2 (could not be made, or blind: amendment 0028) only when it lasts longer than the blind bound (`networks.reserve_blind_page_seconds`, ten minutes by default), or a cold start and every catch-up alarm before the core's own `reserve-blind` page would | `INV-1`, `REQ-IC-2` |
 | `open_gaps` | above 0 | `REQ-ST-6`, `REQ-OB-3` |
 | `oldest_nonfinal_transfer_age_seconds` | above the route's completion budget | `NFR-2` |
 | `unknown_legs_oldest_age_seconds` | above the route's deadline | `REQ-RV-1` |
@@ -104,7 +108,9 @@ deployment):
 | `fee_short_transfers` | above 0 | `CND-FeeShort` |
 | `fee_position_amount` | the floor is in the core's configuration and the core pages on it (`fee-position-low`, below); this alarm is for **missing data**, which the page does not cover: a breach. Every network | `REQ-ST-6`, `REQ-TR-5` |
 | `fee_position_age_seconds` | growing without bound: the endpoint is not recording a reading | `REQ-ST-6` |
-| `pauses_in_force` | above 0 (information) | `REQ-GV-1` |
+| `pauses_in_force` | above 0 (information). Pauses only (`kind = 'pause'`); holds are apart since amendment 0028 | `REQ-GV-1` |
+| `holds_in_force` | information only: the core pages a hold itself (`reserve-blind`) once it outlasts its bound | `REQ-IC-2` |
+| `hold_age_seconds` (dimension `Asset`) | above the asset's blind bound (`networks.reserve_blind_page_seconds`, 600 s by default): a backstop to `reserve-blind` | `REQ-IC-2` |
 | `submission_gate_state` (dimension `Network`; written by the Kreivo endpoint) | not 0 for a few minutes (alert); missing data is a breach. `0` open, `1` closed | issue #104, `REQ-ST-6` |
 
 **The Kreivo submission gate** (issue #104, `services/kreivo-endpoint/src/metric.rs`). The endpoint builds and signs a

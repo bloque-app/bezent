@@ -60,6 +60,8 @@ async fn core(f: &Fixture, _connect: &PgConnectOptions) -> Core {
 
 /// The declarations (the operator's), a final arrival on the origin network (its endpoint's) and
 /// the deposit request binding it, accepted (the ingress's). Returns the transfer.
+/// The reserve check has seen the asset (amendment 0028: a holding evaluation that was made), or the
+/// signer would hold its mints.
 async fn deposit(f: &Fixture) -> i64 {
     exec(
         &f.admin,
@@ -74,6 +76,8 @@ async fn deposit(f: &Fixture) -> i64 {
              INSERT INTO routes (asset, network, direction, minimum, maximum, window_limit, \
                  window_seconds, capacity, cutoffs, completion_budget_seconds) VALUES \
                ('{ASSET}', '{ORIGIN}', 'deposit', 1, 1000000000, 10000000000, 86400, 100, '[]', 3600); \
+             INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+               VALUES ('{ASSET}', '2000-01-01T00:00:00Z', 'holds', 0); \
              INSERT INTO observations (network, block_number, block_hash, block_time, \
                  position_kind, position_index, token, amount, sender, recipient, executed, \
                  kind) \

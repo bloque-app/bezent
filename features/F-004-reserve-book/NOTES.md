@@ -286,6 +286,63 @@ this is how the bucket is reached.
 - **Open.** SSE-KMS and a publicly readable bucket conflict (anonymous readers cannot read SSE-KMS objects). The
   lock mode has no default and production's is the owner's to name (GOVERNANCE or COMPLIANCE).
 
+## Amendment 0028: a blind check holds, a money difference pauses (2026-11-07)
+
+@pandres95's ruling in chat, 2026-11-07: "Yes, write the amendment and build it." Two production pauses at start-up
+(a `REQ-IC-2` stall pause at the cold start, a `REQ-BK-1` pause while the walk caught up), with every term zero, each
+needed the two-login lift. Items 6, 16 and 17 above describe the behaviour before this change; what replaces it:
+
+32. **Lag is not a divergence.** `final_point` and `final_head` are no longer `Difference`s. A point behind its
+    network's final head beyond `reserve_point_lag_seconds`, or a latest final head older than that by the clock, makes
+    an evaluation that agrees on every term **incomplete** (reason `blind (amendment 0028 …)`, naming each network and
+    `catching up` or `a finality stall`), with its terms and the book's kept in the record. It diverges only on a
+    difference of value; when it also lags, it diverges and is held as well (`Evaluation::blind`).
+33. **The hold is a row of `pauses`** (migration 0142): cause `blind`, generated `kind` `hold`, asset-scoped, naming the
+    evaluation it began at and, in `held_heads`, each of the asset's networks' latest final head and watermark then; one
+    per asset. Every reader of `pauses` (the gate, the ingress, `pause_holds_intent`, the deadline clock) refuses work
+    under it, unchanged. The core places it at the first evaluation that does not hold (incomplete, blind, or diverging
+    while lagging), in that evaluation's transaction, and lifts it (`DELETE`) in the transaction of the next that holds.
+    The store refuses the core any other `DELETE` (trigger `pauses_guard_delete`: the latest evaluation by id must hold
+    and name a book cut) and a hold naming an evaluation that held; `operator_request_unpause` refuses a hold. The core
+    no longer inserts a `REQ-IC-2` evaluation pause; `stalled()` is gone. Every evaluation and every record of a failure
+    takes the advisory lock `bezent/reserve-evaluation/<asset>` before it reads and holds it until it is recorded
+    (waiting up to `statement_timeout`; a timeout fails as any store error does); "latest" is by id in the check, the
+    gate, the signer's read, the delete guard and `ops_observables`; a statement still picks by time, and so does the
+    walk's baseline (`walked_watermarks`: an index seek on `reserve_evaluations_latest`, passing over records of
+    failures). `held_heads` is best effort (`{}` when the heads cannot be read).
+34. **Unseen is held.** The gate (`Core::route_held`) and the signer (`pause_holds_intent`) also hold an asset for which
+    `reserve_check_holds` is false (its latest evaluation, by id, does not hold or names no book cut, or there is none;
+    its age is not asked: a known limitation, amendment 0028 item 6),
+    and the gate holds what the check could not even record (`Unseen`, shared through `Core::watching`): an asset whose
+    failed evaluation the store refused, and every asset while the check cannot list them. A check's first tick
+    evaluates every asset.
+35. **Pages.** `reserve-blind`, once per hold and `why`: `finality-stall` at once, or `beyond-bound` once the hold is
+    older than `networks.reserve_blind_page_seconds` (default 600, at most 3600; the smallest of the asset's own
+    networks': its issuing network and its reserve networks). Not paged, only recorded (event log, and a WARN line under
+    `recorded=`): `reserve-hold`, `reserve-hold-lifted`, `reserve-check-incomplete`, and `reserve-check-failed` when the
+    failure was recorded. A failure the store cannot record pages `reserve-check-failed` at once and
+    `reserve-check-stalled` past the blind bound, both held in memory. Every page about a pause or a hold names `class`
+    (`blind` or `money-differs`) and `stop`. `values` is on `reserve-divergence`, `reserve-check-incomplete`,
+    `reserve-hold`, `reserve-blind`, `reserve-hold-lifted`, `reserve-check-failed` and `reserve-check-stalled` (null
+    when nothing could be derived); `lags` on `reserve-divergence`, `reserve-check-incomplete`, `reserve-hold` and
+    `reserve-blind`; `held_heads` on `reserve-hold` and `reserve-blind`.
+36. **Catching up or a finality stall.** The endpoints record only the live finalized head, and none in the middle of a
+    walk, so the latest head ages during a catch-up (`NFR-6` sees it) while the watermark moves.
+    A network is a finality stall when its walk has stopped (the watermark has not moved since the latest evaluation at
+    least the network's lag bound old; none, or one with no watermark, is unknown, not stopped; unknown can last, and
+    is then held and paged `beyond-bound` at the blind bound) and either its latest head is
+    older than its lag bound by the clock, or the hold is older than that bound and the latest head is still the one in
+    `held_heads`. A stale head with a moving walk is catching up. A network with no head ever recorded is never a stall.
+    The core cannot tell a stalled chain from nothing recording heads and pages both at once. When a reading fails the
+    points and lags already found are kept, so the rule still applies.
+37. **Order.** `bezent_core_service::pass` (used by `main.rs`) runs the reserve check before the cycle.
+38. **The second reading** (amendment 0028, ruling of 2026-11-08). One `diverges` evaluation closes the gate (decision 34)
+    and is logged as `reserve-divergence-unconfirmed`; the `REQ-BK-1` pause and the `reserve-divergence` page need the
+    asset's previous evaluation by id to have diverged too, at points strictly older on every network (`newer_points`:
+    a higher block number or a higher `lag.head_block_number`). `INV-4` stays immediate: its flag outlives the point, so
+    the evaluation may hold while the pause is due. A flapping D, H, D, H never pauses (fails closed on each D): follow-up.
+    A different node for the second reading waits for #103.
+
 ## Review items left open (PR #40 review, 2026-10-14)
 
 Not fixed in this PR (each needs more than a small change, or a ruling); none of them lets a divergence pass unseen.

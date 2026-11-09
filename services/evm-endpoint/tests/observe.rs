@@ -12,8 +12,8 @@ use bezent_evm_endpoint::evm;
 use bezent_evm_endpoint::observe::Step;
 use bezent_evm_endpoint::rpc::mock::MockChain;
 use common::{
-    CHAIN_ID, Fixture, contracts, delivery, depositor, payout_logs, pool_address, transfer_log,
-    usdc, usdt0, vault,
+    CHAIN_ID, Fixture, NETWORK, contracts, delivery, depositor, payout_logs, pool_address,
+    transfer_log, usdc, usdt0, vault,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -458,4 +458,56 @@ async fn t_009_05_self_zero_bare_emit_and_unpaired_transfers_are_not_payouts(
             "UnpairedReference",
         ]
     );
+}
+
+/// Amendment 0028 (`NFR-6`, `REQ-IC-2`): one step that walks a backlog records the final point it
+/// started at, once, and no other head while the chain finalizes on (the latest final head ages as
+/// it would without the walk, so `observer_lag_estimate_seconds` and the core's deadlines see the
+/// lag). What moves is the watermark, range by range: that is what the reserve check reads as a walk
+/// catching up, not a finality stall.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_nfr_6_a_long_step_moves_the_watermark_and_records_only_its_own_head(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect, 40).await;
+    f.chain.finalize(12);
+    // The chain finalizes on while the step reads: a block at every logs read.
+    f.chain.finalize_on_logs(Some(1));
+    let step = f.follower().step().await.unwrap();
+    assert!(
+        matches!(
+            step,
+            Step::Read {
+                first: 1,
+                last: 12,
+                ..
+            }
+        ),
+        "{step:?}"
+    );
+    let heads: Vec<i64> = sqlx::query_scalar(
+        "SELECT block_number FROM final_heads WHERE network = $1 ORDER BY block_number",
+    )
+    .bind(NETWORK)
+    .fetch_all(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!(heads, [12], "only the step's own final point");
+    // The walk moved, range by range, to the point it started at.
+    let ranges: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM observation_ranges WHERE network = $1 AND outcome = 'read'",
+    )
+    .bind(NETWORK)
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    assert!(ranges >= 3, "{ranges} ranges");
+    let watermark: Option<i64> =
+        sqlx::query_scalar("SELECT watermark FROM observation_watermarks WHERE network = $1")
+            .bind(NETWORK)
+            .fetch_one(&f.admin)
+            .await
+            .unwrap();
+    assert_eq!(watermark, Some(12));
 }

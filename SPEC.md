@@ -1,7 +1,7 @@
 ---
 name: bezent
 summary: A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger's contract.
-spec_version: 0.5.11
+spec_version: 0.5.12
 status: draft
 date: 2026-11-09
 ---
@@ -15,7 +15,7 @@ It is normative and self-contained. It does not say how bezent is built, which t
 implement it, which networks it serves today, or why the project exists. `notes/` says why, and
 `notes/CONSTRAINTS-FOR-PLAN.md` says what the plan is expected to bind.
 
-Amendments 0001 to 0015, 0018 (A1b; Open 3 in part, and Open 6), 0019 (A1d), 0020, 0021 (A1b), 0022 (A1b and A2a; A3 and A4 are not ruled) and 0024 are
+Amendments 0001 to 0015, 0018 (A1b; Open 3 in part, and Open 6), 0019 (A1d), 0020, 0021 (A1b), 0022 (A1b and A2a; A3 and A4 are not ruled), 0024 and 0028 are
 applied (see `amendments/`). Amendment 0026 was applied in v0.5.9 and is withdrawn (v0.5.11).
 
 ### Change history
@@ -23,6 +23,7 @@ applied (see `amendments/`). Amendment 0026 was applied in v0.5.9 and is withdra
 | Version | Date | Change |
 |---|---|---|
 | 0.5.11 | 2026-11-09 | Amendment 0026 is withdrawn (decision item `d-0026-holdout`, ruled by @pandres95 on the decision form, 2026-11-09: "Revert #100"); amendment 0029 replaces the path that needed it (directed deposits, #119). v0.5.9's text is reverted: `REQ-IN-3`, `REQ-IN-6`, `REQ-CV-2`, `REQ-RQ-3` and the Requester row of §3 read as in v0.5.8; `REQ-PN-3`, `AC-A2.5`, `ERR-SenderNotDeclared` and the §2 term "Declared sender" are withdrawn, and not reused. No identifier is renumbered. The 0.5.9 row stays as history. |
+| 0.5.12 | 2026-11-09 | Amendment 0028 (ruled by @pandres95 in chat, 2026-11-07: "Yes, write the amendment and build it."): when the reserve check cannot see an asset (no evaluation that holds: one that cannot be made, a point too far behind its network's final head, a final head that stops advancing, an observation gap), bezent **holds** the asset's routes: new work waits as under a pause, transfers in flight continue, bezent lifts the hold itself once an evaluation holds, and a human is paged only once the hold outlasts a declared bound, or at once when a network's final head is not advancing (§2 "Hold", `REQ-IC-2`, `REQ-GV-2`, `NFR-5`, `NFR-6`, `AC-E2.3`). When the money differs, it is a **pause**, as before, lifted only by several approvers; a lag is no longer a divergence, and a hold never masks one the evaluation can see (`REQ-BK-1`, `AC-E2.1`). Every pause and page says which of the two it is, with the values (`REQ-IC-2`). §10 `CND-Paused` covers both. |
 | 0.5.10 | 2026-11-06 | Amendment 0018, its Open 3 (in part: the route's limits only) and Open 6 (decision item `d-cv-open-choices`, ruled by @pandres95 on the decision form: "As recommended"; and his chat ruling of 2026-11-06 that an approval records the exact output it approved). A conversion output may be named for a deposit in `Needs-Review` for the conversion's deadline, as long as no refund of it is recorded (defined once, in `REQ-CV-6`: a refund counts as recorded from the moment a resolution into `Refunding` is recorded and not refused, which is what the code already tests; the clarification changes no behaviour); the deposit stays in review with its source and amount moved to the output, and the review ends as every review does, by a recorded resolution into `Delivering` with a second approver, after which the mint is ordered once at the output's amount; no edge is added (`REQ-RQ-4`, `REQ-CV-2`, `REQ-CV-6`). The output's amount is also checked against the route's minimum, maximum and window, with the route's own errors (`REQ-CV-2`, `REQ-LM-1`). `AC-A5.4` and `AC-A5.5` follow. |
 | 0.5.9 | 2026-11-06 | Amendment 0026 (decision item `d-requester-arrivals`, ruled by @pandres95 on the decision form: "Bind by sender"): each requester has declared senders, recorded by the operator, per origin network (`REQ-PN-3`, §2 "Declared sender"); a deposit binds only an arrival whose funder is one of the requesting requester's declared senders (`REQ-IN-3`, `REQ-RQ-3`), and is refused otherwise (`ERR-SenderNotDeclared`, `AC-A2.5`); an arrival no requester may bind stays an unassociated arrival (`REQ-IN-6`). A deposit naming a convertible arrival is checked on that arrival, and its conversion's output is bound through it (`REQ-CV-2`). Partly closes the exposure recorded in amendment 0018; what stays open is in amendment 0026. |
 | 0.5.8 | 2026-11-06 | Amendment 0021 (decision item `d-gate-sustained`, ruled by @pandres95 on the decision form: "24 hours"): "sustained" in V0's exit criteria is 24 consecutive hours of the reserve equation's evaluations at exactly zero divergence, a divergence restarting the window (§15). Amendment 0024 (`d-gate-scope`, ruled the same day: "As recommended"): the exit criteria gate only a release that moves value, the first release that lets a bridged asset carry value and each that adds an asset or a network to it; every other release needs its automated checks and the approval of one owner of the specification; a release declares which it is, and one that does not is refused (§15). No `REQ-*` changes. |
@@ -282,6 +283,7 @@ One canonical name per concept. This document uses each term only in the sense g
 | **Ledger** | A ledger of record that settles on the issuing network. Value reaches it, and leaves it, through a requester. bezent never calls it (`REQ-LG-1`). |
 | **Account reference** | Opaque bytes that name one account at a ledger. Only that ledger resolves it. |
 | **Fee position** | The native token an address needs to pay network costs. The operator's own, never reserve. |
+| **Hold** | What bezent places on an asset's routes while it cannot see whether the reserve equation holds (`REQ-IC-2`). It stops new work exactly as a pause does, and bezent lifts it itself once an evaluation holds. It is never a finding that value is wrong. |
 
 ---
 
@@ -600,8 +602,10 @@ The **reserve equation** is:
     Σ Reserve(A) + InTransit(A) = Supply(A) + OwedMint(A) + OwedPayout(A) + Surplus(A)
 
 **`REQ-BK-1`** bezent MUST compute the reserve equation for every bridged asset, from chain data at
-final points, continuously (`NFR-5`). Any divergence, to the smallest unit, MUST pause the asset's routes
-and page a human (`REQ-IC-2`).
+final points, continuously (`NFR-5`). Any difference of value, to the smallest unit, MUST pause the asset's
+routes and page a human (`REQ-IC-2`). An evaluation that cannot be made, or that rests on a point too far
+behind its network's final head, is not a divergence: it holds the asset's routes (`REQ-IC-2`). A hold never
+masks a difference of value the evaluation can see: one found while the check also lags is a pause as well. A difference of value closes the asset's routes at once; the pause and the page need it seen twice, at a newer final point on every network (amendment 0028, "The second reading").
 
 **`REQ-BK-2`** InTransit, OwedMint and OwedPayout MUST each be itemised: a list of the transfers and
 venue deliveries that make it up, never a residual.
@@ -987,10 +991,16 @@ lost.
 - `AC-E1.2` Given two statements, Then a revision of the earlier one is detectable (`REQ-PR-2`).
 
 **`US-E2`** — As the **operator**, a gap between reserve and supply stops the asset before it grows.
-- `AC-E2.1` Given any divergence in the reserve equation, Then the asset's routes pause, transfers in flight
-  continue to be observed, and a human is paged (`REQ-BK-1`, `REQ-IC-2`).
+- `AC-E2.1` Given any difference of value in the reserve equation, whether or not the check also lags, Then
+  the asset's routes pause until more than one approver lifts the pause, transfers in flight continue to be
+  observed, and a human is paged with the values (`REQ-BK-1`, `REQ-IC-2`, `REQ-GV-2`).
 - `AC-E2.2` Given a venue fee or a network cost, Then it is recorded against surplus and no delivery is
   reduced (`REQ-BK-4`, `REQ-TR-5`).
+- `AC-E2.3` Given the reserve check cannot see an asset (no evaluation yet, one that cannot be made, a point
+  behind its network's final head, a stale final head), Then its routes are held: new work waits as under a
+  pause and transfers in flight continue to be observed; the hold lifts itself at the first evaluation that
+  holds; and a human is paged only once it has lasted beyond its bound, or at once on a finality stall
+  (`REQ-IC-2`, `REQ-GV-2`, `NFR-5`).
 
 ### Epic F — Venues
 
@@ -1315,6 +1325,8 @@ recorded signature is in flight. The time a payout waits under a pause does not 
 choice of a refund or a new attempt after a proof of non-execution.
 
 **`REQ-GV-2`** Pausing SHOULD need one authorised party. Unpausing and raising a bound SHOULD need several.
+The one exception is a hold (`REQ-IC-2`): bezent lifts it itself once an evaluation of the reserve equation
+holds, and no person lifts it by hand. A pause is never lifted by bezent.
 
 **`REQ-GV-3`** Whoever can upgrade on-chain code that mints, destroys or holds reserve MUST be named, and upgrades
 MUST pass a published governance process with a delay before taking effect.
@@ -1331,9 +1343,14 @@ second approver.
 **`REQ-IC-1`** At start-up, bezent MUST check that each network it reaches is the one declared, by its
 genesis or chain identity, and fail closed on a mismatch.
 
-**`REQ-IC-2`** On a condition it cannot explain (a divergence in the reserve equation, a finality stall, an
-observation gap, a reorganisation deeper than expected, a signature it did not record), bezent MUST
-pause the affected routes, keep observing, and page a human.
+**`REQ-IC-2`** On a condition that shows value is wrong or unexplained (a divergence in the reserve equation,
+a reorganisation deeper than expected, a signature it did not record), bezent MUST pause the affected routes,
+keep observing, and page a human. On a condition where it cannot see (no evaluation of the reserve equation
+that holds: one that cannot be made, a point too far behind its network's final head, a final head that stops
+advancing, an observation gap), bezent MUST hold the affected routes and keep observing; it lifts the hold
+itself once an evaluation holds (`REQ-GV-2`); and it MUST page a human once the hold has lasted beyond a
+declared bound, or at once when a network's final head is not advancing. Every pause and every page MUST say
+which of the two it is, and carry the values it rests on.
 
 **`REQ-IC-3`** During an incident, transfers in flight MUST be reported as unknown or delayed, never as
 failed, and MUST NOT be refunded.
@@ -1416,7 +1433,7 @@ The layers are:
 | `CND-DestinationRefused` | The issuing network refused a mint because of its destination; nothing was minted |
 | `CND-AmountMismatch` | A delivery moved a different amount; both are reported |
 | `CND-Withdrawn` | An observation stopped matching the chain before finality |
-| `CND-Paused` | Work in flight continues; new work for this route waits, including an attempt recorded before the pause that has no recorded signature (`REQ-GV-1`). The time held does not count toward a payout's deadline (§5.4) |
+| `CND-Paused` | A pause or a hold (`REQ-IC-2`) covers the route. Work in flight continues; new work for this route waits, including an attempt recorded before the pause that has no recorded signature (`REQ-GV-1`). The time held does not count toward a payout's deadline (§5.4) |
 | `CND-AwaitingConversion` | A deposit at `Source-Final` whose source is a convertible-token arrival, waiting for its requester to name the conversion's output; nothing is minted, and the arrival is never reserve (`REQ-CV-1`, `REQ-CV-2`, `REQ-CV-6`) |
 | `CND-CutOff` | The transfer's next step falls outside its route's declared cut-off; resumes by itself when the route reopens (`REQ-LM-1`). The time held does not count toward a payout's deadline (§5.4) |
 | `CND-PayoutWindow` | The reserve's outflow allowance for the current window is spent; the withdrawal waits and resumes by itself when the allowance refills. Nothing is refunded or failed because of it (`REQ-RN-4`, `REQ-KY-3`) |
@@ -1431,8 +1448,8 @@ The layers are:
 | `NFR-2` | Every route MUST have a published completion budget, a p99 target and a p99 ceiling, set before it carries value. Completion runs from the final block of the source leg to the final block of the destination leg. Each transfer is measured against its own route. Each budget is first measured on a test network that reproduces the route, then published. |
 | `NFR-3` | Latency MUST be computed only from write-once milestones taken from chain data: source leg final, destination leg included, destination leg final, each with network, block number, block hash and block time. Every transfer counts: an open one at its current age, one with a missing milestone as a miss. Latency MUST be recomputable from chain data alone. |
 | `NFR-4` | Latency SHOULD be reported per closed week, as an absolute count of misses alongside the percentage and the share of transfers measured. |
-| `NFR-5` | The reserve equation MUST be evaluated at least once a minute per bridged asset, at zero tolerance. |
-| `NFR-6` | Each observer MUST stay within 60 s of its network's final head. Beyond that is an alert; beyond the route's budget it is `REQ-IC-2`. |
+| `NFR-5` | The reserve equation MUST be evaluated at least once a minute per bridged asset, at zero tolerance. An evaluation that cannot see is not one at zero tolerance: it holds (`REQ-IC-2`). |
+| `NFR-6` | Each observer MUST stay within 60 s of its network's final head. Beyond that is an alert; beyond the route's budget the asset is held (`REQ-IC-2`). |
 | `NFR-7` | No acknowledged request may be lost. A restore from backup MUST re-derive every transfer's state from durable records and the networks, and MUST NOT mint or deliver anything twice (`INV-2`). |
 | `NFR-8` | A pause MUST take effect for new work within one block of the network it applies to, or 30 s, whichever is longer. |
 | `NFR-9` | Each runbook of `REQ-IC-6` MUST be exercised on a test network before bezent carries value. |

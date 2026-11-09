@@ -700,6 +700,9 @@ impl Bed {
         let fork_now = anvil.block(anvil.number().await).await.1;
         let kreivo_now = kreivo_time(&chain).await;
         let withdrawal_budget = (fork_now as i64 - kreivo_now as i64) + 7200;
+        // The declarations. The bed does not run the core's reserve check on a clock (it evaluates
+        // only in `check_reserve`), so the asset is declared seen by it (amendment 0028: a holding
+        // evaluation that was made), or the gate and the signer would hold every transfer.
         sqlx::raw_sql(&format!(
             "INSERT INTO networks (network, role, address_format, backend) VALUES \
                ('{KREIVO}', 'issuing', 'ss58', NULL), ('{POLYGON}', 'origin', 'evm', 'evm:{CHAIN_ID}'); \
@@ -708,6 +711,8 @@ impl Bed {
              INSERT INTO admitted_tokens (network, token, asset, precision) VALUES \
                ('{POLYGON}', '{USDC}', '{ASSET}', 6); \
              INSERT INTO reserves (asset, network, address) VALUES ('{ASSET}', '{POLYGON}', '{vault_text}'); \
+             INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+               VALUES ('{ASSET}', '2000-01-01T00:00:00Z', 'holds', 0); \
              INSERT INTO routes (asset, network, direction, minimum, maximum, window_limit, \
                  window_seconds, capacity, cutoffs, completion_budget_seconds) VALUES \
                ('{ASSET}', '{POLYGON}', 'deposit', 1, 1000000000, 10000000000, 86400, 100, '[]', 3600), \

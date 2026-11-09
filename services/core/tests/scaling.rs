@@ -38,6 +38,7 @@ async fn declare_bbtc(w: &World) {
         ),
     )
     .await;
+    seen(&w.admin).await;
 }
 
 /// A bBTC deposit of `arrival` BTCB minor units at `block`, through to `Completed`. Returns the

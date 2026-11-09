@@ -6,8 +6,8 @@ SPDX-License-Identifier: CC-BY-4.0
 id: CND-Paused
 kind: condition
 covers: [REQ-GV-1, REQ-GV-2, REQ-IC-2, REQ-IC-3, REQ-IC-5, INV-15]
-pages: [reserve-divergence, reserve-check-incomplete, supply-mismatch-pause, book-quarantine]
-observables: [pauses_in_force, nonfinal_transfers, oldest_nonfinal_transfer_age_seconds]
+pages: [reserve-divergence, reserve-blind, reserve-check-incomplete, supply-mismatch-pause, book-quarantine]
+observables: [pauses_in_force, holds_in_force, nonfinal_transfers, oldest_nonfinal_transfer_age_seconds]
 tests: [services/core/tests/conditions.rs::cnd_paused_new_work_waits_and_resumes_when_the_route_reopens, services/core/tests/conditions.rs::cnd_paused_work_in_flight_continues, services/core/tests/operations.rs::ac_i2_1_an_operators_pause_holds_new_work_in_each_scope_and_a_second_operator_lifts_it, services/core/tests/operations.rs::ac_i2_1_a_pause_does_not_fail_or_refund_work_in_flight]
 exercised: no
 ---
@@ -26,14 +26,16 @@ lifted the same way, the core never lifts its own (F-004 NOTES).
 ## Pages
 
 A pause made by the operator raises no page. A pause the reserve check made does, and the page names its cause:
-`reserve-divergence`, `reserve-check-incomplete`, `supply-mismatch-pause`, `book-quarantine`. Their runbook is
-`../pages/reserve.md`; follow it first. Otherwise the signal is the metric `pauses_in_force` and the requesters'
-condition webhook (once per route, `REQ-IC-5`).
+`reserve-divergence`, `supply-mismatch-pause`, `book-quarantine`. A hold (amendment 0028: the check cannot see the
+asset) is `CND-Paused` to a requester too; it lifts itself, and pages `reserve-blind` only once it outlasts its bound
+(`reserve-check-incomplete` is recorded, no longer paged). Their runbook is `../pages/reserve.md`; follow it first.
+Otherwise the signal is the metrics `pauses_in_force` and `holds_in_force` and the requesters' condition webhook (once
+per route, `REQ-IC-5`).
 
 ## Confirm
 
 ```sql
-SELECT metric, value FROM ops_observables() WHERE metric = 'pauses_in_force';
+SELECT metric, value FROM ops_observables() WHERE metric IN ('pauses_in_force', 'holds_in_force');
 SELECT id, kind, subject, detail, actor, justification, recorded_at
 FROM admin_actions WHERE kind IN ('pause', 'unpause-request', 'unpause') ORDER BY id DESC LIMIT 20;
 SELECT asset, evaluated_at, outcome, reason FROM reserve_evaluations ORDER BY id DESC LIMIT 5;
