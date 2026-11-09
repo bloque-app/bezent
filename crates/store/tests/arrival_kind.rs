@@ -434,20 +434,24 @@ async fn ac_a6_6_the_directing_kinds_are_an_origin_networks_and_agree_with_their
         );
     }
     // The event and the kind agree: the guard names the event's kind.
-    for (event, kind) in [
+    for (n, (event, kind)) in [
         ("DirectedArrival", "directed_arrival"),
         ("UnpairedDirection", "unpaired_direction"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let base = 10 + 2 * i64::try_from(n).unwrap();
         let sql = |block: i64, kind: &str| {
             format!(
                 "INSERT INTO observations (network, block_number, block_hash, block_time, \
-                   position_kind, position_index, executed, kind, detail) \
-                 VALUES ('origin-a', {block}, '\\x07', '2026-10-13T00:00:00Z', 'log', 1, TRUE, \
-                   '{kind}', '{{\"event\": \"{event}\"}}')"
+                   position_kind, position_index, token, amount, recipient, executed, kind, detail) \
+                 VALUES ('origin-a', {block}, '\\x07', '2026-10-13T00:00:00Z', 'log', 1, 'token-a', 1, \
+                   '{RESERVE}', TRUE, '{kind}', '{{\"event\": \"{event}\"}}')"
             )
         };
-        exec(&pool, &sql(10, kind)).await;
-        assert_refused(&pool, &sql(11, "arrival"), "REQ-OB-6").await;
+        exec(&pool, &sql(base, kind)).await;
+        assert_refused(&pool, &sql(base + 1, "arrival"), "REQ-OB-6").await;
     }
     // The old kinds keep their events.
     let kind: String = sqlx::query_scalar("SELECT observation_kind_for_event('Arrival')")

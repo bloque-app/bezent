@@ -179,11 +179,11 @@ fn deploy_directed(anvil: &Anvil, vault: Address) -> Address {
         "forge create failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // forge prints the JSON over several lines.
     let stdout = String::from_utf8_lossy(&out.stdout);
-    stdout
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .find_map(|v| v["deployedTo"].as_str().map(str::to_owned))
+    let created: Value = serde_json::from_str(&stdout).expect("forge create's JSON");
+    created["deployedTo"]
+        .as_str()
         .expect("the deployment's address")
         .parse()
         .unwrap()
