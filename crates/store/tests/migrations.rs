@@ -63,7 +63,6 @@ const TABLES: &[&str] = &[
     "late_mint_checks",
     "admin_actions",
     "deposit_conversions",
-    "requester_senders",
 ];
 
 async fn bezent_objects(pool: &PgPool) -> Vec<String> {

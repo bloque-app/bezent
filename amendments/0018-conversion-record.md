@@ -10,9 +10,7 @@ proposal). **Ruled by @pandres95 in chat, 2026-11-05 (`d-cv-conversion-link`): A
 doesn't make sense IMO." A1d is not taken. Applied to `SPEC.md` v0.5.5; built by issue #10 (migration 0120). The exposure
 below, and the choices listed under "Open after the ruling", stay **open**, except Open 3 (route limits on the output; applied in part) and
 Open 6 (an output named after review), which @pandres95 ruled on the decision form, 2026-11-06 (`d-cv-open-choices`, "As
-recommended"); applied to `SPEC.md` v0.5.10 (see "Ruling of 2026-11-06"). The exposure is partly closed by amendment
-0026 (`d-requester-arrivals`, 2026-11-06: "Bind by sender"), which says which rows of the table below close; the test that
-pinned it, `requester_binding_today.rs`, is now `services/ingress/tests/bind_by_sender.rs`.
+recommended"); applied to `SPEC.md` v0.5.10 (see "Ruling of 2026-11-06").
 **Target:** `SPEC.md` v0.5.4 (§5.10 `REQ-CV-1`, `REQ-CV-2`, `REQ-CV-6`; §5.4; §7.A `REQ-RQ-3`, `REQ-RQ-4`; §10
 `CND-AwaitingConversion`; `AC-A5.1`, `AC-A5.2`; §15)
 **Date:** 2026-11-04; ruled and applied 2026-11-05

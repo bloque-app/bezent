@@ -30,10 +30,6 @@ pub const ISSUING_ASSET: &str = "Here(101)";
 pub const TOKEN: &str = "0x41e94eb019c0762f9bfcf9fb1e58725bfb0e7582";
 /// The reserve address on [`ORIGIN`].
 pub const RESERVE: &str = "0x00000000000000000000000000000000000000aa";
-/// The sender of an arrival the driver makes when its body names none, declared as every seeded
-/// requester's sender on [`ORIGIN`] (`REQ-PN-3`, amendment 0026): a deposit binds only an arrival
-/// from one of its requester's declared senders. An arrival from any other sender is bound by no one.
-pub const TEST_SENDER: &str = "0x00000000000000000000000000000000000000de";
 
 /// The logins this process creates, one per role.
 pub const LOGIN_INGRESS: &str = "bezent_sidecar_ingress";
@@ -124,16 +120,6 @@ pub async fn seed(owner: &PgPool, requesters: &[(String, String, String)]) -> Re
             .await
             .map_err(|e| format!("cannot seed the grants of {name}: {e}"))?;
         }
-        sqlx::query(
-            "INSERT INTO requester_senders (requester, network, address) VALUES ($1, $2, $3) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(name)
-        .bind(ORIGIN)
-        .bind(TEST_SENDER)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("cannot seed the sender of {name}: {e}"))?;
         sqlx::query(
             "INSERT INTO requester_credentials (credential_id, requester, secret_sha256) \
              VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",

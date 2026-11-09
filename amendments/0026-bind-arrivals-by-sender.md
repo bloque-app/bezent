@@ -5,10 +5,14 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0026 — a deposit binds only an arrival from its requester's declared senders
 
-**Status:** **Ruled by @pandres95 on the decision form, 2026-11-06 (`d-requester-arrivals`): "Bind by sender
-(recommended)".** Applied to `SPEC.md` v0.5.9 (§2, §3, `REQ-PN-3`, `REQ-IN-3`, `REQ-IN-6`, `REQ-CV-2`, `REQ-RQ-3`,
-`AC-A2.5`, §10 `ERR-SenderNotDeclared`); `PLAN.md` v0.6.8 binds it. Built by migration 0135 and the ingress. The items
-under "Open after the ruling" stay open.
+**Status:** **Withdrawn, 2026-11-09 (`d-0026-holdout`): @pandres95 ruled "Revert #100 (recommended)" on the decision
+form.** Pull request #100, which built it, is reverted; `SPEC.md` v0.5.11 withdraws `REQ-PN-3`, `AC-A2.5`,
+`ERR-SenderNotDeclared` and §2 "Declared sender", and restores `REQ-IN-3`, `REQ-IN-6`, `REQ-CV-2`, `REQ-RQ-3` and §3's
+requester row to their v0.5.8 text; `PLAN.md` v0.6.10 binds it. Migration 0135 is removed (it was never released). The
+reason: the swap service must keep binding evmhot sweeps by coordinate, and evmhot's senders are thousands of per-user
+addresses, so a declared-sender rule cannot be kept for it; amendment 0029 (directed deposits, #119) replaces that path,
+and the exposure this amendment set out to close is dealt with there. The text below is kept as it was ruled and applied
+(2026-11-06, `SPEC.md` v0.5.9, `PLAN.md` v0.6.8), as the record of what was withdrawn; nothing in it is in force.
 **Target:** `SPEC.md` v0.5.8 (v0.5.7 on `develop`, and v0.5.8 as pull request #99 leaves it)
 **Date:** 2026-11-06
 **Needs:** nothing further for the ruling. Each item under "Open after the ruling" needs a decision item of its own.

@@ -69,7 +69,7 @@
             }
           },
           "201": {
-            "description": "Taken in now: `Accepted`, or `Refused` with its named error (ERR-SenderNotDeclared: the arrival was not sent from a sender you declared on its network, REQ-PN-3)",
+            "description": "Taken in now: `Accepted`, or `Refused` with its named error",
             "content": {
               "application/json": {
                 "schema": {

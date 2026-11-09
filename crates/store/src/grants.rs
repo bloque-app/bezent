@@ -173,8 +173,6 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "relayed_instructions",
             "requester_credentials",
             "requester_grants",
-            // sender_declared(), which a deposit's binding calls (0135, amendment 0026).
-            "requester_senders",
             "requesters",
             "reserves",
             "routes",
@@ -217,7 +215,6 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "deposit_refund_recorded(bigint)",
             "funding_arrival(text,text,text,bigint)",
             "review_entered_from(bigint)",
-            "sender_declared(text,text,text)",
             "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
         ],
     ),

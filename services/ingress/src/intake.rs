@@ -47,7 +47,6 @@ const BELOW_MINIMUM: &str = "ERR-BelowMinimum";
 const ABOVE_MAXIMUM: &str = "ERR-AboveMaximum";
 const WINDOW_EXCEEDED: &str = "ERR-WindowExceeded";
 const INVALID_DESTINATION: &str = "ERR-InvalidDestination";
-const SENDER_NOT_DECLARED: &str = "ERR-SenderNotDeclared";
 
 /// What a request came to.
 enum Outcome {
@@ -245,8 +244,6 @@ struct Arrival {
     token: String,
     amount: String,
     recipient: String,
-    /// Who sent it, as its endpoint spells it; `None` when the endpoint recorded no sender.
-    sender: Option<String>,
     /// The kind its endpoint wrote (migration 0034).
     kind: String,
 }
@@ -282,7 +279,7 @@ enum Source {
 }
 
 /// An observation at a coordinate: token, amount, recipient, its outcome (`final` or `withdrawn`;
-/// none while it is open), whether its kind is one the request may name, the kind, and the sender.
+/// none while it is open), whether its kind is one the request may name, and the kind.
 type ObservedRow = (
     Option<String>,
     Option<String>,
@@ -290,7 +287,6 @@ type ObservedRow = (
     Option<String>,
     bool,
     String,
-    Option<String>,
 );
 
 /// The source at `c` for a request of `purpose`: an observation whose kind the endpoint wrote and
@@ -307,7 +303,7 @@ async fn source(
     let row: Option<ObservedRow> = sqlx::query_as(
         "SELECT o.token, o.amount::text, o.recipient, oo.outcome, \
                     source_bindable($6, o.network, o.block_number, o.block_hash, \
-                                    o.position_kind, o.position_index), o.kind::text, o.sender \
+                                    o.position_kind, o.position_index), o.kind::text \
              FROM observations o \
              LEFT JOIN observation_outcomes oo ON oo.observation_id = o.id \
              WHERE o.network = $1 AND o.block_number = $2 AND o.block_hash = $3 \
@@ -322,18 +318,17 @@ async fn source(
     .fetch_optional(conn)
     .await?;
     Ok(match row {
-        Some((Some(token), Some(amount), Some(recipient), Some(outcome), true, kind, sender))
+        Some((Some(token), Some(amount), Some(recipient), Some(outcome), true, kind))
             if outcome == "final" =>
         {
             Source::Final(Arrival {
                 token,
                 amount,
                 recipient,
-                sender,
                 kind,
             })
         }
-        Some((_, _, _, None, true, _, _)) => Source::NotFinal,
+        Some((_, _, _, None, true, _)) => Source::NotFinal,
         _ => Source::None,
     })
 }
@@ -362,23 +357,6 @@ async fn funding_arrival(
     .fetch_optional(conn)
     .await?;
     Ok(funding.unwrap_or(false))
-}
-
-/// Whether `requester` declared `sender` as one of its senders on `network`: a deposit binds only an
-/// arrival sent from one (`REQ-PN-3`, `REQ-IN-3`; amendment 0026, `d-requester-arrivals`). The
-/// store's `sender_declared()` rule, which the store also enforces on the deposit's answer (0135).
-async fn sender_declared(
-    conn: &mut PgConnection,
-    requester: &str,
-    network: &str,
-    sender: Option<&str>,
-) -> Result<bool, ApiError> {
-    Ok(sqlx::query_scalar("SELECT sender_declared($1, $2, $3)")
-        .bind(requester)
-        .bind(network)
-        .bind(sender)
-        .fetch_one(conn)
-        .await?)
 }
 
 fn position(c: &Coordinate) -> (&'static str, i64) {
@@ -658,7 +636,7 @@ fn amount_of(text: &str) -> Option<u128> {
     request_body = DepositRequest,
     security(("bearer" = [])),
     responses(
-        (status = 201, description = "Taken in now: `Accepted`, or `Refused` with its named error (ERR-SenderNotDeclared: the arrival was not sent from a sender you declared on its network, REQ-PN-3)", body = TransferStatus),
+        (status = 201, description = "Taken in now: `Accepted`, or `Refused` with its named error", body = TransferStatus),
         (status = 200, description = "A repeat: the original's status (REQ-ID-1)", body = TransferStatus),
         (status = 202, description = "taken-in: taken in, but the status could not be read back; read it by request reference", body = ErrorBody),
         (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
@@ -741,15 +719,6 @@ async fn decide_deposit(
         refund_destination: Some(&request.refund_destination),
         source: Some(c),
     };
-
-    // A deposit binds only an arrival sent from one of its requester's declared senders (REQ-PN-3,
-    // REQ-IN-3; amendment 0026). An arrival no requester may bind stays unassociated (REQ-IN-6). A
-    // convertible arrival is checked here, when it is bound; its conversion's output, sent from the
-    // venue, is bound only through this deposit, by its own requester (REQ-CV-2, REQ-RQ-4). Checked
-    // before consumption, so another requester learns nothing of whether the arrival is bound.
-    if !sender_declared(conn, requester, network, arrival.sender.as_deref()).await? {
-        return refuse(conn, requester, t, SENDER_NOT_DECLARED).await;
-    }
 
     let issuing = issuing_network(conn).await?;
     if !destination_ok(conn, &request.destination, &issuing).await?

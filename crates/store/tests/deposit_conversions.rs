@@ -8,8 +8,7 @@
 //! whom no writer guard exempts from these rules: the move is `deposit_conversion_record()` alone,
 //! the arrival and the output are each consumed once, and nothing binds a recorded arrival again.
 //! The ingress's refusals by name, and the core's mint against the output, are
-//! `services/core/tests/conversions.rs`. The deposit's requester declared the convertible arrival's
-//! sender (`REQ-PN-3`, migration 0135), so its answer binds it.
+//! `services/core/tests/conversions.rs`.
 
 mod common;
 
@@ -33,10 +32,7 @@ async fn declarations(pool: &PgPool) {
                ('origin-a', 'token-b', 'asset-b', 6); \
              INSERT INTO reserves (asset, network, address) VALUES \
                ('asset-a', 'origin-a', '{RESERVE}'), ('asset-a', 'origin-b', '{RESERVE}'), \
-               ('asset-b', 'origin-a', '0xreserve-b'); \
-             INSERT INTO requesters (requester) VALUES ('swaps'); \
-             INSERT INTO requester_senders (requester, network, address) VALUES \
-               ('swaps', 'origin-a', '0xfunder')"
+               ('asset-b', 'origin-a', '0xreserve-b')"
         ),
     )
     .await;
