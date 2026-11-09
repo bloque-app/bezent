@@ -55,7 +55,7 @@ jobs:
     env:
       # Each scenario creates its own database on this server (#[sqlx::test]).
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-      BEZENT_E2E_FORK_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.drpc.org' }}
+      BEZENT_E2E_FORK_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.gateway.tenderly.co' }}
     steps:
       # The vault's contracts are the submodules of contracts/evm.
       - uses: actions/checkout@v4
