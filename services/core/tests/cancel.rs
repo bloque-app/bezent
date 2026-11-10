@@ -902,6 +902,367 @@ async fn req_rv_1_issue_35_a_flapping_refusal_does_not_restart_the_deadline_each
     assert_eq!(refunds(&w).await, 0, "REQ-RF-1: no refund on unknown");
 }
 
+/// CND-PayoutWindow, issue #35 point 4 (built by pull request #70; amendment 0019 asks the owner
+/// to rule it): of an attempt that takes and leaves the hold more than once, the time *between*
+/// two holds counts toward its deadline, the time *before* the first hold does not (the clock
+/// restarts where the first hold was taken), and the time held is left out. Each of the three is
+/// what decides here: had the time before the first hold counted, the transfer would be in review
+/// ~1 000 s earlier; had the gap between the holds been left out, ~1 000 s later.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn cnd_payout_window_issue_35_time_between_holds_counts_and_time_before_the_first_does_not(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [62; 32], 700).await; // the clock starts at 22
+    w.cycle(t0()).await;
+    head(&w.admin, ORIGIN, 1_000).await;
+    spend(&w, id).await; // held at 1 000: the 978 s before it are dropped
+    head(&w.admin, ORIGIN, 1_500).await;
+    refuse(&w, id, &disagreed()).await; // left at 1 500: held 500 s
+    head(&w.admin, ORIGIN, 2_500).await;
+    spend(&w, id).await; // held again at 2 500: the 1 000 s between the holds count
+    head(&w.admin, ORIGIN, 3_000).await;
+    refuse(&w, id, &disagreed()).await; // left at 3 000: held 500 s
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+
+    let deadline = 1_000 + BUDGET + 500 + 500;
+    head(&w.admin, ORIGIN, deadline - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    head(&w.admin, ORIGIN, deadline + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(refunds(&w).await, 0, "REQ-RF-1: no refund on unknown");
+}
+
+/// REQ-GV-1, REQ-RV-1, REQ-NX-4, AC-B1.4 (amendment 0019, A1d, ruled `d-payout-late-signing`,
+/// 2026-11-06: time under a pause is not counted in the deadline). A payout held by a pause in
+/// `Source-Final` far past its nominal deadline (22 + BUDGET) is released, signed and `Delivering`:
+/// on the cycles after the release it is neither reviewed nor cancelled, and its deadline is the
+/// nominal one moved by the time paused, measured on the destination's final heads at which the
+/// pause was taken and left. Past that, unknown, it goes to review with its cancel as any other.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_gv_1_a1d_a_payout_held_by_a_pause_past_its_deadline_is_not_reviewed_and_its_deadline_moves(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    head(&w.admin, ORIGIN, 30).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    let id = withdrawal(&w, 20, [71; 32], 700).await; // the clock starts at 22
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    assert!(
+        order(&w.admin, id, 1).await.is_none(),
+        "new work under the pause"
+    );
+    assert_eq!(
+        transitions(
+            &w,
+            id,
+            &format!("condition = 'CND-Paused' AND network = '{ORIGIN}' AND block_number = 30")
+        )
+        .await,
+        1,
+        "the pause is taken resting on the destination's final head"
+    );
+
+    // Lifted far past the nominal deadline; the payout goes out.
+    let lifted = 30 + 3 * BUDGET;
+    head(&w.admin, ORIGIN, lifted).await;
+    exec(&w.admin, "DELETE FROM pauses").await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    deliver(&w, id, 1, t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+
+    // The next cycles do not send it to review, nor order its cancel.
+    w.settle(t0()).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    assert_eq!(transitions(&w, id, "to_state = 'Needs-Review'").await, 0);
+    assert_eq!(
+        cancels(&w).await,
+        0,
+        "no cancel of a payout that waited out a pause"
+    );
+
+    // Its deadline moved by the time paused, exactly.
+    let deadline = 22 + BUDGET + (lifted - 30);
+    head(&w.admin, ORIGIN, deadline - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    head(&w.admin, ORIGIN, deadline + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert!(
+        cancel_order(&w.admin, signed_of(&w.admin, id, 1).await)
+            .await
+            .is_some(),
+        "REQ-NX-4: past the moved deadline, the cancel is ordered"
+    );
+    assert_eq!(refunds(&w).await, 0, "REQ-RF-1: no refund on unknown");
+}
+
+/// The route's cut-off, closed from midnight to noon UTC every day (`REQ-LM-1`): a cycle at
+/// `t0() + 1 h` finds it closed, one at `t0() + 13 h` open. `t0()` is a Tuesday at 00:00.
+async fn close_withdrawals_in_the_morning(w: &World) {
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET cutoffs = '[{{\"weekdays\": [1,2,3,4,5,6,7], \"from\": \"00:00\", \"to\": \"12:00\"}}]' \
+             WHERE asset = '{ASSET}' AND direction = 'withdrawal'"
+        ),
+    )
+    .await;
+}
+
+/// REQ-LM-1, REQ-GV-1, REQ-RV-1, REQ-NX-4 (amendment 0019, A1d): time held under a **cut-off**, not
+/// only a pause, is left out of a payout's deadline. A payout held by `CND-CutOff` in
+/// `Source-Final` far past its nominal deadline is released, signed and `Delivering`; it is not
+/// reviewed or cancelled afterwards, and goes to review exactly at the nominal deadline moved by the
+/// time the cut-off held it. It fails if the cut-off's time counts.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_lm_1_a1d_a_payout_held_by_a_cut_off_past_its_deadline_is_not_reviewed_and_its_deadline_moves(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    close_withdrawals_in_the_morning(&w).await;
+    head(&w.admin, ORIGIN, 30).await;
+    let closed = t0() + Duration::hours(1);
+    let open = t0() + Duration::hours(13);
+    let id = withdrawal(&w, 20, [72; 32], 700).await; // the clock starts at 22
+    w.settle(closed).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-CutOff".into()))
+    );
+    assert_eq!(
+        transitions(
+            &w,
+            id,
+            &format!("condition = 'CND-CutOff' AND network = '{ORIGIN}' AND block_number = 30")
+        )
+        .await,
+        1,
+        "the cut-off is taken resting on the destination's final head"
+    );
+
+    let lifted = 30 + 3 * BUDGET;
+    head(&w.admin, ORIGIN, lifted).await;
+    w.cycle(open).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    deliver(&w, id, 1, open).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    w.settle(open).await;
+    w.settle(open).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    assert_eq!(transitions(&w, id, "to_state = 'Needs-Review'").await, 0);
+    assert_eq!(
+        cancels(&w).await,
+        0,
+        "no cancel of a payout that waited out a cut-off"
+    );
+
+    let deadline = 22 + BUDGET + (lifted - 30);
+    head(&w.admin, ORIGIN, deadline - 10).await;
+    w.settle(open).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    head(&w.admin, ORIGIN, deadline + 10).await;
+    w.settle(open).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(refunds(&w).await, 0, "REQ-RF-1: no refund on unknown");
+}
+
+/// REQ-GV-1, REQ-LM-1 (amendment 0019, A1d): a pause that turns into a cut-off back to back, with
+/// no moment open between them, is one stretch of held time, counted once. The pause is taken at
+/// head 30 and becomes a cut-off at head 1 000 (one transition, the pause lifted while the route is
+/// closed), which is left at head 5 000: 4 970 s in all. Counting the pause twice would put review
+/// 970 s late, and dropping either part, early; both are checked at 10 s either side.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_gv_1_a1d_a_pause_that_turns_into_a_cut_off_is_left_out_once(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    close_withdrawals_in_the_morning(&w).await;
+    let closed = t0() + Duration::hours(1);
+    let open = t0() + Duration::hours(13);
+    head(&w.admin, ORIGIN, 30).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    let id = withdrawal(&w, 20, [73; 32], 700).await; // the clock starts at 22
+    w.settle(closed).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+
+    head(&w.admin, ORIGIN, 1_000).await;
+    exec(&w.admin, "DELETE FROM pauses").await;
+    w.settle(closed).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-CutOff".into())),
+        "the pause lifted into the cut-off with no open moment between"
+    );
+
+    head(&w.admin, ORIGIN, 5_000).await;
+    w.cycle(open).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    deliver(&w, id, 1, open).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+
+    let deadline = 22 + BUDGET + (5_000 - 30);
+    head(&w.admin, ORIGIN, deadline - 10).await;
+    w.settle(open).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Delivering".into(), None),
+        "reviewed early: part of the held time was not left out"
+    );
+    head(&w.admin, ORIGIN, deadline + 10).await;
+    w.settle(open).await;
+    assert_eq!(
+        w.state(id).await.0,
+        "Needs-Review",
+        "not reviewed at the deadline: the pause was counted twice"
+    );
+    assert_eq!(refunds(&w).await, 0, "REQ-RF-1: no refund on unknown");
+}
+
+/// REQ-GV-1 (amendment 0019, open question: mints). The ruling is about the payout clock, so a mint
+/// keeps the clock it had before A1d: time under a pause counts toward its deadline. A deposit
+/// held by a pause past its nominal deadline (12 + `BUDGET`), released and signed, goes to review on
+/// the next cycles, and the pause is not recorded on a final head of the issuing network.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_gv_1_a1d_a_mint_under_a_pause_keeps_the_deadline_it_had(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    head(&w.admin, ISSUING, 30).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    let a = arrival(&w.admin, 10, 5_000).await;
+    decide(&w.admin, a, "final", 12).await;
+    let id = deposit(&w.admin, 10, 5_000).await; // the clock starts at 12
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    assert_eq!(
+        transitions(&w, id, &format!("network = '{ISSUING}'")).await,
+        0,
+        "a mint's pause is not measured"
+    );
+
+    head(&w.admin, ISSUING, 30 + 3 * BUDGET).await;
+    exec(&w.admin, "DELETE FROM pauses").await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    deliver(&w, id, 1, t0()).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await.0,
+        "Needs-Review",
+        "the time under the pause counts toward a mint's deadline, as before"
+    );
+}
+
+/// REQ-GV-1, REQ-RF-5, REQ-EO-6, REQ-RV-1 (amendments 0019 A1d and 0022 A1b): the new attempt of a
+/// payout proven not executed is new work. A pause in force at the proof holds it in `Delivering`
+/// as `CND-Paused`, and no order of attempt 2 is recorded; it is never refunded because of the
+/// pause. Once the pause is lifted attempt 2 is ordered and signed, and its deadline, counted from
+/// the proof it rests on, moves by the time paused.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_gv_1_a1d_a_pause_holds_the_new_attempt_and_its_deadline_moves_by_the_paused_time(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, _) = payout_in_flight(&w, 73).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    prove(&w.admin, id, 1, ORIGIN, 100).await; // before the deadline: a new attempt, not a refund
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Delivering".into(), Some("CND-Paused".into()))
+    );
+    assert_eq!(
+        later_attempts(&w, id).await,
+        0,
+        "attempt 2 ordered under the pause"
+    );
+
+    let lifted = 100 + 2 * BUDGET;
+    head(&w.admin, ORIGIN, lifted).await;
+    w.settle(t0()).await;
+    assert_eq!(later_attempts(&w, id).await, 0, "still paused");
+    assert_eq!(
+        refunds(&w).await,
+        0,
+        "REQ-GV-1: never refunded because of the pause"
+    );
+    exec(&w.admin, "DELETE FROM pauses").await;
+    w.cycle(t0()).await;
+    deliver(&w, id, 2, t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    assert_eq!(store_attempt(&w, id).await, 2);
+
+    let deadline = 100 + BUDGET + (lifted - 100);
+    w.settle(t0()).await;
+    head(&w.admin, ORIGIN, deadline - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+    head(&w.admin, ORIGIN, deadline + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(refunds(&w).await, 0);
+}
+
+/// The transfer's current attempt, as the store numbers it.
+async fn store_attempt(w: &World, id: i64) -> i32 {
+    scalar(
+        &w.admin,
+        &format!("SELECT COALESCE(max(attempt), 0) FROM transitions WHERE transfer_id = {id}"),
+    )
+    .await
+}
+
+/// REQ-GV-1, REQ-NX-4 (amendment 0022, A1b): a pause holds new work only. The cancel the core
+/// orders for a payout unknown past its deadline is not new work (it moves nothing and is no
+/// attempt), so the signer signs it under a global pause.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_nx_4_a1b_a_cancel_is_signed_under_a_pause(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, signed) = payout_in_flight(&w, 72).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    head(&w.admin, ORIGIN, PAST).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    let (order, _) = cancel_order(&w.admin, signed)
+        .await
+        .expect("a cancel order under the pause");
+    prepare_cancel(&w.admin, order, None).await;
+    w.settle(t0()).await;
+    let (intent, _) = cancel_signing_intent(&w.admin, signed)
+        .await
+        .expect("the cancel's signing intent");
+    sign(&w, intent).await;
+}
+
 /// REQ-RV-1, issue #35 point 1: a refusal that keeps coming back and names nothing pages a human
 /// once, well before its deadline, and then goes to review at the deadline as any unknown leg.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -1311,6 +1672,33 @@ async fn req_rf_1_issue_35_a_new_attempt_is_withheld_beside_an_inclusion_on_the_
     );
     deliver(&w, id, 2, t0()).await;
     assert_eq!(w.state(id).await.0, "Delivering");
+}
+
+/// REQ-RV-1, REQ-RF-1, issue #48: a new attempt that the endpoint never prepares, beside a standing
+/// inclusion on an origin network, is never ordered at all (withheld), so the never-prepared
+/// deadline cannot send it to review or to a refund over the inclusion.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_issue_48_a_never_prepared_attempt_beside_an_inclusion_is_withheld_not_reviewed(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, _signed) = payout_in_flight(&w, 73).await;
+    payout_included(&w, id, 30).await;
+    w.settle(t0()).await;
+    prove_replaced(&w.admin, id, 1, 25, 28).await;
+    head(&w.admin, ORIGIN, 28 + 5 * BUDGET).await;
+    for _ in 0..3 {
+        w.settle(t0()).await;
+    }
+    assert_eq!(w.state(id).await.0, "Delivered");
+    assert!(order(&w.admin, id, 2).await.is_none());
+    assert_eq!(w.count("SELECT count(*) FROM reviews").await, 0);
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
 }
 
 /// REQ-RF-1, INV-16, review of the fix round of #35: the daily page of a hold is not measured on the

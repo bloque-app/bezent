@@ -167,6 +167,48 @@ async fn ac_i1_2_a_compromise_alert_refuses_new_requests(pool: PgPool) {
     assert_eq!(table["routes"][0]["paused"], true);
 }
 
+/// `AC-E2.3`, amendment 0028: while the reserve check cannot see an asset, the core's hold refuses
+/// new requests for its routes exactly as a pause does, and the route table says the route is
+/// paused; once the core lifts its hold (an evaluation holds), the same request is taken in. The
+/// hold and its lift are written here by the core's own role.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_a_blind_hold_refuses_new_requests_and_its_lift_admits_them(pool: PgPool) {
+    let ingress = Ingress::new(&pool).await;
+    let core = role_pool(&pool, bezent_store::CORE_ROLE).await;
+    exec(
+        &core,
+        &format!(
+            "WITH v AS (INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, reason) \
+                        VALUES ('{ASSET}', now(), 'incomplete', 'blind: catching up') RETURNING id) \
+             INSERT INTO pauses (asset, cause, evaluation_id, held_heads) SELECT '{ASSET}', 'blind', id, '{{}}' FROM v"
+        ),
+    )
+    .await;
+    let body = deposit_body("while-blind", arrival(&pool, 1, 4_000).await);
+    let (_, answer) = ingress.post("/v0/deposits", ALPHA, &body).await;
+    assert_refused(&answer, "ERR-RoutePaused");
+    let (_, table) = ingress.get("/v0/routes", ALPHA).await;
+    assert_eq!(table["routes"][0]["paused"], true);
+    // The check sees again: an evaluation holds, and the core lifts its hold.
+    exec(
+        &core,
+        &format!(
+            "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+             VALUES ('{ASSET}', now(), 'holds', 0); \
+             DELETE FROM pauses WHERE asset = '{ASSET}' AND cause = 'blind'"
+        ),
+    )
+    .await;
+    let (_, answer) = ingress
+        .post(
+            "/v0/deposits",
+            ALPHA,
+            &deposit_body("once-seen", coordinate(1)),
+        )
+        .await;
+    assert_eq!(answer["state"], "Accepted", "{answer}");
+}
+
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn ac_g1_3_when_bezent_cannot_keep_up_new_requests_are_refused_with_overloaded(pool: PgPool) {
     let ingress = Ingress::new(&pool).await;

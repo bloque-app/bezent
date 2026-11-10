@@ -7,9 +7,10 @@
 //! (`REQ-ID-4`, PLAN `DEC-15`). Anything else reads as not found.
 
 use crate::api::{
-    CapacityOut, CoordinateOut, CoordinateQuery, DestinationBody, Health, LogEntry, LogPage,
-    LogQuery, Milestone, PositionBody, PositionKind, ReserveEquation, ReserveOut, Reserves,
-    RouteOut, RouteTable, TransferList, TransferStatus, WindowOut, refusal_detail, to_hex,
+    CapacityOut, ConvertedArrival, CoordinateOut, CoordinateQuery, DestinationBody, Health,
+    LogEntry, LogPage, LogQuery, Milestone, PositionBody, PositionKind, ReserveEquation,
+    ReserveOut, Reserves, RouteOut, RouteTable, TransferList, TransferStatus, WindowOut,
+    refusal_detail, to_hex,
 };
 use crate::app::{App, Params};
 use crate::auth::Requester;
@@ -50,7 +51,15 @@ const STATUS_COLUMNS: &str = "\
        WHERE m.transfer_id = t.id AND m.milestone = 'included' AND t.state = 'Delivered' \
        ORDER BY m.attempt DESC LIMIT 1)) AS destination_included_seen_at, \
     t.destination_final_network, t.destination_final_block_number, \
-    t.destination_final_block_hash, t.destination_final_block_time, t.destination_final_seen_at";
+    t.destination_final_block_hash, t.destination_final_block_time, t.destination_final_seen_at, \
+    (SELECT jsonb_build_object( \
+       'coordinate', jsonb_build_object('network', c.arrival_network, \
+         'block_number', c.arrival_block_number, \
+         'block_hash', '0x' || encode(c.arrival_block_hash, 'hex'), \
+         'position', jsonb_build_object('kind', c.arrival_position_kind, \
+                                        'index', c.arrival_position_index)), \
+       'token', c.arrival_token, 'amount', c.arrival_amount::text) \
+     FROM deposit_conversions c WHERE c.transfer_id = t.id) AS converted_arrival";
 
 /// Whether requester `$1` may read transfer `t` (`REQ-ID-4`).
 const VISIBLE_TO: &str = "EXISTS (SELECT 1 FROM intake_answers a JOIN intake i ON i.id = a.intake_id \
@@ -92,6 +101,7 @@ struct StatusRow {
     destination_final_block_hash: Option<Vec<u8>>,
     destination_final_block_time: Option<DateTime<Utc>>,
     destination_final_seen_at: Option<DateTime<Utc>>,
+    converted_arrival: Option<sqlx::types::Json<ConvertedArrival>>,
 }
 
 fn milestone(
@@ -179,6 +189,7 @@ impl From<StatusRow> for TransferStatus {
                 r.destination_final_block_time,
                 r.destination_final_seen_at,
             ),
+            converted_arrival: r.converted_arrival.map(|j| j.0),
         }
     }
 }
@@ -233,6 +244,7 @@ pub(crate) async fn status_of_intake(
             source_final: None,
             destination_included: None,
             destination_final: None,
+            converted_arrival: None,
         }),
     }
 }

@@ -6,9 +6,9 @@ SPDX-License-Identifier: CC-BY-4.0
 id: key-compromise
 kind: pages
 covers: [REQ-IC-4, REQ-IC-2, REQ-KY-3, REQ-KY-4, AC-I1.2, INV-4, INV-9, INV-14]
-pages: [key-compromise]
+pages: [key-compromise, lane-use-unknown]
 observables: [pauses_in_force]
-tests: [services/core/tests/signals.rs::req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted, crates/store/tests/compromise_pause.rs::ac_i1_2_each_detector_s_alert_pauses_the_bridge, services/core/tests/lifecycle.rs::ac_i1_2_a_signature_not_over_the_recorded_bytes_raises_the_alert_and_moves_nothing, services/core/tests/cancel.rs::ac_i1_2_a_cancel_signature_not_over_its_bytes_raises_the_alert, services/core/tests/running_core.rs::inv_4_a_supply_mismatch_raises_key_compromise_once_and_pauses_until_the_operator_lifts_it]
+tests: [services/core/tests/signals.rs::req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted, crates/store/tests/compromise_pause.rs::ac_i1_2_each_detector_s_alert_pauses_the_bridge, services/core/tests/lifecycle.rs::ac_i1_2_a_signature_not_over_the_recorded_bytes_raises_the_alert_and_moves_nothing, services/core/tests/cancel.rs::ac_i1_2_a_cancel_signature_not_over_its_bytes_raises_the_alert, services/core/tests/running_core.rs::inv_4_a_supply_mismatch_raises_key_compromise_once_and_pauses_until_the_operator_lifts_it, services/evm-endpoint/tests/submit.rs::ac_i1_2_p2_one_provider_reporting_the_lane_used_outside_bezent_pauses_nothing_and_both_do, services/core/tests/conditions.rs::ac_i2_1_inv_15_a1b_an_intent_recorded_before_the_pause_is_not_signed_until_it_is_lifted]
 exercised: no
 ---
 # Key compromise (a signature bezent did not record)
@@ -29,10 +29,22 @@ on chain per asset and window (`REQ-KY-3`, `AC-I1.1`); that is why this is an in
 - the reserve check, for a supply mismatch (`INV-4`): `page kind=key-compromise asset=<asset> detail=<json>`, which is
   followed by `supply-mismatch-pause`.
 
+`lane-use-unknown`, an ERROR line of the EVM endpoint only (no `event_log` entry: the endpoint's login appends no other
+kind): `page: the providers do not agree, or one failed, on whether the delivery key was used outside bezent ...
+kind=lane-use-unknown dedupe=<network>:lane-code|lane-nonce:<lane> detail=<json>`. The read before a preparation or a
+signature that would raise `key-compromise` (code at the lane, or its nonce past every nonce bezent signed) found it on one
+provider only, or a provider failed. **Nothing is raised and nothing is paused** on one provider's word (amendment 0022, P2,
+ruled 2026-11-06), and nothing is prepared or signed from the lane until both providers answer alike. At most once an hour
+per lane and read. The `detail` names each provider's answer (`a`, `b`): read the lane's nonce and code on a public
+explorer. If it shows what the provider that reported the use shows, the key was used outside bezent: pause by hand
+(`SELECT operator_pause(NULL, NULL, NULL, 'lane-use-unknown <lane>');`) and follow "Do" below; the second provider will raise
+the alert itself once it catches up. If it does not, fix or replace that provider (`deploy/compromise-pause.md`, step 3).
+
 **The pause is already applied.** A `key-compromise` alert pauses the whole bridge in the transaction that records it
 (migration 0095; `deploy/compromise-pause.md` has the reasoning and the recovery). It stops new work only: new requests,
-orders, signing intents and attempts. It does **not** stop a signing intent recorded before the pause (one era on Kreivo,
-no bound on an EVM network until amendment 0022 A1 is ruled), and it **cannot stop a stolen key**, which signs by itself:
+orders, signing intents and attempts, and the signature of a signing intent recorded before the pause whose attempt has
+no signature yet: the signer refuses it until the pause is lifted (amendment 0022, A1b). It does **not** stop a transaction
+already signed, and it **cannot stop a stolen key**, which signs by itself:
 only the on-chain pause and the bounds of `REQ-KY-3` do, and those are a person's act (step 1 below). The exception is a
 supply mismatch (`INV-4`), which pauses that asset's routes.
 

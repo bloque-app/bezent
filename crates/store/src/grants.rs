@@ -10,8 +10,10 @@
 //! `crates/store/README.md` explains it in prose.
 //!
 //! A pause by compromise is deliberately absent: no role holds `pauses(alert_seq)`, nor anything on
-//! `pauses` beyond the core's asset pauses, and the signer and the endpoints hold nothing on it.
-//! The store makes it on the alert's insert (migration 0095), so issue #77 widened nothing here.
+//! `pauses` beyond the core's asset pauses and holds, and the signer and the endpoints hold nothing
+//! on it. The store makes it on the alert's insert (migration 0095), so issue #77 widened nothing
+//! here. The core's `DELETE` on `pauses` (amendment 0028, migration 0142) lifts only its own blind
+//! hold: the store's trigger refuses it any other row.
 //!
 //! A privilege is one of:
 //! - `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER` on a table or
@@ -63,6 +65,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "book_entries",
             "book_postings",
             "book_quarantine",
+            "deposit_conversions",
             "endpoint_scopes",
             "event_log",
             "event_log_head",
@@ -113,7 +116,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "book_quarantine",
             "event_log",
             "intents",
-            "pauses(asset,cause,evaluation_id,quarantine_id,reading_id)",
+            "pauses(asset,cause,evaluation_id,quarantine_id,reading_id,held_heads)",
             "reserve_evaluations",
             "reserve_statement_abandoned",
             "reserve_statement_objects",
@@ -131,6 +134,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "transfers(on_chain_reference)",
         ],
     ),
+    // Amendment 0028 (0142): the core lifts its own blind hold, and nothing else; the store's
+    // trigger refuses any other row, and a hold while the asset's latest evaluation does not hold.
+    (crate::CORE_ROLE, "DELETE", &["pauses"]),
     (
         crate::CORE_ROLE,
         "EXECUTE",
@@ -143,6 +149,8 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "one_business_day_after(timestamp with time zone)",
             "ops_observables()",
             "pause_reading_is_supply_mismatch(text,bigint)",
+            "reserve_check_holds(text)",
+            "review_entered_from(bigint)",
             "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
         ],
     ),
@@ -157,6 +165,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "assets",
             "attempt_milestones",
             "book_balances",
+            "deposit_conversions",
             "event_log",
             "event_log_head",
             "event_log_position",
@@ -206,7 +215,12 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         &[
             "bezent_applied_migrations()",
             "bezent_writer_holds(text,oid)",
+            "coordinate_lock(text,bigint,bytea,position_kind,bigint)",
+            "coordinate_recorded_converted(text,bigint,bytea,position_kind,bigint)",
+            "deposit_conversion_record(bigint,bigint,text,bigint,bytea,position_kind,bigint)",
+            "deposit_refund_recorded(bigint)",
             "funding_arrival(text,text,text,bigint)",
+            "review_entered_from(bigint)",
             "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
         ],
     ),
@@ -270,7 +284,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
     // The signer (migration 0012): it reads the intent, the core's order and the prepared bytes,
     // and records the signature. Since 0049 (audit must-fix 2) it also reads which token an
     // order's asset is paid in, and which signing intent a signed transaction is of (a cancel's
-    // target), to compare the bytes it decodes with the core's order. Nothing else (REQ-AR-3).
+    // target), to compare the bytes it decodes with the core's order. Since 0125 (amendment 0022,
+    // A1b) it asks whether a pause holds the intent, through a definer function, and reads
+    // neither `pauses` nor `transfers`. Nothing else (REQ-AR-3).
     (
         crate::SIGNER_ROLE,
         "SELECT",
@@ -293,6 +309,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         &[
             "attempt_gate_open(text,text,text,bytea,integer)",
             "bezent_applied_migrations()",
+            "pause_holds_intent(bigint)",
             "statement_place_refusal(text,bigint,bytea,jsonb)",
         ],
     ),
@@ -304,6 +321,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         &[
             "admin_actions",
             "book_quarantine",
+            "deposit_conversions",
             "event_log",
             "ledger_accounts",
             "ledger_accounts_listed",
@@ -327,7 +345,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         &[
             "ledger_accounts(network,address,kind,reason)",
             "manual_actions(kind,transfer_id,to_state,network,block_number,block_hash,block_time,justification)",
-            "manual_approvals(action_id,justification)",
+            "manual_approvals(action_id,justification,approved_output_network,approved_output_block_number,approved_output_block_hash,approved_output_position_kind,approved_output_position_index,approved_output_amount)",
         ],
     ),
     (
@@ -373,7 +391,7 @@ const EVM_ENDPOINT_SELECT: &[&str] = &[
 ];
 
 /// What the EVM endpoint appends: the endpoints' common records and the delivery account's fee
-/// position (migration 0110; the Kreivo endpoint records none).
+/// position (migration 0110; the Kreivo endpoint's own is `KREIVO_ENDPOINT_INSERT`, migration 0130).
 const EVM_ENDPOINT_INSERT: &[&str] = &[
     "event_log",
     "fee_position_readings",
@@ -387,12 +405,14 @@ const EVM_ENDPOINT_INSERT: &[&str] = &[
     "signed_transactions",
 ];
 
-/// What the Kreivo endpoint reads: the endpoints' common tables and its walk anchors.
+/// What the Kreivo endpoint reads: the endpoints' common tables, its walk anchors and its own fee
+/// position (migration 0130).
 const KREIVO_ENDPOINT_SELECT: &[&str] = &[
     "admitted_tokens",
     "assets",
     "endpoint_scopes",
     "event_log",
+    "fee_position_readings",
     "final_heads",
     "intents",
     "networks",
@@ -410,9 +430,11 @@ const KREIVO_ENDPOINT_SELECT: &[&str] = &[
     "signed_transactions",
 ];
 
-/// What the Kreivo endpoint appends: the endpoints' common records and its walk anchors.
+/// What the Kreivo endpoint appends: the endpoints' common records, its walk anchors and the
+/// delivery account's fee position (migration 0130).
 const KREIVO_ENDPOINT_INSERT: &[&str] = &[
     "event_log",
+    "fee_position_readings",
     "final_heads",
     "non_execution_proofs",
     "observation_outcomes",

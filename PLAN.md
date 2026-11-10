@@ -1,9 +1,9 @@
 ---
 name: bezent
-plan_version: 0.6.3
-status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`)
-date: 2026-10-30
-binds: SPEC.md v0.5.4
+plan_version: 0.6.11
+status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first); v0.6.5 binds SPEC.md v0.5.6 (amendment 0020: an attempt never prepared goes to review at the route's deadline); v0.6.6 binds SPEC.md v0.5.7 (amendments 0022, A1b, and 0019, A1d: a pause holds an unsigned attempt, and its time is left out of the deadline); v0.6.7 binds SPEC.md v0.5.8 (amendments 0021 and 0024: "sustained" is 24 hours, and the full release gate applies only to a release that moves value) and records the fee position ruling (amendment 0025); v0.6.8 binds SPEC.md v0.5.9 (amendment 0026: a deposit binds only an arrival from its requester's declared senders); v0.6.9 binds SPEC.md v0.5.10 (amendment 0018, Open 3 in part and Open 6: a conversion output may be named in review, and the output is checked against the route's limits); v0.6.10 binds SPEC.md v0.5.11 (amendment 0026 is withdrawn, `d-0026-holdout`: a deposit binds an arrival by its coordinate again); v0.6.11 binds SPEC.md v0.5.12 (amendment 0028: the reserve check holds an asset it cannot see and lifts the hold itself; a difference of value is a pause, as before)
+date: 2026-11-09
+binds: SPEC.md v0.5.12
 ---
 
 # bezent — Implementation Plan
@@ -21,7 +21,7 @@ that serves nothing in the spec is not in this plan.
 | `M-*` | A milestone: a set of features that together make a stated claim true, with exit criteria |
 | `RISK-*` | A risk to the plan, with its mitigation |
 
-1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.4. If a technical fact makes a requirement
+1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.12. If a technical fact makes a requirement
    impossible to meet, that becomes a spec amendment first (`amendments/`), and the plan follows it. A gap in the spec
    is handled the same way: we stop, propose an amendment, and do not fill the gap in code.
 2. **Facts come from the notes.** Numbers and properties of Kreivo, the EVM networks, CCTP, evmhot and Swaps come from
@@ -36,6 +36,14 @@ that serves nothing in the spec is not in this plan.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.6.10 | 2026-11-09 | The plan binds `SPEC.md` v0.5.11. Amendment 0026 is withdrawn (`d-0026-holdout`, ruled by @pandres95 on the decision form, 2026-11-09: "Revert #100"): a deposit binds an arrival by the coordinate its request names, as before v0.6.8, and no requester declares senders (`ERR-SenderNotDeclared`, `REQ-PN-3` withdrawn). The swap service keeps binding evmhot sweeps by coordinate; amendment 0029 (directed deposits, #119) replaces that path. The paragraphs v0.6.8 added to the deposit flow and to the one-instance note are removed (`DEC-9`, `DEC-15`, `F-002`; migration 0135 removed, never released). The 0.6.8 row stays as history |
+| 0.6.11 | 2026-11-09 | The plan binds `SPEC.md` v0.5.12. Amendment 0028 (@pandres95's ruling in chat, 2026-11-07: "Yes, write the amendment and build it."): when the reserve check cannot see an asset it holds the asset's routes (a row of `pauses` of cause `blind`, kind `hold`, so every reader that refuses work under a pause refuses it under the hold), lifts the hold itself at the first evaluation that holds, and pages `reserve-blind` once the hold outlasts `networks.reserve_blind_page_seconds` (default 600) or at once on a finality stall; a lag or a stale head is no longer a divergence; a difference of value pauses under `REQ-BK-1`, as before, and is lifted only by two operators. The core runs the reserve check before its cycle (`DEC-16`, `F-004`, migration 0142). |
+| 0.6.9 | 2026-11-06 | The plan binds `SPEC.md` v0.5.10. @pandres95's ruling on the decision form, 2026-11-06. `d-cv-open-choices` ("As recommended"; amendment 0018, Open 3 in part and Open 6): a conversion output may be named for a deposit in `Needs-Review` for the conversion's deadline while no refund of it is recorded, and the output's amount is checked against the route's minimum, maximum and window with the route's own errors. The deposit stays in review and leaves by the resolution the review model already has, into `Delivering`, with a second approver; no edge is added (`F-010`, migration 0140). Per @pandres95's chat ruling of 2026-11-06, the approval records the exact output it approved and the mint runs only if that is still the deposit's output (migration 0141). |
+| 0.6.8 | 2026-11-06 | The plan binds `SPEC.md` v0.5.9. Amendment 0026 (`d-requester-arrivals`, ruled by @pandres95 on the decision form, 2026-11-06: "Bind by sender"): each requester's senders are declared by the operator per origin network, and a deposit binds only an arrival whose sender is one of them (`REQ-PN-3`, `REQ-IN-3`, `ERR-SenderNotDeclared`). On an EVM network the sender is the `from` of the ERC-20 `Transfer` log at the arrival's coordinate. Bloque Test's and Bloque's senders are declared apart, so Test's deposit grant no longer reaches Bloque's ordinary arrivals; a conversion output can still be named for any awaiting convertible deposit (amendment 0026, Open 1) (`DEC-9`, `DEC-15`, `F-002`; migration 0135). Nothing else changes |
+| 0.6.7 | 2026-11-06 | The plan binds `SPEC.md` v0.5.8. @pandres95's rulings on the decision form, 2026-11-06. `d-gate-sustained` ("24 hours"; amendment 0021): the test bed's "sustained" is 24 consecutive hours of zero divergence (§15; `DEC-19`, `F-013`). `d-gate-scope` ("As recommended"; amendment 0024): the full gate applies only to a release that moves value, which is the first release of bUSDC and each new asset or network; every other release needs its checks green and one spec owner's sign-off; a release's class is a field of its evidence and a missing one is refused (`DEC-19`, `F-013`). `d-fee-position-scope` ("As recommended", with his note that usage subscriptions will soon override it; amendment 0025): on Kreivo the fee position is the delivery account's free balance less its frozen balance, the alert floor is in bezent's own configuration, and the core pages when a position is below it (`DEC-18`, `F-014`). |
+| 0.6.6 | 2026-11-06 | The plan binds `SPEC.md` v0.5.7. @pandres95's rulings on the decision form, 2026-11-06. `d-pause-0022` ("As recommended"; amendment 0022): a signing intent recorded before a pause and not yet signed is new work, and the signer refuses it (`REQ-GV-1`, A1b; `F-005`); the on-chain pause stays a person's act (A2a); every detector login keeps its power to pause globally, for now (P1); and an EVM lane detector raises the compromise path only on both providers' word, one provider's being unknown and paged (P2; `DEC-12`, `F-009`). `d-payout-late-signing` ("Leave pause time out"; amendment 0019, A1d): the time a payout is held under a pause or a cut-off does not count toward its attempt's deadline (`F-003`). Nothing else changes |
+| 0.6.5 | 2026-11-06 | The plan binds `SPEC.md` v0.5.6. Amendment 0020 (`d-never-prepared`, ruled Yes by @pandres95 in the decision form, 2026-11-06): a delivery attempt whose preparation never happened (the endpoint is down) goes to `Needs-Review` at the route's deadline, counted from the order, from the state it is in; never a refund or a retry (`REQ-EO-3`, `REQ-RF-1`, `REQ-RV-1`). Nothing else changes |
+| 0.6.4 | 2026-11-06 | The plan binds `SPEC.md` v0.5.5, as the owner asked in chat on 2026-11-06. Amendment 0018 (A1b, ruled `d-cv-conversion-link`, 2026-11-05) makes a convertible deposit begin with its request: the request names the final convertible arrival (`REQ-RQ-3`) and the deposit holds `CND-AwaitingConversion` until its requester names the conversion's output by the request reference (`REQ-RQ-4`, `REQ-CV-2`). `DEC-9`, `DEC-13` and `F-010` are worded to match. Nothing else changes |
 | 0.6.3 | 2026-10-30 | @pandres95's ruling `d-polygon-central-signer` (2026-10-30): there is no Polygon signer sidecar. The central signer, which has its own task role, signs Polygon through the Vault signing plugin, and the EVM endpoint reaches it over the mTLS signer link (`PUB-1b`) like every other caller. Containers in one task share one cloud IAM role, so a sidecar would let the EVM endpoint authenticate as the plugin role and sign arbitrary hashes, bypassing the signer's intent check (`REQ-AR-3`). `DEC-11` and `F-005` follow; `PUB-1b` becomes a prerequisite of Polygon delivery (`F-009`, `M-1`). `SPEC.md` is unchanged |
 | 0.6.2 | 2026-10-29 | The plan binds `SPEC.md` v0.5.4 (amendment 0015: `REQ-CU-1` names a boundary, not a store). @pandres95's ruling `d-delivery-keys` (2026-10-29) moves both delivery keys off AWS KMS: `DEC-11` names the store per key, and `RISK-7` is closed. The signer gets one `SigningEngine` interface (`F-005`) |
 | 0.6.1 | 2026-10-22 | The plan binds `SPEC.md` v0.5.3 (amendments 0013 and 0014; no requirement the plan relies on changes). @pandres95's rulings of 2026-10-22: the 48-hour mainnet soak exercises tiny synthetic transfers within the bounds between Polygon and Kreivo (his option A; `DEC-19`, `M-4`); the vault guard's bounds are confirmed: a delay cooldown from 1 hour to 30 days and an expiration from 1 day to 90 days, with a deployment default of a 24-hour cooldown and a 7-day expiration (`DEC-10`); and the guardian key is replaced by a key held by an independent party before the vault is funded, the holder still to be decided, a hot key until then (`DEC-10`, `RISK-10`) |
@@ -291,8 +299,10 @@ evmhot's sweeps; Swaps then requests the deposit by naming the arrival's coordin
 - A coordinate is consumed once (`INV-2`), so an arrival can back one deposit only. An arrival nobody claims by the
   route's deadline stays unassociated with an owner (`REQ-IN-6`).
 - Nothing is matched by amount or time: the request names the coordinate, and bezent checks it itself at finality.
-- A convertible token that arrives (for example USDT on Polygon) is itemised outside the reserve until Swaps converts
-  it under its role (`DEC-10`, `DEC-13`), and the deposit is minted against the converted output.
+- A convertible token that arrives (for example USDT on Polygon) is itemised outside the reserve. Swaps requests the
+  deposit by naming that arrival's coordinate, and the deposit holds `CND-AwaitingConversion` while Swaps converts it
+  under its role (`DEC-10`, `DEC-13`). Swaps then names the conversion's output by the deposit's request reference,
+  and the deposit is minted against that output (`REQ-CV-1`, `REQ-CV-2`).
 - evmhot is revamped (outside this plan) to sweep deposit addresses straight into the vault.
 
 *Serves:* deposits bound by coordinate (`REQ-IN-3`, `REQ-RQ-3`, `REQ-IN-4`), arrivals de-duplicated by coordinate
@@ -383,6 +393,11 @@ disagree, the disposition is unknown, never a mint.** Ruled by @pandres95 (`pl-r
   the fee and gas estimates, the dry run, receipts, logs and headers, stays on the paid pair, cross-checked. A public
   node cannot forge a signed transaction, only drop it, and the endpoint sends the same bytes again until the pair
   shows the outcome. There is no fallback to the paid pair.
+- An alarm rests on both providers too (@pandres95, `d-pause-0022`, 2026-11-06; amendment 0022, P2). The reads that
+  would raise the compromise path from a lane (its nonce past every nonce bezent signed, or code at it) read each
+  provider on its own, and raise only when both report it. One provider's report, or one that fails, is unknown: it
+  pages and pauses nothing, and the lane prepares and signs nothing until they agree. Choosing a nonce still takes the
+  higher of the two, which is right for that and wrong for an alarm.
 - Alternatives: one provider, or our own nodes.
 
 *Serves:* finality with the hash re-checked (`REQ-OB-2`), decisions only at final blocks (`REQ-OB-5`), unknown rather
@@ -398,7 +413,9 @@ Ruled by @pandres95 (`pl-scope`, 2026-10-13; `pl-cross-network`, in chat, 2026-1
 admitted convertible is USDT0 on Polygon for bUSDC (`pl-convertibles`, 2026-10-13); bEURC and bBTC have none, so
 the Base and BNB Chain vaults carry no conversion role.
 
-- The minimum output of a conversion is Swaps' own. bezent mints what the swap delivered into the vault.
+- The minimum output of a conversion is Swaps' own. A deposit in a convertible token is requested first, naming the
+  convertible arrival, and Swaps then names the conversion's output by the request reference; bezent mints what the
+  swap delivered into the vault (`REQ-CV-1`, `REQ-CV-2`).
 - CCTP stays Swaps' own: no Circle account is needed, standard transfers carry no Circle fee, and Polygon to Base
   takes seconds (constraints note). bezent observes only the Polygon payout to Swaps.
 - In V0, bEURC pays out only on Base and bBTC only on BNB Chain.
@@ -476,7 +493,18 @@ dedicated ed25519 key.** Ruled by @pandres95 (`pl-statement-host`, 2026-10-13): 
 lock.
 
 - Each evaluation re-derives every term from the networks and Swaps' reports at final points and compares it with the
-  reserve book. Any difference pauses the asset's routes and pages a human.
+  reserve book. Any difference of value pauses the asset's routes and pages a human; the pause is lifted by two operators.
+- Decided by amendment 0028 (2026-11-07): an evaluation that cannot see (one that cannot be made, a point behind its
+  network's final head beyond `reserve_point_lag_seconds`, a final head older than that by the clock) holds the asset's
+  routes instead, as a row of `pauses` of cause `blind` that the core alone writes and lifts, at the first evaluation that
+  holds. It pages `reserve-blind` once it outlasts `networks.reserve_blind_page_seconds` (default 600 s, the smallest of
+  the asset's networks'), or at once on a finality stall: no final head within the bound by the clock, or the same latest
+  final head since the hold began, in either case while the network's walk has stopped. A difference of value found while
+  the check lags is a pause and a hold, once a second reading at a newer final point on every network differs as well
+  (the first closes the gate and holds signing, and is only logged as `reserve-divergence-unconfirmed`). Until the check has seen an asset (its latest evaluation, by id, holds and was
+  made: `reserve_check_holds`), the core's gate and the signer hold it with or without a hold row. The core runs the
+  check before its cycle, and a check's first tick evaluates every asset. A stale head while the walk's watermark moves
+  is a catch-up, not a finality stall; the endpoints' head recording is unchanged.
 - The statement names each asset's backend and assurance class, lists unconverted holdings outside the equation, says
   it is a signed claim and not a proof of solvency, and says which terms rest on reports.
 - An append-only bucket with object lock keeps every statement, so a later revision is detectable without bezent.
@@ -531,7 +559,10 @@ environment is not built; a testnet instance comes later.
   there and hold no authority on mainnet (`REQ-KY-6`). Bloque Test reaches the instance as a requester (`DEC-15`).
 - The Kreivo delivery account needs a KSM float. Kreivo charges a storage deposit: 0.0133 KSM on the first mint and about
   0.0067 KSM for each new reference after it. Topping the float up is a runbook item (`F-014`), and its balance has an
-  alert floor, set in configuration and not in this plan (ruled by @pandres95, 2026-10-20).
+  alert floor, set in configuration and not in this plan (ruled by @pandres95, 2026-10-20). The float's measure is the
+  account's free balance less its frozen balance, and the floor is a per-network setting in the core's own
+  configuration; the core pages `fee-position-low` when a network's position is below it (ruled 2026-11-06, amendment
+  0025: a stopgap until usage subscriptions replace the float).
 
 *Serves:* no test key with production power (`REQ-KY-6`), upgrades that lose nothing in flight (`REQ-GV-4`), and
 restore without loss (`NFR-7`). *Cost:* every infrastructure change waits for the operator's review; and Bloque Test's flows run on mainnet with real assets, under the same bounds.
@@ -563,9 +594,19 @@ end-to-end suite being green and every runbook exercised.**
   Kreivo (bezent mints → Swaps deposits into aledgent → aledgent withdraws → bezent redeems); the network definition
   stays upstream in aledgent's public harness with bezent's contract and assets as an optional layer, and the combined
   job lives in the Swaps platform (`notes/ALEDGENT-INTERPLAY.md`, 2026-10-15).
-- The gate also carries the spec's three exit criteria for V0 (§15): the reserve equation at exactly zero divergence,
-  sustained; every final source leg delivered, refunded, or held in a named condition with an owner; and every runbook
-  exercised.
+- The gate also carries the spec's three exit criteria for V0 (§15): the reserve equation at exactly zero divergence for
+  24 consecutive hours (`d-gate-sustained`, amendment 0021; a divergence restarts the window); every final source leg
+  delivered, refunded, or held in a named condition with an owner; and every runbook exercised.
+- **Which releases the gate binds in full** (`d-gate-scope`, amendment 0024, SPEC §15). The full gate (the exit criteria,
+  the runbook exercises, the soak and the sign-off of the spec owner and a maintainer) applies only to a release that
+  moves value: the first release of bUSDC, and each new asset or network. Every other release needs the checks of
+  `release/gate.toml` green on its commit and one spec owner's sign-off. Two points amendment 0024 does not rule are
+  **as built, pending the owner's ruling (amendment 0024, open)**: a criteria map with no exception or known-unmet
+  entry blocks a value-moving release only (`release_gate.py`, `mechanical_map`), and both classes share one list of
+  checks in `gate.toml`, so an ordinary release cannot pass until the self-hosted pool exists. The class is the top-level `class` of `release/evidence.toml`, `"value-moving"` or `"ordinary"`; the gate
+  reads nothing else for it, refuses a release with no class or an unknown one (it never defaults to ordinary), and
+  takes what each class needs from `gate.toml`. The evidence is one pull request approved by the spec owner, so the
+  class is attested by review. The soak is a requirement of every value-moving release.
 - **The soak** (@pandres95, `pl-soak`, 2026-10-15). Before bUSDC goes live, bezent runs for 48 hours on mainnet, as the single
   instance ruled on 2026-10-16 (`DEC-18`), with the bounds as ceilings and no real user flow. Zero reserve divergence
   holds throughout, with at least two daily statements published and verified; a divergence restarts the clock. The
@@ -657,7 +698,7 @@ withdrawals (`AC-B1.1`–`AC-B1.4`, `AC-B3.1`, `AC-B3.2`) and dispositions (`AC-
 
 **`F-004` Reserve book, check and statement.** The double-entry book per asset, the one-minute evaluation with pause
 and page on divergence, the surplus floor alert, and the daily signed statement (`DEC-16`). Done when `AC-E1.1`,
-`AC-E1.2`, `AC-E2.1` and `AC-E2.2` pass, `INV-1` is checked every minute, and a bBTC remainder lands in surplus
+`AC-E1.2`, `AC-E2.1`, `AC-E2.2` and `AC-E2.3` pass, `INV-1` is checked every minute, and a bBTC remainder lands in surplus
 (`REQ-AS-9`).
 
 **`F-005` Signer and guards.** The stateless signer and its guards (`DEC-3`) on the custody of `DEC-11`: a stub with
@@ -687,7 +728,7 @@ coordinate (`REQ-IN-3`), arrivals are minted only after finality (`AC-A2.1`–`A
 central signer, never through a sidecar.
 
 **`F-010` Venues.** Swaps' conversions on the vault: the role configuration, observing them, and minting against
-the output
+the output once Swaps names it by the deposit's request reference
 (`DEC-13`). A gate of the bUSDC launch (`M-4`), by ruling (`pl-busdc-first`). Done when a convertible deposit is minted for what Swaps' swap delivered into the vault (`AC-A5.1`–`AC-A5.3`).
 
 **`F-011` Attested backend.** Swaps' reports as observations, the instruction commitment, and the statement's attested

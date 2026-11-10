@@ -265,6 +265,7 @@ fn f_014_every_page_the_services_log_has_a_runbook_and_a_row_in_alerts() {
         "payout-window-alert",
         "payout-refusal-alert",
         "resolution-blocked-by-inclusion",
+        "resolution-unprepared-alert",
         "late-mint-prover-silent",
         "late-mint-watch-failed",
         "late-mint-check-failed",
@@ -387,10 +388,11 @@ fn f_014_every_runbook_has_its_sections_and_an_honest_exercise_status() {
 #[test]
 fn f_014_a_runbook_names_only_tests_and_observables_that_exist() {
     // The function is defined in 0090 and replaced, with its additions, by each later migration
-    // that adds a metric (0110: fee positions).
+    // that adds a metric (0110: fee positions; 0142: holds, amendment 0028).
     let observables_sql = [
         "0090_ops_observables.up.sql",
         "0110_fee_position_readings.up.sql",
+        "0142_reserve_blind_hold.up.sql",
     ]
     .iter()
     .map(|f| read(&root().join("crates/store/migrations").join(f)))

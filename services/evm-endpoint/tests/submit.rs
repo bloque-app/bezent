@@ -6,10 +6,11 @@
 
 mod common;
 
-use alloy::primitives::{Address, B256, Bytes};
+use alloy::primitives::{Address, B256, Bytes, U256};
 use bezent_evm_endpoint::evm;
+use bezent_evm_endpoint::rpc::mock::MockChain;
 use bezent_evm_endpoint::submit::{NO_EXPIRY, Prepared, Submitted, signing_intent_payload};
-use common::{ASSET, Fixture, beneficiary, contracts, delivery, usdc, vault};
+use common::{ASSET, CHAIN_ID, Fixture, beneficiary, contracts, delivery, usdc, vault};
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -482,6 +483,93 @@ async fn sf1_ac_i1_2_the_lane_used_while_idle_raises_compromise_and_pause(
     };
     assert!(why.contains("SF1"), "{why}");
     assert_eq!(f.compromises().await, 1);
+}
+
+/// `AC-I1.2`, `REQ-IC-4`, `REQ-NX-3` (amendment 0022, P2, ruled `d-pause-0022`, 2026-11-06; PLAN
+/// `DEC-12`): the delivery key's use outside bezent pauses the bridge only on both providers'
+/// word. One provider reporting code at the lane, or the lane's nonce past every nonce bezent
+/// signed, is unknown: nothing is raised and nothing paused, and nothing is prepared or signed
+/// from the lane meanwhile. Once the second provider reports the same, the alert is raised and the
+/// bridge pauses, once.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i1_2_p2_one_provider_reporting_the_lane_used_outside_bezent_pauses_nothing_and_both_do(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let a = MockChain::new(CHAIN_ID, 5);
+    let b = a.fork();
+    let f = Fixture::with_chains(pool, connect, a, b).await;
+    f.chain_b
+        .set_balance(f.lane.address, U256::from(10u128.pow(21)));
+    let pauses = "SELECT count(*) FROM pauses";
+    // bezent signs nonce 0, and it is included on both: the lane is at 1, nothing in flight.
+    let (_, bytes) = f.signed_payout(reference(1), 700).await;
+    let block = f.mine(&bytes, true);
+    let order = f.order_payout(reference(2), beneficiary(), 700).await;
+    let prepared = f.submitter().prepare(order).await.unwrap();
+    let Prepared::Ready { nonce: 1, .. } = prepared else {
+        panic!("not ready at nonce 1: {prepared:?}");
+    };
+    let intent = f
+        .signing_intent("payout", Some(reference(2).as_slice()), &prepared, 700)
+        .await;
+
+    // One provider reports code at the lane: unknown, not a compromise.
+    f.chain.set_code(f.lane.address, vec![0xef, 0x01, 0x00]);
+    let later = f.order_payout(reference(3), beneficiary(), 700).await;
+    let Prepared::Unavailable(why) = f.submitter().prepare(later).await.unwrap() else {
+        panic!("prepared, or refused as a compromise, on one provider's word");
+    };
+    assert!(why.contains("P2") && why.contains("holds code"), "{why}");
+    f.chain.set_code(f.lane.address, Vec::<u8>::new());
+
+    // One provider reports the lane's nonce at 3, past every nonce bezent signed plus one.
+    f.chain.set_nonce(f.lane.address, block, 3);
+    let before = signatures(&f).await;
+    let Submitted::Unavailable(why) = f.submitter().sign_and_submit(intent).await.unwrap() else {
+        panic!("signed, or refused as a compromise, on one provider's word");
+    };
+    assert!(why.contains("P2") && why.contains("nonce 3"), "{why}");
+    let Prepared::Unavailable(_) = f.submitter().prepare(later).await.unwrap() else {
+        panic!("prepared from a lane whose use is unknown");
+    };
+    assert_eq!(signatures(&f).await, before, "nothing signed while unknown");
+    assert_eq!(
+        f.compromises().await,
+        0,
+        "one provider's word raised the alert"
+    );
+    assert_eq!(
+        f.count(pauses).await,
+        0,
+        "one provider's word paused the bridge"
+    );
+
+    // The second provider reports the same: the compromise path, and the bridge pauses.
+    f.chain_b.set_nonce(f.lane.address, block, 3);
+    let Submitted::Refused(why) = f.submitter().sign_and_submit(intent).await.unwrap() else {
+        panic!("signed from a lane both providers saw used outside bezent");
+    };
+    assert!(
+        why.contains("SF1") && why.contains("both providers"),
+        "{why}"
+    );
+    assert_eq!(signatures(&f).await, before);
+    assert_eq!(f.compromises().await, 1);
+    assert_eq!(f.count(pauses).await, 1);
+    let Prepared::Refused(_) = f.submitter().prepare(later).await.unwrap() else {
+        panic!("prepared from a lane the key was used on outside bezent");
+    };
+    assert_eq!(f.compromises().await, 1, "raised once for that nonce");
+
+    // Code on both providers is the compromise path too (PR #39 review S5).
+    f.chain.set_code(f.lane.address, vec![0xef, 0x01, 0x00]);
+    f.chain_b.set_code(f.lane.address, vec![0xef, 0x01, 0x00]);
+    let Prepared::Refused(why) = f.submitter().prepare(later).await.unwrap() else {
+        panic!("prepared from a lane both providers report holds code");
+    };
+    assert!(why.contains("holds code"), "{why}");
+    assert_eq!(f.compromises().await, 2);
 }
 
 /// PR #39 third review SF-B (`REQ-KY-4`, `INV-9`): a payout's decoded chain id is its order's

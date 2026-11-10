@@ -12,8 +12,8 @@
 //! This test exists so that the exposure is not described only in prose that rests on a scratch run. It
 //! names no criterion and verifies none (a green run here is not a claim that anything is met).
 //!
-//! REMOVE OR REWRITE this file when the owner rules `d-requester-arrivals` (bezent's decision form): the
-//! ruling changes what binding an arrival means, and this assertion then states the opposite.
+//! The ruling that would have changed this was withdrawn: `d-0026-holdout` (2026-11-09) withdrew amendment
+//! 0026, and amendment 0029 (directed deposits) replaces this path. Until it lands, this assertion stands.
 
 mod common;
 

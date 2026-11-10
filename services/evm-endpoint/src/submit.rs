@@ -34,8 +34,10 @@
 //! **The key used outside bezent** (`AC-I1.2`; PR #39 second review SF1): before every preparation
 //! and every signature the endpoint reads the lane. A nonce on chain past every nonce bezent signed
 //! for the lane plus one, or code at the lane (an EIP-7702 delegation), is the delivery key used
-//! where bezent recorded nothing: the compromise path starts (an alert and a global pause request,
-//! once per nonce or per lane) and nothing is prepared or signed.
+//! where bezent recorded nothing: the compromise path starts (an alert, which pauses the bridge,
+//! once per nonce or per lane) and nothing is prepared or signed. Only on both providers' word
+//! (amendment 0022, P2): one provider's report, or a read that fails, is unknown, pages
+//! (`kind=lane-use-unknown`) and raises nothing, and nothing is prepared or signed until they agree.
 //!
 //! **Signing lane** (`REQ-EO-4`), declared by [`Lane::declaration`]: one lane per delivery key, the
 //! key's nonce sequence; every payout of the network is in it, in nonce order. A prepared
@@ -343,9 +345,11 @@ type PreparedRow = (
 enum LaneUse {
     /// Nothing bezent did not do.
     Clean,
-    /// The key was used outside bezent: the compromise path is in the event log.
+    /// The key was used outside bezent, on both providers' word: the compromise path is in the
+    /// event log.
     Outside(String),
-    /// The chain did not answer: try again.
+    /// Unknown: a provider did not answer, or the two disagree (amendment 0022, P2). Paged; try
+    /// again.
     Unreadable(String),
 }
 
@@ -640,42 +644,84 @@ impl<R: Rpc> Submitter<'_, R> {
         Ok(Ok((max_fee.min(self.gas.max_fee), priority)))
     }
 
-    /// Why a cancel must not be prepared or signed now, if the lane holds code (PR #39 review S5):
-    /// a transfer of nothing to itself would run that code (an EIP-7702 delegation) as a member
-    /// of the delivery role. bezent's delivery key has none, so code is the key used outside
-    /// bezent: the compromise path (`AC-I1.2`). A read that fails refuses too, raising nothing.
-    async fn lane_runs_code(&self, intent: i64) -> Result<Option<String>, sqlx::Error> {
-        match self.pair.has_code(self.lane.address).await {
-            Ok(false) => Ok(None),
-            Err(e) => Ok(Some(format!("S5: the lane's code cannot be read: {e}"))),
-            Ok(true) => {
+    /// Whether the lane holds code (PR #39 review S5): a transfer of nothing to itself would run
+    /// that code (an EIP-7702 delegation) as a member of the delivery role. bezent's delivery key
+    /// has none, so code is the key used outside bezent: the compromise path (`AC-I1.2`). Only when
+    /// **both** providers report code (amendment 0022, P2, ruled `d-pause-0022`, 2026-11-06): one
+    /// provider's word, or a read that fails, is unknown, pages ([`signal::lane_use_unknown`]) and
+    /// raises nothing; nothing is prepared or signed meanwhile.
+    async fn lane_runs_code(&self, intent: i64) -> Result<LaneUse, sqlx::Error> {
+        let dedupe = format!("{}:lane-code:{}", self.network, self.lane.address);
+        match self.pair.codes(self.lane.address).await {
+            Ok((false, false)) => Ok(LaneUse::Clean),
+            Ok((true, true)) => {
                 signal::raise_once(
                     self.pool,
-                    &format!("{}:lane-code:{}", self.network, self.lane.address),
+                    &dedupe,
                     json!({"network": self.network, "lane": self.lane.address, "intent": intent,
                            "reason": "the delivery key holds code (an EIP-7702 delegation); a cancel would run it"}),
                 )
                 .await?;
-                Ok(Some(format!(
+                Ok(LaneUse::Outside(format!(
                     "AC-I1.2, S5: the lane {} holds code; no cancel is prepared or signed",
                     self.lane.address
                 )))
+            }
+            Ok((a, b)) => {
+                let why = format!(
+                    "amendment 0022 P2, DEC-12: unknown whether the lane {} holds code: {} answers \
+                     {a}, {} answers {b}; nothing raised, nothing prepared or signed",
+                    self.lane.address,
+                    self.pair.a.name(),
+                    self.pair.b.name()
+                );
+                signal::lane_use_unknown(
+                    &dedupe,
+                    &json!({"network": self.network, "lane": self.lane.address, "intent": intent,
+                            "read": "code", "a": a, "b": b, "reason": why}),
+                );
+                Ok(LaneUse::Unreadable(why))
+            }
+            Err(e) => {
+                let why = format!("S5: the lane's code cannot be read: {e}");
+                signal::lane_use_unknown(
+                    &dedupe,
+                    &json!({"network": self.network, "lane": self.lane.address, "intent": intent,
+                            "read": "code", "reason": why}),
+                );
+                Ok(LaneUse::Unreadable(why))
             }
         }
     }
 
     /// PR #39 second review SF1 (`AC-I1.2`, as the Kreivo endpoint's review S4): whether the
-    /// delivery key was used outside bezent. The lane holds code (S5), or its nonce on chain (the
-    /// higher of the two providers') is past every nonce bezent signed for it plus one: a nonce
-    /// moved while bezent had nothing in flight. Either raises the compromise path, once per lane
-    /// or per nonce seen. A lane bezent never signed for raises nothing on its nonce.
+    /// delivery key was used outside bezent. The lane holds code (S5), or its nonce on chain is
+    /// past every nonce bezent signed for it plus one: a nonce moved while bezent had nothing in
+    /// flight. Either raises the compromise path, once per lane or per nonce seen, and only when
+    /// **both** providers report it (amendment 0022, P2): each provider's latest nonce is read on
+    /// its own, never the higher of the two (which is right for choosing a nonce, wrong for an
+    /// alarm), and the nonce raised on is the lower, the one both have seen passed. One provider
+    /// past it and the other not, or a read that fails, is unknown: it pages
+    /// ([`signal::lane_use_unknown`]), raises nothing and pauses nothing, and nothing is prepared or
+    /// signed from the lane until both agree. A lane bezent never signed for raises nothing on its
+    /// nonce.
     async fn lane_use(&self, intent: i64) -> Result<LaneUse, sqlx::Error> {
-        if let Some(why) = self.lane_runs_code(intent).await? {
-            return Ok(LaneUse::Outside(why));
+        match self.lane_runs_code(intent).await? {
+            LaneUse::Clean => {}
+            other => return Ok(other),
         }
-        let chain = match self.pair.latest_nonce(self.lane.address).await {
+        let dedupe = format!("{}:lane-nonce:{}", self.network, self.lane.address);
+        let (a, b) = match self.pair.latest_nonces(self.lane.address).await {
             Ok(n) => n,
-            Err(e) => return Ok(LaneUse::Unreadable(read_err(e))),
+            Err(e) => {
+                let why = read_err(e);
+                signal::lane_use_unknown(
+                    &dedupe,
+                    &json!({"network": self.network, "lane": self.lane.address, "intent": intent,
+                            "read": "nonce", "reason": why}),
+                );
+                return Ok(LaneUse::Unreadable(why));
+            }
         };
         let signed: Option<i64> = sqlx::query_scalar(
             "SELECT max(p.nonce) FROM prepared_transactions p \
@@ -690,20 +736,41 @@ impl<R: Rpc> Submitter<'_, R> {
         let Some(highest) = signed.and_then(|n| u64::try_from(n).ok()) else {
             return Ok(LaneUse::Clean);
         };
-        if chain <= highest.saturating_add(1) {
-            return Ok(LaneUse::Clean);
+        let past = |n: u64| n > highest.saturating_add(1);
+        match (past(a), past(b)) {
+            (false, false) => return Ok(LaneUse::Clean),
+            (true, true) => {}
+            _ => {
+                let why = format!(
+                    "amendment 0022 P2, DEC-12: unknown whether the lane {} was used outside bezent: \
+                     {} answers nonce {a}, {} answers nonce {b}, past every nonce bezent signed \
+                     ({highest}) on one only; nothing raised, nothing prepared or signed",
+                    self.lane.address,
+                    self.pair.a.name(),
+                    self.pair.b.name()
+                );
+                signal::lane_use_unknown(
+                    &dedupe,
+                    &json!({"network": self.network, "lane": self.lane.address, "intent": intent,
+                            "read": "nonce", "a": a, "b": b, "highest_signed_nonce": highest,
+                            "reason": why}),
+                );
+                return Ok(LaneUse::Unreadable(why));
+            }
         }
+        let chain = a.min(b);
         signal::raise_once(
             self.pool,
             &format!("{}:lane:{}:nonce:{chain}", self.network, self.lane.address),
             json!({"network": self.network, "source": "lane", "lane": self.lane.address,
                    "intent": intent, "highest_signed_nonce": highest, "chain_nonce": chain,
-                   "reason": "the lane's nonce on chain is past every nonce bezent signed"}),
+                   "provider_nonces": [a, b],
+                   "reason": "the lane's nonce on chain is past every nonce bezent signed, on both providers"}),
         )
         .await?;
         Ok(LaneUse::Outside(format!(
-            "AC-I1.2, SF1: the lane {}'s nonce {chain} is past every nonce bezent signed ({highest}); \
-             key compromise raised, nothing is prepared or signed",
+            "AC-I1.2, SF1: the lane {}'s nonce {chain} is past every nonce bezent signed ({highest}), \
+             on both providers; key compromise raised, nothing is prepared or signed",
             self.lane.address
         )))
     }

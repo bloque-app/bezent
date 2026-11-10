@@ -146,6 +146,112 @@
         ]
       }
     },
+    "/v0/deposits/conversion": {
+      "post": {
+        "tags": [
+          "requests"
+        ],
+        "summary": "Name a deposit's conversion output by the deposit's request reference (`REQ-RQ-4`, `REQ-CV-2`;\namendment 0018, A1b).",
+        "operationId": "deposit_conversion",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DepositConversionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A repeat: the original's status (REQ-ID-1)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferStatus"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Taken in now: the deposit's status, its source now the output and its `converted_arrival` recorded; or `Refused` with its named error (ERR-SourceNotFound: no deposit of yours by that reference naming a convertible arrival, or no conversion output at the coordinate; ERR-SourceMismatch: an output of another network, reserve or asset; ERR-SourceConsumed: the output is bound already, or the deposit no longer awaits its conversion (it is past its review, or a refund of it is recorded); ERR-BelowMinimum, ERR-AboveMaximum, ERR-WindowExceeded: the output's amount is outside the deposit route's minimum or maximum, or over what its window has left; ERR-ReferenceConflict: its output is named already)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferStatus"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "taken-in: taken in, but the status could not be read back; read it by request reference",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ERR-Overloaded: nothing recorded; retry. not-final: the output is observed but not final yet, or the deposit has not reached Source-Final yet; nothing recorded: send the same request again. outcome-unknown: repeat the same request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/v0/log": {
       "get": {
         "tags": [
@@ -1204,6 +1310,29 @@
           }
         }
       },
+      "ConvertedArrival": {
+        "type": "object",
+        "description": "What a deposit that named a convertible arrival records once its conversion's output is named\n(`REQ-CV-2`): the arrival, with its token and amount. The output is the deposit's `source`, and\nits amount the deposit's `amount`.",
+        "required": [
+          "coordinate",
+          "token",
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string",
+            "description": "What arrived, in the convertible's minor units."
+          },
+          "coordinate": {
+            "$ref": "#/components/schemas/CoordinateOut",
+            "description": "The convertible arrival's coordinate."
+          },
+          "token": {
+            "type": "string",
+            "description": "The convertible token."
+          }
+        }
+      },
       "CoordinateBody": {
         "type": "object",
         "description": "A coordinate: network, block number, block hash and position (SPEC §2). A pointer bezent\nverifies, never a claim (`REQ-RQ-7`).",
@@ -1364,6 +1493,30 @@
           }
         }
       },
+      "DepositConversionRequest": {
+        "type": "object",
+        "description": "Name, by a deposit's request reference, the output of the conversion of the convertible arrival\nit named (`REQ-RQ-4`, `REQ-CV-2`; amendment 0018, A1b). Only the requester that made the deposit\nmay, once, while the deposit is `Source-Final` holding `CND-AwaitingConversion`. The deposit's\nsource then becomes the output: it is minted for the output's amount, and the convertible\narrival is recorded against it with its own amount, consumed once (`INV-2`). That the arrival fed\nthat conversion is the requester's word; bezent checks only that the output is a final\nconversion output at the same reserve, of the deposit's asset, not consumed.",
+        "required": [
+          "request_reference",
+          "deposit_reference",
+          "conversion_output"
+        ],
+        "properties": {
+          "conversion_output": {
+            "$ref": "#/components/schemas/CoordinateBody",
+            "description": "The coordinate of the conversion's output into the reserve: an observation its endpoint\nrecorded as kind `conversion_output`, final and not yet consumed. One observed but not final\nyet is answered `not-final` (HTTP 503), nothing recorded."
+          },
+          "deposit_reference": {
+            "type": "string",
+            "description": "The request reference of the deposit that named the convertible arrival, this requester's."
+          },
+          "request_reference": {
+            "type": "string",
+            "description": "The requester's reference for this request, unique for this requester forever."
+          }
+        },
+        "additionalProperties": false
+      },
       "DepositRequest": {
         "type": "object",
         "description": "Request a deposit (`REQ-RQ-3`): bind the arrival at a coordinate, and name where it is minted\nand where it is refunded.",
@@ -1376,7 +1529,7 @@
         "properties": {
           "coordinate": {
             "$ref": "#/components/schemas/CoordinateBody",
-            "description": "The coordinate of the arrival at a reserve address: an observation its endpoint recorded\nas kind `arrival`, or `conversion_output` (the output of a conversion into the reserve,\n`REQ-CV-2`), final and not yet consumed; never a convertible arrival (`REQ-CV-1`), a payout\nleg or any other kind (`REQ-RQ-3`, `REQ-IN-3`, `INV-2`). Otherwise `ERR-SourceNotFound`,\nrecorded. An arrival of one of those kinds that is observed but not final yet is answered\n`not-final` (HTTP 503) and nothing is recorded: the same request, sent again once it is\nfinal, is taken in."
+            "description": "The coordinate of the arrival at a reserve address: an observation its endpoint recorded\nas kind `arrival`, `conversion_output` (the output of a conversion into the reserve,\n`REQ-CV-2`) or `convertible_arrival` (held in `CND-AwaitingConversion` and never minted\nagainst until its conversion's output is named, `POST /v0/deposits/conversion`;\n`REQ-CV-1`), final and not yet consumed; never a payout leg or any other kind (`REQ-RQ-3`,\n`REQ-IN-3`, `INV-2`). Otherwise `ERR-SourceNotFound`,\nrecorded. An arrival of one of those kinds that is observed but not final yet is answered\n`not-final` (HTTP 503) and nothing is recorded: the same request, sent again once it is\nfinal, is taken in."
           },
           "destination": {
             "$ref": "#/components/schemas/DestinationBody",
@@ -1808,6 +1961,17 @@
               "null"
             ],
             "description": "The named condition held, if any (§10)."
+          },
+          "converted_arrival": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ConvertedArrival",
+                "description": "For a deposit that named a convertible arrival, once its conversion's output is named: the\narrival it recorded (`REQ-CV-2`). Until then the `source` is the arrival and the `amount`\nits own, in the convertible's minor units; nothing is minted (`CND-AwaitingConversion`)."
+              }
+            ]
           },
           "destination": {
             "oneOf": [

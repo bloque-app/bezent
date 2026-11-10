@@ -223,6 +223,14 @@ where
 
 impl World {
     pub async fn new(options: PgPoolOptions, connect: PgConnectOptions) -> Self {
+        let w = Self::unseen(options, connect).await;
+        seen(&w.admin).await;
+        w
+    }
+
+    /// [`World::new`] with no evaluation of the asset at all: the reserve check has never seen it
+    /// (amendment 0028).
+    pub async fn unseen(options: PgPoolOptions, connect: PgConnectOptions) -> Self {
         let admin = bezent_store::login::guard(options)
             .connect_with(connect.clone())
             .await
@@ -252,6 +260,20 @@ impl World {
             signer,
             connect,
         }
+    }
+
+    /// A second signer, in process, on the signer's login, over `wrap` of a fresh test backend:
+    /// for a test that needs the key backend to do something while it signs.
+    pub async fn signer_over<B: bezent_signer::engine::SigningEngine>(
+        &self,
+        wrap: impl FnOnce(FileBackend) -> B,
+    ) -> Signer<B> {
+        let (backend, config) = signer_files();
+        let backend = wrap(backend);
+        let policy = config.policy(&backend).unwrap();
+        let pool = login_pool(&self.admin, SIGNER_LOGIN, bezent_store::SIGNER_ROLE, 4).await;
+        let (log, _captured) = Log::capture();
+        Signer::new(pool, policy, backend, log)
     }
 
     /// A core restarted from nothing but the store.
@@ -319,6 +341,19 @@ pub async fn seed(pool: &PgPool) {
     )
     .await;
 }
+
+/// Amendment 0028: the reserve check has seen every declared asset (a holding evaluation that was
+/// made, sixteen minutes before [`t0`]: older than any statement states, within the hour a
+/// statement's grace allows), so the gate and the signer let new work through until a test's own
+/// evaluation says otherwise.
+pub async fn seen(pool: &PgPool) {
+    exec(pool, SEEN).await;
+}
+
+/// The statement [`seen`] runs, for fixtures that declare assets of their own.
+pub const SEEN: &str = "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+     SELECT a.asset, '2026-10-12T23:44:00Z', 'holds', 0 FROM assets a \
+     WHERE NOT EXISTS (SELECT 1 FROM reserve_evaluations v WHERE v.asset = a.asset)";
 
 pub fn hash(network: &str, block: i64) -> Vec<u8> {
     let mut h = vec![if network == ISSUING { 0xcc } else { 0xab }];

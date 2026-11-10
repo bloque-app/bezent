@@ -48,7 +48,9 @@ correct: the destination is theirs.
    `INSERT INTO manual_actions (kind, transfer_id, to_state, network, block_number, block_hash, block_time, justification) VALUES ('review-resolution', <id>, 'Delivering', '<network>', <n>, '<hash bytea>', '<time>', '<why>')`.
    A resolution into `Source-Final`, `Delivering` or `Refunding` moves value and needs a second approver, another
    login: `INSERT INTO manual_approvals (action_id, justification) VALUES (<action id>, '<why>')`. The core then runs the
-   ordinary step, and the review gates (pause, cut-off, reserve) still apply.
+   ordinary step, and the review gates (pause, cut-off, reserve) still apply. For a deposit that went through
+   `CND-AwaitingConversion` (a converted deposit), the approval must also name the output it approved, in
+   `approved_output_*`; see `CND-AwaitingConversion.md` (Do, step 2) and amendment 0018, Open 6.
 3. A refund of a deposit that cannot be minted is not an operator edge from this review: see F-003 NOTES and the
    requester's refund path (`REQ-RQ-6`); not established here beyond that.
 

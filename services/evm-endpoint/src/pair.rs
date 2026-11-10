@@ -123,6 +123,23 @@ impl<R: Rpc> Pair<R> {
         Ok(a.max(b))
     }
 
+    /// `address`'s nonce at the latest block, from each provider, `(a, b)`: for an alarm, which
+    /// rests on both providers' word and never on one's (amendment 0022, P2, ruled
+    /// `d-pause-0022`, 2026-11-06). A provider that fails is [`Read::Unavailable`].
+    pub async fn latest_nonces(&self, address: Address) -> Result<(u64, u64), Read> {
+        let a = self.a.nonce(address, At::Latest).await?;
+        let b = self.b.nonce(address, At::Latest).await?;
+        Ok((a, b))
+    }
+
+    /// Whether `address` holds code at the latest block, from each provider, `(a, b)`: for an
+    /// alarm, as [`Pair::latest_nonces`].
+    pub async fn codes(&self, address: Address) -> Result<(bool, bool), Read> {
+        let a = self.a.code(address, At::Latest).await?;
+        let b = self.b.code(address, At::Latest).await?;
+        Ok((!a.is_empty(), !b.is_empty()))
+    }
+
     /// `address`'s balance at the latest block: the lower of the two (preparation only).
     pub async fn latest_balance(&self, address: Address) -> Result<U256, Read> {
         let a = self.a.balance(address, At::Latest).await?;
@@ -131,7 +148,8 @@ impl<R: Rpc> Pair<R> {
     }
 
     /// Whether `address` holds code at the latest block on either provider (an EIP-7702
-    /// delegation is code): any code on either is code (PR #39 review S5).
+    /// delegation is code): any code on either is code (PR #39 review S5). For the start-up check,
+    /// which fails closed and raises nothing; the alarm reads [`Pair::codes`].
     pub async fn has_code(&self, address: Address) -> Result<bool, Read> {
         let a = self.a.code(address, At::Latest).await?;
         let b = self.b.code(address, At::Latest).await?;

@@ -252,7 +252,7 @@ jobs:
     timeout-minutes: 40
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-      BEZENT_EVM_FORK_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.drpc.org' }}
+      BEZENT_EVM_FORK_URL: ${{ secrets.POLYGON_RPC_URL || 'https://polygon.gateway.tenderly.co' }}
       # Base and BNB Chain (M-2): the same secret names e2e-evm.yml reads, the same keyless public
       # fallbacks. Without them fork.rs skips that network and passes.
       BEZENT_EVM_FORK_URL_BASE: ${{ secrets.BASE_RPC_URL || 'https://mainnet.base.org' }}

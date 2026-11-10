@@ -1325,19 +1325,15 @@ async fn m1_inv_2_an_observation_without_a_bindable_kind_binds_nothing(pool: PgP
     assert_eq!(count(&pool, "transfers").await, 0);
 }
 
-/// M2: a deposit binds an `arrival` or a `conversion_output` at the reserve (REQ-CV-2); a
-/// convertible arrival is never minted against (REQ-CV-1), nor are the other kinds.
+/// M2: a deposit binds an `arrival` or a `conversion_output` at the reserve (REQ-CV-2), and, since
+/// amendment 0018 (A1b), a `convertible_arrival`, held in `CND-AwaitingConversion` and never minted
+/// against (REQ-CV-1; `services/core/tests/conversions.rs`); never the other kinds.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn m2_req_cv_1_req_cv_2_a_deposit_names_an_arrival_or_a_conversion_output(pool: PgPool) {
+async fn m2_req_cv_1_req_cv_2_a_deposit_names_an_arrival_a_convertible_arrival_or_a_conversion_output(
+    pool: PgPool,
+) {
     let ingress = Ingress::new(&pool).await;
     let not_for_deposit = [
-        (
-            "a convertible arrival (REQ-CV-1)",
-            Seen {
-                kind: Some("convertible_arrival"),
-                ..arrival_seen(1_000)
-            },
-        ),
         (
             "an arrival of a token that is not admitted",
             Seen {
@@ -1368,8 +1364,12 @@ async fn m2_req_cv_1_req_cv_2_a_deposit_names_an_arrival_or_a_conversion_output(
     }
     assert_eq!(count(&pool, "transfers").await, 0);
 
-    // An arrival and a conversion's output, each final at the reserve, bind.
-    for (block, kind) in [(50, "arrival"), (51, "conversion_output")] {
+    // An arrival, a conversion's output and a convertible arrival, each final at the reserve, bind.
+    for (block, kind) in [
+        (50, "arrival"),
+        (51, "conversion_output"),
+        (52, "convertible_arrival"),
+    ] {
         let coordinate = observe_seen(
             &pool,
             block,

@@ -92,15 +92,15 @@ and no role may DELETE or TRUNCATE anything but the dispatcher's own condition h
 | `unsigned_attempt_cancellations` | core: an attempt ordered and never signed, cancelled under an approved review resolution into `Refunding` (0051) |
 | `book_entries`, `book_postings`, `book_quarantine` | core |
 | `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_statement_objects` (0053: where the statement sink wrote each object, with its ETag and version id) | core |
-| `pauses(asset, cause, evaluation_id, quarantine_id, reading_id)` | core; no role holds `alert_seq`: a compromise pause is the store's own, on an alert's insert (0095) |
+| `pauses(asset, cause, evaluation_id, quarantine_id, reading_id, held_heads)` | core; no role holds `alert_seq`: a compromise pause is the store's own, on an alert's insert (0095). `DELETE` on `pauses`: core, its own blind hold only (0142, amendment 0028) |
 | `observations`, `observation_outcomes`, `observation_ranges`, `final_heads` | Kreivo endpoint, EVM endpoint: each its own networks only, the Kreivo endpoint the issuing network, the EVM endpoint the EVM origin networks (the guard of 0049 on every chain table, by the session's login and the role it acts as; 0034 and 0035 before it) |
 | `prepared_transactions`, `signed_transactions`, `non_execution_proofs` | Kreivo endpoint, EVM endpoint: each its own networks only, a preparation counting as its order's network and a signed transaction as its intent's (0049) |
 | `reserve_readings` | Kreivo endpoint, EVM endpoint: each its own networks only (0049) |
-| `fee_position_readings` | EVM endpoint: its own network only, at a final head it recorded (0110); the Kreivo endpoint records none. The core and the operators read it through `ops_observables()` only |
+| `fee_position_readings` | each endpoint: its own network only, at a final head it recorded (0110; the Kreivo endpoint since 0130: free less frozen). The core and the operators read it through `ops_observables()` only |
 | `signatures` | signer (with the nonce and the asset it decoded from the bytes it signed, 0049) |
 | `webhook_secrets`, `webhook_transfer_urls`, `webhook_condition_urls` | ingress |
 | `webhook_deliveries`, `webhook_condition_holds` (and DELETE), `webhook_cursor(after)` UPDATE, `webhook_deliveries(state, attempts, next_attempt_at, leased_until, last_status, last_error, finished_at)` UPDATE | webhook dispatcher |
-| `manual_actions(kind, transfer_id, to_state, network, block_number, block_hash, block_time, justification)`, `manual_approvals(action_id, justification)`, `ledger_accounts(network, address, kind, reason)`; EXECUTE `operator_pause`, `operator_request_unpause`, `operator_approve_unpause`, `operator_record` (0091: the only way an operator pauses, lifts a pause or records an administrative act) | operators |
+| `manual_actions(kind, transfer_id, to_state, network, block_number, block_hash, block_time, justification)`, `manual_approvals(action_id, justification, approved_output_network, approved_output_block_number, approved_output_block_hash, approved_output_position_kind, approved_output_position_index, approved_output_amount)` (0141: all six `approved_output_*` or none), `ledger_accounts(network, address, kind, reason)`; EXECUTE `operator_pause`, `operator_request_unpause`, `operator_approve_unpause`, `operator_record` (0091: the only way an operator pauses, lifts a pause or records an administrative act) | operators |
 | `networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `endpoint_scopes`, `evm_endpoint_networks` | nobody: the migration owner's declarations |
 
 Who **reads** what (SELECT):
@@ -122,7 +122,7 @@ Who may **call** what (EXECUTE; the functions that run as the owner are marked *
 | core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
 | ingress | `source_bindable`, `funding_arrival`, `bezent_writer_holds` |
 | Kreivo endpoint, EVM endpoint | `bezent_writer_holds`, `bezent_endpoint_writer`, `bezent_evm_endpoint_writer`, `bezent_row_network`, `observation_kind_on_network`, `observation_kind_for_event`, `observation_writer_covers` (the guards' helpers, which run as the inserting login) |
-| signer | `attempt_gate_open` *definer*, `statement_place_refusal` *definer* |
+| signer | `attempt_gate_open` *definer*, `pause_holds_intent` *definer* (0125: whether a pause holds a signing intent whose attempt has no signature, amendment 0022 A1b), `statement_place_refusal` *definer* |
 | operators | `ops_observables` *definer* (0090), `source_bindable`, `funding_arrival`, `one_business_day_after`, `operator_pause` *definer*, `operator_request_unpause` *definer*, `operator_approve_unpause` *definer*, `operator_record` *definer* |
 
 Every service and the operators also call `bezent_applied_migrations()` *definer*, which lists the
@@ -164,6 +164,20 @@ The audit of PR #56 added these (0049), for every login but the owner:
 - A `key-compromise` alert pauses the bridge in the transaction that records it (0095, a definer trigger
   no role may call): one pause per alert, naming it, global but for the core's `scope` `asset` (`INV-4`,
   0040). No service inserts, edits or deletes such a pause, and a repeated detection makes none.
+- Since 0142 (amendment 0028), a row of `pauses` of cause `blind` is a **hold** (`kind` `hold`, generated; every other
+  row is `kind` `pause`): the reserve check cannot see the asset. It refuses new work exactly as a pause does, since
+  every reader reads `pauses`. The core inserts one per asset at most, only naming an evaluation of that asset that did
+  not hold, and deletes it only once the asset's latest evaluation (by id) holds and is later than the one it names;
+  the store refuses the core every other `DELETE` (`pauses_guard_delete`). The core no longer inserts a `REQ-IC-2` pause
+  naming an evaluation (rows from before 0142 stay pauses). `operator_request_unpause` refuses a hold: it lifts itself.
+  `networks.reserve_blind_page_seconds` (default 600, at most 3600) is how long an asset may be held before the core
+  pages `reserve-blind`; the operator sets it per network beside `reserve_point_lag_seconds`.
+  A hold carries `held_heads` (each of its asset's networks' latest final head and watermark when it was placed), and
+  the core may delete a hold only while the asset's latest evaluation holds and names a book cut. `reserve_check_holds
+  (asset)` (definer; the core may call it, and `pause_holds_intent` does) is whether that is so: the core's gate and the
+  signer hold an asset for which it is false, whatever `pauses` says. The latest evaluation is the latest by id
+  (`reserve_evaluations_latest_by_id`). `ops_observables()`'s `pauses_in_force` counts pauses only;
+  `holds_in_force` and `hold_age_seconds` count holds.
 - A bound deposit's destination is on the issuing network and its refund destination on its arrival's
   network; an unassociated arrival's refund pays out on the arrival's network; neither is accepted
   otherwise.

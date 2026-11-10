@@ -4,8 +4,9 @@
 //!
 //! - `bezent-core <config-path>` runs a cycle every `cycle_seconds` until SIGINT or SIGTERM, then
 //!   finishes the cycle in progress and exits. Every cycle reads durable state only, so a restart
-//!   picks up where the last one left off (`REQ-AR-1`). After each cycle it runs the reserve check
-//!   (each asset evaluated once a minute, from the readings the endpoints recorded at final heads,
+//!   picks up where the last one left off (`REQ-AR-1`). Before each cycle it runs the reserve check
+//!   (amendment 0028: the first tick evaluates every asset, so an asset it cannot see is held
+//!   before the cycle starts new work for it; then each asset evaluated once a minute, from the readings the endpoints recorded at final heads,
 //!   `NFR-5`, `REQ-BK-8`) and publishes each asset's daily statement, signed by the signer process
 //!   (`REQ-PR-1`; PLAN `DEC-16`; issue #42), paging one that is overdue. `[statement]` is required;
 //!   only a test deployment may leave it out, by saying so (PR #50 review M2). A test deployment
@@ -156,9 +157,12 @@ async fn main() -> ExitCode {
     // service's log (issue #42; NFR-5, REQ-BK-8, REQ-IC-2).
     let check = ReserveCheck::new(pool.clone(), Recorded::new(pool.clone()), LogPager);
     let check_pool = pool.clone();
-    let core = bezent_core_service::Core::new(pool, config.settings());
+    // The gate holds what the check could not even record (amendment 0028).
+    let core = bezent_core_service::Core::new(pool, config.settings()).watching(check.unseen());
     let mut tick = tokio::time::interval(Duration::from_secs(config.cycle_seconds));
     let mut observables = bezent_core_service::observe::Emitter::new();
+    // The floors were checked when the configuration was read (`Config::from_file`).
+    let mut fees = bezent_core_service::fees::Watch::new(config.fee_floors().unwrap_or_default());
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
@@ -173,17 +177,13 @@ async fn main() -> ExitCode {
                     tracing::error!(error = %e, "stopping: the store no longer holds only test networks");
                     return ExitCode::from(2);
                 }
-                let cycle_ok = match core.cycle(chrono::Utc::now()).await {
-                    Ok(report) => {
-                        tracing::debug!(?report, "cycle");
-                        true
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "cycle failed; the next one starts from the store");
-                        false
-                    }
-                };
-                let check_ok = match check.tick(&SystemClock).await {
+                // The reserve check runs before the cycle (amendment 0028), and its first tick
+                // evaluates every asset: on a core's first pass, an asset it cannot see is held
+                // before the cycle can start new work for it. Until the check has seen an asset
+                // (its latest evaluation holds), the gate holds it anyway (`reserve_check_holds`).
+                let (evaluations, report) =
+                    bezent_core_service::pass(&core, &check, &SystemClock).await;
+                let check_ok = match evaluations {
                     Ok(evaluations) => {
                         for e in &evaluations {
                             tracing::debug!(asset = %e.asset, outcome = ?e.outcome, "reserve check");
@@ -191,7 +191,17 @@ async fn main() -> ExitCode {
                         true
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "NFR-5: the reserve check could not list the assets; tried again next cycle");
+                        tracing::warn!(error = %e, "NFR-5: the reserve check could not list the assets; every asset is held until it can; tried again next cycle");
+                        false
+                    }
+                };
+                let cycle_ok = match report {
+                    Ok(report) => {
+                        tracing::debug!(?report, "cycle");
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "cycle failed; the next one starts from the store");
                         false
                     }
                 };
@@ -214,6 +224,8 @@ async fn main() -> ExitCode {
                 observables
                     .tick(&check_pool, std::time::Instant::now(), chrono::Utc::now().timestamp_millis())
                     .await;
+                // A fee position below its floor is a page (REQ-ST-6, DEC-18; amendment 0025).
+                fees.tick(&check_pool, std::time::Instant::now(), chrono::Utc::now()).await;
                 if let Some(statements) = &statements {
                     // Bounded: a signer or a store that never answers does not freeze the cycle
                     // and the reserve check; a statement it keeps from being published is paged

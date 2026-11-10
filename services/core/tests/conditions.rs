@@ -10,6 +10,7 @@
 
 mod common;
 
+use bezent_signer::{Outcome, Refusal};
 use chrono::Duration;
 use common::*;
 use serde_json::json;
@@ -48,6 +49,251 @@ async fn cnd_paused_new_work_waits_and_resumes_when_the_route_reopens(
     w.settle(t0()).await;
     assert_eq!(w.state(id).await, ("Source-Final".into(), None));
     assert!(order(&w.admin, id, 1).await.is_some());
+}
+
+/// `AC-I2.1`, `INV-15`, `REQ-GV-1` (amendment 0022, A1b, ruled `d-pause-0022`, 2026-11-06): an attempt
+/// is in flight from its first recorded signature, and everything before it is new work. A signing
+/// intent the core recorded a moment before a pause, with no signature yet, is held by the pause:
+/// the signer refuses it (custody, `INV-9`'s layer), nothing is signed, the core holds the transfer
+/// in `Source-Final` as `CND-Paused` and records nothing new. Once the pause is lifted the same
+/// intent is signed and the transfer moves to `Delivering`.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_inv_15_a1b_an_intent_recorded_before_the_pause_is_not_signed_until_it_is_lifted(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let id = source_final_deposit(&w).await;
+    w.cycle(t0()).await;
+    let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, o, None).await;
+    w.cycle(t0()).await;
+    let (s, _) = signing_intent(&w.admin, id, 1)
+        .await
+        .expect("the signing intent, recorded before the pause");
+    let intents = w.count("SELECT count(*) FROM intents").await;
+
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    let refused = w.signer.sign(s).await;
+    assert!(
+        matches!(refused, Outcome::Refused(Refusal::Paused)),
+        "signed new work under a pause: {refused:?}"
+    );
+    assert_eq!(w.count("SELECT count(*) FROM signatures").await, 0);
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    assert_eq!(
+        w.count("SELECT count(*) FROM intents").await,
+        intents,
+        "the core recorded new work under the pause"
+    );
+    // Asked again under the pause, by an endpoint that keeps the intent: still held.
+    assert!(matches!(
+        w.signer.sign(s).await,
+        Outcome::Refused(Refusal::Paused)
+    ));
+
+    exec(&w.admin, "DELETE FROM pauses").await;
+    sign(&w, s).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+}
+
+/// Amendment 0028 (`AC-E2.3`, with amendment 0022 A1b): a hold of the asset the reserve check cannot
+/// see holds a signing intent recorded before it, exactly as a pause does: the signer refuses it, the
+/// core holds the transfer as `CND-Paused`, and once the core lifts its hold (an evaluation holds) the
+/// same intent is signed. The hold and its lift are written by the core's own login.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_a1b_a_hold_keeps_an_unsigned_intent_unsigned_until_the_core_lifts_it(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let id = source_final_deposit(&w).await;
+    w.cycle(t0()).await;
+    let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, o, None).await;
+    w.cycle(t0()).await;
+    let (s, _) = signing_intent(&w.admin, id, 1)
+        .await
+        .expect("the signing intent, recorded before the hold");
+    exec(
+        w.core.pool(),
+        &format!(
+            "WITH v AS (INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, reason) \
+                        VALUES ('{ASSET}', now(), 'incomplete', 'blind: catching up') RETURNING id) \
+             INSERT INTO pauses (asset, cause, evaluation_id, held_heads) SELECT '{ASSET}', 'blind', id, '{{}}' FROM v"
+        ),
+    )
+    .await;
+    assert!(matches!(
+        w.signer.sign(s).await,
+        Outcome::Refused(Refusal::Paused)
+    ));
+    assert_eq!(w.count("SELECT count(*) FROM signatures").await, 0);
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    exec(
+        w.core.pool(),
+        &format!(
+            "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+             VALUES ('{ASSET}', now(), 'holds', 0); \
+             DELETE FROM pauses WHERE asset = '{ASSET}' AND cause = 'blind'"
+        ),
+    )
+    .await;
+    sign(&w, s).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+}
+
+/// Amendment 0028: until the reserve check has seen an asset (its latest evaluation, by id, holds
+/// and was made), new work of it waits as under a pause, with no row of `pauses` at all: the core
+/// holds the transfer as `CND-Paused` and the signer refuses a mint recorded before. An evaluation
+/// recorded as holding that names no book cut was not made, and does not count. Once one that was
+/// made holds, the work moves on. This holds an asset declared while the core runs, and the
+/// moment after a restart, before the check has run.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_e2_3_a1b_an_asset_the_check_has_not_seen_is_held_with_no_hold_row(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let id = source_final_deposit(&w).await;
+    w.cycle(t0()).await;
+    let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, o, None).await;
+    w.cycle(t0()).await;
+    let (s, _) = signing_intent(&w.admin, id, 1)
+        .await
+        .expect("the signing intent");
+    // The check's latest word on the asset: it could not see it. No hold row is written here.
+    exec(
+        w.core.pool(),
+        &format!(
+            "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, reason) \
+             VALUES ('{ASSET}', now(), 'incomplete', 'unreachable')"
+        ),
+    )
+    .await;
+    assert_eq!(w.count("SELECT count(*) FROM pauses").await, 0);
+    assert!(matches!(
+        w.signer.sign(s).await,
+        Outcome::Refused(Refusal::Paused)
+    ));
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    // A holding evaluation that names no book cut was not made: still held.
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome) \
+             VALUES ('{ASSET}', now(), 'holds')"
+        ),
+    )
+    .await;
+    assert!(matches!(
+        w.signer.sign(s).await,
+        Outcome::Refused(Refusal::Paused)
+    ));
+    exec(
+        w.core.pool(),
+        &format!(
+            "INSERT INTO reserve_evaluations (asset, evaluated_at, outcome, book_entry_cut) \
+             VALUES ('{ASSET}', now(), 'holds', 0)"
+        ),
+    )
+    .await;
+    sign(&w, s).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Delivering".into(), None));
+}
+
+/// A key backend that commits a pause while it signs: the moment between the signer's first read
+/// of the pause and the record of the signature.
+struct PausesWhileSigning {
+    inner: bezent_signer::keys::FileBackend,
+    admin: sqlx::PgPool,
+}
+
+impl bezent_signer::engine::SigningEngine for PausesWhileSigning {
+    fn kind(&self) -> bezent_signer::engine::EngineKind {
+        self.inner.kind()
+    }
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+    fn environment(&self) -> bezent_signer::keys::Environment {
+        self.inner.environment()
+    }
+    fn key_ids(&self) -> Vec<String> {
+        self.inner.key_ids()
+    }
+    fn scheme(
+        &self,
+        id: &str,
+    ) -> Result<bezent_signer::keys::Scheme, bezent_signer::keys::KeyError> {
+        self.inner.scheme(id)
+    }
+    fn public_key(&self, id: &str) -> Result<Vec<u8>, bezent_signer::keys::KeyError> {
+        self.inner.public_key(id)
+    }
+    async fn sign_prepared(
+        &self,
+        id: &str,
+        scheme: bezent_signer::keys::Scheme,
+        input: bezent_signer::engine::Signable<'_>,
+    ) -> Result<Vec<u8>, bezent_signer::keys::KeyError> {
+        sqlx::query("INSERT INTO pauses (asset) VALUES (NULL)")
+            .execute(&self.admin)
+            .await
+            .expect("the pause commits while the key signs");
+        self.inner.sign_prepared(id, scheme, input).await
+    }
+}
+
+/// `AC-I2.1`, `INV-15`, `REQ-GV-1`, `NFR-8` (amendment 0022, A1b): a pause committed after the signer
+/// first read the pause and before it records the signature holds that signature. The key backend
+/// signs, the signer reads the pause again in its transaction before the INSERT, refuses, and nothing
+/// is recorded; once the pause is lifted the same intent is signed.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_i2_1_inv_15_a1b_a_pause_committed_while_the_key_signs_holds_the_signature(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let id = source_final_deposit(&w).await;
+    w.cycle(t0()).await;
+    let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, o, None).await;
+    w.cycle(t0()).await;
+    let (s, _) = signing_intent(&w.admin, id, 1)
+        .await
+        .expect("the signing intent");
+
+    let admin = w.admin.clone();
+    let racing = w
+        .signer_over(|inner| PausesWhileSigning { inner, admin })
+        .await;
+    let refused = racing.sign(s).await;
+    assert!(
+        matches!(refused, Outcome::Refused(Refusal::Paused)),
+        "recorded a signature under a pause that committed while the key signed: {refused:?}"
+    );
+    assert_eq!(w.count("SELECT count(*) FROM signatures").await, 0);
+
+    exec(&w.admin, "DELETE FROM pauses").await;
+    sign(&w, s).await;
+    assert_eq!(w.count("SELECT count(*) FROM signatures").await, 1);
 }
 
 /// `AC-I2.1`, `REQ-GV-1`: a global pause stops new work only; a transfer in flight is still observed and completed.
@@ -240,17 +486,31 @@ async fn cnd_awaiting_conversion_mints_nothing_and_goes_to_review_past_its_deadl
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
-    // REQ-CV-1, REQ-CV-6. The conversion itself is the requester's (F-010); the hold is here.
+    // REQ-CV-1, REQ-CV-6. The conversion itself is the requester's (F-010); the hold is here. The
+    // deposit names a convertible arrival (amendment 0018, A1b), and the core puts the condition
+    // there itself, on the edge into Source-Final: no transition is written by hand.
     let w = World::new(options, connect).await;
-    let id = source_final_deposit(&w).await;
-    exec(
+    let a = observe(
         &w.admin,
-        &format!(
-            "INSERT INTO transitions (transfer_id, from_state, to_state, condition) \
-             VALUES ({id}, 'Source-Final', 'Source-Final', 'CND-AwaitingConversion')"
-        ),
+        ORIGIN,
+        10,
+        0,
+        "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        5_000,
+        Some("0xfunder"),
+        Some(RESERVE),
+        None,
+        true,
+        json!({"event": "ConvertibleArrival"}),
     )
     .await;
+    decide(&w.admin, a, "final", 12).await;
+    let id = deposit(&w.admin, 10, 5_000).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-AwaitingConversion".into()))
+    );
     head(&w.admin, ISSUING, 100).await;
     w.settle(t0()).await;
     assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
@@ -260,6 +520,13 @@ async fn cnd_awaiting_conversion_mints_nothing_and_goes_to_review_past_its_deadl
         w.state(id).await,
         ("Needs-Review".into(), Some("CND-AwaitingConversion".into()))
     );
+    // REQ-RF-1: review, never a refund on a timer.
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]

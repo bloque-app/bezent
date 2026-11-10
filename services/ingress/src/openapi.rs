@@ -4,10 +4,10 @@
 //! is committed as `services/ingress/openapi.json`; a test fails when the two differ.
 
 use crate::api::{
-    CapacityOut, CoordinateBody, CoordinateOut, DepositRequest, DestinationBody, Health, LogEntry,
-    LogPage, Milestone, PositionBody, PositionKind, RefundRequest, ReserveEquation, ReserveOut,
-    Reserves, RouteOut, RouteTable, TransferList, TransferStatus, WindowOut,
-    WithdrawalExtrasRequest,
+    CapacityOut, ConvertedArrival, CoordinateBody, CoordinateOut, DepositConversionRequest,
+    DepositRequest, DestinationBody, Health, LogEntry, LogPage, Milestone, PositionBody,
+    PositionKind, RefundRequest, ReserveEquation, ReserveOut, Reserves, RouteOut, RouteTable,
+    TransferList, TransferStatus, WindowOut, WithdrawalExtrasRequest,
 };
 use crate::error::ErrorBody;
 use crate::webhooks::api::{
@@ -59,6 +59,7 @@ impl Modify for Bearer {
     paths(
         crate::query::health,
         crate::intake::deposit,
+        crate::intake::deposit_conversion,
         crate::intake::withdrawal_extras,
         crate::intake::refund,
         crate::query::by_request,
@@ -75,7 +76,8 @@ impl Modify for Bearer {
         crate::webhooks::api::deliveries,
     ),
     components(schemas(
-        CapacityOut, CoordinateBody, CoordinateOut, DepositRequest, DestinationBody, ErrorBody,
+        CapacityOut, ConvertedArrival, CoordinateBody, CoordinateOut, DepositConversionRequest,
+        DepositRequest, DestinationBody, ErrorBody,
         Health, LogEntry, LogPage, Milestone, PositionBody, PositionKind, RefundRequest,
         ReserveEquation, ReserveOut, Reserves, RouteOut, RouteTable, TransferList, TransferStatus,
         WindowOut, WithdrawalExtrasRequest, CallbackRegistration, ConditionCallback, DeliveryList,

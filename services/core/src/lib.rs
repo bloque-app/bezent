@@ -18,12 +18,14 @@
 //! - [`reserve`] (`F-004`): the reserve book, the one-minute reserve check and the daily signed
 //!   statement.
 //! - [`signals`] (`F-014`): a key-compromise alert raised by the signer or an endpoint, put in front of a human.
+//! - [`fees`] (`F-014`): the floor of each network's fee position, in this configuration, and the page when a position is below it.
 //! - [`observe`] (`F-014`): the observables of `REQ-ST-6`, written once a minute for the alarms.
 //! - [`config`]: the configuration file.
 
 pub mod config;
 pub mod cutoff;
 pub mod engine;
+pub mod fees;
 pub mod health;
 pub mod late_mint;
 pub mod observe;
@@ -34,3 +36,25 @@ pub mod store;
 
 pub use config::Config;
 pub use engine::{Core, Report, Settings};
+
+/// One pass of the running core (amendment 0028): the reserve check first, so an asset it cannot
+/// see is held before the cycle can start new work for it, then the cycle. Returns whether each
+/// answered: the check's `Err` is a store that could not list the assets (every asset is then held,
+/// `reserve::check::Unseen::all`), the cycle's a cycle that failed. `core` must be watching
+/// `check` ([`Core::watching`]).
+pub async fn pass<R, P>(
+    core: &Core,
+    check: &reserve::check::ReserveCheck<R, P>,
+    clock: &impl reserve::check::Clock,
+) -> (
+    sqlx::Result<Vec<reserve::check::Evaluation>>,
+    sqlx::Result<Report>,
+)
+where
+    R: reserve::readings::Readings,
+    P: reserve::check::Pager,
+{
+    let evaluations = check.tick(clock).await;
+    let report = core.cycle(clock.now()).await;
+    (evaluations, report)
+}

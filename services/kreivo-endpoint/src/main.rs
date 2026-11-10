@@ -265,6 +265,7 @@ mod run {
             pool: &pool,
             network: &config.network,
             contract,
+            delivery: lane.account,
         };
         let submitter = Submitter {
             chain: &chain,

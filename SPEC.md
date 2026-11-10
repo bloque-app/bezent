@@ -1,9 +1,9 @@
 ---
 name: bezent
 summary: A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger's contract.
-spec_version: 0.5.4
+spec_version: 0.5.12
 status: draft
-date: 2026-10-13
+date: 2026-11-09
 ---
 
 # bezent — System Specification
@@ -15,12 +15,21 @@ It is normative and self-contained. It does not say how bezent is built, which t
 implement it, which networks it serves today, or why the project exists. `notes/` says why, and
 `notes/CONSTRAINTS-FOR-PLAN.md` says what the plan is expected to bind.
 
-Amendments 0001 to 0015 are applied (see `amendments/`).
+Amendments 0001 to 0015, 0018 (A1b; Open 3 in part, and Open 6), 0019 (A1d), 0020, 0021 (A1b), 0022 (A1b and A2a; A3 and A4 are not ruled), 0024 and 0028 are
+applied (see `amendments/`). Amendment 0026 was applied in v0.5.9 and is withdrawn (v0.5.11).
 
 ### Change history
 
 | Version | Date | Change |
 |---|---|---|
+| 0.5.11 | 2026-11-09 | Amendment 0026 is withdrawn (decision item `d-0026-holdout`, ruled by @pandres95 on the decision form, 2026-11-09: "Revert #100"); amendment 0029 replaces the path that needed it (directed deposits, #119). v0.5.9's text is reverted: `REQ-IN-3`, `REQ-IN-6`, `REQ-CV-2`, `REQ-RQ-3` and the Requester row of §3 read as in v0.5.8; `REQ-PN-3`, `AC-A2.5`, `ERR-SenderNotDeclared` and the §2 term "Declared sender" are withdrawn, and not reused. No identifier is renumbered. The 0.5.9 row stays as history. |
+| 0.5.12 | 2026-11-09 | Amendment 0028 (ruled by @pandres95 in chat, 2026-11-07: "Yes, write the amendment and build it."): when the reserve check cannot see an asset (no evaluation that holds: one that cannot be made, a point too far behind its network's final head, a final head that stops advancing, an observation gap), bezent **holds** the asset's routes: new work waits as under a pause, transfers in flight continue, bezent lifts the hold itself once an evaluation holds, and a human is paged only once the hold outlasts a declared bound, or at once when a network's final head is not advancing (§2 "Hold", `REQ-IC-2`, `REQ-GV-2`, `NFR-5`, `NFR-6`, `AC-E2.3`). When the money differs, it is a **pause**, as before, lifted only by several approvers; a lag is no longer a divergence, and a hold never masks one the evaluation can see (`REQ-BK-1`, `AC-E2.1`). Every pause and page says which of the two it is, with the values (`REQ-IC-2`). §10 `CND-Paused` covers both. |
+| 0.5.10 | 2026-11-06 | Amendment 0018, its Open 3 (in part: the route's limits only) and Open 6 (decision item `d-cv-open-choices`, ruled by @pandres95 on the decision form: "As recommended"; and his chat ruling of 2026-11-06 that an approval records the exact output it approved). A conversion output may be named for a deposit in `Needs-Review` for the conversion's deadline, as long as no refund of it is recorded (defined once, in `REQ-CV-6`: a refund counts as recorded from the moment a resolution into `Refunding` is recorded and not refused, which is what the code already tests; the clarification changes no behaviour); the deposit stays in review with its source and amount moved to the output, and the review ends as every review does, by a recorded resolution into `Delivering` with a second approver, after which the mint is ordered once at the output's amount; no edge is added (`REQ-RQ-4`, `REQ-CV-2`, `REQ-CV-6`). The output's amount is also checked against the route's minimum, maximum and window, with the route's own errors (`REQ-CV-2`, `REQ-LM-1`). `AC-A5.4` and `AC-A5.5` follow. |
+| 0.5.9 | 2026-11-06 | Amendment 0026 (decision item `d-requester-arrivals`, ruled by @pandres95 on the decision form: "Bind by sender"): each requester has declared senders, recorded by the operator, per origin network (`REQ-PN-3`, §2 "Declared sender"); a deposit binds only an arrival whose funder is one of the requesting requester's declared senders (`REQ-IN-3`, `REQ-RQ-3`), and is refused otherwise (`ERR-SenderNotDeclared`, `AC-A2.5`); an arrival no requester may bind stays an unassociated arrival (`REQ-IN-6`). A deposit naming a convertible arrival is checked on that arrival, and its conversion's output is bound through it (`REQ-CV-2`). Partly closes the exposure recorded in amendment 0018; what stays open is in amendment 0026. |
+| 0.5.8 | 2026-11-06 | Amendment 0021 (decision item `d-gate-sustained`, ruled by @pandres95 on the decision form: "24 hours"): "sustained" in V0's exit criteria is 24 consecutive hours of the reserve equation's evaluations at exactly zero divergence, a divergence restarting the window (§15). Amendment 0024 (`d-gate-scope`, ruled the same day: "As recommended"): the exit criteria gate only a release that moves value, the first release that lets a bridged asset carry value and each that adds an asset or a network to it; every other release needs its automated checks and the approval of one owner of the specification; a release declares which it is, and one that does not is refused (§15). No `REQ-*` changes. |
+| 0.5.7 | 2026-11-06 | Amendment 0022 (decision item `d-pause-0022`, ruled by @pandres95 on the decision form: "As recommended"): new work is everything before an attempt's first recorded signature, and an attempt with a recorded signature is in flight (`REQ-GV-1`, A1b), so a pause holds an attempt recorded before it that has no signature (§10 `CND-Paused`); the on-chain pause stays a person's act (A2a, no text). Amendment 0019 (decision item `d-payout-late-signing`, ruled the same day: "Leave pause time out", A1d): the time a payout is held under a pause or a cut-off, taken and left, does not count toward its attempt's deadline (§5.4, `REQ-GV-1`, `REQ-LM-1`, §10 `CND-Paused`, `CND-CutOff`). `NFR-2` and `NFR-3` are unchanged: latency is still measured end to end. |
+| 0.5.6 | 2026-11-06 | Amendment 0020 (decision item `d-never-prepared`, ruled by @pandres95 in the decision form, Yes): a delivery attempt whose preparation never happened (the endpoint is down, so no preparation row, refused or not, is written) goes to `Needs-Review` at the route's deadline, counted from the later of the attempt's own clock and the first final head of the destination network seen at or after the attempt was ordered, from the state it is in. No refund, no retry (`REQ-EO-3`, `REQ-RF-1`, `REQ-RV-1`). §5.2's `Needs-Review` row, §5.4's `Source-Final` and `Delivering`, `Delivered` rows and `REQ-RV-1` follow. |
+| 0.5.5 | 2026-11-05 | Amendment 0018 (decision item `d-cv-conversion-link`, ruled by @pandres95 in chat: A1b, the request comes first; A1d not taken): a deposit may name a final convertible arrival (`REQ-RQ-3`) and begins at `Source-Final` holding `CND-AwaitingConversion`; its requester names the conversion's output by the deposit's request reference (`REQ-RQ-4`); the deposit's source then becomes the output, which is minted against, and the convertible arrival is recorded with both amounts, each consumed once (`REQ-CV-1`, `REQ-CV-2`); past its deadline the deposit goes to `Needs-Review`, never to a refund (`REQ-CV-6`). §5.4's `Source-Final` row, §10's `CND-AwaitingConversion` and `AC-A5.1`, `AC-A5.2` follow. That the arrival fed that conversion, and that the requester is the one the value belongs to, stay the requester's word: recorded as open in the amendment. |
 | 0.5.4 | 2026-10-29 | Amendment 0015 (decision item `sp-custody-boundary`, ruled by @pandres95 in chat): `REQ-CU-1` names a boundary and its properties, not a store. Key material is never readable outside the component that signs with it, which is separate from the state and auditable on its own; the sentences naming a key-management service, a hardware security module and a secrets vault are removed. |
 | 0.5.3 | 2026-10-22 | Amendment 0013 (decision item `sp-needs-review-when`, ruled by @pandres95): two more occasions for `Needs-Review` in §5.4 — a delivery attempt whose preparation is refused without a named condition past the route's deadline, and a delivery anomaly recorded for the transfer's attempt. Amendment 0014 (`sp-inv8-unsigned`): an attempt for which no signature has been recorded, and which the store has closed to signing under the approved resolution that refunds, counts as proven not executed for `INV-8`; and the signer releases a signature only once it is recorded (`INV-9`). |
 | 0.5.2 | 2026-10-15 | Amendment 0012 (decision item `sp-payout-window`): new named condition `CND-PayoutWindow` — a withdrawal waits while the reserve's outflow allowance is spent and resumes when it refills. |
@@ -245,6 +254,7 @@ One canonical name per concept. This document uses each term only in the sense g
 | **Route** | An (asset, origin network, direction) triple bezent serves, with its declared limits (`REQ-LM-1`). A venue route is (asset, from network, to network, venue). |
 | **Requester** | A system authorised to ask bezent for transfers. It decides what moves and where. It never decides whether value arrived. |
 | **Funder** | Whoever sends value to a reserve address. Never a caller of bezent. |
+| **Declared sender** | *Withdrawn by amendment 0026 (`d-0026-holdout`, ruled by @pandres95 on the decision form, 2026-11-09): the sender rule is not applied; amendment 0029 replaces the path that needed it.* |
 | **Beneficiary** | Whoever receives a delivery. Never a caller of bezent. |
 | **Deposit address** | *Withdrawn by amendment 0007 (A1): deposit addresses are the requester's (§1.6).* |
 | **Treasury** | The reserve address on an origin network: where bezent holds an asset's reserve, and from which it pays out. |
@@ -273,6 +283,7 @@ One canonical name per concept. This document uses each term only in the sense g
 | **Ledger** | A ledger of record that settles on the issuing network. Value reaches it, and leaves it, through a requester. bezent never calls it (`REQ-LG-1`). |
 | **Account reference** | Opaque bytes that name one account at a ledger. Only that ledger resolves it. |
 | **Fee position** | The native token an address needs to pay network costs. The operator's own, never reserve. |
+| **Hold** | What bezent places on an asset's routes while it cannot see whether the reserve equation holds (`REQ-IC-2`). It stops new work exactly as a pause does, and bezent lifts it itself once an evaluation holds. It is never a finding that value is wrong. |
 
 ---
 
@@ -294,6 +305,8 @@ authenticated MUST NOT be accepted.
 **`REQ-PN-2`** Requester authority MUST be scoped by kind: requesting deposits, adding a redemption's extras
 (withdrawals, `REQ-RQ-4`), requesting refunds of unassociated arrivals (`REQ-RQ-6`), and attesting for an attested
 backend are separate grants.
+
+**`REQ-PN-3`** *Withdrawn by amendment 0026 (`d-0026-holdout`, ruled by @pandres95 on the decision form, 2026-11-09): the sender rule is not applied; amendment 0029 replaces the path that needed it.*
 
 ---
 
@@ -589,8 +602,10 @@ The **reserve equation** is:
     Σ Reserve(A) + InTransit(A) = Supply(A) + OwedMint(A) + OwedPayout(A) + Surplus(A)
 
 **`REQ-BK-1`** bezent MUST compute the reserve equation for every bridged asset, from chain data at
-final points, continuously (`NFR-5`). Any divergence, to the smallest unit, MUST pause the asset's routes
-and page a human (`REQ-IC-2`).
+final points, continuously (`NFR-5`). Any difference of value, to the smallest unit, MUST pause the asset's
+routes and page a human (`REQ-IC-2`). An evaluation that cannot be made, or that rests on a point too far
+behind its network's final head, is not a divergence: it holds the asset's routes (`REQ-IC-2`). A hold never
+masks a difference of value the evaluation can see: one found while the check also lags is a pause as well. A difference of value closes the asset's routes at once; the pause and the page need it seen twice, at a newer final point on every network (amendment 0028, "The second reading").
 
 **`REQ-BK-2`** InTransit, OwedMint and OwedPayout MUST each be itemised: a list of the transfers and
 venue deliveries that make it up, never a residual.
@@ -636,7 +651,7 @@ a refund destination, and a source binding: the coordinate of the leg that funds
 | `Received` | Taken in durably, not yet decided | No |
 | `Refused` | Refused at request with a named error. Nothing moved, and nothing will on its account | Yes |
 | `Accepted` | Within route rules; its source leg is not yet final | No |
-| `Source-Final` | Its source leg is final and consumed for it, on chain (`INV-2`) | No |
+| `Source-Final` | Its source leg is final and consumed for it, on chain (`INV-2`). A deposit that names a convertible arrival begins here holding `CND-AwaitingConversion`; its source becomes the conversion's output once its requester names it (`REQ-CV-2`) | No |
 | `Delivering` | A destination transaction is signed and recorded; it may be submitted | No |
 | `Delivered` | The destination leg is included, not final | No |
 | `Completed` | The destination leg is final and executed in full | Yes |
@@ -644,7 +659,7 @@ a refund destination, and a source binding: the coordinate of the leg that funds
 | `Refunded` | Its refund transfer is `Completed` | Yes |
 | `Expired` | Accepted, but its source leg never arrived before the request's expiry. Nothing moved | Yes |
 | `Withdrawn` | Its source observation no longer matches the chain, before finality. Nothing moved | Yes |
-| `Needs-Review` | A leg is unknown past its deadline, an execution was partial or mismatched, a condition that blocks delivery is past its deadline, a delivery attempt's preparation was refused without a named condition and the route's deadline is past, or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown at once, with no deadline to wait for (`REQ-RV-1`, `REQ-TR-3`, `REQ-TR-5`, `REQ-EO-3`, `REQ-NX-3`) | No |
+| `Needs-Review` | A leg is unknown past its deadline, an execution was partial or mismatched, a condition that blocks delivery is past its deadline, a delivery attempt's preparation was refused without a named condition, or never happened, and the route's deadline is past, or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown at once, with no deadline to wait for (`REQ-RV-1`, `REQ-TR-3`, `REQ-TR-5`, `REQ-EO-3`, `REQ-NX-3`) | No |
 
 A transfer that cannot proceed for a named reason that clears itself holds a **named condition**
 (`CND-*`, §10) in its current state. A condition is not a state and never a failure.
@@ -677,11 +692,11 @@ sends the transfer to `Needs-Review`.
 | `Accepted` | `Withdrawn` | The source observation no longer matches the chain, before finality (`REQ-IN-7`) |
 | `Accepted` | `Needs-Review` | The source leg is observed but neither final nor withdrawn past its deadline (`REQ-RV-1`) |
 | `Source-Final` | `Delivering` | A destination transaction is signed and recorded |
-| `Source-Final` | `Needs-Review` | A condition that blocks delivery (`CND-AwaitingConversion`, `CND-DestinationRefused`) is past its deadline (`REQ-CV-6`, `REQ-IN-9`); or the delivery attempt's preparation was refused without a named condition and the route's deadline is past (`REQ-EO-3`); or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown (`REQ-NX-3`, `INV-8`) |
+| `Source-Final` | `Needs-Review` | A condition that blocks delivery (`CND-AwaitingConversion`, `CND-DestinationRefused`) is past its deadline (`REQ-CV-6`, `REQ-IN-9`); or the delivery attempt's preparation was refused without a named condition, or never happened, and the route's deadline, counted from the later of the source leg's finality and the first final head seen after the attempt was ordered, is past (`REQ-EO-3`); or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown (`REQ-NX-3`, `INV-8`) |
 | `Delivering` | `Delivered` | The destination leg is included |
 | `Delivering`, `Delivered` | `Delivering` | A **new attempt** after the previous one is proven not executed at finality (`REQ-RF-5`); each attempt is numbered and recorded |
 | `Delivering`, `Delivered` | `Refunding` | The destination leg is proven not executed at finality, and a refund transfer exists |
-| `Delivering`, `Delivered` | `Needs-Review` | A leg unknown past its deadline; a partial or mismatched execution (`REQ-TR-3`, `REQ-TR-5`); or the next attempt's preparation was refused without a named condition and the route's deadline, counted from the proof it rests on, is past (`REQ-EO-3`); or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown (`REQ-NX-3`, `INV-8`) |
+| `Delivering`, `Delivered` | `Needs-Review` | A leg unknown past its deadline; a partial or mismatched execution (`REQ-TR-3`, `REQ-TR-5`); or the next attempt's preparation was refused without a named condition, or never happened, and the route's deadline, counted from the later of the proof it rests on and the first final head seen after the attempt was ordered, is past (`REQ-EO-3`); or a delivery anomaly was recorded for the transfer's attempt, which makes its leg unknown (`REQ-NX-3`, `INV-8`) |
 | `Delivered` | `Completed` | The destination leg is final and executed in full (`REQ-TR-3`) |
 | `Refunding` | `Refunded` | Its refund transfer is `Completed` |
 | `Needs-Review` | Any state reachable by **one ordinary edge** from the state held before review | The evidence is that edge's coordinate, verified by bezent (`REQ-RV-2`); a resolution that moves value has a second approver (`REQ-GV-5`) |
@@ -695,6 +710,15 @@ A new attempt carries the same on-chain reference as the attempt it replaces. A 
 leg that executed (`INV-2`), and the previous attempt is proven not executed before the next is signed, so one
 transaction is signed per (reference, attempt), and attempt *n*+1 only once the proof of non-execution of
 attempt *n* is recorded (`REQ-EO-6`).
+
+**A pause or a cut-off and a payout attempt's deadline.** A payout is a withdrawal's, or a refund's of an arrival
+no deposit claimed, paid out on an origin network. Of the time counted toward a payout attempt's deadline ("unknown
+past its deadline" and "the route's deadline" in the table above; `REQ-RV-1`, `REQ-EO-3`), the time the transfer is held
+under `CND-Paused` or `CND-CutOff`, from when it takes the condition to when it leaves it, does not count: a payout that
+waited out a pause or a cut-off is neither sent to `Needs-Review` nor forced out (`REQ-NX-4`) for that time, and its
+deadline moves by it. This covers neither a mint (a deposit's, or a refund mint), whose deadline is counted as before,
+nor the choice between a refund and a new attempt after a proof of non-execution (`REQ-RF-1`, `REQ-RF-5`), which
+compares the proof with the deadline as before. Both are open (amendment 0019).
 
 **`REQ-TR-6`** A transfer MUST change state only along the edges of the §5.4 transition table.
 
@@ -786,8 +810,8 @@ proven before the next.
 ### 5.9 Review
 
 **`REQ-RV-1`** A transfer or venue delivery with an unknown leg past its deadline MUST go to `Needs-Review`,
-and so MUST a transfer whose delivery attempt's preparation was refused without a named condition past the route's
-deadline (`REQ-EO-3`), and one for which a delivery anomaly was recorded, which makes its leg unknown at once
+and so MUST a transfer whose delivery attempt's preparation was refused without a named condition, or never happened,
+past the route's deadline (`REQ-EO-3`), and one for which a delivery anomaly was recorded, which makes its leg unknown at once
 (`REQ-NX-3`), with no deadline to wait for. Each goes with an owner and a service level, and MUST NOT be
 refunded, retried as a new transaction, or failed. The owner of `Needs-Review` and `CND-Unassociated` is the operator's operations function, and the service level is one
 business day.
@@ -798,13 +822,25 @@ second approver (`REQ-GV-5`).
 
 ### 5.10 Conversions
 
-**`REQ-CV-1`** An arrival of a convertible token MUST NOT be minted against. It is held in
-`CND-AwaitingConversion` until a conversion turns it into the origin token.
+**`REQ-CV-1`** An arrival of a convertible token MUST NOT be minted against. A deposit request MAY name a
+final one at a reserve address (`REQ-RQ-3`); the deposit then begins at `Source-Final` holding
+`CND-AwaitingConversion` until its conversion's output is named (`REQ-CV-2`). A convertible arrival that no
+deposit names is an unassociated arrival (`CND-Unassociated`, `REQ-IN-6`).
 
 **`REQ-CV-2`** A conversion on a deposit MUST be executed by the requester under `REQ-CV-7`, as one
-transaction whose output lands in the reserve. The deposit is then minted against **that** output, at its
-observed amount, under every rule of §5.5. The deposit records the convertible arrival and the converted
-output, with both amounts.
+transaction whose output lands in the reserve. The deposit is minted against **that** output, at its observed
+amount, under every rule of §5.5. When the deposit named the convertible arrival (`REQ-CV-1`), the requester
+that made it names the output by the deposit's request reference (`REQ-RQ-4`); the deposit's source then
+becomes the output, and the convertible arrival is recorded against the deposit and never minted against. The
+arrival and the output are each consumed once (`INV-2`). Such a deposit records the convertible arrival and the
+converted output, with both amounts. bezent MUST verify that the output is a final conversion output at the
+reserve address the convertible arrived at, in a token admitted for the deposit's asset, and not consumed; that
+the arrival fed that conversion is the requester's word, as its price and slippage are (`REQ-CV-5`). bezent MUST also
+check the output's amount, when its requester names it, against the deposit route's declared limits (`REQ-LM-1`), as it
+checks the arrival's at the deposit request: an output below the route's minimum, above its maximum, or over what the
+route's window has left is refused with the route's own error (`ERR-BelowMinimum`, `ERR-AboveMaximum`,
+`ERR-WindowExceeded`) before anything is recorded. The window counts the deposit once, at the output's amount in place of
+the arrival's. Nothing is matched by amount (`REQ-OT-2`): the output is the one the request names.
 
 **`REQ-CV-3`** *Withdrawn by amendment 0007 (A2), with `AC-B4.1` and `AC-B4.2`: every payout is in the
 origin token; a requester that wants another token converts what it receives.*
@@ -815,8 +851,22 @@ reserve equation, and published in the statement (`REQ-PR-1`). They back nothing
 **`REQ-CV-5`** The price, the slippage and any fee of a conversion are the requester's. bezent MUST NOT
 make a delivery or a mint up to a quoted amount; it mints or delivers what was observed.
 
-**`REQ-CV-6`** A conversion that does not complete by its deadline goes to `Needs-Review` (`REQ-RV-1`). Its
-convertible holdings stay itemised; they are never written off and never counted as reserve.
+**`REQ-CV-6`** A conversion that does not complete by its deadline goes to `Needs-Review` (`REQ-RV-1`): a
+deposit holding `CND-AwaitingConversion` past the route's deadline, as for any condition held at `Source-Final`,
+goes to `Needs-Review`, and MUST NOT be refunded on a timer (`REQ-RF-1`). Its convertible holdings stay
+itemised; they are never written off and never counted as reserve. Its requester MAY still name the output
+(`REQ-RQ-4`) while no refund of the deposit is recorded. A refund counts as recorded from the moment a
+resolution into `Refunding` is recorded for the deposit (`REQ-RV-2`) and not refused by the core; it stops counting
+if the core refuses that resolution's evidence. The test is on the record, not on the refund's progress: from then
+until it is refused, no output is named. Naming does not end the review: the deposit stays in
+`Needs-Review` holding the condition, with its source and amount moved to the output (`REQ-CV-2`), and the review ends
+as every review does (`REQ-RV-2`), by a recorded resolution into `Delivering`, which is one ordinary edge from
+`Source-Final`, the state held before review (§5.4), made by one person and approved by a second (`REQ-GV-5`). The mint
+is then ordered once, at the output's amount (`REQ-CV-5`), through the ordinary steps. No transition is added. The
+approval records the exact output its approver named (chat ruling of 2026-11-06 by @pandres95): a resolution into `Delivering`
+runs only if its approval recorded the output the deposit holds now. One approved before the output was named names none,
+and one approved for another output does not match; either is refused, whenever it is looked at, with its reason, and a new
+approval is needed. The comparison is on the output, never on the order of two clocks.
 
 **`REQ-CV-7`** A requester MAY hold a role on a reserve address that lets it convert, at a protocol venue,
 convertible holdings at that address into the origin token. The network MUST enforce, by on-chain code
@@ -849,6 +899,7 @@ deposit request names once it cannot be taken back, and not before.
 - `AC-A2.3` Given an observation that stops matching before finality, Then it is withdrawn, and nothing is
   minted (`REQ-IN-7`).
 - `AC-A2.4` *Withdrawn by amendment 0007 (A1).*
+- `AC-A2.5` *Withdrawn by amendment 0026 (`d-0026-holdout`, ruled by @pandres95 on the decision form, 2026-11-09): the sender rule is not applied; amendment 0029 replaces the path that needed it.*
 
 **`US-A3`** *Withdrawn by amendment 0001 (A9), with `AC-A3.1` and `AC-A3.2`.*
 
@@ -860,12 +911,21 @@ deposit request names once it cannot be taken back, and not before.
 
 **`US-A5`** — As a **requester**, a deposit in a convertible token becomes the bridged asset for what the
 conversion actually delivered.
-- `AC-A5.1` Given an arrival of a convertible token, Then nothing is minted and it holds
-  `CND-AwaitingConversion` (`REQ-CV-1`).
-- `AC-A5.2` Given the conversion's output arrival at the reserve is final, Then the deposit is minted at that
-  arrival's amount, and both amounts are reported (`REQ-CV-2`, `REQ-CV-5`).
+- `AC-A5.1` Given a deposit request naming a final arrival of a convertible token, Then nothing is minted and
+  the deposit holds `CND-AwaitingConversion` (`REQ-CV-1`).
+- `AC-A5.2` Given the conversion's output arrival at the reserve is final and its requester names it for the
+  deposit, Then the deposit is minted at that arrival's amount, and both amounts are reported (`REQ-CV-2`,
+  `REQ-CV-5`).
 - `AC-A5.3` Given a statement, Then unconverted holdings appear itemised and outside the reserve equation
   (`REQ-CV-4`).
+- `AC-A5.4` Given a deposit in `Needs-Review` for its conversion's deadline, with no refund of it recorded,
+  and its requester names the conversion's output, Then the deposit stays in review with its source and amount at the
+  output; Then a resolution into `Delivering` recorded by one person and approved by a second orders the mint once,
+  at the output's amount; and Then a refund recorded first (`REQ-CV-6`) refuses the naming (`REQ-RQ-4`, `REQ-CV-2`,
+  `REQ-CV-6`, `REQ-RV-2`, `REQ-GV-5`).
+- `AC-A5.5` Given a deposit awaiting its conversion's output, Then an output named below the route's minimum, above its
+  maximum, or over what its window has left is refused with the route's own error, and nothing is recorded
+  (`REQ-CV-2`, `REQ-LM-1`).
 
 ### Epic B — Withdrawals
 
@@ -931,10 +991,16 @@ lost.
 - `AC-E1.2` Given two statements, Then a revision of the earlier one is detectable (`REQ-PR-2`).
 
 **`US-E2`** — As the **operator**, a gap between reserve and supply stops the asset before it grows.
-- `AC-E2.1` Given any divergence in the reserve equation, Then the asset's routes pause, transfers in flight
-  continue to be observed, and a human is paged (`REQ-BK-1`, `REQ-IC-2`).
+- `AC-E2.1` Given any difference of value in the reserve equation, whether or not the check also lags, Then
+  the asset's routes pause until more than one approver lifts the pause, transfers in flight continue to be
+  observed, and a human is paged with the values (`REQ-BK-1`, `REQ-IC-2`, `REQ-GV-2`).
 - `AC-E2.2` Given a venue fee or a network cost, Then it is recorded against surplus and no delivery is
   reduced (`REQ-BK-4`, `REQ-TR-5`).
+- `AC-E2.3` Given the reserve check cannot see an asset (no evaluation yet, one that cannot be made, a point
+  behind its network's final head, a stale final head), Then its routes are held: new work waits as under a
+  pause and transfers in flight continue to be observed; the hold lifts itself at the first evaluation that
+  holds; and a human is paged only once it has lasted beyond its bound, or at once on a finality stall
+  (`REQ-IC-2`, `REQ-GV-2`, `NFR-5`).
 
 ### Epic F — Venues
 
@@ -1007,13 +1073,21 @@ answered. The answer carries bezent reference and the state.
 **`REQ-RQ-2`** *Withdrawn by amendment 0007 (A1).*
 
 **`REQ-RQ-3`** **Request a deposit:** request reference, the coordinate of a final arrival at a reserve
-address, the destination, and the refund destination. A coordinate is consumed once (`INV-2`).
+address (of an admitted token, or of a convertible token, `REQ-CV-1`), the destination, and the refund
+destination. A coordinate is consumed once (`INV-2`).
 
 **`REQ-RQ-4`** **Request a withdrawal:** a redemption is the request. The requester MAY add, by the
 redemption's reference, an expiry, and for an attested backend the relayed instructions (`REQ-RQ-9`). A
 withdrawal's refund always goes to its redeemer (`REQ-RF-4`). Extras are written once. For an attested backend only the requester holding that
 backend's attesting grant may add them. For a public backend, any requester holding the withdrawal grant may, and
 the first accepted wins; a later different body is refused (`ERR-ReferenceConflict`).
+
+A deposit that names a convertible arrival takes one extra the same way: the requester that made it MAY add, by
+the deposit's request reference, the coordinate of its conversion's output (`REQ-CV-2`). It is written once, by that
+requester only; a later different body is refused (`ERR-ReferenceConflict`). It MAY be added while the deposit holds
+`CND-AwaitingConversion` at `Source-Final`, and after the deposit has gone to `Needs-Review` for that condition's deadline
+(`REQ-CV-6`), as long as no refund of the deposit is recorded (`REQ-CV-6`); once one is, it is refused
+(`ERR-SourceConsumed`). The output's amount is checked against the route (`REQ-CV-2`).
 
 **`REQ-RQ-5`** *Withdrawn by amendment 0001 (A12).*
 
@@ -1192,7 +1266,8 @@ attempt is proven not executed at finality.
 transfer, window limits, cut-offs, current capacity, any minimum a venue imposes, the venue addresses for
 venue routes, and the route's completion budget. A route's minimum is at least one minor unit of the bridged
 asset, expressed in the origin token. A transfer whose next step falls outside its route's declared cut-off
-holds `CND-CutOff` until the route reopens, then resumes by itself. No request is refused for a cut-off.
+holds `CND-CutOff` until the route reopens, then resumes by itself; the time held does not count toward a payout's
+deadline (§5.4). No request is refused for a cut-off.
 
 **`REQ-LM-2`** bezent MUST refuse at request time, with a named error and before any value moves,
 anything it can already tell will not execute.
@@ -1245,9 +1320,13 @@ addresses or components, and production keys MUST NOT sign on test networks.
 
 **`REQ-GV-1`** bezent MUST be pausable per route, per asset, per direction and globally. A pause MUST
 stop new work only. Transfers in flight MUST keep being observed and completed, never failed or refunded
-because of the pause.
+because of the pause. New work is everything before an attempt's first recorded signature. An attempt with a
+recorded signature is in flight. The time a payout waits under a pause does not count toward its deadline (§5.4); that does not cover a mint or the
+choice of a refund or a new attempt after a proof of non-execution.
 
 **`REQ-GV-2`** Pausing SHOULD need one authorised party. Unpausing and raising a bound SHOULD need several.
+The one exception is a hold (`REQ-IC-2`): bezent lifts it itself once an evaluation of the reserve equation
+holds, and no person lifts it by hand. A pause is never lifted by bezent.
 
 **`REQ-GV-3`** Whoever can upgrade on-chain code that mints, destroys or holds reserve MUST be named, and upgrades
 MUST pass a published governance process with a delay before taking effect.
@@ -1264,9 +1343,14 @@ second approver.
 **`REQ-IC-1`** At start-up, bezent MUST check that each network it reaches is the one declared, by its
 genesis or chain identity, and fail closed on a mismatch.
 
-**`REQ-IC-2`** On a condition it cannot explain (a divergence in the reserve equation, a finality stall, an
-observation gap, a reorganisation deeper than expected, a signature it did not record), bezent MUST
-pause the affected routes, keep observing, and page a human.
+**`REQ-IC-2`** On a condition that shows value is wrong or unexplained (a divergence in the reserve equation,
+a reorganisation deeper than expected, a signature it did not record), bezent MUST pause the affected routes,
+keep observing, and page a human. On a condition where it cannot see (no evaluation of the reserve equation
+that holds: one that cannot be made, a point too far behind its network's final head, a final head that stops
+advancing, an observation gap), bezent MUST hold the affected routes and keep observing; it lifts the hold
+itself once an evaluation holds (`REQ-GV-2`); and it MUST page a human once the hold has lasted beyond a
+declared bound, or at once when a network's final head is not advancing. Every pause and every page MUST say
+which of the two it is, and carry the values it rests on.
 
 **`REQ-IC-3`** During an incident, transfers in flight MUST be reported as unknown or delayed, never as
 failed, and MUST NOT be refunded.
@@ -1331,6 +1415,7 @@ The layers are:
 | `ERR-SourceNotFound` | The coordinate named does not hold a movement bezent can bind |
 | `ERR-SourceMismatch` | The movement at the coordinate differs in token, amount or recipient from the request |
 | `ERR-SourceConsumed` | The source leg or funding was already bound to a transfer (`INV-2`) |
+| `ERR-SenderNotDeclared` | *Withdrawn by amendment 0026 (`d-0026-holdout`, ruled by @pandres95 on the decision form, 2026-11-09): the sender rule is not applied; amendment 0029 replaces the path that needed it.* |
 | `ERR-InvalidDestination` | The destination or refund destination is malformed for its network |
 | `ERR-Overloaded` | bezent cannot take more work within budget. Retryable (`REQ-LM-4`) |
 | `ERR-Malformed` | The request does not parse, or lacks a field its kind requires |
@@ -1348,9 +1433,9 @@ The layers are:
 | `CND-DestinationRefused` | The issuing network refused a mint because of its destination; nothing was minted |
 | `CND-AmountMismatch` | A delivery moved a different amount; both are reported |
 | `CND-Withdrawn` | An observation stopped matching the chain before finality |
-| `CND-Paused` | Work in flight continues; new work for this route waits |
-| `CND-AwaitingConversion` | A convertible-token arrival waiting for its conversion; never reserve (`REQ-CV-1`) |
-| `CND-CutOff` | The transfer's next step falls outside its route's declared cut-off; resumes by itself when the route reopens (`REQ-LM-1`) |
+| `CND-Paused` | A pause or a hold (`REQ-IC-2`) covers the route. Work in flight continues; new work for this route waits, including an attempt recorded before the pause that has no recorded signature (`REQ-GV-1`). The time held does not count toward a payout's deadline (§5.4) |
+| `CND-AwaitingConversion` | A deposit at `Source-Final` whose source is a convertible-token arrival, waiting for its requester to name the conversion's output; nothing is minted, and the arrival is never reserve (`REQ-CV-1`, `REQ-CV-2`, `REQ-CV-6`) |
+| `CND-CutOff` | The transfer's next step falls outside its route's declared cut-off; resumes by itself when the route reopens (`REQ-LM-1`). The time held does not count toward a payout's deadline (§5.4) |
 | `CND-PayoutWindow` | The reserve's outflow allowance for the current window is spent; the withdrawal waits and resumes by itself when the allowance refills. Nothing is refunded or failed because of it (`REQ-RN-4`, `REQ-KY-3`) |
 
 ---
@@ -1363,8 +1448,8 @@ The layers are:
 | `NFR-2` | Every route MUST have a published completion budget, a p99 target and a p99 ceiling, set before it carries value. Completion runs from the final block of the source leg to the final block of the destination leg. Each transfer is measured against its own route. Each budget is first measured on a test network that reproduces the route, then published. |
 | `NFR-3` | Latency MUST be computed only from write-once milestones taken from chain data: source leg final, destination leg included, destination leg final, each with network, block number, block hash and block time. Every transfer counts: an open one at its current age, one with a missing milestone as a miss. Latency MUST be recomputable from chain data alone. |
 | `NFR-4` | Latency SHOULD be reported per closed week, as an absolute count of misses alongside the percentage and the share of transfers measured. |
-| `NFR-5` | The reserve equation MUST be evaluated at least once a minute per bridged asset, at zero tolerance. |
-| `NFR-6` | Each observer MUST stay within 60 s of its network's final head. Beyond that is an alert; beyond the route's budget it is `REQ-IC-2`. |
+| `NFR-5` | The reserve equation MUST be evaluated at least once a minute per bridged asset, at zero tolerance. An evaluation that cannot see is not one at zero tolerance: it holds (`REQ-IC-2`). |
+| `NFR-6` | Each observer MUST stay within 60 s of its network's final head. Beyond that is an alert; beyond the route's budget the asset is held (`REQ-IC-2`). |
 | `NFR-7` | No acknowledged request may be lost. A restore from backup MUST re-derive every transfer's state from durable records and the networks, and MUST NOT mint or deliver anything twice (`INV-2`). |
 | `NFR-8` | A pause MUST take effect for new work within one block of the network it applies to, or 30 s, whichever is longer. |
 | `NFR-9` | Each runbook of `REQ-IC-6` MUST be exercised on a test network before bezent carries value. |
@@ -1432,7 +1517,7 @@ invalid. This specification MUST NOT contain a requirement that serves no story.
 
 | Epic | Stories | Principal requirements | Key invariants |
 |---|---|---|---|
-| A — Deposits | `US-A2`, `US-A4`, `US-A5` | `REQ-IN-*`, `REQ-CV-1`, `REQ-CV-2`, `REQ-CV-4`, `REQ-CV-7`, `REQ-RQ-3`, `REQ-LG-*` | `INV-2`, `INV-6`, `INV-10` |
+| A — Deposits | `US-A2`, `US-A4`, `US-A5` | `REQ-IN-*`, `REQ-CV-1`, `REQ-CV-2`, `REQ-CV-4`, `REQ-CV-6`, `REQ-CV-7`, `REQ-RQ-3`, `REQ-RQ-4`, `REQ-LG-*` | `INV-2`, `INV-6`, `INV-10` |
 | B — Withdrawals | `US-B1`, `US-B3`, `US-B5` | `REQ-OT-*`, `REQ-RF-*`, `REQ-CV-5`, `REQ-CV-6`, `REQ-RQ-4`, `REQ-RQ-9`, `REQ-HN-8`, `REQ-LM-3` | `INV-2`, `INV-7`, `INV-8` |
 | C — Outcomes and proof | `US-C1`, `US-C2` | `REQ-NX-*`, `REQ-OB-*`, `REQ-ST-3`, `REQ-TR-*` | `INV-5`, `INV-16` |
 | D — Exactly once | `US-D1`, `US-D2` | `REQ-ID-*`, `REQ-EO-*`, `REQ-OB-3` | `INV-2`, `INV-9`, `INV-10` |
@@ -1466,6 +1551,16 @@ backend (`REQ-AS-8`), protocol venues only (`DEF-8`), no fast path.**
 | I — Custody, governance, incidents | `US-I1`–`US-I4` | — |
 
 **V0 is first proven on a test network that reproduces the issuing network, before any value. Its exit
-criteria are the reserve equation at exactly zero divergence, sustained; every final source leg delivered,
-refunded or held in a named condition with an owner; and every runbook exercised.** Nothing else in this
+criteria are the reserve equation at exactly zero divergence for 24 consecutive hours; every final source leg
+delivered, refunded or held in a named condition with an owner; and every runbook exercised.** Nothing else in this
 document may be traded against them.
+
+"For 24 consecutive hours" means that every evaluation of the reserve equation in that time (`NFR-5`) is at exactly
+zero divergence. A divergence restarts the window.
+
+**Which releases these criteria gate.** A release that moves value is the first release that lets a bridged asset carry
+value, and each release that adds a bridged asset or a network to what carries value. It MUST meet the exit criteria
+above and every other condition of its release gate. Every other release is ordinary: its automated checks MUST pass
+and one owner of this specification (`GOVERNANCE.md` names them) MUST approve it. A release MUST declare which of the
+two it is, in a record that an owner of this specification reviews, and a release that does not declare it MUST be
+refused, not treated as ordinary.

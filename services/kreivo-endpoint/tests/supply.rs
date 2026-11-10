@@ -16,6 +16,7 @@ fn supplies(f: &Fixture) -> Supplies<'_, bezent_kreivo_endpoint::chain::fake::Fa
         pool: &f.endpoint,
         network: NETWORK,
         contract: CONTRACT,
+        delivery: f.lane.account,
     }
 }
 

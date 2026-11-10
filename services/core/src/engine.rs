@@ -34,7 +34,9 @@
 //! never from the reason's text (PR #52 review S-2). Taking and leaving the hold rest on the
 //! destination network's latest final head: the time held does not count toward the attempt's
 //! deadline, whose clock restarts when the hold is left (review M-1), and a hold longer than
-//! [`Settings::payout_window_alert_after`] pages once, then daily (review S-3).
+//! [`Settings::payout_window_alert_after`] pages once, then daily (review S-3). Time held under a
+//! pause or a cut-off (`CND-Paused`, `CND-CutOff`), taken and left on the destination's final head,
+//! does not count toward the deadline either (amendment 0019, A1d).
 //!
 //! # Forced non-execution, with review (`REQ-RV-1`, `REQ-NX-4`, `REQ-RV-2`; issue #41)
 //!
@@ -122,6 +124,9 @@ pub struct Core {
     settings: Settings,
     /// The late-mint check's count of failed cycles (issue #26).
     late_mint: std::sync::Arc<crate::late_mint::Watcher>,
+    /// What the reserve check could not even record (amendment 0028): assets held in memory, or
+    /// every asset while the check cannot list them.
+    unseen: std::sync::Arc<crate::reserve::check::Unseen>,
 }
 
 /// What a step did to a transfer.
@@ -271,7 +276,15 @@ impl Core {
             pool,
             settings,
             late_mint: Default::default(),
+            unseen: Default::default(),
         }
+    }
+
+    /// The core, holding new work of every asset the reserve check `unseen` names as one it could
+    /// not even record an evaluation of (amendment 0028; `ReserveCheck::unseen`).
+    pub fn watching(mut self, unseen: std::sync::Arc<crate::reserve::check::Unseen>) -> Self {
+        self.unseen = unseen;
+        self
     }
 
     /// The store pool.
@@ -684,8 +697,19 @@ impl Core {
     /// [`Core::deadline`] for an attempt whose clock started at `start`, with the time the transfer
     /// was held in `CND-PayoutWindow` since then left out, and the clock restarted where the first
     /// hold was taken (amendment 0012; review M-1). Every hold counts, so a provider that flaps in
-    /// and out of the hold restarts nothing (issue #35). The holds are those recorded after the
-    /// last transition of the attempt before `attempt` (see [`store::held_under_window`]).
+    /// and out of the hold restarts nothing (issue #35): the time between two holds counts, and the
+    /// time before the first does not. The holds are those recorded after the last transition of
+    /// the attempt before `attempt` (see [`store::held_under_window`]).
+    ///
+    /// The time held under a pause (`CND-Paused`) or a cut-off (`CND-CutOff`), taken and left, is
+    /// left out as well (amendment 0019, A1d, ruled `d-payout-late-signing`, 2026-11-06;
+    /// `REQ-GV-1`): a delivery released from a pause after its nominal deadline is neither reviewed
+    /// nor cancelled for the time it waited, and its deadline moves by that time
+    /// ([`store::held_under_pause_or_cutoff`]). This is for a **payout** (a withdrawal's, and a refund
+    /// of an unassociated arrival, both on an origin network; [`purpose`]) only: the ruling is about
+    /// the payout clock, so a mint (a deposit's or a refund mint) keeps the clock it had, and time
+    /// under a pause counts toward its deadline (amendment 0019, open question). Time under any
+    /// other condition counts.
     async fn deadline_held(
         &self,
         conn: &mut PgConnection,
@@ -693,12 +717,17 @@ impl Core {
         attempt: i32,
         start: DateTime<Utc>,
     ) -> sqlx::Result<DateTime<Utc>> {
-        Ok(
-            match store::held_under_window(conn, t.id, attempt - 1, Some(start)).await? {
-                Some((first, held)) => self.deadline(conn, t, first.max(start)).await? + held,
-                None => self.deadline(conn, t, start).await?,
-            },
-        )
+        // Payouts only (`d-payout-late-signing`): a mint's clock is what it was before A1d.
+        let gated = if purpose(t).0 == "payout" {
+            store::held_under_pause_or_cutoff(conn, t.id, attempt - 1).await?
+        } else {
+            chrono::Duration::zero()
+        };
+        let deadline = match store::held_under_window(conn, t.id, attempt - 1, Some(start)).await? {
+            Some((first, held)) => self.deadline(conn, t, first.max(start)).await? + held,
+            None => self.deadline(conn, t, start).await?,
+        };
+        Ok(deadline + gated)
     }
 
     /// The latest final head on `network`, if it is past `deadline` (`REQ-OB-5`: decided at a final
@@ -789,13 +818,20 @@ impl Core {
                 } else {
                     return Ok(Did::default());
                 };
+                // REQ-CV-1, AC-A5.1 (amendment 0018, A1b): a deposit that names a convertible
+                // arrival reaches Source-Final holding CND-AwaitingConversion, in the same
+                // transition, so no cycle sees it there without the condition.
+                let condition = (to == State::SourceFinal
+                    && t.kind == "deposit"
+                    && o.kind == "convertible_arrival")
+                    .then_some(Condition::AwaitingConversion);
                 store::append(
                     conn,
                     t.id,
                     &Move {
                         from,
                         to,
-                        condition: None,
+                        condition,
                         point: Some(&point),
                         attempt: None,
                         manual_action: None,
@@ -821,6 +857,8 @@ impl Core {
     /// leaving `CND-PayoutWindow` rests on the destination network's latest final head, the clock
     /// the hold is measured on: its alert ([`Core::payout_window_alert`]) and the attempt's
     /// deadline, which restarts when the hold is left ([`Core::delivering_deadline`]; review M-1).
+    /// Taking or leaving `CND-Paused` or `CND-CutOff` rests on it too, so the time held is measured
+    /// and left out of the deadline (amendment 0019, A1d; [`Core::deadline_held`]).
     async fn hold(
         &self,
         conn: &mut PgConnection,
@@ -831,8 +869,14 @@ impl Core {
             return Ok(Did::default());
         }
         let state = t.state();
-        let window = [t.condition(), c].contains(&Some(Condition::PayoutWindow));
-        let head = if window {
+        // A pause or a cut-off is measured for a payout only: the mint keeps the clock it had.
+        let payout = purpose(t).0 == "payout";
+        let measured = [t.condition(), c].iter().any(|x| match x {
+            Some(Condition::PayoutWindow) => true,
+            Some(Condition::Paused | Condition::CutOff) => payout,
+            _ => false,
+        });
+        let head = if measured {
             store::latest_head(conn, &t.destination_network).await?
         } else {
             None
@@ -959,6 +1003,9 @@ impl Core {
         t: &Transfer,
         now: DateTime<Utc>,
     ) -> sqlx::Result<Did> {
+        if let Some(did) = self.conversion(conn, t, now).await? {
+            return Ok(did);
+        }
         if let Some(c) = t.condition().filter(|c| c.blocks_delivery()) {
             let start = t.source_final_block_time.unwrap_or(now);
             let deadline = self.deadline(conn, t, start).await?;
@@ -988,6 +1035,70 @@ impl Core {
         }
         self.deliver(conn, t, State::SourceFinal, 1, None, None)
             .await
+    }
+
+    /// A deposit that named a convertible arrival (`REQ-CV-1`, `REQ-CV-2`, `REQ-CV-6`; amendment
+    /// 0018, A1b). While its source is the convertible arrival it holds `CND-AwaitingConversion`
+    /// and nothing is ordered: one found without the condition takes it again. Once its requester
+    /// named the conversion's output (the store moved its source there, `deposit_conversion_record`),
+    /// the conversion completed by its deadline when the output's block is at or before it: the
+    /// condition clears, resting on the output's final point, and the next cycle delivers against
+    /// the output. An output whose block is past the deadline did not complete by it, and the
+    /// deadline rule of [`Core::source_final`] sends the transfer to review, never to a refund
+    /// (`REQ-RF-1`). `None` for every other transfer.
+    async fn conversion(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        now: DateTime<Utc>,
+    ) -> sqlx::Result<Option<Did>> {
+        if t.kind != "deposit" {
+            return Ok(None);
+        }
+        let Some(source) = t.source() else {
+            return Ok(None);
+        };
+        let Some(o) = store::observation_at(conn, &source).await? else {
+            return Ok(None);
+        };
+        let awaiting = t.condition() == Some(Condition::AwaitingConversion);
+        match o.kind.as_str() {
+            "convertible_arrival" if !awaiting => {
+                tracing::error!(transfer = %t.bridge_reference, "REQ-CV-1: a deposit on a convertible arrival without CND-AwaitingConversion; held");
+                self.hold(conn, t, Some(Condition::AwaitingConversion))
+                    .await
+                    .map(Some)
+            }
+            "conversion_output" if awaiting => {
+                let start = t.source_final_block_time.unwrap_or(now);
+                let deadline = self.deadline(conn, t, start).await?;
+                if o.block_time > deadline {
+                    return Ok(None);
+                }
+                let (Some(n), Some(h)) = (o.final_block_number, o.final_block_hash.as_deref())
+                else {
+                    return Ok(None);
+                };
+                let Some(point) = store::final_point(conn, &o.network, n, h).await? else {
+                    return Ok(None);
+                };
+                store::append(
+                    conn,
+                    t.id,
+                    &Move {
+                        from: State::SourceFinal,
+                        to: State::SourceFinal,
+                        condition: None,
+                        point: Some(&point),
+                        attempt: None,
+                        manual_action: None,
+                    },
+                )
+                .await?;
+                Ok(Some(Did::moved()))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Why `t`'s destination cannot be delivered to (`REQ-IN-5`): it is on the declared list of
@@ -1066,7 +1177,7 @@ impl Core {
         let Some((asset, network, direction)) = t.route() else {
             return Ok(None);
         };
-        let paused = Self::route_paused(conn, &asset, &network, direction).await?;
+        let paused = self.route_held(conn, &asset, &network, direction).await?;
         let held = paused && !self.attempt_signed(conn, t, attempt).await?;
         // REQ-BE-6: a reversal that took the surplus below its floor pauses new mints of the
         // asset until the attesting party restores the reserve (F-004).
@@ -1098,6 +1209,30 @@ impl Core {
             }
         }
         Ok(None)
+    }
+
+    /// Whether new work of the route waits (`REQ-GV-1`): a pause or a hold covers it, or, amendment
+    /// 0028, the reserve check has not seen the asset (its latest evaluation, by id, does not hold,
+    /// or there is none yet), whatever `pauses` says, or could not even record its evaluation.
+    async fn route_held(
+        &self,
+        conn: &mut PgConnection,
+        asset: &str,
+        network: &str,
+        direction: &str,
+    ) -> sqlx::Result<bool> {
+        Ok(Self::route_paused(conn, asset, network, direction).await?
+            || self.unseen.holds(asset)
+            || !Self::reserve_seen(conn, asset).await?)
+    }
+
+    /// Whether the reserve check has seen `asset`: its latest evaluation, by id, holds and was made
+    /// (`reserve_check_holds`, migration 0142; amendment 0028).
+    async fn reserve_seen(conn: &mut PgConnection, asset: &str) -> sqlx::Result<bool> {
+        sqlx::query_scalar("SELECT reserve_check_holds($1)")
+            .bind(asset)
+            .fetch_one(&mut *conn)
+            .await
     }
 
     /// Whether a pause covers the route (`REQ-GV-1`): a row that is silent on a dimension matches
@@ -1511,13 +1646,19 @@ impl Core {
         // 1. The order.
         let latest_order: Option<i64> = sqlx::query_scalar(
             "SELECT id FROM intents WHERE transfer_id = $1 AND attempt = $2 AND purpose = $3 \
-               AND payload ? 'order' ORDER BY id DESC LIMIT 1",
+               AND payload ? 'order' \
+               AND ($4::bigint IS NULL OR recorded_at >= \
+                    (SELECT recorded_at FROM manual_actions WHERE id = $4)) \
+             ORDER BY id DESC LIMIT 1",
         )
         .bind(t.id)
         .bind(attempt)
         .bind(purpose)
+        .bind(manual)
         .fetch_optional(&mut *conn)
         .await?;
+        // A resolution's delivery orders anew: an order, and any preparation, from before the
+        // evidence the operator ruled on is not used (INV-9).
         let Some(order_id) = latest_order else {
             self.record_intent(conn, t, purpose, &reference, scope, attempt, &order)
                 .await?;
@@ -1527,6 +1668,9 @@ impl Core {
         // 2. The endpoint's preparation (F-007's `prepared_transactions`).
         // Whether the retry delay has passed is read on the store's clock, the one that stamped
         // the preparation.
+        // The current order's own row is read first, whatever rows other orders of the attempt have
+        // and whenever they arrived: a late row of an earlier order must not hide it. A resolution
+        // reads no row of an order from before it (INV-9).
         // PR #39 second review MF1 (INV-9): only a preparation on the order's own network, the
         // transfer's destination, is read; the store refuses any other (0036), and the networks
         // are compared again below before a signing intent is recorded.
@@ -1537,13 +1681,17 @@ impl Core {
              FROM prepared_transactions p JOIN intents o ON o.id = p.order_intent_id \
              WHERE o.transfer_id = $1 AND o.attempt = $2 AND o.purpose = $3 \
                AND p.network = o.network AND o.network = $5 \
-             ORDER BY p.id DESC LIMIT 1",
+               AND ($7::bigint IS NULL OR o.recorded_at >= \
+                    (SELECT recorded_at FROM manual_actions WHERE id = $7)) \
+             ORDER BY (p.order_intent_id = $6) DESC, p.id DESC LIMIT 1",
         )
         .bind(t.id)
         .bind(attempt)
         .bind(purpose)
         .bind(self.settings.retry_preparation_after.num_seconds())
         .bind(&t.destination_network)
+        .bind(order_id)
+        .bind(manual)
         .fetch_optional(&mut *conn)
         .await?;
         let Some((
@@ -1557,12 +1705,22 @@ impl Core {
             order_network,
         )) = prepared
         else {
-            return Ok(Did::default());
+            // Ordered, and the endpoint has prepared nothing (it is down): the same deadline as a
+            // refused preparation (issue #48). Only this endpoint path reads it.
+            return self
+                .unprepared_deadline(conn, t, None, from, attempt, Some(order_id))
+                .await;
         };
         if prepared_network != order_network || order_network != t.destination_network {
             tracing::error!(transfer = %t.bridge_reference, prepared = prepared_id, %prepared_network, %order_network,
                 "INV-9: a preparation on another network than its order's; no signing intent is recorded");
             return Ok(Did::default());
+        }
+        if passed && prepared_order != order_id {
+            // A passing row of an earlier order (it arrived late) is never signed over.
+            return self
+                .unprepared_deadline(conn, t, None, from, attempt, Some(order_id))
+                .await;
         }
         if !passed {
             // A refusal that is not the allowance's does not keep a payout window hold (S-2).
@@ -1572,7 +1730,9 @@ impl Core {
             if prepared_order != order_id {
                 // A new order waits for its preparation; a refusal that keeps coming back still
                 // has its deadline (issue #25).
-                return self.unprepared_deadline(conn, t, held, from, attempt).await;
+                return self
+                    .unprepared_deadline(conn, t, held, from, attempt, None)
+                    .await;
             }
             if from != State::NeedsReview {
                 self.refusal_page(conn, t, purpose, attempt, allowance.as_ref())
@@ -1585,7 +1745,7 @@ impl Core {
             let in_flight_under_pause = self.attempt_signed(conn, t, attempt).await?
                 && match t.route() {
                     Some((asset, network, direction)) => {
-                        Self::route_paused(conn, &asset, &network, direction).await?
+                        self.route_held(conn, &asset, &network, direction).await?
                     }
                     None => false,
                 };
@@ -1596,7 +1756,7 @@ impl Core {
             }
             if !did.moved {
                 let due = self
-                    .unprepared_deadline(conn, t, held, from, attempt)
+                    .unprepared_deadline(conn, t, held, from, attempt, None)
                     .await?;
                 did.moved |= due.moved;
             }
@@ -1897,7 +2057,8 @@ impl Core {
     /// (the previous attempt's proof), or at the source leg's finality for the first; and it
     /// restarts at the final head where the transfer last left `CND-PayoutWindow`, so a payout
     /// released after its original deadline is neither reviewed nor cancelled for the time it
-    /// waited (amendment 0012; review M-1). On a network
+    /// waited (amendment 0012; review M-1); the time it waited under a pause or a cut-off is left
+    /// out the same way (amendment 0019, A1d; [`Core::deadline_held`]). On a network
     /// where transactions never expire, the cancel of an attempt of which nothing was observed
     /// (`forcible`) is ordered at the same moment ([`Core::order_cancels`], `REQ-NX-4`).
     async fn delivering_deadline(
@@ -1990,15 +2151,21 @@ impl Core {
     ///
     /// The clock is the attempt's: the source leg's finality for the first attempt, the previous
     /// attempt's proof of non-execution for a later one, with the time held in `CND-PayoutWindow`
-    /// left out (amendment 0012). Time under the other conditions counts, since only a
+    /// left out (amendment 0012), and the time held under a pause or a cut-off (amendment 0019,
+    /// A1d). Time under the other conditions counts, since only a
     /// refusal that names nothing is measured: `CND-FeeShort`, `CND-MintWindow` and the gates
     /// resume by themselves (§10), and `CND-DestinationRefused` has its own deadline.
     ///
-    /// Only a refused preparation is measured. An attempt whose preparation never happens (the
-    /// endpoint is down, so no preparation row exists) does not reach here and waits for the
-    /// endpoint: issue #48.
+    /// A preparation that never happens (the endpoint is down, so no row exists) has the same
+    /// deadline (issue #48), counted from the later of the attempt's clock and the first final head
+    /// the core saw at or after the order (`ordered`). The budget is the route's time on the
+    /// destination's clock from that head; it is not promised to be the whole of it in wall time: a
+    /// head older than the order (an observer that lags) or a stall after that head both count.
+    /// Only the endpoint path in [`Core::deliver`] asks.
     ///
-    /// Not for a delivery a review resolution runs: the transfer is in review already.
+    /// A delivery a review resolution runs is not moved to review again: the transfer is in review
+    /// already. Where such an order has no preparation after the same time it pages, once per order
+    /// ([`Core::resolution_unprepared_page`]).
     async fn unprepared_deadline(
         &self,
         conn: &mut PgConnection,
@@ -2006,8 +2173,14 @@ impl Core {
         held: Option<Condition>,
         from: State,
         attempt: i32,
+        ordered: Option<i64>,
     ) -> sqlx::Result<Did> {
-        if from == State::NeedsReview || held.is_some() || t.condition().is_some() {
+        if held.is_some() || t.condition().is_some() {
+            return Ok(Did::default());
+        }
+        // In review the transfer is not moved; only an order a resolution made, waiting for a
+        // preparation that does not come, is measured, and it pages (below).
+        if from == State::NeedsReview && ordered.is_none() {
             return Ok(Did::default());
         }
         let start = if attempt <= 1 {
@@ -2021,12 +2194,74 @@ impl Core {
         let Some(start) = start else {
             return Ok(Did::default());
         };
+        let mut start = start;
+        if let Some(order) = ordered {
+            // The endpoint is given the route's time from the first final head the core sees at or
+            // after the order, on the destination's clock. A head read before the order would count
+            // the time the head feed stood still against an endpoint that was never asked: after a
+            // stall of the route's length the first head would send a healthy order to review. No
+            // such head yet: the order has not started to age.
+            let at: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT h.block_time FROM final_heads h JOIN intents o ON o.id = $1 \
+                 WHERE h.network = $2 AND h.seen_at >= o.recorded_at \
+                 ORDER BY h.seen_at, h.block_number LIMIT 1",
+            )
+            .bind(order)
+            .bind(&t.destination_network)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let Some(at) = at else {
+                return Ok(Did::default());
+            };
+            start = at.max(start);
+        }
         let deadline = self.deadline_held(conn, t, attempt, start).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
         };
+        if let (State::NeedsReview, Some(order)) = (from, ordered) {
+            self.resolution_unprepared_page(conn, t, attempt, order, &head)
+                .await?;
+            return Ok(Did::default());
+        }
         tracing::info!(transfer = %t.bridge_reference, attempt, "REQ-RV-1: the attempt's preparation never passed by its deadline; review");
         self.deadline_review(conn, t, t.state(), None, &head).await
+    }
+
+    /// Pages a human, once per order, when the order a review resolution made for its delivery has
+    /// had no preparation for the route's time (`unprepared_deadline` measures it): the endpoint is
+    /// down or has not answered, and the resolution cannot run. It changes nothing: the transfer is
+    /// in review already, the resolution waits for its preparation, and nothing is refunded or
+    /// failed (`REQ-RF-1`, `REQ-EO-3`). Another resolution makes another order and may page again.
+    async fn resolution_unprepared_page(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        attempt: i32,
+        order: i64,
+        head: &Point,
+    ) -> sqlx::Result<()> {
+        let order = order.to_string();
+        if store::has_event(
+            conn,
+            "resolution-unprepared-alert",
+            Some(t.id),
+            "order",
+            &order,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        let detail = json!({"spec": "REQ-EO-3", "bridge_reference": t.bridge_reference,
+                            "attempt": attempt.to_string(), "order": order,
+                            "network": t.destination_network,
+                            "head_block": head.block_number,
+                            "head_time": head.block_time.to_rfc3339()});
+        store::event(conn, "resolution-unprepared-alert", Some(t.id), &detail).await?;
+        tracing::error!(kind = %"resolution-unprepared-alert", transfer = %t.bridge_reference, %detail,
+            "page: the order of a review resolution has no preparation after the route's time; is the endpoint down? The resolution waits");
+        Ok(())
     }
 
     /// Whether a transaction on `network` never expires, so that its non-execution is proven only
@@ -2782,6 +3017,55 @@ impl Core {
             // Waits for the second approver (REQ-GV-5).
             return Ok(Did::default());
         }
+        // REQ-GV-5, amendment 0018 Open 6 (chat ruling of 2026-11-06 by @pandres95): the approval
+        // records the exact output it approved. A resolution into Delivering for a deposit whose
+        // conversion output is named runs only if its approval recorded that output (coordinate and
+        // amount); one approved before the output was named recorded none, and one approved for
+        // another output does not match. Either is refused, and a new approval is needed. The
+        // comparison is on the output's identity, never on two timestamps.
+        if before == State::SourceFinal && to == State::Delivering && t.kind == "deposit" {
+            let judged: Option<(bool, bool)> = sqlx::query_as(
+                "SELECT p.approved_output_network IS NOT NULL, \
+                        COALESCE(ROW(p.approved_output_network, p.approved_output_block_number, \
+                                     p.approved_output_block_hash, p.approved_output_position_kind, \
+                                     p.approved_output_position_index, p.approved_output_amount) \
+                                 IS NOT DISTINCT FROM \
+                                 ROW(x.source_network, x.source_block_number, x.source_block_hash, \
+                                     x.source_position_kind, x.source_position_index, x.amount), FALSE) \
+                 FROM transfers x \
+                 JOIN deposit_conversions c ON c.transfer_id = x.id \
+                 JOIN manual_approvals p ON p.action_id = $2 \
+                 WHERE x.id = $1",
+            )
+            .bind(t.id)
+            .bind(action)
+            .fetch_optional(&mut *conn)
+            .await?;
+            // No row: the deposit has no conversion (an ordinary deposit in review), so there is no
+            // output to compare.
+            if let Some((recorded, same)) = judged {
+                if !recorded {
+                    return self
+                        .refuse_evidence(
+                            conn,
+                            t,
+                            action,
+                            "approved before the conversion's output was named: the approval recorded no output",
+                        )
+                        .await;
+                }
+                if !same {
+                    return self
+                        .refuse_evidence(
+                            conn,
+                            t,
+                            action,
+                            "approved for another output than the deposit's: a new approval is needed",
+                        )
+                        .await;
+                }
+            }
+        }
         let verified = self
             .evidence_holds(conn, t, before, to, attempt, &evidence)
             .await?;
@@ -2927,7 +3211,19 @@ impl Core {
                 }
                 _ => false,
             },
-            (State::SourceFinal, State::Delivering) => evidence.network == t.destination_network,
+            (State::SourceFinal, State::Delivering) => {
+                // A deposit still on its convertible arrival has no output to mint against, and a
+                // resolution approved before the output is named would otherwise run later, at an
+                // amount its approvers never saw (REQ-CV-1, REQ-CV-2, REQ-GV-5; amendment 0018,
+                // Open 6): it is refused, and a new one is recorded once the output is named.
+                let on_arrival = match t.source() {
+                    Some(c) if t.kind == "deposit" => store::observation_at(conn, &c)
+                        .await?
+                        .is_some_and(|o| o.kind == "convertible_arrival"),
+                    _ => false,
+                };
+                evidence.network == t.destination_network && !on_arrival
+            }
             (State::Delivering | State::Delivered, State::Delivering | State::Refunding) => {
                 let proven = matches!(store::proof_of(conn, t.id, attempt).await?,
                          Some(ProofPoint::Final(p)) if p.network == evidence.network

@@ -19,7 +19,8 @@
 //! - [`check`] (`T-004-03`, `T-004-04`): the evaluation, once a minute per asset at zero tolerance,
 //!   re-deriving every term from the networks and comparing it with the book (`REQ-BK-1`,
 //!   `REQ-BK-8`, `NFR-5`, `INV-1`). A divergence pauses the asset's routes and pages a human
-//!   (`REQ-IC-2`); a surplus near or under its floor alerts (`REQ-BK-10`).
+//!   (`REQ-IC-2`); an evaluation that cannot see holds them, and the core lifts the hold when one
+//!   holds (amendment 0028); a surplus near or under its floor alerts (`REQ-BK-10`).
 //! - [`statement`] (`T-004-05`): the daily statement per asset, signed with a key used for nothing
 //!   else, chained by hash and kept in an append-only store (`REQ-PR-1`, `REQ-PR-2`, `REQ-BE-3`,
 //!   `REQ-BK-9`, `REQ-CV-4`).

@@ -33,8 +33,11 @@ SPDX-License-Identifier: CC-BY-4.0
   `crates/vault/` custody, the rest service) against `e2e/criteria/layers.toml`. A criterion that cites an invariant needs a test at
   every layer section 9 gives it (`REQ-AR-5`).
 - **A new criterion** (an amendment) fails the map until it has a layer entry and a test or an exception.
-- **The release gate** says in its header what is mechanical and what is human. The window of "sustained" is unruled
-  (amendment 0021); `release/gate.toml` leaves it unset on purpose.
+- **The release gate** says in its header what is mechanical and what is human. The window of "sustained" is 24 hours
+  (`d-gate-sustained`, ruled 2026-11-06, amendment 0021; `release/gate.toml`). The full gate binds only a release that moves
+  value; every other release needs its checks and one spec owner's sign-off, and a release names its class in `evidence.toml`
+  or is refused (`d-gate-scope`, amendment 0024; `release/README.md`). A value-moving release cannot pass until the maintainers
+  are named in `release/roles.toml`.
 
 ## The full-chain suite (T-013-08, 2026-11-04)
 

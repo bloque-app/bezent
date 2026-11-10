@@ -352,6 +352,10 @@ async fn quarantine(
         asset: asset.clone().unwrap_or_default(),
         detail: json!({
             "spec": "REQ-IC-2, INV-1",
+            // Amendment 0028: a movement the book cannot post is about the money, not about
+            // seeing: a pause, lifted by two operators, never a hold.
+            "class": "money-differs",
+            "stop": if asset.is_some() { "pause" } else { "none" },
             "asset": asset,
             "observation": o.id,
             "coordinate": coordinate_key(&o.coordinate()),

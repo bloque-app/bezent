@@ -152,6 +152,7 @@ pub fn router(app: App) -> Router {
     Router::new()
         .route("/health", get(query::health))
         .route("/v0/deposits", post(intake::deposit))
+        .route("/v0/deposits/conversion", post(intake::deposit_conversion))
         .route("/v0/withdrawals/extras", post(intake::withdrawal_extras))
         .route("/v0/refunds", post(intake::refund))
         .route(

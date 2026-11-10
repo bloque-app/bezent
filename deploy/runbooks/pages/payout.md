@@ -6,9 +6,9 @@ SPDX-License-Identifier: CC-BY-4.0
 id: payout
 kind: pages
 covers: [REQ-RV-1, REQ-RF-1, REQ-EO-3, REQ-GV-5, REQ-RN-4]
-pages: [payout-window-alert, payout-refusal-alert, resolution-blocked-by-inclusion]
+pages: [payout-window-alert, payout-refusal-alert, resolution-blocked-by-inclusion, resolution-unprepared-alert]
 observables: [oldest_nonfinal_transfer_age_seconds, nonfinal_transfers, reviews_open, reviews_oldest_age_seconds]
-tests: [services/core/tests/cancel.rs::req_rv_1_issue_35_a_repeated_refusal_pages_once_and_reaches_review_at_the_deadline, services/core/tests/cancel.rs::cnd_payout_window_s3_a_hold_past_its_bound_pages_once_then_daily]
+tests: [services/core/tests/cancel.rs::req_rv_1_issue_35_a_repeated_refusal_pages_once_and_reaches_review_at_the_deadline, services/core/tests/cancel.rs::cnd_payout_window_s3_a_hold_past_its_bound_pages_once_then_daily, services/core/tests/unsigned_attempts.rs::req_eo_3_a_resolutions_order_the_endpoint_never_prepares_pages_once_and_moves_nothing]
 exercised: no
 ---
 # Payout pages
@@ -23,6 +23,7 @@ owner, never a failure and never a refund on a timer (`REQ-RF-1`, `REQ-RV-1`).
 | `payout-window-alert` | `CND-PayoutWindow` has been held past its bound. | `../conditions/CND-PayoutWindow.md` |
 | `payout-refusal-alert` | The payout's preparation is refused ten times in a row with no named condition. It goes to review at its deadline. Paged once per attempt. | below |
 | `resolution-blocked-by-inclusion` | A refund or a new attempt (by resolution or automatically) waits because the payout is observed included and not withdrawn. Once, then daily. | below |
+| `resolution-unprepared-alert` | The order a review resolution made for its delivery has had no preparation for the route's time (the endpoint is down or silent). The transfer stays in review and the resolution waits. Paged once per order. | below |
 
 ## Pages
 
@@ -33,7 +34,7 @@ the transfer.
 
 ```sql
 SELECT bridge_reference, state, condition FROM transfer_status WHERE state IN ('Source-Final', 'Delivering', 'Needs-Review');
-SELECT seq, kind, payload FROM event_log WHERE kind IN ('payout-refusal-alert', 'resolution-blocked-by-inclusion')
+SELECT seq, kind, payload FROM event_log WHERE kind IN ('payout-refusal-alert', 'resolution-blocked-by-inclusion', 'resolution-unprepared-alert')
 ORDER BY seq DESC LIMIT 10;
 SELECT * FROM reviews ORDER BY entered_at;
 ```
@@ -57,7 +58,12 @@ payload and from the endpoint's own log; the refusal text is the network's, not 
    page as the record, and escalate to the spec owner with the transfer's reference, the observation (`observation_id` in
    the mismatch event) and the amounts. Recovering what was paid wrongly is outside bezent and the owner's decision
    (amendment 0019, "A point for the owner").
-3. In both cases tell the requester the withdrawal is delayed, never failed (`REQ-IC-3`).
+3. `resolution-unprepared-alert`: the resolution is recorded and approved, its order is written, and the endpoint has
+   prepared nothing for it. Nothing in bezent moves; look at the endpoint for the destination network (down, behind, or
+   refusing to answer) and bring it back. The resolution runs on its own when the preparation is written. Do not record
+   another resolution to get past it: that orders again and waits again. The payload names the order and the head the
+   route's time ran out on.
+4. In all cases tell the requester the withdrawal is delayed, never failed (`REQ-IC-3`).
 
 ## Never
 
