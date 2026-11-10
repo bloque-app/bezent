@@ -213,6 +213,7 @@ mod run {
             max_range: config.max_range,
             max_walk: config.max_walk,
             rung: WALK_RUNG.min(config.max_walk),
+            concurrency: config.walk_concurrency,
         };
         // Issue #49: start_block's hash is the finalized chain's, reached by parent hash from the
         // light client's head, not any source's word. A first start walks the backlog for it (its

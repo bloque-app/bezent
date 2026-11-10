@@ -18,6 +18,14 @@
 //! again, which is how the gap is filled from history. The store refuses a read range that starts
 //! past the watermark, so nothing moves past a gap; and nothing past the watermark may be decided.
 //!
+//! **Reads in flight** (`walk_concurrency`): a step asks for up to that many blocks' headers (by
+//! number, ahead of the walk by parent hash; [`crate::chain::Descent`]) and events (the proven
+//! read; [`Chain::read_events`]) at once, and takes the answers **in block order**: each block is
+//! decoded after its parent, checked and recorded as with one at a time, and the first block that
+//! fails stops the step there, whatever was read after it. Nothing is accepted on other terms than
+//! a read one at a time: a header is the one its child names, a value is proven under its block's
+//! verified header.
+//!
 //! **Rungs** (issue #49): a first start is about 81,000 blocks behind. Walking them all back from the
 //! finalized head before reading any would lose the walk to its first late error or restart, so the
 //! backlog is read **a rung at a time**: a rung is the blocks from the watermark up to the next
@@ -34,10 +42,11 @@
 //! backend, and the payout address or commitment (`REQ-RQ-9`). The endpoint decides nothing: it
 //! writes no transfer state.
 
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use crate::chain::{BlockRef, Chain, ChainError, ancestry};
+use crate::chain::{BlockRef, Chain, ChainError, ChainResult, Descent, ancestry_with};
 use crate::kreivo::{self, AccountId32, Backend, ContractEvent, Payout};
 
 /// How many headers a walk reads between two calls of its `progress` callback.
@@ -107,6 +116,9 @@ pub struct Follower<'a, C> {
     pub max_walk: u64,
     /// The blocks between two anchors of a long walk, and the most one step reads (at least 1).
     pub rung: u64,
+    /// The most blocks whose header or events are read at once (at least 1; see the module
+    /// documentation).
+    pub concurrency: usize,
 }
 
 /// The default distance between anchors.
@@ -150,7 +162,9 @@ impl<C: Chain> Follower<'_, C> {
                 Err(e) => return self.gap(next, top, &finalized, e.to_string()).await,
             }
         };
-        let blocks = match ancestry(self.chain, &head, next, self.max_walk).await {
+        let concurrency = self.concurrency.max(1);
+        let blocks = match ancestry_with(self.chain, &head, next, self.max_walk, concurrency).await
+        {
             Ok(Some(blocks)) => blocks,
             Ok(None) => {
                 let reason = format!(
@@ -170,12 +184,20 @@ impl<C: Chain> Follower<'_, C> {
         let mut read = 0;
         let mut first_read = None;
         let mut last_read = None;
+        // Up to `concurrency` reads in flight, answered in block order; dropped (and the reads
+        // still in flight with it) at the first block that fails.
+        let mut reads = futures_util::stream::iter(&blocks)
+            .map(|b| self.chain.read_events(b))
+            .buffered(concurrency);
         for chunk in blocks.chunks(usize::try_from(self.max_range).unwrap_or(usize::MAX)) {
             let mut observations = Vec::new();
             let mut failed = None;
             let mut done = 0;
             for block in chunk {
-                match self.read_block(block, &mut seq).await {
+                let Some(events) = reads.next().await else {
+                    unreachable!("one read per block");
+                };
+                match self.read_block(block, events, &mut seq).await {
                     Ok(mut found) => {
                         observations.append(&mut found);
                         done += 1;
@@ -241,6 +263,7 @@ impl<C: Chain> Follower<'_, C> {
     ) -> Result<Result<[u8; 32], ChainError>, sqlx::Error> {
         let mut headers = 0u64;
         let rung = self.rung.max(1);
+        let concurrency = self.concurrency.max(1);
         let above: Option<(i64, Vec<u8>)> = sqlx::query_as(
             "SELECT block_number, block_hash FROM observation_walk_anchors \
              WHERE network = $1 AND block_number >= $2 ORDER BY block_number LIMIT 1",
@@ -261,6 +284,7 @@ impl<C: Chain> Follower<'_, C> {
                 finalized.number
             ))));
         }
+        let mut walk = Descent::new(self.chain, at, number, concurrency);
         loop {
             if at.number == number || at.number.is_multiple_of(rung) {
                 match self.keep_anchor(&at, finalized).await? {
@@ -271,16 +295,10 @@ impl<C: Chain> Follower<'_, C> {
             if at.number == number {
                 return Ok(Ok(at.hash));
             }
-            let header = match self.chain.header(&at.hash).await {
+            let header = match walk.next().await {
                 Ok(h) => h,
                 Err(e) => return Ok(Err(e)),
             };
-            if header.block != at {
-                return Ok(Err(ChainError::Invalid(format!(
-                    "the header asked for as block {} is block {}",
-                    at.number, header.block.number
-                ))));
-            }
             at = BlockRef {
                 number: at.number - 1,
                 hash: header.parent,
@@ -407,11 +425,13 @@ impl<C: Chain> Follower<'_, C> {
     async fn read_block(
         &self,
         block: &BlockRef,
+        read: ChainResult<C::EventsRead>,
         seq: &mut u64,
     ) -> Result<Vec<NewObservation>, String> {
+        let read = read.map_err(|e| e.to_string())?;
         let events = self
             .chain
-            .events(block, &self.contract)
+            .decode_events(block, read, &self.contract)
             .await
             .map_err(|e| e.to_string())?;
         let mut out = Vec::new();

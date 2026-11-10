@@ -411,3 +411,134 @@ async fn issue_49_start_anchor_bounds_the_distance_still_to_walk(
         f.chain.block(1).hash
     );
 }
+
+/// What a walk recorded: the ranges (first, last, outcome) in order, and the observations
+/// (block, event index, seq).
+type Recorded = (Vec<(i64, i64, String)>, Vec<(i64, i64, String)>);
+
+async fn recorded(f: &Fixture) -> Recorded {
+    let ranges = sqlx::query_as(
+        "SELECT first_block, last_block, outcome FROM observation_ranges ORDER BY id",
+    )
+    .fetch_all(&f.admin)
+    .await
+    .unwrap();
+    let observations = sqlx::query_as(
+        "SELECT block_number, position_index, detail ->> 'seq' FROM observations \
+         ORDER BY block_number, position_index",
+    )
+    .fetch_all(&f.admin)
+    .await
+    .unwrap();
+    (ranges, observations)
+}
+
+/// Blocks 4 to 43, final, with a redemption every seventh block from 4; event reads that finish
+/// out of order; header hints by number, two of them lies.
+fn walk_scenario(f: &Fixture) {
+    for i in 0..40u8 {
+        if i % 7 == 0 {
+            f.chain.emit(redeemed([i + 1; 32], [7; 32], 10));
+        }
+        f.chain.advance(1);
+    }
+    f.chain.set_slow_reads(true);
+    f.chain.set_hints(true, &[7, 20]);
+}
+
+/// What reading blocks 1 to 43 one at a time records, in ranges of four: up to `last` read, and a
+/// gap from the block after it to the end of its range if `last` is not the head.
+fn one_at_a_time(last: i64) -> Recorded {
+    let mut ranges: Vec<_> = (1..=last)
+        .step_by(4)
+        .map(|s| (s, (s + 3).min(last), "read".to_owned()))
+        .collect();
+    if last < 43 {
+        let end = (last / 4 * 4 + 4).min(43);
+        ranges.push((last + 1, end, "gap".to_owned()));
+    }
+    let observations = [4, 11, 18, 25, 32, 39]
+        .into_iter()
+        .filter(|b| *b <= last)
+        .enumerate()
+        .map(|(seq, b)| (b, 0, seq.to_string()))
+        .collect();
+    (ranges, observations)
+}
+
+async fn walk_with(f: &Fixture, concurrency: usize) -> Step {
+    let follower = observe::Follower {
+        rung: 64,
+        concurrency,
+        ..f.follower()
+    };
+    loop {
+        match follower.step().await.unwrap() {
+            Step::Read { .. } => continue,
+            other => return other,
+        }
+    }
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn walk_concurrency_1_reads_one_block_at_a_time(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    walk_scenario(&f);
+    assert_eq!(walk_with(&f, 1).await, Step::CaughtUp { watermark: 43 });
+    assert_eq!(recorded(&f).await, one_at_a_time(43));
+    assert_eq!(f.chain.most_in_flight(), 1);
+    // No hint is asked for: every header is asked for by the hash its child names.
+    assert_eq!(f.chain.header_reads(), (1..=43).rev().collect::<Vec<_>>());
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn walk_concurrency_32_records_what_one_at_a_time_records(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    walk_scenario(&f);
+    assert_eq!(walk_with(&f, 32).await, Step::CaughtUp { watermark: 43 });
+    assert_eq!(recorded(&f).await, one_at_a_time(43));
+    let most = f.chain.most_in_flight();
+    assert!((2..=32).contains(&most), "{most} reads in flight");
+    // Each hint was taken only as the header its child names: the two lies were not, and those
+    // two blocks' headers were asked for by hash, as with no hints.
+    assert_eq!(f.chain.header_reads(), vec![20, 7]);
+}
+
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn walk_concurrency_a_failure_inside_a_batch_is_a_gap_at_that_block_and_nothing_after(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    walk_scenario(&f);
+    // Block 22 is in the middle of a range of four (21 to 24), and the reads after it finish
+    // first: the walk records 21 and stops at 22.
+    f.chain.fail_reads_at(22);
+    let step = walk_with(&f, 32).await;
+    let Step::Gap { first, last, .. } = &step else {
+        panic!("{step:?}");
+    };
+    assert_eq!((*first, *last), (22, 24));
+    assert_eq!(recorded(&f).await, one_at_a_time(21));
+    assert_eq!(
+        observe::watermark(&f.endpoint, NETWORK).await.unwrap(),
+        Some(21)
+    );
+    // Healed, the gap is filled from 22 and the rest recorded as before.
+    f.chain.heal(22);
+    assert_eq!(walk_with(&f, 32).await, Step::CaughtUp { watermark: 43 });
+    let (ranges, observations) = recorded(&f).await;
+    assert_eq!(observations, one_at_a_time(43).1);
+    assert_eq!(ranges.last().map(|r| r.1), Some(43));
+    assert_eq!(
+        f.count("SELECT count(*) FROM observation_gaps WHERE NOT filled")
+            .await,
+        0
+    );
+}

@@ -1885,6 +1885,7 @@ dependencies = [
  "chrono",
  "ed25519-zebra",
  "frame-metadata",
+ "futures-util",
  "hex",
  "parity-scale-codec",
  "scale-info",
