@@ -780,3 +780,81 @@ async fn req_nx_2_proofs_prepared_transactions_and_ranges_are_append_only(
         Some("42501")
     );
 }
+
+/// The final head the prover's records rest on, at `number`: its hash and block time (ms).
+async fn final_head_at(f: &Fixture, number: i64) -> Option<(Vec<u8>, i64)> {
+    sqlx::query_as(
+        "SELECT block_hash, (extract(epoch FROM block_time) * 1000)::bigint FROM final_heads \
+         WHERE network = $1 AND block_number = $2",
+    )
+    .bind(NETWORK)
+    .bind(number)
+    .fetch_optional(&f.admin)
+    .await
+    .unwrap()
+}
+
+/// Issue #131: a proof rests on a recorded final head, recorded with it, with the chain's block
+/// time, so the core can time it (`REQ-OB-2`, `REQ-OB-5`, `REQ-NX-1`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_ob_2_a_proof_rests_on_a_recorded_final_head(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    signed_but_not_sent(&f, [0x41; 32]).await;
+    f.chain.advance(MAX_ERA);
+    let found = f.prover().step().await.unwrap();
+    assert!(
+        matches!(found.as_slice(), [(_, Disposition::NotExecuted(_))]),
+        "{found:?}"
+    );
+    let (number, hash): (i64, Vec<u8>) =
+        sqlx::query_as("SELECT final_block_number, final_block_hash FROM non_execution_proofs")
+            .fetch_one(&f.admin)
+            .await
+            .unwrap();
+    assert_eq!(
+        final_head_at(&f, number).await,
+        Some((
+            hash,
+            bezent_kreivo_endpoint::chain::fake::time_of(number as u64) as i64
+        ))
+    );
+}
+
+/// Issue #131: an inclusion the prover records rests on a recorded final head, recorded with it
+/// (`REQ-OB-2`, `REQ-OB-6`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_ob_2_an_inclusion_rests_on_a_recorded_final_head(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect).await;
+    signed_but_not_sent(&f, [0x42; 32]).await;
+    let ours: Vec<u8> = sqlx::query_scalar("SELECT bytes FROM signed_transactions")
+        .fetch_one(&f.admin)
+        .await
+        .unwrap();
+    f.chain.submit(&ours).await.unwrap();
+    f.chain.advance(1);
+    let found = f.prover().step().await.unwrap();
+    assert!(
+        matches!(found.as_slice(), [(_, Disposition::Executed { .. })]),
+        "{found:?}"
+    );
+    let (number, hash): (i64, Vec<u8>) = sqlx::query_as(
+        "SELECT x.final_block_number, x.final_block_hash FROM observation_outcomes x \
+         JOIN observations o ON o.id = x.observation_id WHERE o.position_kind = 'transaction'",
+    )
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        final_head_at(&f, number).await,
+        Some((
+            hash,
+            bezent_kreivo_endpoint::chain::fake::time_of(number as u64) as i64
+        ))
+    );
+}

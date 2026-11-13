@@ -35,6 +35,14 @@
 //! that cannot go on because a header is unavailable keeps its anchors and tries again; one that
 //! meets a header which does not verify is a visible gap.
 //!
+//! **Final heads** (`REQ-OB-2`, `REQ-OB-5`; issue #131): every outcome is written under the
+//! finalized head the block was read under, and that head is recorded in `final_heads`, with its
+//! block time, in the same transaction, so the core finds the final point an outcome names. Another
+//! hash already recorded at its height is an error: nothing is recorded, and the step says so. An
+//! outcome written before this rule held may name a head that was never recorded; each cycle,
+//! [`Follower::record_missing_heads`] walks to that height from the finalized head by parent hash,
+//! and records the head only if the chain has the outcome's hash there.
+//!
 //! **What an observation is**: one event of the contract, at its coordinate (network, block number,
 //! block hash, event index), recorded once (`INV-10`): `Minted`, `Redeemed`, `RefundMinted`, the
 //! pause and bounds events, and the contract's other events by name. A redemption's observation
@@ -44,10 +52,11 @@
 
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use crate::chain::{BlockRef, Chain, ChainError, ChainResult, Descent, ancestry_with};
 use crate::kreivo::{self, AccountId32, Backend, ContractEvent, Payout};
+use crate::supply::{self, Supplies};
 
 /// How many headers a walk reads between two calls of its `progress` callback.
 pub const WALK_PROGRESS_EVERY: u64 = 256;
@@ -96,7 +105,32 @@ pub enum Step {
     Unavailable(String),
 }
 
-/// Follows one network's finalized head. See the module documentation.
+/// What [`Follower::record_missing_heads`] did. Each point not recorded is named in `findings`,
+/// which the caller logs when they change, so one that stays as it was is not logged every pass.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Backfill {
+    /// Final heads recorded.
+    pub recorded: usize,
+    /// Final points whose hash is not the finalized chain's, or not the head recorded, at their
+    /// height: nothing recorded.
+    pub mismatched: usize,
+    /// Final points not recorded this time (the chain did not answer, the point is above the
+    /// finalized head, or no head with supply readings is recorded above it yet): looked for
+    /// again next time.
+    pub pending: usize,
+    /// Final points more than [`BACKFILL_WALK`] (or `max_walk`) blocks below where a walk to them
+    /// would start: not walked to, so a backlog of old points never holds the loop up.
+    pub too_far: usize,
+    /// Why each point not recorded was not, one line each.
+    pub findings: Vec<String>,
+}
+
+/// The most blocks the backfill walks down to one final point ([`Follower::record_missing_heads`]):
+/// four rungs. The walk runs inside the endpoint's loop, so a point further down than this is not
+/// walked to; it waits, and is named in the findings.
+pub const BACKFILL_WALK: u64 = 4 * WALK_RUNG;
+
+/// Follows one network's finalized head. See the module documentation./// Follows one network's finalized head. See the module documentation.
 pub struct Follower<'a, C> {
     /// The chain.
     pub chain: &'a C,
@@ -119,10 +153,23 @@ pub struct Follower<'a, C> {
     /// The most blocks whose header or events are read at once (at least 1; see the module
     /// documentation).
     pub concurrency: usize,
+    /// The supply reader: the head outcomes are written under is recorded with its supply
+    /// readings first ([`supply::ready_head`]). `None` records the head alone.
+    pub supplies: Option<&'a Supplies<'a, C>>,
 }
 
 /// The default distance between anchors.
 pub const WALK_RUNG: u64 = 4_096;
+
+/// Where a walk of the backfill ended ([`Follower::record_missing_heads`]).
+enum Reach {
+    /// The finalized chain's hash at the height.
+    At([u8; 32]),
+    /// Not reached now: looked for again next time.
+    Pending(String),
+    /// Too far below where the walk would start: not walked to.
+    TooFar(String),
+}
 
 impl<C: Chain> Follower<'_, C> {
     /// Reads from the watermark to the finalized head, or to the first block it cannot read.
@@ -184,6 +231,8 @@ impl<C: Chain> Follower<'_, C> {
         let mut read = 0;
         let mut first_read = None;
         let mut last_read = None;
+        // The finalized head's block time, read once, when an outcome is first written under it.
+        let mut head_time = None;
         // Up to `concurrency` reads in flight, answered in block order; dropped (and the reads
         // still in flight with it) at the first block that fails.
         let mut reads = futures_util::stream::iter(&blocks)
@@ -210,16 +259,38 @@ impl<C: Chain> Follower<'_, C> {
             }
             if done > 0 {
                 let (first, last) = (chunk[0].number, chunk[done - 1].number);
-                read += record_read(
+                // REQ-OB-2: an outcome rests on the head it is written under, recorded with its
+                // block time, read from the chain and never guessed (a rung's head is not among
+                // the blocks read).
+                if !observations.is_empty() && head_time.is_none() {
+                    match supply::ready_head(self.chain, self.supplies, &self.contract, &finalized)
+                        .await?
+                    {
+                        Ok(t) => head_time = Some(t),
+                        Err(why) => {
+                            tracing::warn!(network = self.network, head = finalized.number, reason = %why, "REQ-OB-2: the finalized head could not be recorded; nothing is recorded under it, and the next step reads again");
+                            return Ok(Step::Unavailable(why));
+                        }
+                    }
+                }
+                match record_read(
                     self.pool,
                     self.network,
                     &self.contract,
                     first,
                     last,
                     &finalized,
+                    head_time,
                     &observations,
                 )
-                .await?;
+                .await?
+                {
+                    Ok(new) => read += new,
+                    Err(conflict) => {
+                        tracing::error!(network = self.network, %conflict, "REQ-OB-2: the finalized head read is not the one recorded at its height; nothing is recorded under it");
+                        return Ok(Step::Unavailable(conflict.to_string()));
+                    }
+                }
                 first_read.get_or_insert(first);
                 last_read = Some(last);
             }
@@ -397,6 +468,186 @@ impl<C: Chain> Follower<'_, C> {
         }
         self.anchor_with(&finalized, self.start_block, progress)
             .await
+    }
+
+    /// Records the final heads that outcomes and non-execution proofs of this network name and
+    /// `final_heads` lacks (issue #131: written before the follower and the prover recorded their
+    /// head). Each is reached from the finalized head by parent hash, as any block the endpoint
+    /// reads ([`Follower::anchor`]), so the chain's finalized head is at or above it; it is recorded,
+    /// with the block time read from the chain, only if the chain has the hash the outcome names
+    /// at that height. A hash that differs records nothing. Highest first, so each walk starts at
+    /// the anchors the one before left.
+    ///
+    /// A recorded head carries no supply readings, and the reserve check takes the latest final
+    /// head at or below the watermark. So a point is recorded only below a head that has its
+    /// readings and is at or below the watermark: the check then never takes it. Until there is
+    /// one, it waits. A point more than [`BACKFILL_WALK`] blocks (or `max_walk`) below where its
+    /// walk would start is not walked to at all.
+    pub async fn record_missing_heads(&self) -> Result<Backfill, sqlx::Error> {
+        self.record_missing_heads_with(&mut || {}).await
+    }
+
+    /// [`Follower::record_missing_heads`], calling `progress` as a walk moves (see
+    /// [`Follower::anchor_with`]).
+    pub async fn record_missing_heads_with(
+        &self,
+        progress: &mut (dyn FnMut() + Send),
+    ) -> Result<Backfill, sqlx::Error> {
+        let missing: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT DISTINCT p.number, p.hash FROM ( \
+                 SELECT x.final_block_number AS number, x.final_block_hash AS hash \
+                 FROM observation_outcomes x JOIN observations o ON o.id = x.observation_id \
+                 WHERE o.network = $1 AND x.final_block_number IS NOT NULL \
+                   AND x.final_block_hash IS NOT NULL \
+                 UNION \
+                 SELECT final_block_number, final_block_hash FROM non_execution_proofs \
+                 WHERE network = $1) p \
+             WHERE NOT EXISTS (SELECT 1 FROM final_heads h WHERE h.network = $1 \
+                                 AND h.block_number = p.number AND h.block_hash = p.hash) \
+             ORDER BY p.number DESC",
+        )
+        .bind(self.network)
+        .fetch_all(self.pool)
+        .await?;
+        let mut done = Backfill::default();
+        if missing.is_empty() {
+            return Ok(done);
+        }
+        let finalized = match self.chain.finalized().await {
+            Ok(f) => f,
+            Err(e) => {
+                done.pending = missing.len();
+                done.findings.push(format!(
+                    "{} final points wait: the finalized head could not be read: {e}",
+                    missing.len()
+                ));
+                return Ok(done);
+            }
+        };
+        // The highest head with its readings, at or below the watermark: what the reserve check
+        // takes, unless a later one comes.
+        let supplied: Option<i64> = sqlx::query_scalar(
+            "SELECT max(h.block_number) FROM final_heads h \
+             JOIN observation_watermarks w ON w.network = h.network \
+             WHERE h.network = $1 AND h.block_number <= w.watermark \
+               AND (EXISTS (SELECT 1 FROM reserve_readings r WHERE r.network = h.network \
+                              AND r.block_number = h.block_number AND r.block_hash = h.block_hash \
+                              AND r.kind = 'supply') \
+                    OR EXISTS (SELECT 1 FROM fee_position_readings f WHERE f.network = h.network \
+                              AND f.block_number = h.block_number AND f.block_hash = h.block_hash))",
+        )
+        .bind(self.network)
+        .fetch_one(self.pool)
+        .await?;
+        for (number, named) in missing {
+            let (Ok(n), Ok(named)) = (
+                u64::try_from(number),
+                <[u8; 32]>::try_from(named.as_slice()),
+            ) else {
+                done.mismatched += 1;
+                done.findings.push(format!(
+                    "block {number}: not a block of this network; nothing is recorded"
+                ));
+                continue;
+            };
+            if supplied.is_none_or(|s| s <= number) {
+                done.pending += 1;
+                done.findings.push(format!(
+                    "block {n}: waits for a head with supply readings above it, at or below the watermark (the reserve check takes the latest)"
+                ));
+                continue;
+            }
+            match self.reach(&finalized, n, progress).await? {
+                Reach::At(hash) if hash == named => {}
+                Reach::At(hash) => {
+                    done.mismatched += 1;
+                    done.findings.push(format!(
+                        "block {n}: the outcome names {}, the finalized chain has {}; nothing is recorded",
+                        hex0x(&named),
+                        hex0x(&hash)
+                    ));
+                    continue;
+                }
+                Reach::Pending(why) => {
+                    done.pending += 1;
+                    done.findings
+                        .push(format!("block {n}: not reached now: {why}"));
+                    continue;
+                }
+                Reach::TooFar(why) => {
+                    done.too_far += 1;
+                    done.findings
+                        .push(format!("block {n}: not walked to: {why}"));
+                    continue;
+                }
+            }
+            let at = BlockRef {
+                number: n,
+                hash: named,
+            };
+            let time_ms = match self.chain.events(&at, &self.contract).await {
+                Ok(e) => e.time_ms,
+                Err(e) => {
+                    done.pending += 1;
+                    done.findings
+                        .push(format!("block {n}: its block time could not be read: {e}"));
+                    continue;
+                }
+            };
+            let mut conn = self.pool.acquire().await?;
+            match record_head(&mut conn, self.network, &at, time_ms).await? {
+                Ok(()) => {
+                    tracing::info!(network = self.network, block = n, hash = %hex0x(&named), "REQ-OB-2: recorded the final head an outcome names, verified on the finalized chain");
+                    done.recorded += 1;
+                }
+                Err(conflict) => {
+                    done.mismatched += 1;
+                    done.findings
+                        .push(format!("block {n}: {conflict}; nothing is recorded"));
+                }
+            }
+        }
+        Ok(done)
+    }
+
+    /// The hash of the final block `number`, reached from `finalized` by parent hash
+    /// ([`Follower::anchor_with`]), if it is fewer than [`BACKFILL_WALK`] and `max_walk` blocks
+    /// below where the walk starts (the lowest anchor at or above it, or the finalized head).
+    async fn reach(
+        &self,
+        finalized: &BlockRef,
+        number: u64,
+        progress: &mut (dyn FnMut() + Send),
+    ) -> Result<Reach, sqlx::Error> {
+        if number > finalized.number {
+            return Ok(Reach::Pending(format!(
+                "it is above the finalized head {}",
+                finalized.number
+            )));
+        }
+        let above: Option<i64> = sqlx::query_scalar(
+            "SELECT block_number FROM observation_walk_anchors \
+             WHERE network = $1 AND block_number >= $2 ORDER BY block_number LIMIT 1",
+        )
+        .bind(self.network)
+        .bind(i64_of(number)?)
+        .fetch_optional(self.pool)
+        .await?;
+        let from = above
+            .and_then(|n| u64::try_from(n).ok())
+            .filter(|n| *n <= finalized.number)
+            .unwrap_or(finalized.number);
+        let bound = self.max_walk.min(BACKFILL_WALK);
+        if from - number >= bound {
+            return Ok(Reach::TooFar(format!(
+                "{} blocks below block {from}, where the walk would start; the bound is {bound}",
+                from - number
+            )));
+        }
+        Ok(match self.anchor_with(finalized, number, progress).await? {
+            Ok(hash) => Reach::At(hash),
+            Err(e) => Reach::Pending(e.to_string()),
+        })
     }
 
     async fn gap(
@@ -593,9 +844,77 @@ pub async fn last_seq(
     Ok(s.and_then(|s| u64::try_from(s).ok()))
 }
 
+/// The store holds another hash than the chain's at a final head's height (`REQ-OB-2`): a network
+/// that finalised two blocks at one height, or a read that lied. Nothing may be decided on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeadConflict {
+    /// The height.
+    pub number: u64,
+    /// The hash the chain was read with there.
+    pub read: [u8; 32],
+    /// The hash the store holds there.
+    pub stored: Vec<u8>,
+}
+
+impl std::fmt::Display for HeadConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "REQ-OB-2: block {} is final as {} here, and {} is recorded",
+            self.number,
+            hex0x(&self.read),
+            hex0x(&self.stored)
+        )
+    }
+}
+
+/// Records `head`, a final block of `network` with its block time, in `final_heads` (one hash per
+/// height), in `conn`. A head already recorded with the same hash is recorded; another hash there
+/// is a [`HeadConflict`], never a silent pass.
+pub async fn record_head(
+    conn: &mut PgConnection,
+    network: &str,
+    head: &BlockRef,
+    time_ms: u64,
+) -> Result<Result<(), HeadConflict>, sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO final_heads (network, block_number, block_hash, block_time) \
+         VALUES ($1, $2, $3, to_timestamp(0) + $4 * interval '1 millisecond') \
+         ON CONFLICT ON CONSTRAINT final_heads_one_hash_per_height DO NOTHING",
+    )
+    .bind(network)
+    .bind(i64_of(head.number)?)
+    .bind(head.hash.as_slice())
+    .bind(i64_of(time_ms)?)
+    .execute(&mut *conn)
+    .await?;
+    let stored: Vec<u8> = sqlx::query_scalar(
+        "SELECT block_hash FROM final_heads WHERE network = $1 AND block_number = $2",
+    )
+    .bind(network)
+    .bind(i64_of(head.number)?)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(if stored == head.hash {
+        Ok(())
+    } else {
+        Err(HeadConflict {
+            number: head.number,
+            read: head.hash,
+            stored,
+        })
+    })
+}
+
 /// Records blocks `first` to `last` as read under `finalized`, with their observations, in one
 /// transaction. An observation already recorded at its coordinate is not recorded again
 /// (`INV-10`). Returns how many were new.
+///
+/// When one is new, its outcome is written under `finalized`, and `finalized` is recorded in
+/// `final_heads` in the same transaction with `finalized_time_ms`, its block time, which must then
+/// be given (`REQ-OB-2`, `REQ-OB-5`). Another hash recorded at its height records nothing: the
+/// transaction is rolled back and the conflict returned.
+#[allow(clippy::too_many_arguments)]
 pub async fn record_read(
     pool: &PgPool,
     network: &str,
@@ -603,8 +922,9 @@ pub async fn record_read(
     first: u64,
     last: u64,
     finalized: &BlockRef,
+    finalized_time_ms: Option<u64>,
     observations: &[NewObservation],
-) -> Result<usize, sqlx::Error> {
+) -> Result<Result<usize, HeadConflict>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let mut new = 0;
     for o in observations {
@@ -645,6 +965,19 @@ pub async fn record_read(
             .await?;
         }
     }
+    if new > 0 {
+        // REQ-OB-2, REQ-OB-5: the final point the outcomes name is a recorded final head.
+        let Some(time_ms) = finalized_time_ms else {
+            return Err(sqlx::Error::InvalidArgument(format!(
+                "REQ-OB-2: outcomes are written under block {} without its block time",
+                finalized.number
+            )));
+        };
+        if let Err(conflict) = record_head(&mut tx, network, finalized, time_ms).await? {
+            tx.rollback().await?;
+            return Ok(Err(conflict));
+        }
+    }
     sqlx::query(
         "INSERT INTO observation_ranges (network, first_block, last_block, outcome, \
            final_block_number, final_block_hash) VALUES ($1, $2, $3, 'read', $4, $5)",
@@ -657,7 +990,7 @@ pub async fn record_read(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(new)
+    Ok(Ok(new))
 }
 
 /// Records blocks `first` to `last` as a gap, unless the same gap is already open.

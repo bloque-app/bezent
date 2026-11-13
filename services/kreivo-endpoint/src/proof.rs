@@ -46,6 +46,11 @@
 //! copy), an extrinsic of the delivery key that does not decode, a nonce consumed with no extrinsic
 //! of the key in its block, and bytes that do not answer their rows.
 //!
+//! **The final head** both rest on, `F`, is recorded in `final_heads` in the same transaction,
+//! with its block time read from the chain (issue #131; `REQ-OB-2`, `REQ-OB-5`): the core takes
+//! an outcome or a proof as final only at a recorded final head. Another hash recorded at `F`'s
+//! height records nothing.
+//!
 //! The endpoint records proofs and inclusions; what they mean for a transfer is the core's.
 
 use bezent_signer::compromise::ObservedSignature;
@@ -54,8 +59,10 @@ use sqlx::PgPool;
 
 use crate::chain::{BlockRef, Chain, ancestry};
 use crate::kreivo::{self, AccountId32, Decoded, Message, Mortality, blake2_256};
+use crate::observe;
 use crate::signal::{self, Seen};
 use crate::submit::Lane;
+use crate::supply::{self, Supplies};
 
 /// A signed transaction whose outcome is not recorded yet, as the store holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,6 +188,9 @@ pub struct Prover<'a, C> {
     pub lane: &'a Lane,
     /// The most blocks walked back from the finalized head.
     pub max_walk: u64,
+    /// The supply reader: the head a proof or an inclusion rests on is recorded with its supply
+    /// readings first ([`supply::ready_head`]). `None` records the head alone.
+    pub supplies: Option<&'a Supplies<'a, C>>,
 }
 
 fn i64_of(n: u64) -> Result<i64, sqlx::Error> {
@@ -816,7 +826,29 @@ impl<C: Chain> Prover<'_, C> {
             return Ok(());
         }
         let signed_hash = blake2_256(&w.bytes);
+        // REQ-OB-2, REQ-OB-5: what is recorded here rests on `finalized`, a recorded final head.
+        let head_time = match supply::ready_head(
+            self.chain,
+            self.supplies,
+            &self.contract,
+            finalized,
+        )
+        .await?
+        {
+            Ok(t) => t,
+            Err(why) => {
+                tracing::warn!(network = self.network, signed = w.id, head = finalized.number, reason = %why, "REQ-OB-2: the finalized head could not be recorded; nothing is recorded under it, and the next step looks again");
+                return Ok(());
+            }
+        };
         let mut tx = self.pool.begin().await?;
+        if let Err(conflict) =
+            observe::record_head(&mut tx, self.network, finalized, head_time).await?
+        {
+            tx.rollback().await?;
+            tracing::error!(network = self.network, signed = w.id, %conflict, "REQ-OB-2: the finalized head read is not the one recorded at its height; nothing is recorded under it");
+            return Ok(());
+        }
         if let Some((at, index, hash, executed, error)) = included {
             let time_ms = match self.chain.events(&at, &[0; 32]).await {
                 Ok(e) => e.time_ms,
