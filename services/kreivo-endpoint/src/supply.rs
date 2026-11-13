@@ -19,7 +19,11 @@
 //! a guess, and the check takes the evaluation as incomplete.
 //!
 //! The head is recorded in `final_heads` in the same transaction as its readings, so a final point
-//! the check picks has its supply readings with it. The delivery account's fee position is read at the same
+//! the check picks has its supply readings with it. The follower and the prover record the head
+//! they write outcomes under (issue #131); they ask for it here first ([`ready_head`]), so it has
+//! its readings before it is recorded, and a head one of them recorded without readings (one
+//! that ran with no supply reader) is read here when it is the finalized head, never skipped as
+//! recorded. The delivery account's fee position is read at the same
 //! head and recorded in that transaction too ([`crate::fee`], issue #14), but it is not a supply reading: a
 //! savepoint keeps a refused write of it from taking the head and the supply with it.
 
@@ -29,6 +33,7 @@ use sqlx::PgPool;
 use crate::chain::{BlockRef, Chain};
 use crate::fee;
 use crate::kreivo::{self, AccountId32, AssetId};
+use crate::observe;
 
 /// Records supply at final heads. See the module documentation.
 pub struct Supplies<'a, C> {
@@ -90,18 +95,27 @@ impl<C: Chain> Supplies<'_, C> {
     }
 
     /// Records `head`, a final block, and the supply of every bridged asset at it, in one
-    /// transaction.
+    /// transaction. A head already recorded is `Already` only once its readings are recorded too:
+    /// one recorded without them is read now, or the reserve check would find no supply at the
+    /// latest final point (as the EVM endpoint does for its prover's heads, PR #50 review M4).
     pub async fn record_at(&self, head: &BlockRef) -> Result<Recorded, sqlx::Error> {
         let number = i64_of(head.number)?;
-        let stored: Option<Vec<u8>> = sqlx::query_scalar(
-            "SELECT block_hash FROM final_heads WHERE network = $1 AND block_number = $2",
+        let stored: Option<(Vec<u8>, bool)> = sqlx::query_as(
+            "SELECT h.block_hash, \
+                    EXISTS (SELECT 1 FROM reserve_readings r WHERE r.network = h.network \
+                              AND r.block_number = h.block_number AND r.block_hash = h.block_hash \
+                              AND r.kind = 'supply') \
+                    OR EXISTS (SELECT 1 FROM fee_position_readings f WHERE f.network = h.network \
+                              AND f.block_number = h.block_number AND f.block_hash = h.block_hash) \
+             FROM final_heads h WHERE h.network = $1 AND h.block_number = $2",
         )
         .bind(self.network)
         .bind(number)
         .fetch_optional(self.pool)
         .await?;
         match stored {
-            Some(h) if h == head.hash => return Ok(Recorded::Already(head.number)),
+            Some((h, true)) if h == head.hash => return Ok(Recorded::Already(head.number)),
+            Some((h, false)) if h == head.hash => {}
             Some(_) => return Ok(Recorded::Conflict(head.number)),
             None => {}
         }
@@ -124,25 +138,10 @@ impl<C: Chain> Supplies<'_, C> {
         let fee = fee::read(self.chain, &self.delivery, head).await;
 
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO final_heads (network, block_number, block_hash, block_time) \
-             VALUES ($1, $2, $3, to_timestamp(0) + $4 * interval '1 millisecond') \
-             ON CONFLICT ON CONSTRAINT final_heads_one_hash_per_height DO NOTHING",
-        )
-        .bind(self.network)
-        .bind(number)
-        .bind(head.hash.as_slice())
-        .bind(i64_of(time_ms)?)
-        .execute(&mut *tx)
-        .await?;
-        let stored: Vec<u8> = sqlx::query_scalar(
-            "SELECT block_hash FROM final_heads WHERE network = $1 AND block_number = $2",
-        )
-        .bind(self.network)
-        .bind(number)
-        .fetch_one(&mut *tx)
-        .await?;
-        if stored != head.hash {
+        if observe::record_head(&mut tx, self.network, head, time_ms)
+            .await?
+            .is_err()
+        {
             return Ok(Recorded::Conflict(head.number));
         }
         for r in &readings {
@@ -261,6 +260,37 @@ impl<C: Chain> Supplies<'_, C> {
             (_, Err(e)) => unknown(format!("the asset's issuance: {e}"), json!({})),
         }
     }
+}
+
+/// Readies `head`, a final block, for outcomes to be written under it, and returns its block time,
+/// read from the chain (issue #131; `REQ-OB-2`, `REQ-OB-5`). With `supplies`, `head` is recorded
+/// first, with the supply of every bridged asset at it ([`Supplies::record_at`]), so the reserve
+/// check, which takes the latest final head the follower has read to, finds supply there. `Err`
+/// when the chain did not answer or another hash is recorded at its height: nothing may be written
+/// under it.
+pub async fn ready_head<C: Chain>(
+    chain: &C,
+    supplies: Option<&Supplies<'_, C>>,
+    contract: &AccountId32,
+    head: &BlockRef,
+) -> Result<Result<u64, String>, sqlx::Error> {
+    if let Some(s) = supplies {
+        match s.record_at(head).await? {
+            Recorded::At { .. } | Recorded::Already(_) => {}
+            Recorded::Conflict(n) => {
+                return Ok(Err(format!(
+                    "REQ-OB-2: another hash than 0x{} is recorded at block {n}",
+                    hex::encode(head.hash)
+                )));
+            }
+            Recorded::Unavailable(why) => return Ok(Err(why)),
+        }
+    }
+    Ok(chain
+        .events(head, contract)
+        .await
+        .map(|e| e.time_ms)
+        .map_err(|e| e.to_string()))
 }
 
 /// Records the delivery account's fee position, read at `head`, a recorded final head of `network`. A reading

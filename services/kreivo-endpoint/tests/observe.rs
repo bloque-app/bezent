@@ -129,19 +129,21 @@ async fn req_ob_3_the_store_refuses_a_range_past_the_watermark(
 ) {
     let f = Fixture::new(pool, connect).await;
     let head = f.chain.finalized_ref();
-    observe::record_read(&f.endpoint, NETWORK, &CONTRACT, 1, 2, &head, &[])
+    observe::record_read(&f.endpoint, NETWORK, &CONTRACT, 1, 2, &head, None, &[])
         .await
+        .unwrap()
         .unwrap();
     // Block 3 was not read: a range from block 4 would move past it.
-    let err = observe::record_read(&f.endpoint, NETWORK, &CONTRACT, 4, 4, &head, &[])
+    let err = observe::record_read(&f.endpoint, NETWORK, &CONTRACT, 4, 4, &head, None, &[])
         .await
         .unwrap_err();
     let db = err.as_database_error().expect("a store refusal");
     assert_eq!(db.code().as_deref(), Some(bezent_store::REFUSAL_SQLSTATE));
     assert!(db.message().contains("REQ-OB-3"), "{}", db.message());
     // Overlapping and adjacent ranges are fine.
-    observe::record_read(&f.endpoint, NETWORK, &CONTRACT, 2, 3, &head, &[])
+    observe::record_read(&f.endpoint, NETWORK, &CONTRACT, 2, 3, &head, None, &[])
         .await
+        .unwrap()
         .unwrap();
 }
 
@@ -172,13 +174,25 @@ async fn inv_10_an_observation_is_recorded_once_per_coordinate(
         1,
         2,
         &head,
+        Some(1_760_000_020_000),
         std::slice::from_ref(&o),
     )
     .await
+    .unwrap()
     .unwrap();
-    let again = observe::record_read(&f.endpoint, NETWORK, &CONTRACT, 1, 2, &head, &[o])
-        .await
-        .unwrap();
+    let again = observe::record_read(
+        &f.endpoint,
+        NETWORK,
+        &CONTRACT,
+        1,
+        2,
+        &head,
+        Some(1_760_000_020_000),
+        &[o],
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!((first, again), (1, 0));
     assert_eq!(f.count("SELECT count(*) FROM observations").await, 1);
     assert_eq!(

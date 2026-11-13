@@ -226,6 +226,7 @@ impl Fixture {
             max_walk: 10_000,
             rung: 5,
             concurrency: 4,
+            supplies: None,
         }
     }
 
@@ -252,6 +253,7 @@ impl Fixture {
             contract: CONTRACT,
             lane: &self.lane,
             max_walk: 10_000,
+            supplies: None,
         }
     }
 

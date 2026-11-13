@@ -214,6 +214,7 @@ mod run {
             max_walk: config.max_walk,
             rung: WALK_RUNG.min(config.max_walk),
             concurrency: config.walk_concurrency,
+            supplies: None,
         };
         // Issue #49: start_block's hash is the finalized chain's, reached by parent hash from the
         // light client's head, not any source's word. A first start walks the backlog for it (its
@@ -267,6 +268,11 @@ mod run {
             contract,
             delivery: lane.account,
         };
+        // Issue #131: the head outcomes are written under is recorded with its supply readings.
+        let follower = Follower {
+            supplies: Some(&supplies),
+            ..follower
+        };
         let submitter = Submitter {
             chain: &chain,
             pool: &pool,
@@ -289,9 +295,12 @@ mod run {
             contract,
             lane: &lane,
             max_walk: config.max_walk,
+            supplies: Some(&supplies),
         };
 
         let mut lied_seen = 0u64;
+        // Issue #131: what the backfill last could not record, logged only when it changes.
+        let mut backfill_findings: Vec<String> = Vec::new();
         // Issue #104: the gate's state, once a minute, for an alarm. Not a liveness matter.
         let mut gate_metric = bezent_kreivo_endpoint::metric::Emitter::new();
         // Whether the pass before failed (the store, the prover): while it did, a walk's progress is
@@ -340,6 +349,27 @@ mod run {
                         tracing::warn!(block = n, "REQ-OB-2: another hash is recorded at the finalized head's height")
                     }
                     other => tracing::debug!(?other, "supply"),
+                }
+                // Issue #131: the final heads that outcomes recorded earlier name, verified on the
+                // finalized chain and recorded, so no transfer waits on a head never recorded. After
+                // the supply reader, so this pass has recorded a current head first: the core times
+                // an order from the first head it sees after it (issue #48).
+                if caught_up {
+                    let filled = follower
+                        .record_missing_heads_with(&mut || {
+                            if !failed_before {
+                                bezent_kreivo_endpoint::health::beat(&heartbeat);
+                            }
+                        })
+                        .await?;
+                    // What it could not record is logged when it changes, not every pass.
+                    if filled.findings != backfill_findings {
+                        for finding in &filled.findings {
+                            tracing::warn!(%finding, "REQ-OB-2: a final head an outcome names is not recorded");
+                        }
+                        tracing::info!(recorded = filled.recorded, mismatched = filled.mismatched, pending = filled.pending, too_far = filled.too_far, "REQ-OB-2: final heads that outcomes name");
+                        backfill_findings = filled.findings;
+                    }
                 }
                 if let Ok(finalized) = bezent_kreivo_endpoint::chain::Chain::finalized(&chain).await
                 {
