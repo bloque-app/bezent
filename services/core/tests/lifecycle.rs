@@ -696,6 +696,33 @@ async fn req_rv_1_inv_7_a_redemption_final_under_an_unrecorded_head_goes_to_revi
     );
 }
 
+/// Issue #131: an `Accepted` leg decided `withdrawn` under an unrecorded head does not go to
+/// review: it waits, and moves to `Withdrawn` once its head is recorded (`AC-A2.3`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_a_withdrawn_leg_under_an_unrecorded_head_waits_for_the_head_not_for_review(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let r = redemption(&w.admin, 20, &[0x32; 32], 700).await;
+    let past = 20 + BUDGET + 10;
+    decide_under_unrecorded_head(&w, r, "withdrawn", past + 5).await;
+    w.settle(t0()).await;
+    let id: i64 = scalar(
+        &w.admin,
+        "SELECT id FROM transfers WHERE kind = 'withdrawal'",
+    )
+    .await;
+    assert_eq!(w.state(id).await.0, "Accepted");
+    head(&w.admin, ISSUING, past).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Accepted");
+    head(&w.admin, ISSUING, past + 5).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Withdrawn");
+}
+
 /// Issue #131: a payout decided final under a final point that is not a recorded final head does
 /// not complete the withdrawal (`REQ-OB-2`, `REQ-TR-3`), and does not stall it in silence: the leg
 /// is unknown, and goes to review past its deadline, never refunded (`REQ-RV-1`, `AC-B1.4`).

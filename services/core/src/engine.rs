@@ -820,6 +820,11 @@ impl Core {
                         outcome,
                         "REQ-OB-2: the source leg's final point is not a recorded final head; it is not taken as decided, and goes to review past its deadline (REQ-RV-1)"
                     );
+                    if outcome == "withdrawn" {
+                        // A withdrawal moves nothing and a review would end it by hand: it waits
+                        // for the head to be recorded, and is then moved to Withdrawn below.
+                        return Ok(Did::default());
+                    }
                     return self.accepted_unknown(conn, t, &o).await;
                 };
                 let to = if outcome == "final" && o.executed {
