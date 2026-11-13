@@ -321,6 +321,17 @@ Tests: `services/core/tests/cancel.rs` (`*_issue_35_*`; the S-4 test that never 
 
 Tests: `services/core/tests/anomalies.rs` (`INV-8`).
 
+## A final point that is not a recorded head (issue #131)
+
+1. **Not decided, and not stalled in silence** (`REQ-OB-2`, `REQ-RV-1`). `final_point()` finds an outcome's final point
+   only when an endpoint recorded it in `final_heads`. When it found nothing, `accepted()` and `delivered()` returned
+   before their deadline review, so the transfer waited forever (transfer 11 in production). Now such an outcome is
+   unknown: the core logs a warning each cycle and, past the deadline, sends the transfer to `Needs-Review`, resting
+   on the latest recorded head. It never refunds, and never moves to `Source-Final` or `Completed` without the head.
+2. **Deploy only after the endpoint's backfill** (#132). The Kreivo endpoint now records the heads it writes under and
+   backfills the missing ones. `deploy.sh` updates the core first; deployed before that backfill ran, this change
+   would send a transfer whose deadline has passed, such as transfer 11, to review instead of `Source-Final`.
+
 ## Integration points (for review)
 
 - **PR #31 (F-007).** The core implements the two-step delivery of its decision 1: order intent
