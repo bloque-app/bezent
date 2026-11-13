@@ -939,6 +939,7 @@ impl Bed {
             max_walk: 10_000,
             rung: 5,
             concurrency: 4,
+            supplies: None,
         }
     }
 
@@ -963,6 +964,7 @@ impl Bed {
             contract: CONTRACT,
             lane: &self.signing.kreivo_lane,
             max_walk: 10_000,
+            supplies: None,
         }
     }
 
@@ -990,17 +992,10 @@ impl Bed {
     }
 
     /// One pass of the Kreivo endpoint, in the order of its loop (`services/kreivo-endpoint/src/main.rs`):
-    /// follow to the finalized head, record the supply at it, prepare, sign and submit, resend,
-    /// prove.
+    /// follow to the finalized head (each head outcomes are written under recorded with its
+    /// supply), record the supply at the finalized head, record the final heads earlier outcomes
+    /// name, prepare, sign and submit, resend, prove.
     pub async fn kreivo_pass(&self) {
-        let follower = self.kreivo_follower();
-        loop {
-            match follower.step().await.expect("the store") {
-                KreivoStep::Read { .. } => continue,
-                KreivoStep::CaughtUp { .. } => break,
-                other => panic!("the Kreivo follower stopped: {other:?}"),
-            }
-        }
         let supplies = Supplies {
             chain: &self.chain,
             pool: &self.kreivo_pool,
@@ -1008,7 +1003,19 @@ impl Bed {
             contract: CONTRACT,
             delivery: self.signing.kreivo_lane.account,
         };
+        let follower = KreivoFollower {
+            supplies: Some(&supplies),
+            ..self.kreivo_follower()
+        };
+        loop {
+            match follower.step().await.expect("the store") {
+                KreivoStep::Read { .. } => continue,
+                KreivoStep::CaughtUp { .. } => break,
+                other => panic!("the Kreivo follower stopped: {other:?}"),
+            }
+        }
         supplies.record().await.expect("the store");
+        follower.record_missing_heads().await.expect("the store");
         let finalized = Chain::finalized(&self.chain).await.expect("the model");
         let submitter = self.kreivo_submitter();
         for id in submitter
@@ -1026,7 +1033,13 @@ impl Bed {
             submitter.sign_and_submit(id).await.expect("the store");
         }
         submitter.resend().await.expect("the store");
-        self.kreivo_prover().step().await.expect("the store");
+        KreivoProver {
+            supplies: Some(&supplies),
+            ..self.kreivo_prover()
+        }
+        .step()
+        .await
+        .expect("the store");
     }
 
     /// One cycle of the core, as its loop runs them (`services/core/src/main.rs`): the cycle, then
