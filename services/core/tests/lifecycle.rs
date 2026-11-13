@@ -621,6 +621,158 @@ async fn ac_b1_4_a_delivery_unknown_at_its_deadline_goes_to_review_and_nothing_i
     assert_eq!(w.state(id).await.0, "Needs-Review");
 }
 
+/// Decides observation `id` `outcome` under the final point (its network, `block`) without
+/// recording that point as a final head: what the Kreivo endpoint wrote before issue #131.
+async fn decide_under_unrecorded_head(w: &World, id: i64, outcome: &str, block: i64) {
+    let network: String = scalar(
+        &w.admin,
+        &format!("SELECT network FROM observations WHERE id = {id}"),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO observation_outcomes (observation_id, outcome, final_block_number, \
+             final_block_hash) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(id)
+    .bind(outcome)
+    .bind(block)
+    .bind(hash(&network, block))
+    .execute(&w.admin)
+    .await
+    .unwrap();
+}
+
+/// Issue #131: a redemption decided final under a final point that is not a recorded final head
+/// is not taken as final (`REQ-OB-2`, `INV-7`): nothing is paid out, and the withdrawal does not
+/// stall in silence either. It is unknown, and goes to review past its deadline, never refunded
+/// (`REQ-RV-1`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_inv_7_a_redemption_final_under_an_unrecorded_head_goes_to_review_past_its_deadline(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let r = redemption(&w.admin, 20, &[0x31; 32], 700).await;
+    decide_under_unrecorded_head(&w, r, "final", 22).await;
+    w.settle(t0()).await;
+    let id: i64 = scalar(
+        &w.admin,
+        "SELECT id FROM transfers WHERE kind = 'withdrawal'",
+    )
+    .await;
+    assert_eq!(w.state(id).await.0, "Accepted");
+    // Before its deadline (the redemption's block time plus the route's budget, in chain time):
+    // it waits, and nothing is ordered.
+    head(&w.admin, ISSUING, 30).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Accepted");
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+    // Past it, at a recorded final head: review, resting on that head. No payout, no refund.
+    let past = 20 + BUDGET + 10;
+    head(&w.admin, ISSUING, past).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM transitions WHERE transfer_id = {id} \
+             AND from_state = 'Accepted' AND to_state = 'Needs-Review' AND block_number = {past}"
+        ))
+        .await,
+        1
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM transfers WHERE id = {id} AND source_final_network IS NOT NULL"
+        ))
+        .await,
+        0
+    );
+    assert_eq!(w.count("SELECT count(*) FROM intents").await, 0);
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+}
+
+/// Issue #131: an `Accepted` leg decided `withdrawn` under an unrecorded head does not go to
+/// review: it waits, and moves to `Withdrawn` once its head is recorded (`AC-A2.3`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_a_withdrawn_leg_under_an_unrecorded_head_waits_for_the_head_not_for_review(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let r = redemption(&w.admin, 20, &[0x32; 32], 700).await;
+    let past = 20 + BUDGET + 10;
+    decide_under_unrecorded_head(&w, r, "withdrawn", past + 5).await;
+    w.settle(t0()).await;
+    let id: i64 = scalar(
+        &w.admin,
+        "SELECT id FROM transfers WHERE kind = 'withdrawal'",
+    )
+    .await;
+    assert_eq!(w.state(id).await.0, "Accepted");
+    head(&w.admin, ISSUING, past).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Accepted");
+    head(&w.admin, ISSUING, past + 5).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Withdrawn");
+}
+
+/// Issue #131: a payout decided final under a final point that is not a recorded final head does
+/// not complete the withdrawal (`REQ-OB-2`, `REQ-TR-3`), and does not stall it in silence: the leg
+/// is unknown, and goes to review past its deadline, never refunded (`REQ-RV-1`, `AC-B1.4`).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_ac_b1_4_a_payout_final_under_an_unrecorded_head_goes_to_review_past_its_deadline(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [0x32; 32], 700).await;
+    deliver(&w, id, 1, t0()).await;
+    let paid = observe(
+        &w.admin,
+        ORIGIN,
+        50,
+        3,
+        TOKEN,
+        700,
+        None,
+        Some(BENEFICIARY),
+        Some(&payout_reference_of(&w.admin, id).await),
+        true,
+        json!({"event": "Payout"}),
+    )
+    .await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivered");
+    decide_under_unrecorded_head(&w, paid, "final", 60).await;
+    head(&w.admin, ORIGIN, 70).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Delivered");
+    let past = 50 + BUDGET + 10;
+    head(&w.admin, ORIGIN, past).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM intents WHERE transfer_id = {id} AND attempt > 1"
+        ))
+        .await,
+        0
+    );
+}
+
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_tr_5_a_delivery_of_another_amount_goes_to_review_reporting_both(
     options: PgPoolOptions,

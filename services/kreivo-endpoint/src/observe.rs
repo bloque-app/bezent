@@ -130,7 +130,7 @@ pub struct Backfill {
 /// walked to; it waits, and is named in the findings.
 pub const BACKFILL_WALK: u64 = 4 * WALK_RUNG;
 
-/// Follows one network's finalized head. See the module documentation./// Follows one network's finalized head. See the module documentation.
+/// Follows one network's finalized head. See the module documentation.
 pub struct Follower<'a, C> {
     /// The chain.
     pub chain: &'a C,
