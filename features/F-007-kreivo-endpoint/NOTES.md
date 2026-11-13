@@ -392,6 +392,49 @@ runs. `wss://` verifies with the system's roots (`rustls-platform-verifier`); th
 them. A failed start-up check names the source and why. `T-013-05` (zombienet) now needs `archive_rpc` too: a
 zombienet node run as an archive, back to `start_block` and its parent.
 
+## Outcomes rest on a recorded final head (issue #131)
+
+A withdrawal stayed in `Accepted` because its redemption's outcome named a final head the endpoint had never
+recorded. The follower and the prover wrote outcomes under the finalized head they read, and only the supply reader
+recorded heads, once a pass. The core's `final_point()` found nothing and returned, before its deadline review.
+
+43. **The head is recorded with what rests on it.** `observe::record_read` records the finalized head in
+    `final_heads`, in the transaction that writes the outcomes under it, with its block time read from the chain (a
+    rung's head is not among the blocks read, so it is one more proven read, made once a step and only when an
+    outcome is written). The prover does the same for its inclusions and non-execution proofs. Another hash at that
+    height rolls the transaction back: the follower's step is `Unavailable` with the `REQ-OB-2` reason, and the
+    prover records nothing. `observe::record_head` is the one insert; the supply reader uses it too.
+44. **The head has its supply.** The reserve check takes the latest final head at or below the watermark, which is
+    the follower's own. A head recorded without supply readings there would make every evaluation incomplete and
+    hold every asset (amendment 0028). So the follower and the prover take the head through `supply::ready_head`,
+    which records it with its supply readings first, and `Supplies::record_at` no longer passes over a head that was
+    recorded without them (as the EVM endpoint reads its prover's heads, PR #50 review M4).
+45. **Earlier outcomes.** Each pass, once caught up and after the supply reader, `Follower::record_missing_heads`
+    lists the final points that outcomes and non-execution proofs of the network name and `final_heads` lacks, highest
+    first. Each is reached from the finalized head by parent hash (`Follower::anchor`), so the chain's finalized head is
+    at or above it. The head is recorded, with the chain's block time, only when the chain has the hash the outcome
+    names there; a hash that differs records nothing.
+    - **Never the reserve check's point.** A backfilled head carries no supply readings, and the check takes the latest
+      head at or below the watermark. So a point is recorded only below a head that has its readings and is at or below
+      the watermark. Until there is one (the supply reader failing for a few passes), it waits.
+    - **Bounded walks.** The walk runs inside the loop. A point more than `BACKFILL_WALK` (four rungs, 16,384 blocks) or
+      `max_walk` below where its walk would start (the lowest anchor at or above it, else the finalized head) is not
+      walked to. In production on 2026-11-13, the 14 old points (blocks 40,572,375 to 40,690,107) are about 200,000 to
+      310,000 blocks down, above the newest anchor (40,561,680), so they stay unrecorded and are named, never walked
+      every pass. Transfer 11's point, 40,883,094, is a walk of a few thousand blocks from the finalized head.
+    - **Logged when it changes.** What a pass could not record comes back as findings; the loop logs them only when they
+      differ from the last pass's.
+    - The endpoint cannot read transfers (`KREIVO_ENDPOINT_SELECT`), so the backfill cannot tell which points a transfer
+      waits on; the bound is what keeps the old ones cheap.
+46. **Fail-closed while supply cannot be read.** The follower and the prover record their head through
+    `supply::ready_head`. While the chain cannot give the head's block time, they write nothing: the follower's step is
+    `Unavailable` and the prover records nothing, until the read works. A supply reading that fails is recorded as
+    unknown, as before, and does not stop them.
+
+**The core's side** (a final point that is not a recorded head goes to review past its deadline, `REQ-RV-1`) is a
+separate change, deployed only after this one has backfilled: `deploy.sh` updates the core first, and a transfer whose
+deadline has passed would go to review before its head is recorded.
+
 ## Limits stated plainly
 
 - **History**: verified from `archive_rpc` (items 32 to 35). Its availability is the archive nodes': with one node, an
