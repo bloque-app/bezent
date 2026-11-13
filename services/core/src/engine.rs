@@ -808,7 +808,24 @@ impl Core {
         ) {
             (Some(outcome), Some(n), Some(h)) => {
                 let Some(point) = store::final_point(conn, &o.network, n, h).await? else {
-                    return Ok(Did::default());
+                    // REQ-OB-2, REQ-OB-5 (issue #131): decided under a final point that is not a
+                    // recorded final head. Nothing rests on it, so the leg is not final yet, nor
+                    // withdrawn: it is unknown, and goes to review past its deadline (REQ-RV-1),
+                    // never refunded, never stalled in silence.
+                    tracing::warn!(
+                        transfer = %t.bridge_reference,
+                        network = %o.network,
+                        final_block = n,
+                        final_hash = %format!("0x{}", hex::encode(h)),
+                        outcome,
+                        "REQ-OB-2: the source leg's final point is not a recorded final head; it is not taken as decided, and goes to review past its deadline (REQ-RV-1)"
+                    );
+                    if outcome == "withdrawn" {
+                        // A withdrawal moves nothing and a review would end it by hand: it waits
+                        // for the head to be recorded, and is then moved to Withdrawn below.
+                        return Ok(Did::default());
+                    }
+                    return self.accepted_unknown(conn, t, &o).await;
                 };
                 let to = if outcome == "final" && o.executed {
                     State::SourceFinal
@@ -840,17 +857,25 @@ impl Core {
                 .await?;
                 Ok(Did::moved())
             }
-            _ => {
-                // Observed, neither final nor withdrawn: review past its deadline (REQ-RV-1).
-                let deadline = self.deadline(conn, t, o.block_time).await?;
-                if let Some(head) = self.past(conn, &o.network, deadline).await? {
-                    return self
-                        .deadline_review(conn, t, from, t.condition(), &head)
-                        .await;
-                }
-                Ok(Did::default())
-            }
+            _ => self.accepted_unknown(conn, t, &o).await,
         }
+    }
+
+    /// `Accepted`, its source leg observed and neither final nor withdrawn: review past its
+    /// deadline, on the source network's clock (`REQ-RV-1`).
+    async fn accepted_unknown(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        o: &store::Observation,
+    ) -> sqlx::Result<Did> {
+        let deadline = self.deadline(conn, t, o.block_time).await?;
+        if let Some(head) = self.past(conn, &o.network, deadline).await? {
+            return self
+                .deadline_review(conn, t, State::Accepted, t.condition(), &head)
+                .await;
+        }
+        Ok(Did::default())
     }
 
     /// Takes or clears a condition in place (§5.4: any non-terminal state, itself). Taking or
@@ -2787,7 +2812,18 @@ impl Core {
             )
         {
             let Some(point) = store::final_point(conn, &o.network, n, h).await? else {
-                return Ok(Did::default());
+                // REQ-OB-2 (issue #131): decided under a final point that is not a recorded final
+                // head: the leg is unknown, whatever a proof says, and goes to review past its
+                // deadline (REQ-RV-1), never refunded, never stalled in silence.
+                tracing::warn!(
+                    transfer = %t.bridge_reference,
+                    network = %o.network,
+                    final_block = n,
+                    final_hash = %format!("0x{}", hex::encode(h)),
+                    outcome,
+                    "REQ-OB-2: the destination leg's final point is not a recorded final head; it is not taken as decided, and goes to review past its deadline (REQ-RV-1)"
+                );
+                return self.delivered_unknown(conn, t, included_at).await;
             };
             if outcome == "withdrawn" {
                 // The inclusion stopped matching the chain: unknown until evidence (F-001 NOTES
@@ -2833,6 +2869,17 @@ impl Core {
                 .after_proof(conn, t, State::Delivered, attempt, &proof, None, now)
                 .await;
         }
+        self.delivered_unknown(conn, t, included_at).await
+    }
+
+    /// `Delivered`, its leg unknown: review past its deadline, counted from the inclusion, on the
+    /// destination network's clock (`REQ-RV-1`).
+    async fn delivered_unknown(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        included_at: DateTime<Utc>,
+    ) -> sqlx::Result<Did> {
         let deadline = self.deadline(conn, t, included_at).await?;
         if let Some(head) = self.past(conn, &t.destination_network, deadline).await? {
             return self
