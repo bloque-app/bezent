@@ -234,30 +234,135 @@ export interface Unsettled {
 
 export type Settled = { kind: 'recorded'; redemption: Redemption; at: number } | { kind: 'expired'; at: number };
 
+/** What one turn of `settle` read: the finalized head it checked, or why the read failed. Reported for display only;
+ * it decides nothing. */
+export type SettleRead = { ok: true; head: number } | { ok: false; error: string };
+
 /** Waits until an unclear redemption settles: the contract records it (read at the finalized block), or the
  * finalized head is past its mortality and no record exists. A failed read is tried again. `chain` may answer
- * `undefined` (the page moved to another network), which skips a turn; `stopped` ends the wait unsettled. */
+ * `undefined` (the page moved to another network), which skips a turn; `stopped` ends the wait unsettled. `onRead`
+ * hears each read's outcome, so a watcher that keeps failing is not silent; it changes nothing `settle` returns. */
 export async function settle(
   u: Unsettled,
   chain: () => RedeemChain | undefined,
-  o: { sleep: (ms: number) => Promise<void>; intervalMs?: number; stopped?: () => boolean },
+  o: { sleep: (ms: number) => Promise<void>; intervalMs?: number; stopped?: () => boolean; onRead?: (r: SettleRead) => void },
 ): Promise<Settled | undefined> {
+  const heard = (r: SettleRead) => {
+    try {
+      o.onRead?.(r);
+    } catch {
+      // A display that fails must not stop the wait.
+    }
+  };
   for (;;) {
     if (o.stopped?.()) return undefined;
     const c = chain();
     if (c) {
+      let head: number | undefined;
+      let red: Redemption | undefined;
       try {
         // The head first: a redemption final at or before it shows in the read that follows.
-        const head = await c.finalized();
-        const red = await c.redemption(u.redeemer, u.reference);
+        head = await c.finalized();
+        red = await c.redemption(u.redeemer, u.reference);
+      } catch (e) {
+        // Read again next turn.
+        heard({ ok: false, error: e instanceof Error ? e.message : String(e) });
+        head = undefined;
+      }
+      if (head !== undefined) {
+        heard({ ok: true, head });
         if (red) return { kind: 'recorded', redemption: red, at: head };
         if (u.validUntil !== undefined && head > u.validUntil) return { kind: 'expired', at: head };
-      } catch {
-        // Read again next turn.
       }
     }
     await o.sleep(o.intervalMs ?? 12_000);
   }
+}
+
+/** An unclear redemption as the page keeps it: the lock, and what is needed to compare the record with what was
+ * reviewed. */
+export interface Pending extends Unsettled {
+  /** The origin network the redemption's backend is on (`key`) and its label. */
+  network: string;
+  networkLabel: string;
+  /** The Kreivo network it was sent on. */
+  kreivo: string;
+  snapshot: RedeemSnapshot;
+}
+
+/** The storage key prefix, versioned: a record of another version is not read. */
+export const PENDING_PREFIX = 'bezent.bridge.pending/v1/';
+/** One key per Kreivo network and redeemer. */
+export const pendingKey = (kreivo: string, redeemer: Hex) => `${PENDING_PREFIX}${kreivo}/${redeemer}`;
+
+/** The record as text for storage (`bigint`s as decimal strings). */
+export function encodePending(p: Pending): string {
+  const s = p.snapshot;
+  return JSON.stringify({
+    v: 1,
+    network: p.network,
+    networkLabel: p.networkLabel,
+    kreivo: p.kreivo,
+    redeemer: p.redeemer,
+    reference: p.reference,
+    txHash: p.txHash,
+    validUntil: p.validUntil ?? null,
+    snapshot: {
+      redeemer: s.redeemer,
+      asset: s.asset,
+      amount: s.amount.toString(),
+      whole: s.whole,
+      backend: s.backend.kind === 'evm' ? { kind: 'evm', chainId: s.backend.chainId.toString() } : s.backend,
+      payout: s.payout,
+      reference: s.reference,
+    },
+  });
+}
+
+/** Reads a stored record back; `undefined` when it is not one this version wrote, whole and well formed. */
+export function decodePending(text: string): Pending | undefined {
+  try {
+    const j = JSON.parse(text);
+    const hex = (x: unknown, bytes: number): x is Hex => typeof x === 'string' && new RegExp(`^0x[0-9a-f]{${bytes * 2}}$`).test(x);
+    const str = (x: unknown): x is string => typeof x === 'string' && x.length > 0;
+    const uint = (x: unknown): x is string => typeof x === 'string' && /^[0-9]{1,40}$/.test(x);
+    const s = j?.snapshot;
+    if (j?.v !== 1 || !str(j.network) || !str(j.networkLabel) || !str(j.kreivo) || !hex(j.redeemer, 32) || !hex(j.reference, 32) || !hex(j.txHash, 32)) return undefined;
+    if (j.validUntil !== null && !(Number.isSafeInteger(j.validUntil) && j.validUntil >= 0)) return undefined;
+    if (!s || !hex(s.redeemer?.account, 32) || !str(s.redeemer?.address) || !Number.isSafeInteger(s.asset?.id) || !str(s.asset?.symbol) || !Number.isSafeInteger(s.asset?.decimals)) return undefined;
+    if (!uint(s.amount) || typeof s.whole !== 'boolean' || !isAddress(s.payout, { strict: false }) || !hex(s.reference, 32)) return undefined;
+    if (s.redeemer.account !== j.redeemer || s.reference !== j.reference) return undefined;
+    let backend: Backend;
+    if (s.backend?.kind === 'evm' && uint(s.backend.chainId)) backend = { kind: 'evm', chainId: BigInt(s.backend.chainId) };
+    else if (s.backend?.kind === 'attested' && Number.isSafeInteger(s.backend.id)) backend = { kind: 'attested', id: s.backend.id };
+    else return undefined;
+    const snapshot: RedeemSnapshot = Object.freeze({
+      redeemer: Object.freeze({ account: s.redeemer.account as Hex, address: s.redeemer.address as string }),
+      asset: Object.freeze({ id: s.asset.id as number, symbol: s.asset.symbol as string, decimals: s.asset.decimals as number }),
+      amount: BigInt(s.amount),
+      whole: s.whole as boolean,
+      backend: Object.freeze(backend),
+      payout: getAddress(s.payout),
+      reference: s.reference as Hex,
+    });
+    return {
+      redeemer: j.redeemer,
+      reference: j.reference,
+      txHash: j.txHash,
+      validUntil: j.validUntil === null ? undefined : j.validUntil,
+      network: j.network,
+      networkLabel: j.networkLabel,
+      kreivo: j.kreivo,
+      snapshot,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether the redemption Kreivo recorded is the one that was reviewed. */
+export function sameRedemption(red: Redemption, s: RedeemSnapshot): boolean {
+  return red.amount === s.amount && red.asset === s.asset.id && sameBackend(red.backend, s.backend) && red.payout.kind === 'address' && red.payout.address === s.payout.toLowerCase();
 }
 
 /** Runs the redemption of a snapshot. Throws, before anything is signed, when the contract or the dry runs refuse

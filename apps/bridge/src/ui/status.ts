@@ -82,11 +82,11 @@ function routeRows(r: RouteResult): [string, string][] {
 }
 
 /** What a payout search says, for the headline: `no` and `reorged` leave it as it was. */
-type Paid = 'yes' | 'pending' | 'reorged' | 'no' | 'bad' | 'twice' | 'unknown';
+type Paid = 'yes' | 'pending' | 'reorged' | 'no' | 'bad' | 'twice' | 'maybe-twice' | 'unknown';
 
 export const UNPAID_LABEL = 'Reference logs without a payout (anyone can emit these)';
 
-function searchRows(label: string, s: PayoutSearch, check: { to: Address; amount: bigint }): { rows: [string, string][]; paid: Paid } {
+export function searchRows(label: string, s: PayoutSearch, check: { to: Address; amount: bigint }): { rows: [string, string][]; paid: Paid } {
   const where = `blocks ${s.searched.from} to ${s.searched.to}${s.complete ? '' : '; older blocks were not searched'}`;
   const rows: [string, string][] = [];
   let paid: Paid = 'no';
@@ -112,12 +112,18 @@ function searchRows(label: string, s: PayoutSearch, check: { to: Address; amount
     rows.push([`Another ${label.toLowerCase()} with the same reference`, `${o.txHash}, Reference log ${o.referenceLog}; ${finalText(o.finality)}`]);
     // Only a payout that is final and canonical is a second one: an included or reorganised one decides nothing.
     if (o.finality.canonical && o.finality.final) paid = 'twice';
+    // One that is included but not final yet may become a second payout: not plain "paid" meanwhile.
+    else if (o.finality.canonical && (paid === 'yes' || paid === 'pending')) {
+      paid = 'maybe-twice';
+      rows.push([`Possible double payout (pending)`, `${o.txHash} is included but not final: if it becomes final, ${label.toLowerCase()}s were made twice, which should never happen`]);
+    }
   }
   for (const u of s.unpaid) {
     const why = u.transfers.length === 0 ? 'its transaction moves nothing from the reserve' : `its transaction moves ${u.transfers.length} transfers from the reserve, not one`;
     rows.push([UNPAID_LABEL, `${u.txHash}, Reference log ${u.referenceLog}, block ${u.blockNumber}: ${why}`]);
   }
-  if (s.unexamined) rows.push([UNPAID_LABEL, `${s.unexamined} more not examined`]);
+  // Said once: with no payout found, "Undetermined" above already counts them.
+  if (s.unexamined && paid !== 'unknown') rows.push([UNPAID_LABEL, `${s.unexamined} more not examined`]);
   return { rows, paid };
 }
 
@@ -204,6 +210,7 @@ export function initStatus(host: StatusHost) {
                   pending: 'a return to the refund address is included on Polygon, not final',
                   bad: 'a return carries its reference but differs (see the check)',
                   twice: 'more than one return carries its reference: this should never happen; report it',
+                  'maybe-twice': 'a return is included on Polygon, and a second one carrying its reference is included but not final: a possible double return, pending; report it',
                 }[sr.paid];
           }
         } catch (e) {
@@ -281,6 +288,7 @@ export function initStatus(host: StatusHost) {
                     pending: 'a payout is included on Polygon, not final',
                     bad: 'a payout carries its reference but differs (see the check)',
                     twice: 'more than one payout carries its reference: this should never happen; report it',
+                    'maybe-twice': 'a payout is included on Polygon, and a second one carrying its reference is included but not final: a possible double payout, pending; report it',
                   }[sr.paid];
             }
           } catch (e) {

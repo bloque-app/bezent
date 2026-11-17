@@ -40,6 +40,8 @@ const fake = vi.hoisted(() => ({
   /** What the contract records for the reference, and the finalized head, for an unclear outcome. */
   recorded: undefined as unknown,
   head: 1,
+  /** The finalized head cannot be read. */
+  fail: false,
 }));
 
 vi.mock('../src/config/build', async () => {
@@ -108,7 +110,10 @@ vi.mock('../src/kreivo/redeem', async (original) => {
         at: { number: 1, hash: `0x${'00'.repeat(32)}` },
       }),
       redemption: async () => fake.recorded,
-      finalized: async () => fake.head,
+      finalized: async () => {
+        if (fake.fail) throw new Error('the light client is syncing');
+        return fake.head;
+      },
     }),
   };
 });
@@ -151,7 +156,10 @@ const answerRead = async (i = 0) => {
   await flush();
 };
 
-async function load() {
+/** The page's storage, kept across `load({ keep: true })` as a browser keeps it across a reload. */
+let store = new Map<string, string>();
+
+async function load(o: { keep?: boolean; blocked?: boolean } = {}) {
   vi.resetModules();
   fake.connects.length = 0;
   fake.deposits.length = 0;
@@ -161,14 +169,27 @@ async function load() {
   fake.provided = 0;
   fake.recorded = undefined;
   fake.head = 1;
+  fake.fail = false;
   // A storage of the test's own: Node's global localStorage, where it has one, is not the page's.
-  const store = new Map<string, string>();
-  vi.stubGlobal('localStorage', {
-    getItem: (k: string) => store.get(k) ?? null,
-    setItem: (k: string, v: string) => void store.set(k, String(v)),
-    removeItem: (k: string) => void store.delete(k),
-    clear: () => store.clear(),
-  });
+  if (!o.keep) store = new Map<string, string>();
+  const refused = () => {
+    throw new DOMException('blocked', 'SecurityError');
+  };
+  vi.stubGlobal(
+    'localStorage',
+    o.blocked
+      ? { getItem: refused, setItem: refused, removeItem: refused, clear: refused, key: refused, get length(): number { return refused(); } }
+      : {
+          getItem: (k: string) => store.get(k) ?? null,
+          setItem: (k: string, v: string) => void store.set(k, String(v)),
+          removeItem: (k: string) => void store.delete(k),
+          clear: () => store.clear(),
+          key: (i: number) => [...store.keys()][i] ?? null,
+          get length() {
+            return store.size;
+          },
+        },
+  );
   document.body.innerHTML = html.slice(html.indexOf('<body>') + 6, html.indexOf('<script'));
   await import('../src/main');
   await flush();
@@ -393,10 +414,20 @@ describe('the payout address', () => {
   });
 });
 
+describe('leaving the page', () => {
+  it('is not warned about when nothing is pending', async () => {
+    await load();
+    const e = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(e);
+    expect(e.defaultPrevented).toBe(false);
+  });
+});
+
 describe('a signature over another payload, and an unclear outcome', () => {
   const metadataKey = `bezent.bridge.metadata/polkadot-js/0x${'c7'.repeat(32)}/136/PassAuthenticate,DynamicMaxBlockWeight`;
-  async function redeeming() {
-    await load();
+  const pendingKey = `bezent.bridge.pending/v1/kreivo-test/${ALICE}`;
+  async function redeeming(o: Parameters<typeof load>[0] = {}) {
+    await load(o);
     $<HTMLButtonElement>('redeem-connect').click();
     await flush();
     ($('redeem-accounts').querySelector('button') as HTMLButtonElement).click();
@@ -436,7 +467,7 @@ describe('a signature over another payload, and an unclear outcome', () => {
     $<HTMLButtonElement>('redeem-new-reference').click();
     await flush();
     expect($('redeem-reference').textContent).toBe(reference);
-    expect($('redeem-review').textContent).toMatch(/locked: the redemption 0x7{64} may still be included/);
+    expect($('redeem-review').textContent).toMatch(/locked: the redemption 0x7{64} .* may still be included/);
     expect($('redeem-progress').textContent).toMatch(/until block 1064 is final; the reference stays locked meanwhile/);
   });
 
@@ -468,6 +499,78 @@ describe('a signature over another payload, and an unclear outcome', () => {
     expect($<HTMLButtonElement>('redeem-new-reference').disabled).toBe(true);
   });
 
+  async function pend(o: Parameters<typeof load>[0] & { fail?: boolean } = {}) {
+    const ctx = await redeeming(o);
+    fake.head = 1_000;
+    fake.fail = !!o.fail;
+    fake.redeems[0]!.reject(new ctx.UnclearOutcome('The redemption 0x77… was broadcast, but following it failed.', `0x${'77'.repeat(32)}`, 1_064));
+    await flush();
+    return ctx;
+  }
+  const lockRow = () => $('redeem-review').textContent ?? '';
+
+  it('keeps the lock across a reload: the record is stored, and a fresh page with the same storage starts with Redeem off', async () => {
+    const { reference } = await pend();
+    const stored = JSON.parse(store.get(pendingKey) ?? 'null');
+    expect(stored).toMatchObject({ v: 1, txHash: `0x${'77'.repeat(32)}`, reference, validUntil: 1_064, snapshot: { amount: '2000000' } });
+    // A reload: new modules, new DOM, the same storage.
+    await load({ keep: true });
+    expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+    expect($<HTMLButtonElement>('redeem-new-reference').disabled).toBe(true);
+    expect($('redeem-reference').textContent).toBe(reference);
+    expect(lockRow()).toMatch(/locked: the redemption 0x7{64} .* may still be included/);
+    expect(lockRow()).toMatch(/Do not reload or close this page/);
+    expect($('redeem-progress').textContent).toMatch(/sent before this page was reloaded may still be included/);
+    // Connecting an account and filling the form does not enable it.
+    $<HTMLButtonElement>('redeem-connect').click();
+    await flush();
+    ($('redeem-accounts').querySelector('button') as HTMLButtonElement).click();
+    await flush();
+    type('redeem-amount', '2');
+    await flush();
+    expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+    expect(store.has(pendingKey)).toBe(true);
+  });
+
+  it('warns on leaving while a redemption is pending, and says not to reload or close the page', async () => {
+    const { UnclearOutcome } = await pend();
+    const e = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(e);
+    expect(e.defaultPrevented).toBe(true);
+    expect($('redeem-progress').textContent).toMatch(/Do not reload or close this page until it settles/);
+    expect(UnclearOutcome).toBeDefined();
+  });
+
+  it('says the lock would be lost on a reload when storage is unavailable', async () => {
+    await pend({ blocked: true });
+    expect($('redeem-progress').textContent).toMatch(/could not store the lock, so a reload or closing the page would lose it/);
+    expect(lockRow()).toMatch(/could not store the lock, so a reload or closing the page would lose it/);
+    expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+    expect(store.size).toBe(0);
+  });
+
+  it('names the network the redemption belongs to, and says to select it again when another is selected', async () => {
+    const { encodePending, takeRedeemSnapshot } = await import('../src/redeem');
+    const snapshot = takeRedeemSnapshot({ redeemer: { account: ALICE }, asset: { id: 101, symbol: 'bUSDC', decimals: 6 }, amount: 2_000_000n, whole: false, backend: { kind: 'evm', chainId: 137n }, payout: A1, reference: `0x${'12'.repeat(32)}` }, 2)!;
+    store = new Map();
+    store.set(
+      `bezent.bridge.pending/v1/kreivo/${ALICE}`,
+      encodePending({ redeemer: ALICE, reference: snapshot.reference, txHash: `0x${'88'.repeat(32)}`, validUntil: 5_000, network: 'polygon', networkLabel: 'Polygon', kreivo: 'kreivo', snapshot }),
+    );
+    await load({ keep: true });
+    expect(lockRow()).toMatch(/\(.*, Polygon\) may still be included/);
+    expect(lockRow()).toMatch(/belongs to Polygon, which is not selected: select it again to settle it/);
+    expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+  });
+
+  it('shows what the watcher last read, and when its read failed', async () => {
+    await pend();
+    expect(lockRow()).toMatch(/last checked at block 1000 \(finalized\), \d\d:\d\d:\d\d UTC/);
+    // A wedged watcher is visible: its read fails.
+    await pend({ fail: true });
+    expect(lockRow()).toMatch(/last read failed at \d\d:\d\d:\d\d UTC \(the light client is syncing\); trying again/);
+  });
+
   it('frees the reference once Kreivo records the redemption, and links to its status', async () => {
     const { reference, UnclearOutcome } = await redeeming();
     fake.recorded = {
@@ -484,6 +587,8 @@ describe('a signature over another payload, and an unclear outcome', () => {
     expect($('redeem-link').querySelector('a')?.getAttribute('href')).toBe(`#status=withdrawal&redeemer=${ALICE_SS58}&reference=${reference}`);
     expect($('redeem-reference').textContent).not.toBe(reference);
     expect($<HTMLButtonElement>('redeem-new-reference').disabled).toBe(false);
+    // Settled: the stored lock is cleared.
+    expect(store.has(pendingKey)).toBe(false);
   });
 });
 

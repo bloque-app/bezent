@@ -18,7 +18,8 @@ import { connect, deposit, readContract, type Session } from '../src/evm/deposit
 import { depositReference, mintReference, payoutReference, unassociatedRefundPayoutReference, withdrawalReference } from '../src/lib/refs';
 import type { Hex } from '../src/lib/bytes';
 import type { Redemption } from '../src/kreivo/bezent';
-import { initStatus, UNPAID_LABEL } from '../src/ui/status';
+import { initStatus, searchRows, UNPAID_LABEL } from '../src/ui/status';
+import type { Payout, PayoutSearch } from '../src/status/polygon';
 import { mockWallet, network, OWNER } from './mock-wallet';
 
 const kreivo = vi.hoisted(() => ({ minted: false, redemption: undefined as unknown }));
@@ -217,6 +218,8 @@ describe('a withdrawal’s status', () => {
     expect(r['State (from chain data)']).toMatch(/could not be determined: too many Reference logs/);
     expect(r['State (from chain data)']).not.toMatch(/payout not found yet/);
     expect(r['Undetermined']).toMatch(/^20 more Reference logs/);
+    // Said once: the count is not repeated among the logs without a payout.
+    expect(r[UNPAID_LABEL]).not.toMatch(/more not examined/);
   });
 
   it('a real payout is found even behind more than 100 Reference logs anyone emitted', async () => {
@@ -257,5 +260,30 @@ describe('a withdrawal’s status', () => {
     const { status } = await page();
     await status.withdrawal('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY', REF);
     expect(document.getElementById('status-note')!.textContent).toMatch(/prefix 2/);
+  });
+});
+
+describe('a second payout that is included but not final', () => {
+  const payout = (block: bigint, final: boolean, canonical = true): Payout => ({
+    txHash: `0x${block.toString(16).padStart(64, '0')}`,
+    referenceLog: 3,
+    blockNumber: block,
+    blockHash: `0x${'aa'.repeat(32)}`,
+    transfers: [{ to: TO, amount: 5_000_000n, logIndex: 2 }],
+    finality: { blockNumber: block, blockHash: `0x${'aa'.repeat(32)}`, finalized: final ? block : block - 1n, final, canonical },
+  });
+  const search = (found: Payout, others: Payout[]): PayoutSearch => ({ found, others, unpaid: [], unexamined: 0, searched: { from: 1n, to: 100n }, complete: true });
+  const check = { to: TO, amount: 5_000_000n };
+
+  it('is a pending possible double payout, not plain “paid”', () => {
+    const r = searchRows('Payout', search(payout(60n, true), [payout(50n, false)]), check);
+    expect(r.paid).toBe('maybe-twice');
+    expect(r.rows.map(([k]) => k)).toContain('Possible double payout (pending)');
+    expect(searchRows('Payout', search(payout(60n, true), []), check).paid).toBe('yes');
+  });
+
+  it('stays a double payout when the second is final, and ignores one that was reorganised away', () => {
+    expect(searchRows('Payout', search(payout(60n, true), [payout(50n, true)]), check).paid).toBe('twice');
+    expect(searchRows('Payout', search(payout(60n, true), [payout(50n, false, false)]), check).paid).toBe('yes');
   });
 });

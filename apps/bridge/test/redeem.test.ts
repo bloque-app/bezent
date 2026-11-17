@@ -24,9 +24,14 @@ import {
   redeemRows,
   refusal,
   runRedeem,
+  decodePending,
+  encodePending,
+  pendingKey,
   settle,
   takeRedeemSnapshot,
+  type Pending,
   type RedeemSnapshot,
+  type SettleRead,
 } from '../src/redeem';
 import { CONTRACT_ERRORS, REDEEMED_TOPIC, type DryRun, type Redemption } from '../src/kreivo/bezent';
 import type { Finalized, Plan, Prepared, RedeemChain, RedeemFacts } from '../src/kreivo/redeem';
@@ -425,11 +430,60 @@ describe('an unclear outcome', () => {
     expect(await settle({ ...u, validUntil: undefined }, () => never.c, { sleep })).toMatchObject({ kind: 'recorded', at: 5_002 });
   });
 
+  it('reports each read to onRead, and a failed one by its message, without changing what it returns', async () => {
+    const { c } = chain([{ head: 1_000 }, 'throw', { head: 1_065, recorded: true }]);
+    const heard: SettleRead[] = [];
+    expect(await settle(u, () => c, { sleep, onRead: (r) => heard.push(r) })).toEqual({ kind: 'recorded', redemption: record, at: 1_065 });
+    expect(heard).toEqual([{ ok: true, head: 1_000 }, { ok: false, error: 'the light client is syncing' }, { ok: true, head: 1_065 }]);
+    // A display that throws does not stop the wait.
+    const again = chain([{ head: 1_000 }, { head: 1_065, recorded: true }]);
+    expect(await settle(u, () => again.c, { sleep, onRead: () => { throw new Error('display'); } })).toMatchObject({ kind: 'recorded', at: 1_065 });
+  });
+
   it('skips a turn while the page is on another network, and stops when asked', async () => {
     const { c } = chain([{ head: 1_000, recorded: true }]);
     let turns = 0;
     expect(await settle(u, () => (turns++ < 2 ? undefined : c), { sleep })).toMatchObject({ kind: 'recorded' });
     expect(turns).toBe(3);
     expect(await settle(u, () => c, { sleep, stopped: () => true })).toBeUndefined();
+  });
+});
+
+describe('the stored pending record', () => {
+  const pending: Pending = {
+    redeemer: ALICE,
+    reference: REF,
+    txHash: `0x${'77'.repeat(32)}`,
+    validUntil: 1_064,
+    network: 'polygon',
+    networkLabel: 'Polygon',
+    kreivo: 'kreivo',
+    snapshot: snapshot({ whole: true }),
+  };
+
+  it('is one versioned key per Kreivo network and redeemer', () => {
+    expect(pendingKey('kreivo', ALICE)).toBe(`bezent.bridge.pending/v1/kreivo/${ALICE}`);
+  });
+
+  it('round-trips, bigints and an unknown mortality included', () => {
+    expect(decodePending(encodePending(pending))).toEqual(pending);
+    const open = { ...pending, validUntil: undefined };
+    expect(decodePending(encodePending(open))).toEqual(open);
+    expect(decodePending(encodePending(pending))?.snapshot.amount).toBe(5_000_000n);
+  });
+
+  it('refuses a record that is not whole and well formed, or of another version', () => {
+    const j = JSON.parse(encodePending(pending));
+    for (const bad of [
+      'not json',
+      '{}',
+      JSON.stringify({ ...j, v: 2 }),
+      JSON.stringify({ ...j, txHash: '0x77' }),
+      JSON.stringify({ ...j, snapshot: { ...j.snapshot, amount: '-1' } }),
+      JSON.stringify({ ...j, snapshot: { ...j.snapshot, payout: '0x12' } }),
+      JSON.stringify({ ...j, snapshot: { ...j.snapshot, reference: `0x${'cd'.repeat(32)}` } }),
+    ]) {
+      expect(decodePending(bad)).toBeUndefined();
+    }
   });
 });

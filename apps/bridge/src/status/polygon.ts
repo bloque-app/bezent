@@ -142,15 +142,22 @@ export async function findPayout(pc: Reads, n: ResolvedNetwork, emitter: Address
   // Transactions holding a transfer of the token from the reserve in the blocks searched. Only the reserve moves
   // these, so spam cannot add to them: a `Reference` hit in one of them is read before any other.
   const fromReserve = new Set<string>();
+  // Transactions of ranges whose reserve `Transfer` query failed: nothing is known of them, so they are not ranked
+  // down (see `rank`).
+  const unranked = new Set<string>();
   while (to >= from && requests < maxRequests) {
     const lo = to - chunk + 1n > from ? to - chunk + 1n : from;
     requests++;
     let logs;
-    let reserved;
+    let reserved: { transactionHash: Hex | null }[] | undefined;
     try {
       [logs, reserved] = await Promise.all([
         pc.getLogs({ address: emitter, event: referenceEmitterAbi[0], args: { ref: reference }, fromBlock: lo, toBlock: to, strict: true }),
-        pc.getLogs({ address: n.token, event: tokenAbi.find((a) => a.type === 'event' && a.name === 'Transfer')!, args: { from: n.reserve }, fromBlock: lo, toBlock: to, strict: true }),
+        // Only a ranking aid: when this query alone fails for the range (the reserve moved too many transfers for
+        // the provider to return), the range's Reference hits are examined unranked rather than the search lost.
+        pc
+          .getLogs({ address: n.token, event: tokenAbi.find((a) => a.type === 'event' && a.name === 'Transfer')!, args: { from: n.reserve }, fromBlock: lo, toBlock: to, strict: true })
+          .catch(() => undefined),
       ]);
     } catch (e) {
       if (chunk > 1_000n) {
@@ -159,7 +166,7 @@ export async function findPayout(pc: Reads, n: ResolvedNetwork, emitter: Address
       }
       throw new Error(`${n.label} refused the log search (${(e as Error).message.split('\n')[0]}).`);
     }
-    for (const t of reserved) if (t.transactionHash) fromReserve.add(t.transactionHash.toLowerCase());
+    for (const t of reserved ?? []) if (t.transactionHash) fromReserve.add(t.transactionHash.toLowerCase());
     const inChunk = logs
       .filter((l) => l.args.ref?.toLowerCase() === reference.toLowerCase() && l.transactionHash && l.blockHash && l.logIndex !== null && l.blockNumber !== null)
       .sort((a, b) => (a.blockNumber === b.blockNumber ? b.logIndex! - a.logIndex! : a.blockNumber! > b.blockNumber! ? -1 : 1));
@@ -167,6 +174,7 @@ export async function findPayout(pc: Reads, n: ResolvedNetwork, emitter: Address
       const key = l.transactionHash!.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
+      if (!reserved) unranked.add(key);
       hits.push({ txHash: l.transactionHash!, logIndex: l.logIndex!, blockNumber: l.blockNumber!, blockHash: l.blockHash! });
     }
     if (lo === from) {
@@ -178,7 +186,14 @@ export async function findPayout(pc: Reads, n: ResolvedNetwork, emitter: Address
   }
   // Those whose transaction transfers from the reserve first (newest first within each), so that Reference logs
   // anyone emitted cannot push the real payout past `maxHits`; shown newest first.
-  const rank = (h: { txHash: Hex }) => (fromReserve.has(h.txHash.toLowerCase()) ? 0 : 1);
+  //
+  // Two assumptions make this ranking sound, and both are about the token and the reserve, not this code: the
+  // reserve has given no allowance or permit that a third party could use with `transferFrom` (so a transfer from
+  // the reserve is the reserve's own act), and the token has no recipient hook (so a payout's recipient cannot make
+  // the reserve emit a transfer in someone else's transaction). If either stops holding, a spammer could place a
+  // transfer from the reserve beside a Reference log of their own, and rank 0 would no longer mean "the reserve's".
+  // A range whose reserve query failed has no ranking at all: its hits keep rank 0, examined newest first.
+  const rank = (h: { txHash: Hex }) => (fromReserve.has(h.txHash.toLowerCase()) || unranked.has(h.txHash.toLowerCase()) ? 0 : 1);
   const examined = hits
     .map((h, i) => ({ h, i }))
     .sort((a, b) => rank(a.h) - rank(b.h) || a.i - b.i)

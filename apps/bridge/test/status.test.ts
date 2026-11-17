@@ -127,6 +127,22 @@ describe('a payout by its reference', () => {
     expect(checkPayout({ ...r.found!, transfers: [] }, TO, 1n)).toMatchObject({ ok: false, reason: expect.stringMatching(/not a payout/) });
   });
 
+  it('falls back to unranked for a range whose reserve Transfer query fails, and does not throw', async () => {
+    const { s } = await session({
+      payouts: [{ reference: REF, to: TO, amount: 5_000_000n, block: 60 }],
+      bogusReferences: [{ reference: REF, block: 95 }],
+      reserveLogsFail: true,
+      finalized: 90,
+    });
+    const r = await findPayout(s.public, network, EMITTER, 10n, REF);
+    expect(r.complete).toBe(true);
+    expect(r.found).toMatchObject({ blockNumber: 60n, transfers: [{ to: TO, amount: 5_000_000n }] });
+    expect(r.unpaid.map((u) => u.blockNumber)).toEqual([95n]);
+    // Unranked, the Reference hits are examined newest first, and the cap still leaves the rest counted.
+    const capped = await findPayout(s.public, network, EMITTER, 10n, REF, { maxHits: 1 });
+    expect(capped).toMatchObject({ found: undefined, unpaid: [{ blockNumber: 95n }], unexamined: 1 });
+  });
+
   it('searches from the newest block back, halving the range when the provider refuses it', async () => {
     const { s, w } = await session({ payouts: [{ reference: REF, to: TO, amount: 1n, block: 12 }], maxLogRange: 2_500, latest: 9_000 });
     const r = await findPayout(s.public, network, EMITTER, 10n, REF, { chunk: 8_000n });

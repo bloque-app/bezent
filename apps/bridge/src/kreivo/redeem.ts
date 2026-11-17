@@ -371,7 +371,7 @@ export function submitError(err: unknown, at: { hash: string | undefined; broadc
   }
   const until = at.birth === undefined ? undefined : at.birth + MORTALITY;
   return new UnclearOutcome(
-    `The redemption ${at.hash} was broadcast, but following it failed: ${m}. It may still be included${until === undefined ? '' : ` until block ${until}`}; its reference stays locked until Kreivo records it or it can no longer be included.`,
+    `The redemption ${at.hash} was broadcast, but following it failed: ${m}. It may still be included${until === undefined ? '' : ` until block ${until}`}; its reference stays locked until Kreivo records it or it can no longer be included. Do not reload or close this page until it settles.`,
     at.hash as Hex,
     until,
   );
