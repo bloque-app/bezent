@@ -8,8 +8,8 @@ kind: pages
 covers: [REQ-IC-2, REQ-RF-2]
 pages: [directed-returns-alert]
 observables: [nonfinal_transfers, oldest_nonfinal_transfer_age_seconds, reserve_amount]
-tests: [services/core/tests/directed_alerts.rs::req_ic_2_directed_returns_above_the_threshold_page]
-exercised: no
+tests: [services/core/tests/directed_alerts.rs::req_ic_2_directed_returns_above_the_threshold_page, services/full-chain/tests/full_chain/directed.rs::s7_ac_a6_1_ac_a6_4_a_directed_round_trip_and_a_return]
+exercised: yes
 ---
 # Directed returns above their threshold
 
@@ -55,8 +55,8 @@ WHERE kind = 'refund' AND request_reference LIKE 'directed:%' ORDER BY bridge_re
    not returned by bezent: it waits, and an operator's release returns it (`conditions/CND-Unassociated.md`).
 2. Check that withdrawals are not waiting on the allowance because of them: transfers in `CND-PayoutWindow`
    (`conditions/CND-PayoutWindow.md`).
-3. If they come from one client, tell its owner, from the deployment's own notes. If the returns themselves fail, follow
-   `payout.md`.
+3. If they come from one client, tell its owner, from the deployment's own notes. If the returns themselves fail (the
+   token refuses to pay the refund address), follow `../procedures/directed-return-failed.md`.
 4. If it is abuse that the allowance cannot carry, pause the deposit route (`operator_pause`); arrivals keep being observed
    and returned or deposited when it lifts.
 
@@ -70,7 +70,9 @@ WHERE kind = 'refund' AND request_reference LIKE 'directed:%' ORDER BY bridge_re
 
 ## Exercise
 
-On the test bed: set `returns_per_day` to 0, send one directed deposit below the minimum, see it returned and the page
-made once.
+On the test bed: set `returns_per_day` to 0, send one directed deposit that can never be minted, see it returned and the
+page made once. Through the declared contract an amount below the minimum reverts when the route's minimum is the
+contract's, so `s7` of the full-chain suite names a recipient bezent refuses instead.
 
-Status: not exercised (NFR-9). Behaviour proven by the tests listed above, not by a run of this runbook.
+Status: exercised on the full-chain bed on 2026-11-17 (`EXERCISES.md`; NFR-9), by an automated scenario, with the Kreivo half a
+model. Not yet on Kreivo's own runtime.

@@ -8,8 +8,8 @@ kind: pages
 covers: [REQ-IC-2, REQ-AS-11]
 pages: [unpaired-direction]
 observables: [open_gaps, observer_lag_estimate_seconds]
-tests: [services/core/tests/directed_alerts.rs::ac_a6_6_an_unpaired_direction_pages_once, services/evm-endpoint/tests/directed.rs]
-exercised: no
+tests: [services/core/tests/directed_alerts.rs::ac_a6_6_an_unpaired_direction_pages_once, services/evm-endpoint/tests/directed.rs, services/full-chain/tests/full_chain/directed.rs::s9_ac_a6_6_spam_at_the_minimum_only_pages_and_an_unpaired_direction_pages_once]
+exercised: yes
 ---
 # An unpaired direction
 
@@ -70,5 +70,8 @@ transaction from the origin network's public data at that coordinate, with both 
 
 On the test bed: emit a `Directed` log through a contract the endpoint watches without the transfer before it (a test
 contract at the declared address on a fork), see the observation recorded as `unpaired_direction` and the page made once.
+`s9` of the full-chain suite does it: the declared `DirectedDeposit`'s code is replaced on the fork, for one call, by
+code that emits `Directed` alone, then put back.
 
-Status: not exercised (NFR-9). Behaviour proven by the tests listed above, not by a run of this runbook.
+Status: exercised on the full-chain bed on 2026-11-17 (`EXERCISES.md`; NFR-9), by an automated scenario, with the Kreivo half a
+model. Not yet on Kreivo's own runtime.

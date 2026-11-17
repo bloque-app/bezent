@@ -77,6 +77,23 @@ reused.
 | T-018-19 | Runbooks: a return that fails, spam at the minimum (alerts only), an `UnpairedDirection` | `REQ-IC-6`, `NFR-9` | Each exercised on the test bed |
 | T-018-20 | Round trip from `bridge.bloque.network`: a 1 USDC deposit, mint, redeem the 1 bUSDC (production's redemption minimum is 1 bUSDC, Open 14), payout; one return exercised | `M-4` | Every leg at its coordinate, the reserve check at zero divergence throughout, the statement shows it |
 
+**T-018-19, done (2026-11-17).** Three runbooks, each exercised on the full-chain bed (`services/full-chain`, Polygon an
+anvil fork with the real USDC and the vault and `DirectedDeposit` from the repository's scripts, Kreivo the in-memory
+model), and recorded in `deploy/runbooks/EXERCISES.md`:
+
+- **A return that fails:** `deploy/runbooks/procedures/directed-return-failed.md`, exercised by `s8` (a USDC-blacklisted
+  refund address: the dry run refuses every preparation with the Roles modifier's `ModuleTransactionFailed()`, which
+  hides the token's reason, so the runbook reads the token; review at the deadline; a two-person new attempt once the
+  blacklist is lifted pays it once, to the same address).
+- **Spam at the minimum:** `deploy/runbooks/procedures/directed-spam.md`, exercised by `s9` (alerts only; the route's
+  pause is the one lever).
+- **An `UnpairedDirection`:** `deploy/runbooks/pages/unpaired-direction.md`, exercised by `s9`.
+
+The same suite runs a directed round trip end to end (`s7`: deployment, declaration, `[[directing]]`, a
+`depositWithPermit`, the directed arrival, the mint with no request, a redemption and its payout, and a return to a
+refund address), with the reserve check at zero divergence throughout, in CI's `e2e-full-chain` job. `pages/directed-mints.md`
+and `pages/directed-returns.md` are exercised there too. Kreivo's runtime is not: that is T-018-20's mainnet test.
+
 ## Milestone 5 — evmhot sweeps through the directing contract (S, in evmhot, outside this repository)
 
 Ruled by @pandres95, 2026-11-08 (plan, part 5). Until it is done, Swaps binds sweeps by coordinate, as today.

@@ -17,6 +17,7 @@
 //! A scenario that cannot reach the fork **fails**; there is no skip.
 
 mod bed;
+mod directed;
 
 use alloy::primitives::U256;
 use bed::*;
