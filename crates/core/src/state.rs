@@ -95,7 +95,7 @@ impl fmt::Display for State {
 
 /// The named conditions of SPEC §10 (`CND-AwaitingInstruction` is withdrawn by amendment 0007;
 /// `CND-CutOff` is amendment 0010's; `CND-PayoutWindow` amendment 0012's; `CND-DepositWindow`
-/// amendment 0029's).
+/// amendment 0029's; `CND-DepositCapacity` and `CND-TokenUpgraded` amendment 0031's).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Condition {
     /// A final arrival not bound by a deposit request, or one that cannot become a deposit.
@@ -123,11 +123,17 @@ pub enum Condition {
     /// A directed deposit over what its route's window has left; it resumes by itself as the
     /// window rolls over, in the order of arrival (amendment 0029, Open 1).
     DepositWindow,
+    /// A directed deposit over its route's capacity; it resumes by itself when the route has room,
+    /// in the order of arrival (amendment 0031, `d-f018-capacity`).
+    DepositCapacity,
+    /// A directed deposit of an admitted token whose code changed at or before its arrival; it
+    /// resumes once two operators lift the hold (amendment 0031, `d-f018-usdc-upgrade`).
+    TokenUpgraded,
 }
 
 impl Condition {
     /// Every condition.
-    pub const ALL: [Condition; 12] = [
+    pub const ALL: [Condition; 14] = [
         Condition::Unassociated,
         Condition::ReserveShort,
         Condition::FeeShort,
@@ -140,6 +146,8 @@ impl Condition {
         Condition::CutOff,
         Condition::PayoutWindow,
         Condition::DepositWindow,
+        Condition::DepositCapacity,
+        Condition::TokenUpgraded,
     ];
 
     /// The condition's id, as the spec and the store write it.
@@ -157,6 +165,8 @@ impl Condition {
             Condition::CutOff => "CND-CutOff",
             Condition::PayoutWindow => "CND-PayoutWindow",
             Condition::DepositWindow => "CND-DepositWindow",
+            Condition::DepositCapacity => "CND-DepositCapacity",
+            Condition::TokenUpgraded => "CND-TokenUpgraded",
         }
     }
 
@@ -222,9 +232,10 @@ pub fn review_exit(before: State, to: State, new_attempt: bool) -> bool {
 /// The one review exit a directed deposit gains (amendment 0029, A5, Open 2): out of a review it
 /// entered from `Source-Final`, into `Refunding`, a refund to its refund destination. It is not an
 /// edge of the table ([`edge`] and [`review_exit`] still refuse it), and it holds only for a directed
-/// deposit that entered review holding `CND-DestinationRefused` with no mint attempt ever signed,
-/// which the store decides (`directed_review_refund_open()`, migration 0145). It moves value, so it
-/// needs a second approver ([`resolution_moves_value`]).
+/// deposit with no mint attempt ever signed whose evidence, when the review is resolved, is the
+/// issuing network's refusal of its destination (amendment 0031, `d-f018-review-exit-later`), which
+/// the store decides (`directed_review_refund_open()`, migrations 0145 and 0150). It moves value, so
+/// it needs a second approver ([`resolution_moves_value`]).
 pub fn directed_review_exit(before: State, to: State) -> bool {
     before == State::SourceFinal && to == State::Refunding
 }
@@ -297,5 +308,7 @@ mod tests {
         }
         assert!(resolution_moves_value(State::Refunding));
         assert!(!Condition::DepositWindow.blocks_delivery());
+        assert!(!Condition::DepositCapacity.blocks_delivery());
+        assert!(!Condition::TokenUpgraded.blocks_delivery());
     }
 }

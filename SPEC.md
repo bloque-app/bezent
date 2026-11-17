@@ -1,7 +1,7 @@
 ---
 name: bezent
 summary: A trusted, mirrored bridge. Each bridged asset has one reserve, held by the operator on one backend, and each backend declares whether its facts are public or attested. Value deposited there is minted, one to one, on one issuing network, to the destination the order names. Anyone may redeem a bridged asset. It is destroyed at once, and the origin token is paid out from the reserve, on its network. A payout proven never to execute is made whole by one refund mint. bezent never calls a ledger's contract.
-spec_version: 0.5.13
+spec_version: 0.5.14
 status: draft
 date: 2026-11-17
 ---
@@ -15,7 +15,7 @@ It is normative and self-contained. It does not say how bezent is built, which t
 implement it, which networks it serves today, or why the project exists. `notes/` says why, and
 `notes/CONSTRAINTS-FOR-PLAN.md` says what the plan is expected to bind.
 
-Amendments 0001 to 0015, 0018 (A1b; Open 3 in part, and Open 6), 0019 (A1d), 0020, 0021 (A1b), 0022 (A1b and A2a; A3 and A4 are not ruled), 0024, 0028 and 0029 are
+Amendments 0001 to 0015, 0018 (A1b; Open 3 in part, and Open 6), 0019 (A1d), 0020, 0021 (A1b), 0022 (A1b and A2a; A3 and A4 are not ruled), 0024, 0028, 0029 and 0031 are
 applied (see `amendments/`). Amendment 0026 was applied in v0.5.9 and is withdrawn (v0.5.11).
 
 ### Change history
@@ -25,6 +25,7 @@ applied (see `amendments/`). Amendment 0026 was applied in v0.5.9 and is withdra
 | 0.5.11 | 2026-11-09 | Amendment 0026 is withdrawn (decision item `d-0026-holdout`, ruled by @pandres95 on the decision form, 2026-11-09: "Revert #100"); amendment 0029 replaces the path that needed it (directed deposits, #119). v0.5.9's text is reverted: `REQ-IN-3`, `REQ-IN-6`, `REQ-CV-2`, `REQ-RQ-3` and the Requester row of §3 read as in v0.5.8; `REQ-PN-3`, `AC-A2.5`, `ERR-SenderNotDeclared` and the §2 term "Declared sender" are withdrawn, and not reused. No identifier is renumbered. The 0.5.9 row stays as history. |
 | 0.5.12 | 2026-11-09 | Amendment 0028 (ruled by @pandres95 in chat, 2026-11-07: "Yes, write the amendment and build it."): when the reserve check cannot see an asset (no evaluation that holds: one that cannot be made, a point too far behind its network's final head, a final head that stops advancing, an observation gap), bezent **holds** the asset's routes: new work waits as under a pause, transfers in flight continue, bezent lifts the hold itself once an evaluation holds, and a human is paged only once the hold outlasts a declared bound, or at once when a network's final head is not advancing (§2 "Hold", `REQ-IC-2`, `REQ-GV-2`, `NFR-5`, `NFR-6`, `AC-E2.3`). When the money differs, it is a **pause**, as before, lifted only by several approvers; a lag is no longer a divergence, and a hold never masks one the evaluation can see (`REQ-BK-1`, `AC-E2.1`). Every pause and page says which of the two it is, with the values (`REQ-IC-2`). §10 `CND-Paused` covers both. |
 | 0.5.13 | 2026-11-17 | Amendment 0029 (accepted by @pandres95 in chat, 2026-11-17: "We need to revise this and make it happen"; its Open 1 to 13 ruled on the decision form, 2026-11-09, `d-0029-window` to `d-0029-gas`, Open 15 ruled the same day, `d-mixed-sweeps-2`, and the refund destination ruled the same day): a **directed arrival**, made through **directing code** declared for a reserve, records in the transaction that moves its value where on the issuing network it is to be minted (§2, `REQ-AS-11`). A final one becomes a deposit without a request, at `Source-Final`, with the destination its directing code recorded and, as its refund destination, the address its caller named, the original depositor; no request can bind it (`REQ-IN-10`, `REQ-IN-3`, `REQ-RQ-3`, `ERR-SourceNotFound`). One that the route's limits, a pause, a hold or a bound on the issuing network keep from being minted waits and resumes by itself, the route's window under the new `CND-DepositWindow` (Open 1); one that can never be minted is returned to its refund destination by bezent, with no second approver (Open 3) (`REQ-IN-11`, `REQ-IN-6`, `REQ-RF-2`, `DEF-5`). A directed deposit in review for `CND-DestinationRefused`, with no mint ever signed, may be resolved into `Refunding` with a second approver: one new edge in §5.4 (Open 2). Anyone may find a directed deposit by its arrival's coordinate (`REQ-ST-1`) and read its state, or a withdrawal's, without authentication (`REQ-ST-8`, Open 8). New `US-A6` with `AC-A6.1`–`AC-A6.6`; §1.2, §1.4, §3 (the funder's row), §4.2, §4.3 and §15 follow. `REQ-PN-1`, `REQ-RQ-7` and the invariants are unchanged. |
+| 0.5.14 | 2026-11-17 | Amendment 0031 (five rulings by @pandres95 on the decision form, 2026-11-17: `d-f018-capacity`, "Wait for capacity"; `d-f018-review-exit-later`, "Judge by evidence at resolution"; the ruling on a change of an origin token's code, "Yes, hold and alert"; `d-f018-return-routing`, "Accept, with an alert"; `d-f018-window-queue`, "Cap what waits to one window"): a directed deposit over its route's capacity waits in the new `CND-DepositCapacity` and resumes by itself in the order of arrival, never returned (`REQ-LM-4`, `REQ-IN-11`); a change of an admitted origin token's code holds the directed arrivals of that token made at or after it in the new `CND-TokenUpgraded`, neither minted nor returned, until an operator's lift with a second approver (new `REQ-AS-12`); the time a directed deposit waits for its route's window or capacity, or under that hold, does not count toward the route's deadline; a waiting directed deposit claims room in the window against requests only for one window from when it began to wait, and the claims together never more than one window's limit, while the queue still drains in the order of arrival (`REQ-IN-11`, §10 `CND-DepositWindow`); and the §5.4 directed review edge to `Refunding` is judged on the evidence when the review is resolved, the newest preparation of the first mint being the issuing network's refusal of the destination, made after the review began or the one whose deadline began it, never on an unknown (`REQ-RV-2`, `REQ-RF-1`). That a return may pay a third party's refund address at bezent's cost is recorded as an accepted exposure, watched by an alert (amendment 0031, part 4). `AC-A6.3` is revised; new `AC-A6.7`, `AC-A6.8` and `AC-A6.9`. |
 | 0.5.10 | 2026-11-06 | Amendment 0018, its Open 3 (in part: the route's limits only) and Open 6 (decision item `d-cv-open-choices`, ruled by @pandres95 on the decision form: "As recommended"; and his chat ruling of 2026-11-06 that an approval records the exact output it approved). A conversion output may be named for a deposit in `Needs-Review` for the conversion's deadline, as long as no refund of it is recorded (defined once, in `REQ-CV-6`: a refund counts as recorded from the moment a resolution into `Refunding` is recorded and not refused, which is what the code already tests; the clarification changes no behaviour); the deposit stays in review with its source and amount moved to the output, and the review ends as every review does, by a recorded resolution into `Delivering` with a second approver, after which the mint is ordered once at the output's amount; no edge is added (`REQ-RQ-4`, `REQ-CV-2`, `REQ-CV-6`). The output's amount is also checked against the route's minimum, maximum and window, with the route's own errors (`REQ-CV-2`, `REQ-LM-1`). `AC-A5.4` and `AC-A5.5` follow. |
 | 0.5.9 | 2026-11-06 | Amendment 0026 (decision item `d-requester-arrivals`, ruled by @pandres95 on the decision form: "Bind by sender"): each requester has declared senders, recorded by the operator, per origin network (`REQ-PN-3`, §2 "Declared sender"); a deposit binds only an arrival whose funder is one of the requesting requester's declared senders (`REQ-IN-3`, `REQ-RQ-3`), and is refused otherwise (`ERR-SenderNotDeclared`, `AC-A2.5`); an arrival no requester may bind stays an unassociated arrival (`REQ-IN-6`). A deposit naming a convertible arrival is checked on that arrival, and its conversion's output is bound through it (`REQ-CV-2`). Partly closes the exposure recorded in amendment 0018; what stays open is in amendment 0026. |
 | 0.5.8 | 2026-11-06 | Amendment 0021 (decision item `d-gate-sustained`, ruled by @pandres95 on the decision form: "24 hours"): "sustained" in V0's exit criteria is 24 consecutive hours of the reserve equation's evaluations at exactly zero divergence, a divergence restarting the window (§15). Amendment 0024 (`d-gate-scope`, ruled the same day: "As recommended"): the exit criteria gate only a release that moves value, the first release that lets a bridged asset carry value and each that adds an asset or a network to it; every other release needs its automated checks and the approval of one owner of the specification; a release declares which it is, and one that does not is refused (§15). No `REQ-*` changes. |
@@ -587,6 +588,12 @@ address, the admitted token it moves, the reserve address it moves it to, and th
 value. Its address MUST be published with the reserve addresses (`REQ-BK-5`, §7.E). Code that can be upgraded is code
 that holds reserve for `REQ-GV-3`.
 
+**`REQ-AS-12`** When the code of an admitted origin token changes on its network, bezent MUST hold the directed arrivals
+of that token there made at or after the change: each waits (`CND-TokenUpgraded`), and is neither minted nor returned,
+until an operator lifts the hold by a recorded action that a second approver approves (`REQ-GV-5`), after bezent's
+checks of the token's behaviour have been run again against the new code. A requester's deposit of the token is not held
+by it. The change MUST page (amendment 0031).
+
 ### 5.2 Deposit addresses, treasury and sweeps
 
 *Withdrawn by amendment 0007 (A1)*: getting value into a reserve is the requester's.
@@ -710,7 +717,7 @@ sends the transfer to `Needs-Review`.
 | `Delivered` | `Completed` | The destination leg is final and executed in full (`REQ-TR-3`) |
 | `Refunding` | `Refunded` | Its refund transfer is `Completed` |
 | `Needs-Review` | Any state reachable by **one ordinary edge** from the state held before review | The evidence is that edge's coordinate, verified by bezent (`REQ-RV-2`); a resolution that moves value has a second approver (`REQ-GV-5`) |
-| `Needs-Review`, held from `Source-Final`, a directed deposit only | `Refunding` | It is held for `CND-DestinationRefused` and no mint was ever signed for it; a recorded resolution with a second approver refunds it to its refund destination (`REQ-IN-11`, `REQ-RV-2`, `REQ-GV-5`). No other deposit gains this edge (amendment 0029, Open 2) |
+| `Needs-Review`, held from `Source-Final`, a directed deposit only | `Refunding` | No mint was ever signed for it, and the evidence when the review is resolved is the issuing network's refusal of its destination: the newest preparation of its first mint, a resolution's included, is that refusal, made while the asset could be minted, and either it is the refusal whose deadline began the review or it was made after the review began; no delivery anomaly is recorded for it and no mint of it is observed. A recorded resolution with a second approver refunds it to its refund destination (`REQ-IN-11`, `REQ-RV-2`, `REQ-GV-5`). An unknown never opens it (`REQ-RF-1`). No other deposit gains this edge (amendments 0029, Open 2, and 0031) |
 | Any non-terminal | Itself | It takes or clears a named condition (§10) |
 
 Two pairs are not edges, on purpose. `Received` does not lead straight to `Source-Final`: a deposit bound to a
@@ -776,13 +783,19 @@ named, the original depositor. The directing code MUST refuse a zero refund addr
 No one chooses either afterwards. A request naming its coordinate MUST be refused (`ERR-SourceNotFound`) and binds
 nothing.
 
-**`REQ-IN-11`** A directed arrival that its route's limits, a pause, a hold or a bound on the issuing network keep
-from being minted MUST wait in the named condition that applies (§10), and resume by itself. One that can never be
+**`REQ-IN-11`** A directed arrival that its route's limits, its route's capacity, a pause, a hold, a change of its
+token's code or a bound on the issuing network keep from being minted MUST wait in the named condition that applies
+(§10), and resume by itself, or, under a change of its token's code, once the hold is lifted (`REQ-AS-12`). It MUST NOT
+be returned for any of them. The time it waits for its route's window or capacity, or under the hold of its token, MUST
+NOT count toward the route's deadline (§5.4). While it waits for the window, it claims room ahead of later requests only
+for one window from when it began to wait, and never more than one window's limit; after that it still waits, ahead of
+every later directed deposit, but no longer counts against requests (amendment 0031). One that can never be
 minted under the route's current declaration, or whose destination bezent refuses by rule, MUST NOT become a deposit:
 it stays an unassociated arrival and MUST be returned to its refund destination by a refund of an unassociated arrival (`REQ-RQ-6`) that bezent orders itself, with that address
 as destination and with no second approver (amendment 0029, Open 3). Only the issuing network's refusal of a
 destination waits for review instead (`REQ-IN-9`); a review of that kind MAY resolve into a refund to the refund
-destination (amendment 0029, Open 2; §5.4), with a second approver.
+destination (amendment 0029, Open 2; §5.4), with a second approver, judged on the evidence when it is resolved and never
+on an unknown (amendment 0031).
 
 ### 5.6 Withdrawals (issuing network → origin network)
 
@@ -846,7 +859,8 @@ business day.
 
 **`REQ-RV-2`** A review MUST end only by evidence: a coordinate that settles the disposition, which the
 bridge verifies itself, after which the ordinary steps run, except the one edge to `Refunding` of a directed deposit
-(§5.4). A resolution that moves value MUST have a
+(§5.4), which rests on the issuing network's refusal of its destination as the evidence stands when the review is
+resolved. A resolution that moves value MUST have a
 second approver (`REQ-GV-5`).
 
 ### 5.10 Conversions
@@ -964,13 +978,24 @@ named once it cannot be taken back, without any requester.
 - `AC-A6.2` Given a deposit request, or a refund request, by any requester naming a directed arrival's coordinate, Then
   it is refused (`ERR-SourceNotFound`) and binds nothing; only bezent's own return to its refund destination may name
   it (`REQ-IN-10`, `REQ-IN-11`, `REQ-RQ-3`, `REQ-RQ-6`).
-- `AC-A6.3` Given a directed arrival held by a pause, a hold or the mint window, Then it waits and resumes by itself,
-  and nothing is returned (`REQ-IN-11`, `REQ-LM-3`).
+- `AC-A6.3` Given a directed arrival held by a pause, a hold, the mint window, its route's window or its route's
+  capacity, Then it waits and resumes by itself, in the order of arrival, nothing is returned, and the time it waited
+  for the route's window or capacity does not count toward its deadline (`REQ-IN-11`, `REQ-LM-3`, `REQ-LM-4`).
 - `AC-A6.4` Given a directed arrival that can never be minted, Then it is returned to the refund address its caller
   named, once, and to no one else (`REQ-IN-11`, `REQ-RF-2`, `INV-2`).
 - `AC-A6.5` Given an amount the directing code's limits refuse, Then nothing moves (`REQ-LM-2`).
 - `AC-A6.6` Given the transfer into the reserve of a directed arrival, Then it is one observation, consumed once, and
   never a plain arrival (`INV-2`, `INV-10`).
+- `AC-A6.7` Given directed deposits waiting for their route's window, Then a request is refused for their claims only
+  for one window from when each began to wait, and for no more than one window's limit, and they still resume in the
+  order of arrival (`REQ-IN-11`, `REQ-LM-1`).
+- `AC-A6.8` Given a change of an admitted origin token's code, Then a directed arrival of that token at or after it
+  waits holding `CND-TokenUpgraded`, is neither minted nor returned, and resumes only once a lift with a second approver
+  is recorded; a requester's deposit of the token is not held (`REQ-AS-12`, `REQ-GV-5`).
+- `AC-A6.9` Given a directed deposit in review from `Source-Final` with no mint ever signed, Then it may be resolved into
+  `Refunding`, with a second approver, only while the newest preparation of its first mint is the issuing network's
+  refusal of its destination, the asset mintable, made after the review began or the one whose deadline began it; a
+  later preparation that passes, or one refused for anything else, closes it (`REQ-RV-2`, `REQ-RF-1`, `REQ-IN-11`).
 
 ### Epic B — Withdrawals
 
@@ -1324,7 +1349,9 @@ named, parked condition that resumes by itself, with one alert per position. It 
 start a refund.
 
 **`REQ-LM-4`** When bezent cannot keep up, it MUST refuse new requests with `ERR-Overloaded` rather
-than accept work it will not finish within budget.
+than accept work it will not finish within budget. A directed deposit is not a request: over its route's capacity it
+waits (`CND-DepositCapacity`, `REQ-IN-11`) and is never returned for it; while it waits it counts toward the route's
+capacity, ahead of later requests.
 
 ### 8.5 Status
 
@@ -1489,7 +1516,9 @@ The layers are:
 | `CND-AwaitingConversion` | A deposit at `Source-Final` whose source is a convertible-token arrival, waiting for its requester to name the conversion's output; nothing is minted, and the arrival is never reserve (`REQ-CV-1`, `REQ-CV-2`, `REQ-CV-6`) |
 | `CND-CutOff` | The transfer's next step falls outside its route's declared cut-off; resumes by itself when the route reopens (`REQ-LM-1`). The time held does not count toward a payout's deadline (§5.4) |
 | `CND-PayoutWindow` | The reserve's outflow allowance for the current window is spent; the withdrawal waits and resumes by itself when the allowance refills. Nothing is refunded or failed because of it (`REQ-RN-4`, `REQ-KY-3`) |
-| `CND-DepositWindow` | A directed deposit over what its route's window has left; resumes by itself as the window rolls over, in the order of arrival (`REQ-IN-11`) |
+| `CND-DepositWindow` | A directed deposit over what its route's window has left; resumes by itself as the window rolls over, in the order of arrival (`REQ-IN-11`). The time held does not count toward the route's deadline (§5.4). A waiting deposit counts against requests only for one window from when it began to wait, and the waiting deposits together for no more than one window's limit (`REQ-IN-11`) |
+| `CND-DepositCapacity` | A directed deposit over its route's capacity; resumes by itself when the route has room, in the order of arrival (`REQ-IN-11`, `REQ-LM-4`). The time held does not count toward the route's deadline (§5.4) |
+| `CND-TokenUpgraded` | A directed deposit of an admitted token whose code changed at or before its arrival, the hold not lifted; resumes by itself once an operator's lift, with a second approver, is recorded (`REQ-AS-12`). The time held does not count toward the route's deadline (§5.4) |
 
 ---
 
@@ -1570,7 +1599,7 @@ invalid. This specification MUST NOT contain a requirement that serves no story.
 
 | Epic | Stories | Principal requirements | Key invariants |
 |---|---|---|---|
-| A — Deposits | `US-A2`, `US-A4`, `US-A5`, `US-A6` | `REQ-IN-*` (among them `REQ-IN-10`, `REQ-IN-11`), `REQ-AS-11`, `REQ-CV-1`, `REQ-CV-2`, `REQ-CV-4`, `REQ-CV-6`, `REQ-CV-7`, `REQ-RQ-3`, `REQ-RQ-4`, `REQ-LG-*` | `INV-2`, `INV-6`, `INV-10` |
+| A — Deposits | `US-A2`, `US-A4`, `US-A5`, `US-A6` | `REQ-IN-*` (among them `REQ-IN-10`, `REQ-IN-11`), `REQ-AS-11`, `REQ-AS-12`, `REQ-CV-1`, `REQ-CV-2`, `REQ-CV-4`, `REQ-CV-6`, `REQ-CV-7`, `REQ-RQ-3`, `REQ-RQ-4`, `REQ-LG-*` | `INV-2`, `INV-6`, `INV-10` |
 | B — Withdrawals | `US-B1`, `US-B3`, `US-B5` | `REQ-OT-*`, `REQ-RF-*`, `REQ-CV-5`, `REQ-CV-6`, `REQ-RQ-4`, `REQ-RQ-9`, `REQ-HN-8`, `REQ-LM-3` | `INV-2`, `INV-7`, `INV-8` |
 | C — Outcomes and proof | `US-C1`, `US-C2` | `REQ-NX-*`, `REQ-OB-*`, `REQ-ST-3`, `REQ-TR-*` | `INV-5`, `INV-16` |
 | D — Exactly once | `US-D1`, `US-D2` | `REQ-ID-*`, `REQ-EO-*`, `REQ-OB-3` | `INV-2`, `INV-9`, `INV-10` |

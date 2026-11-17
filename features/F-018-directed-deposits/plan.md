@@ -6,8 +6,10 @@ SPDX-License-Identifier: CC-BY-4.0
 # F-018 — Directed deposits and the bridge web app
 
 **Status: Accepted** (amendment 0029, accepted by @pandres95 on 2026-11-17 and applied in `SPEC.md` v0.5.13 and
-`PLAN.md` v0.6.12). In progress: parts 1 and 2 (the contract, the endpoint and the store) are drafted in pull requests
-#121, #122 and #125. Folded into milestone `M-4` (amendment 0029, Open 10, ruled: no `M-6`). Serves `US-A6`, `AC-A6.1`–`AC-A6.6`,
+`PLAN.md` v0.6.12; amendment 0031, ruled 2026-11-17, applied in `SPEC.md` v0.5.14 and `PLAN.md` v0.6.13, adds the
+capacity wait, the hold on an upgrade of the origin token, the one-window cap on the window's queue and the review edge
+judged at resolution: `tasks.md`, T-018-22 to T-018-25). In progress: parts 1 and 2 (the contract, the endpoint and the store) are drafted in pull requests
+#121, #122 and #125. Folded into milestone `M-4` (amendment 0029, Open 10, ruled: no `M-6`). Serves `US-A6`, `AC-A6.1`–`AC-A6.9`,
 `REQ-AS-11`, `REQ-IN-10`, `REQ-IN-11`, `REQ-RN-5`, `REQ-LM-2`, `REQ-ST-1`, `REQ-ST-8`, `US-B5`, and keeps
 `INV-2`, `INV-6`, `INV-10` and `INV-14` (plan `DEC-21` and `DEC-22`; `DEC-8`, `DEC-9`, `DEC-10`,
 `DEC-12`, `DEC-15`). Read amendment 0029 first, then `F-008` NOTES ("Deployment", "The two roles") and `F-009` NOTES

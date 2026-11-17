@@ -11,6 +11,7 @@
 //! | `directed-mints-alert` | the directed deposits minted (`Delivered`) in the trailing 24 hours: each new mint reference takes storage deposit from the issuing network's delivery account | [`Thresholds::mints_per_day`] |
 //! | `directed-returns-alert` | the returns of directed arrivals, and refunds of directed deposits, made in the trailing 24 hours: each is a payout from the reserve's delivery allowance, which withdrawals share | [`Thresholds::returns_per_day`] |
 //! | `directed-window-alert` | the share of the route's window that directed deposits hold: those it counts now (made, or out of `CND-DepositWindow`, within the window, as `route_usage_locked()` counts them) and those waiting in `CND-DepositWindow`, which claim it ahead of anything later (migration 0145) | [`Thresholds::window_share_percent`] |
+//! | `directed-wait-alert` | the directed deposits that have held `CND-TokenUpgraded` or `CND-DepositCapacity` for longer than one of the route's windows, or `CND-DepositWindow` for longer than two (amendment 0031; reviews L2 and M2 of PR #142): a hold no operator has lifted, a route that stays full, or a window queue that does not drain (the queue's claims stop counting against requests after one window, so a deposit still waiting a window later is being outrun) | more than none |
 //!
 //! A count or share **above** its threshold pages, once on crossing and then once a day while it
 //! stays above; back at or below, `directed-alert-cleared` is logged, so a second crossing pages at
@@ -23,12 +24,18 @@
 //!   transfer into the reserve (`AC-A6.6`). With the declared code it should never happen; it binds
 //!   nothing (migration 0143), and a person must find out why.
 //! - `origin-token-upgraded`: an admitted origin token's proxy emitted `Upgraded` (EIP-1967): its
-//!   implementation changed (migration 0147). It **pages and does not pause**. Whether directed intake
-//!   should also hold on it is the owner's open ruling `d-f018-usdc-upgrade`; until it is ruled
-//!   nothing holds. If it rules a hold, [`page_observation`] is the one place to add it: in the same
-//!   transaction as the page's marker, a hold of the token's asset, which the engine already honours
-//!   for every deposit (`CND-Paused`); and [`token_upgrades_since`] already answers "has the token been
-//!   upgraded since", for a hold that lifts on a recorded review instead.
+//!   implementation changed (migration 0147). It pages and does not pause. It **holds directed
+//!   intake** of that token (amendment 0031, `d-f018-usdc-upgrade`, ruled: hold and alert): the
+//!   store reads the observation itself (`directed_arrival_token_held()`, migration 0150), so the
+//!   hold needs nothing from this page and starts with the observation, not with the page. A
+//!   directed deposit of that token at or after the upgrade waits in `CND-TokenUpgraded`, and
+//!   nothing of it is returned, until two operators lift the hold after the fork suite has been run
+//!   against the new implementation (`operator_request_token_hold_lift`,
+//!   `operator_approve_token_hold_lift`). A requester's deposit is not held.
+//!
+//! The returns alert also watches the exposure amendment 0031 accepted (`d-f018-return-routing`):
+//! a funder can route value through the reserve to a third party's refund address, at bezent's gas
+//! cost, by sending what can never be minted; every such return counts here.
 //!
 //! At least once: a page is logged before the entry that remembers it, so a failure between the two
 //! repeats the page rather than losing it.
@@ -46,6 +53,9 @@ pub const MINTS: &str = "directed-mints-alert";
 pub const RETURNS: &str = "directed-returns-alert";
 /// Directed deposits' share of a route's window above the threshold.
 pub const WINDOW: &str = "directed-window-alert";
+/// Directed deposits held by an upgrade of their token, or waiting for capacity, for longer than one
+/// of the route's windows, or waiting for the window for longer than two (review M2 of PR #142).
+pub const WAITS: &str = "directed-wait-alert";
 /// A `Directed` log that paired with no transfer (`AC-A6.6`).
 pub const UNPAIRED: &str = "unpaired-direction";
 /// An admitted origin token's implementation changed.
@@ -147,8 +157,8 @@ type PendingRow = (
     serde_json::Value,
 );
 
-/// Per deposit route: (asset, network, window limit, mints, returns, held).
-type RouteRow = (String, String, String, i64, i64, String);
+/// Per deposit route: (asset, network, window limit, mints, returns, held, long waits).
+type RouteRow = (String, String, String, i64, i64, String, i64);
 
 async fn routes(pool: &PgPool) -> sqlx::Result<Vec<RouteRow>> {
     let directed_p = DIRECTED.replace("d.", "p.");
@@ -186,7 +196,20 @@ async fn routes(pool: &PgPool) -> sqlx::Result<Vec<RouteRow>> {
                                           AND w.condition = 'CND-DepositWindow')) \
                        > now() - make_interval(secs => r.window_seconds) \
                    ELSE d.created_at > now() - make_interval(secs => r.window_seconds) \
-               END) AS held \
+               END) AS held, \
+           (SELECT count(*) FROM transfers d \
+             WHERE d.asset = r.asset AND d.kind = 'deposit' AND d.refund_of IS NULL \
+               AND d.source_network = r.network AND NOT is_terminal_state(d.state) \
+               AND d.condition IN ('CND-TokenUpgraded', 'CND-DepositCapacity', \
+                                   'CND-DepositWindow') \
+               AND (SELECT min(x.seen_at) FROM transitions x \
+                     WHERE x.transfer_id = d.id AND x.condition = d.condition \
+                       AND x.id > COALESCE((SELECT max(y.id) FROM transitions y \
+                                             WHERE y.transfer_id = d.id \
+                                               AND y.condition IS DISTINCT FROM d.condition), 0)) \
+                   <= now() - make_interval(secs => r.window_seconds \
+                                     * CASE d.condition WHEN 'CND-DepositWindow' THEN 2 \
+                                                        ELSE 1 END)) AS waits \
          FROM routes r WHERE r.direction = 'deposit' ORDER BY r.asset, r.network"
     ))
     .fetch_all(pool)
@@ -202,7 +225,7 @@ fn key(kind: &str, asset: &str, network: &str) -> String {
 /// yet. See the module documentation.
 pub async fn check(pool: &PgPool, thresholds: &Thresholds) -> sqlx::Result<Vec<Outcome>> {
     let mut outcomes = Vec::new();
-    for (asset, network, limit, mints, returns, held) in routes(pool).await? {
+    for (asset, network, limit, mints, returns, held, waits) in routes(pool).await? {
         let limit: u128 = limit.parse().unwrap_or(0);
         let held: u128 = held.parse().unwrap_or(0);
         // The share in basis points, for the page; the comparison is exact, in integers.
@@ -229,6 +252,7 @@ pub async fn check(pool: &PgPool, thresholds: &Thresholds) -> sqlx::Result<Vec<O
                 over_window,
                 u128::from(thresholds.window_share_percent) * 100,
             ),
+            (WAITS, u128::try_from(waits).unwrap_or(0), waits > 0, 0),
         ] {
             if let Some(o) =
                 threshold_alert(pool, kind, &asset, &network, value, threshold, above).await?
@@ -322,9 +346,13 @@ async fn threshold_alert(
             kind = %"directed-returns-alert", asset = %asset, network = %network, returns = %value, threshold = %threshold, repeat,
             "page: more directed arrivals were returned on this route in the last 24 hours than the threshold; each is a payout from the reserve's delivery allowance, which withdrawals share (deploy/runbooks/pages/directed-returns.md)"
         ),
-        _ => tracing::error!(
+        WINDOW => tracing::error!(
             kind = %"directed-window-alert", asset = %asset, network = %network, share_bps = %value, threshold_bps = %threshold, repeat,
             "page: directed deposits hold more of this route's window than the threshold; requesters' deposits are refused ERR-WindowExceeded when it is full (deploy/runbooks/pages/directed-window.md)"
+        ),
+        _ => tracing::error!(
+            kind = %"directed-wait-alert", asset = %asset, network = %network, deposits = %value, repeat,
+            "page: directed deposits on this route have been held by an upgrade of their token (CND-TokenUpgraded) or waited for its capacity (CND-DepositCapacity) for longer than one window, or for its window (CND-DepositWindow) for longer than two; is a lift of the hold pending, the route full, or the window's queue outrun? (deploy/runbooks/pages/directed-wait.md)"
         ),
     }
     store::event(
@@ -345,9 +373,9 @@ async fn threshold_alert(
     }))
 }
 
-/// Pages one observation of [`UNPAIRED`] or [`UPGRADED`] and remembers it. It pauses nothing and holds
-/// nothing (the open ruling `d-f018-usdc-upgrade`; see the module documentation for where a hold
-/// would go).
+/// Pages one observation of [`UNPAIRED`] or [`UPGRADED`] and remembers it. It pauses nothing; the
+/// hold on directed intake an upgrade makes is the store's, from the observation itself (see the
+/// module documentation).
 #[allow(clippy::too_many_arguments)]
 async fn page_observation(
     pool: &PgPool,
@@ -375,7 +403,7 @@ async fn page_observation(
         tracing::error!(
             kind = %"origin-token-upgraded", observation = id, at = %at, token = %token,
             implementation = %implementation,
-            "page: an admitted origin token's implementation changed (its proxy emitted Upgraded). Nothing is paused or held; whether directed intake should hold is the open ruling d-f018-usdc-upgrade. Review the new implementation now (deploy/runbooks/pages/token-upgraded.md)"
+            "page: an admitted origin token's implementation changed (its proxy emitted Upgraded). Directed intake of the token is held (CND-TokenUpgraded) until two operators lift it after the fork suite has been run against the new implementation; nothing is paused. Review the new implementation now (deploy/runbooks/pages/token-upgraded.md)"
         );
     }
     let mut conn = pool.acquire().await?;
@@ -391,8 +419,8 @@ async fn page_observation(
 }
 
 /// The `token_upgrade` observations of `token` on `network` after observation `after` (by id),
-/// final: what a hold on an upgrade would read, were one ruled (`d-f018-usdc-upgrade`). Nothing reads
-/// it to hold anything today.
+/// final: the upgrades a runbook names when it requests the lift of their hold (amendment 0031,
+/// `d-f018-usdc-upgrade`). The hold itself is the store's (`directed_arrival_token_held()`).
 pub async fn token_upgrades_since(
     pool: &PgPool,
     network: &str,

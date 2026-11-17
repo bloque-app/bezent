@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 ---
 id: directed-returns
 kind: pages
-covers: [REQ-IC-2, REQ-RF-2]
+covers: [REQ-IC-2, REQ-RF-2, REQ-IN-11]
 pages: [directed-returns-alert]
 observables: [nonfinal_transfers, oldest_nonfinal_transfer_age_seconds, reserve_amount]
 tests: [services/core/tests/directed_alerts.rs::req_ic_2_directed_returns_above_the_threshold_page, services/full-chain/tests/full_chain/directed.rs::s7_ac_a6_1_ac_a6_4_a_directed_round_trip_and_a_return]
@@ -22,6 +22,14 @@ network refuses may also be refunded, through its review, with a second approver
 the reserve: it draws on the vault's delivery allowance, which withdrawals share, and its gas is paid against surplus.
 A well-behaved web app never sends what cannot mint, so returns are rare by construction, and there is no cap on them
 (Open 6, ruled): a count above the threshold pages.
+
+**An accepted exposure (amendment 0031, `d-f018-return-routing`: "Accept, with an alert").** The caller of the directing
+code names the refund address, and bezent returns what can never mint there by itself. So anyone can route value through
+the reserve to a third party's address, at bezent's gas cost and on the allowance withdrawals share, by sending what can
+never mint (an amount outside the route's limits, a recipient on the refused list) and naming someone else as `refund`.
+Nothing is stolen, since the value is the funder's own, but the reserve becomes a hop between two parties that never
+deposit. This alert is the mitigation; a run of returns to addresses that are not the funders' (compare the
+`directed-return` entries' `refund` with the arrival's sender) is that case.
 
 The count is per deposit route: returns of directed arrivals and refunds of directed deposits made in the trailing 24
 hours. The threshold is the core's configuration (`[directed_alerts] returns_per_day`, 3 by default).

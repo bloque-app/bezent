@@ -8,7 +8,7 @@ kind: condition
 covers: [REQ-IN-8, REQ-IN-9, REQ-RV-1, REQ-RV-2, REQ-GV-5]
 pages: []
 observables: [reviews_open, reviews_oldest_age_seconds, nonfinal_transfers, oldest_nonfinal_transfer_age_seconds]
-tests: [services/core/tests/conditions.rs::cnd_destination_refused_mints_nothing_and_resumes_when_the_mint_applies, services/core/tests/directed.rs::req_rf_1_a_refusal_to_mint_a_frozen_asset_never_opens_the_exit, services/kreivo-endpoint/tests/submit.rs::req_in_9_a_refusal_to_mint_is_recorded_with_the_assets_status, services/core/tests/conditions.rs::cnd_destination_refused_past_its_deadline_goes_to_review, services/core/src/engine.rs::req_in_9_a_mint_the_issuing_network_refuses_holds_cnd_destination_refused, services/core/tests/review.rs::req_rv_2_a_review_ends_by_evidence_bezent_verifies_then_the_ordinary_step_runs, services/core/tests/review.rs::req_gv_5_a_resolution_that_moves_value_waits_for_its_second_approver, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_unnamed_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_dropped_destination_hold_after_the_window_gets_its_whole_deadline, services/core/tests/directed.rs::req_rf_1_a_late_row_of_a_superseded_order_decides_the_destination_hold, services/kreivo-endpoint/tests/submit.rs::req_rf_1_an_asset_that_cannot_be_read_is_never_the_destinations_refusal, services/core/tests/directed.rs::req_eo_3_a_refusal_after_a_long_pause_counts_from_the_first_head_after_the_order, services/core/tests/directed.rs::req_eo_3_a_retry_does_not_restart_the_refused_attempts_clock]
+tests: [services/core/tests/conditions.rs::cnd_destination_refused_mints_nothing_and_resumes_when_the_mint_applies, services/core/tests/directed.rs::req_rf_1_a_refusal_to_mint_a_frozen_asset_never_opens_the_exit, services/kreivo-endpoint/tests/submit.rs::req_in_9_a_refusal_to_mint_is_recorded_with_the_assets_status, services/core/tests/conditions.rs::cnd_destination_refused_past_its_deadline_goes_to_review, services/core/src/engine.rs::req_in_9_a_mint_the_issuing_network_refuses_holds_cnd_destination_refused, services/core/tests/review.rs::req_rv_2_a_review_ends_by_evidence_bezent_verifies_then_the_ordinary_step_runs, services/core/tests/review.rs::req_gv_5_a_resolution_that_moves_value_waits_for_its_second_approver, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_unnamed_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_dropped_destination_hold_after_the_window_gets_its_whole_deadline, services/core/tests/directed.rs::req_rf_1_a_late_row_of_a_superseded_order_decides_the_destination_hold, services/kreivo-endpoint/tests/submit.rs::req_rf_1_an_asset_that_cannot_be_read_is_never_the_destinations_refusal, services/core/tests/directed.rs::req_eo_3_a_refusal_after_a_long_pause_counts_from_the_first_head_after_the_order, services/core/tests/directed.rs::req_eo_3_a_retry_does_not_restart_the_refused_attempts_clock, services/core/tests/directed.rs::ac_a6_9_a_review_for_an_unknown_then_a_live_refusal_is_refundable_with_two_approvers, services/core/tests/directed.rs::ac_a6_9_a_later_passing_dry_run_closes_the_exit, services/core/tests/directed.rs::ac_a6_9_a_stale_refusal_followed_by_an_unknown_keeps_the_exit_closed, services/core/tests/directed.rs::req_in_11_a_deposit_that_waited_for_capacity_gets_its_whole_refusal_deadline]
 exercised: no
 ---
 # CND-DestinationRefused
@@ -30,9 +30,9 @@ when it keeps coming back, and goes to review at its deadline with no condition 
 interval, and clears the hold if a later dry run passes (the test: "resumes when the mint applies"). Past the route's
 completion budget, counted from the source leg's finality on the destination network's final head, it is a condition
 that blocks delivery, and the transfer goes to `Needs-Review` with the condition kept (SPEC §5.4; `REQ-IN-9`). For a
-directed deposit that waited in `CND-DepositWindow`, both deadlines (this condition's and that of the refusal that names
-nothing) count from the head it left the window on instead, so the wait takes nothing from them (PR #136, reviews L5 and
-M1). The refusal that names nothing counts, as SPEC §5.4 words it, from the later of that clock and the first final head
+directed deposit that waited in `CND-DepositWindow`, `CND-DepositCapacity` or `CND-TokenUpgraded`, both deadlines (this
+condition's and that of the refusal that names nothing) count from the head it left its last wait on instead, so the wait
+takes nothing from them (PR #136, reviews L5 and M1; amendment 0031). The refusal that names nothing counts, as SPEC §5.4 words it, from the later of that clock and the first final head
 the core saw after the attempt's **first** order: a deposit held under a pause past the route's time is not reviewed on
 the head after its first refused order, and the new order each refusal makes does not restart the clock (PR #136, review
 L-a). On the first attempt the core decides the hold on the dry run the directed exit rests on (below): the newest of the
@@ -86,9 +86,12 @@ is the requester's to correct: the destination is theirs.
    `approved_output_*`; see `CND-AwaitingConversion.md` (Do, step 2) and amendment 0018, Open 6.
 3. A refund of a deposit that cannot be minted is not an operator edge from this review: see F-003 NOTES and the
    requester's refund path (`REQ-RQ-6`); not established here beyond that. The one exception is a **directed** deposit
-   (amendment 0029, Open 2): when the issuing network itself refused its destination (attempt 1's dry run recorded the
-   refusal) and it reached review at the condition's deadline, a resolution into `Refunding`, with a second approver,
-   returns it to its refund destination. Its evidence is the coordinate and block time of attempt 1's **newest** dry
+   (amendment 0029, Open 2; amendment 0031, `d-f018-review-exit-later`): judged on the evidence when the review is
+   resolved, when the issuing network itself refused its destination, a resolution into `Refunding`, with a second
+   approver, returns it to its refund destination. The refusal must be evidence as the review stands: either the one
+   whose deadline began the review (it reached review at this condition's deadline), or one made after the review began
+   (the dry run of a resolution's delivery, say). A refusal from before a review that began for an unknown (a destination
+   or list that could not be read, a delivery anomaly) is stale and opens nothing. Its evidence is the coordinate and block time of attempt 1's **newest** dry
    run, by its block and then by row, which must be the refusal (`Kreivo(Assets(CannotMint))`) recorded with the asset
    `Live` and with its block time; a dry run that passed at or after that block, or a newer one refused for anything
    else, closes the exit. Before you record a resolution:
@@ -107,21 +110,24 @@ is the requester's to correct: the destination is theirs.
    the lowest `id` first: a pending resolution into `Delivering` recorded before one into `Refunding` is evaluated
    first, and while it waits (for its second approver, a gate, or its preparation) the later one is not looked at. It
    is looked at only once the earlier one has run (a transition rests on it) or the core has refused its evidence
-   (`review-evidence-refused`). And the newest dry run, by block, is what both the hold and the exit read, whichever
+   (`review-evidence-refused`). One exception (amendment 0031): when the directed exit is open and a later resolution
+   into `Refunding` is approved, the core records the earlier, unrun resolution into `Delivering` as refused
+   ("superseded"), and runs the refund; the earlier order was never signed, and the refund closes it to signing. And the newest dry run, by block, is what both the hold and the exit read, whichever
    order it belongs to: a late passing row of a superseded order drops the hold and closes the exit. That is the safer
    outcome, since the newest evidence is that the destination can receive; resolve into `Delivering` then.
    `SELECT directed_review_refund_open(<id>)` says whether the exit is open. A review entered because the
    destination or the declared list could not be read, one whose dry run the network refused for another reason, and
    one with a delivery anomaly recorded for the deposit are unknowns, and are never refunded (`REQ-RF-1`).
 
-   A review entered **without** the condition cannot take the directed exit, whatever a later dry run says: the store
-   reads the condition the deposit held when it entered review. That covers the refusal that names nothing at its
-   deadline, and a destination hold dropped by a later refusal that is not the destination's (a frozen asset, say).
-   Resolve it into a new delivery attempt (`Delivering`, with a second approver) once the cause is understood. That
-   attempt runs from review: if its dry run passes, the mint goes through. If the network refuses it again, the deposit
-   stays in `Needs-Review`; it is not entered into review again, so a fresh refusal and its deadline do not open the
-   exit either. A directed deposit in that state whose destination cannot receive is an operator matter under the
-   governed process; do not try to reach `Refunding` by any other edge.
+   A review entered **without** the condition (the refusal that names nothing at its deadline, a preparation that never
+   came, a destination or list that could not be read, a destination hold dropped by a later refusal that is not the
+   destination's) can take the directed exit only on new evidence (amendment 0031, `d-f018-review-exit-later`, which
+   replaces amendment 0029's rule that such a review never could). Resolve it into a new delivery attempt
+   (`Delivering`, with a second approver) once the cause is understood. That attempt runs from review: if its dry run
+   passes, the mint goes through. If the network refuses it for the destination, with the asset `Live`, that refusal is
+   now the newest dry run and was made after the review began, so the exit opens: record a resolution into `Refunding`
+   resting on it, as in step 3, and have a second login approve it. If the network refuses it for anything else, the
+   leg is still unknown and the exit stays closed. Do not try to reach `Refunding` by any other edge.
 
 ## Never
 
