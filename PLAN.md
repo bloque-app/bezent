@@ -1,9 +1,9 @@
 ---
 name: bezent
-plan_version: 0.6.11
-status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first); v0.6.5 binds SPEC.md v0.5.6 (amendment 0020: an attempt never prepared goes to review at the route's deadline); v0.6.6 binds SPEC.md v0.5.7 (amendments 0022, A1b, and 0019, A1d: a pause holds an unsigned attempt, and its time is left out of the deadline); v0.6.7 binds SPEC.md v0.5.8 (amendments 0021 and 0024: "sustained" is 24 hours, and the full release gate applies only to a release that moves value) and records the fee position ruling (amendment 0025); v0.6.8 binds SPEC.md v0.5.9 (amendment 0026: a deposit binds only an arrival from its requester's declared senders); v0.6.9 binds SPEC.md v0.5.10 (amendment 0018, Open 3 in part and Open 6: a conversion output may be named in review, and the output is checked against the route's limits); v0.6.10 binds SPEC.md v0.5.11 (amendment 0026 is withdrawn, `d-0026-holdout`: a deposit binds an arrival by its coordinate again); v0.6.11 binds SPEC.md v0.5.12 (amendment 0028: the reserve check holds an asset it cannot see and lifts the hold itself; a difference of value is a pause, as before)
-date: 2026-11-09
-binds: SPEC.md v0.5.12
+plan_version: 0.6.12
+status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first); v0.6.5 binds SPEC.md v0.5.6 (amendment 0020: an attempt never prepared goes to review at the route's deadline); v0.6.6 binds SPEC.md v0.5.7 (amendments 0022, A1b, and 0019, A1d: a pause holds an unsigned attempt, and its time is left out of the deadline); v0.6.7 binds SPEC.md v0.5.8 (amendments 0021 and 0024: "sustained" is 24 hours, and the full release gate applies only to a release that moves value) and records the fee position ruling (amendment 0025); v0.6.8 binds SPEC.md v0.5.9 (amendment 0026: a deposit binds only an arrival from its requester's declared senders); v0.6.9 binds SPEC.md v0.5.10 (amendment 0018, Open 3 in part and Open 6: a conversion output may be named in review, and the output is checked against the route's limits); v0.6.10 binds SPEC.md v0.5.11 (amendment 0026 is withdrawn, `d-0026-holdout`: a deposit binds an arrival by its coordinate again); v0.6.11 binds SPEC.md v0.5.12 (amendment 0028: the reserve check holds an asset it cannot see and lifts the hold itself; a difference of value is a pause, as before); v0.6.12 binds SPEC.md v0.5.13 (amendment 0029: a directed arrival names its own destination and becomes a deposit with no requester, through the `DirectedDeposit` contract and the bridge web app)
+date: 2026-11-17
+binds: SPEC.md v0.5.13
 ---
 
 # bezent — Implementation Plan
@@ -21,7 +21,7 @@ that serves nothing in the spec is not in this plan.
 | `M-*` | A milestone: a set of features that together make a stated claim true, with exit criteria |
 | `RISK-*` | A risk to the plan, with its mitigation |
 
-1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.12. If a technical fact makes a requirement
+1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.13. If a technical fact makes a requirement
    impossible to meet, that becomes a spec amendment first (`amendments/`), and the plan follows it. A gap in the spec
    is handled the same way: we stop, propose an amendment, and do not fill the gap in code.
 2. **Facts come from the notes.** Numbers and properties of Kreivo, the EVM networks, CCTP, evmhot and Swaps come from
@@ -38,6 +38,7 @@ that serves nothing in the spec is not in this plan.
 |---|---|---|
 | 0.6.10 | 2026-11-09 | The plan binds `SPEC.md` v0.5.11. Amendment 0026 is withdrawn (`d-0026-holdout`, ruled by @pandres95 on the decision form, 2026-11-09: "Revert #100"): a deposit binds an arrival by the coordinate its request names, as before v0.6.8, and no requester declares senders (`ERR-SenderNotDeclared`, `REQ-PN-3` withdrawn). The swap service keeps binding evmhot sweeps by coordinate; amendment 0029 (directed deposits, #119) replaces that path. The paragraphs v0.6.8 added to the deposit flow and to the one-instance note are removed (`DEC-9`, `DEC-15`, `F-002`; migration 0135 removed, never released). The 0.6.8 row stays as history |
 | 0.6.11 | 2026-11-09 | The plan binds `SPEC.md` v0.5.12. Amendment 0028 (@pandres95's ruling in chat, 2026-11-07: "Yes, write the amendment and build it."): when the reserve check cannot see an asset it holds the asset's routes (a row of `pauses` of cause `blind`, kind `hold`, so every reader that refuses work under a pause refuses it under the hold), lifts the hold itself at the first evaluation that holds, and pages `reserve-blind` once the hold outlasts `networks.reserve_blind_page_seconds` (default 600) or at once on a finality stall; a lag or a stale head is no longer a divergence; a difference of value pauses under `REQ-BK-1`, as before, and is lifted only by two operators. The core runs the reserve check before its cycle (`DEC-16`, `F-004`, migration 0142). |
+| 0.6.12 | 2026-11-17 | The plan binds `SPEC.md` v0.5.13. Amendment 0029 (accepted by @pandres95 in chat, 2026-11-17: "We need to revise this and make it happen"; its Open 1 to 13 ruled on the decision form, 2026-11-09, `d-0029-window` to `d-0029-gas`, Open 15 `d-mixed-sweeps-2`, and the refund destination `d-refund-dest-swaps`): a `DirectedDeposit` contract on Polygon pulls USDC from its caller into the vault and emits the Kreivo recipient and the refund address in the same call; immutable limits equal to the route's, no owner, no upgrade, no pause (`DEC-21`). The EVM endpoint records a vault `Transfer` paired with that event as a directed arrival, not an arrival, and it becomes a deposit without Swaps (`DEC-8`, `DEC-9`); the refused list of ledger contract accounts applies to directed recipients, as a return (`DEC-15`). A static bridge web app, `apps/bridge/`, on Cloudflare Workers static assets, deposits with an EVM wallet and redeems with a Kreivo extension wallet (`DEC-22`), under Apache-2.0 OR MIT (Open 12; `DEC-20`, `docs/oss/LICENSING.md`). New feature `F-018`, folded into `M-4` with its criteria (Open 10: no `M-6`); the release that opens directed deposits on mainnet is value-moving and runs inside the 48-hour soak (Open 11). |
 | 0.6.9 | 2026-11-06 | The plan binds `SPEC.md` v0.5.10. @pandres95's ruling on the decision form, 2026-11-06. `d-cv-open-choices` ("As recommended"; amendment 0018, Open 3 in part and Open 6): a conversion output may be named for a deposit in `Needs-Review` for the conversion's deadline while no refund of it is recorded, and the output's amount is checked against the route's minimum, maximum and window with the route's own errors. The deposit stays in review and leaves by the resolution the review model already has, into `Delivering`, with a second approver; no edge is added (`F-010`, migration 0140). Per @pandres95's chat ruling of 2026-11-06, the approval records the exact output it approved and the mint runs only if that is still the deposit's output (migration 0141). |
 | 0.6.8 | 2026-11-06 | The plan binds `SPEC.md` v0.5.9. Amendment 0026 (`d-requester-arrivals`, ruled by @pandres95 on the decision form, 2026-11-06: "Bind by sender"): each requester's senders are declared by the operator per origin network, and a deposit binds only an arrival whose sender is one of them (`REQ-PN-3`, `REQ-IN-3`, `ERR-SenderNotDeclared`). On an EVM network the sender is the `from` of the ERC-20 `Transfer` log at the arrival's coordinate. Bloque Test's and Bloque's senders are declared apart, so Test's deposit grant no longer reaches Bloque's ordinary arrivals; a conversion output can still be named for any awaiting convertible deposit (amendment 0026, Open 1) (`DEC-9`, `DEC-15`, `F-002`; migration 0135). Nothing else changes |
 | 0.6.7 | 2026-11-06 | The plan binds `SPEC.md` v0.5.8. @pandres95's rulings on the decision form, 2026-11-06. `d-gate-sustained` ("24 hours"; amendment 0021): the test bed's "sustained" is 24 consecutive hours of zero divergence (§15; `DEC-19`, `F-013`). `d-gate-scope` ("As recommended"; amendment 0024): the full gate applies only to a release that moves value, which is the first release of bUSDC and each new asset or network; every other release needs its checks green and one spec owner's sign-off; a release's class is a field of its evidence and a missing one is refused (`DEC-19`, `F-013`). `d-fee-position-scope` ("As recommended", with his note that usage subscriptions will soon override it; amendment 0025): on Kreivo the fee position is the delivery account's free balance less its frozen balance, the alert floor is in bezent's own configuration, and the core pages when a position is below it (`DEC-18`, `F-014`). |
@@ -281,6 +282,8 @@ evmhot's, and routing value to the vault is Swaps' (then rutent's).
   block by a different transaction.
 - An arrival is any final transfer of an admitted token into the vault, keyed by its coordinate (block, transaction,
   log index). It waits as unassociated until Swaps requests a deposit naming that coordinate (`REQ-IN-3`, `REQ-RQ-3`).
+- A transfer into the vault paired with the declared `DirectedDeposit` event in the same transaction is a directed
+  arrival, not an arrival; it becomes a deposit without Swaps (`DEC-21`).
 - evmhot's own observer is not reused: it uses a fixed 20-block offset, keeps no block hash, and has five silent ways
   to skip a range (constraints note, "evmhot"). Its sweeps land in the vault and are observed like any arrival.
 
@@ -304,6 +307,8 @@ evmhot's sweeps; Swaps then requests the deposit by naming the arrival's coordin
   under its role (`DEC-10`, `DEC-13`). Swaps then names the conversion's output by the deposit's request reference,
   and the deposit is minted against that output (`REQ-CV-1`, `REQ-CV-2`).
 - evmhot is revamped (outside this plan) to sweep deposit addresses straight into the vault.
+- A transfer into the vault paired with the declared `DirectedDeposit` event in the same transaction is a directed
+  arrival, not an arrival; it becomes a deposit without Swaps (`DEC-21`).
 
 *Serves:* deposits bound by coordinate (`REQ-IN-3`, `REQ-RQ-3`, `REQ-IN-4`), arrivals de-duplicated by coordinate
 (`REQ-IN-1`, `INV-10`), unassociated arrivals with an owner (`REQ-IN-6`), and conversions before minting (`REQ-CV-1`,
@@ -467,7 +472,8 @@ HMAC-signed webhooks; Swaps uses them through a `bezent` instruction module.**
 - The sequenced log is the safety net for lost callbacks: Swaps can read everything since its last position.
 - Swaps names its own Kreivo account as a deposit's destination and moves value into aledgent itself; bezent never
   mints to aledgent's contract account, and the ingress refuses a destination on a declared list of ledger contract
-  accounts (`REQ-IN-5`; `notes/ALEDGENT-INTERPLAY.md`).
+  accounts (`REQ-IN-5`; `notes/ALEDGENT-INTERPLAY.md`). The same list applies to a directed deposit's recipient
+  (`DEC-21`), which has no intake to refuse it at: such a deposit is returned to its refund destination (`REQ-IN-11`).
 - A route's deadline is its completion budget's ceiling (`REQ-LM-1`, `NFR-2`): a transfer whose leg is unknown past it
   goes to review. Decided at plan level, 2026-10-13 (`F-003`).
 - At that deadline, on an origin network, the core also orders the cancel that forces non-execution (`REQ-NX-4`) at the
@@ -638,6 +644,10 @@ import.**
   carries an SPDX header and the tree a `REUSE.toml`. The services and the contract are GPL rather than AGPL: @pandres95's rule is the GPL wherever it is
   possible. The built ink! contract is a GPL-3.0-only combined work (`docs/oss/LICENSING.md` §4.3). @olanod signed
   the table off on 2026-10-17.
+- The bridge web app (`apps/bridge/**`, `DEC-22`) departs from that rule: it is Apache-2.0 OR MIT, permissive as the
+  reusable crates are, by @pandres95's ruling (amendment 0029, Open 12, `d-0029-licence`, 2026-11-09), which did not
+  take the GPL recommended for it. It ships smoldot (GPL-3.0-or-later with the Classpath exception), so whether that
+  fits an Apache-2.0 OR MIT bundle is checked, and recorded in `docs/oss/LICENSING.md`, before its first release.
 - IP: the same review aledgent had (2026-10-12): one chain of title to Pagos Cube LLC, AI co-authorship noted, third-party code and pinned forks listed with their licences. A DCO check is required on `main` once
   public. @olanod signed off the IP review and the trademark position on 2026-10-17.
 - Trademark: @olanod's sign-off (2026-10-17) covers the name "bezent" on the repository.
@@ -645,6 +655,46 @@ import.**
 *Serves:* nothing in the spec requires it; it is @pandres95's direction, and it adds no behaviour. Being
 public also lets holders check the contract and the statement format themselves (`REQ-PR-*`). *Cost:* a redaction
 pass and a review per release; the GPL obliges source for anyone who distributes the services.
+
+### DEC-21 Directed deposits on Polygon
+
+**One `DirectedDeposit` contract per origin network that admits directed arrivals; Polygon first, for bUSDC. It pulls
+USDC from `msg.sender` to the vault with `transferFrom` in the same call as its event, and holds nothing.** Amendment
+0029 (accepted by @pandres95, 2026-11-17).
+
+- It emits `Directed(sender, amount, recipient, refund)`: the recipient is a Kreivo account as `bytes32`, and `refund`
+  is the original depositor, named by the caller (`d-refund-dest-swaps`). The call reverts on a zero recipient, and on
+  a `refund` that is the zero address, the vault or the contract itself.
+- It supports EIP-2612 `permit` (one signature), including the bytes-signature form for contract wallets (FiatToken
+  2.2). It calls `permit` inside `try`, then checks the allowance, and always pulls from `msg.sender`, never from an
+  `owner` argument, so a front-run permit gives the front-runner nothing.
+- Its limits are immutable and equal to the route's (`DEC-17`). It has no owner, no upgrade, no proxy, and no pause
+  (Open 4, ruled `d-0029-pause`).
+- It is deployed by a one-time deployment key that holds no role afterwards, as the vault's glue is (`DEC-10`, `F-008`
+  NOTES, "Deployment"). `VerifyVault` grows a check of its runtime code (immutables included) against the repository's
+  build for the configuration.
+- `features/F-018-directed-deposits/plan.md` has the interface.
+
+*Serves:* a reference carried atomically with the value (`REQ-RN-5`), declared directing code (`REQ-AS-11`), deposits
+without a request (`REQ-IN-10`), refusal before value moves (`REQ-LM-2`), and the governance of code that holds reserve
+(`REQ-GV-3`). *Cost:* one more contract of ours in the path of value, which needs review before mainnet, and a new
+address per change of limits.
+
+### DEC-22 The bridge web app
+
+**A static, client-only web app (`apps/bridge/`) on Cloudflare Workers static assets, at the working name
+`bridge.bloque.network`. It holds no key and no secret.** Amendment 0029 (accepted by @pandres95, 2026-11-17).
+
+- Deposit with an EVM wallet (EIP-6963 discovery; MetaMask and similar), through `DirectedDeposit` (`DEC-21`).
+- Redeem with a Kreivo wallet through a browser extension (Talisman, SubWallet or Polkadot.js). Passkey accounts,
+  Virto's, are out for now (Open 9, ruled `d-0029-wallet`). To work with the polkadot.js interface, those wallets need
+  Kreivo's custom signed extensions **registered in the polkadot.js initialisation metadata**; that is a requirement of
+  the app (Open 9, @pandres95's note; `T-018-15`).
+- Status from public chain data, and the public status route (Open 8, ruled yes; `REQ-ST-8`).
+- Licence: Apache-2.0 OR MIT (Open 12; `DEC-20`).
+
+*Serves:* the way in for anyone (`US-A6`), redemption by anyone (`US-B5`), and status from public data (`REQ-ST-1`).
+*Cost:* a public front end to keep and to defend against phishing.
 
 ## 3. Dependencies: what we wait on
 
@@ -680,6 +730,7 @@ names. A feature depends only on features of its own or an earlier milestone, in
 | `F-015` | Assets and governance on Kreivo: community, contract, roles | genesis in `M-0`; mainnet done 2026-10-20 | asset identity, the dedicated group, upgrade governance (`REQ-AS-*`, `REQ-HN-10`, `REQ-GV-3`) | nothing |
 | `F-016` | Measurements: Swaps volumes, route budgets | before production, `M-4` | bounds sized from volumes (`OQ-6`, closed), ten-times volume (`NFR-10`), route budgets (`NFR-2`) | the endpoints, for route timing (`F-007`, `F-009`) |
 | `F-017` | Open-source release | done 2026-10-17 (`M-5`) | nothing in the spec; @pandres95's direction (`DEC-20`) | nothing |
+| `F-018` | Directed deposits and the bridge web app | `M-4` | directed arrivals, their returns and the public way in (`US-A6`, `REQ-IN-10`, `REQ-IN-11`, `REQ-AS-11`) | the EVM endpoint, the core and the contract (`F-009`, `F-003`, `F-006`) |
 
 **`F-001` Repository, workspace and store.** Sets up the repository and CI. Creates the Rust workspace of `DEC-1` and the PostgreSQL schema of `DEC-4`. Triggers
 refuse UPDATE and DELETE on observations and on the reserve book, and refuse any change to a terminal state, since
@@ -765,6 +816,11 @@ following aledgent's run-book (`DEC-20`). Done when the IP and trademark sign-of
 its tests on its own, and the public repository is open with the DCO check on `main`. **Done on 2026-10-17.** What continues is ordinary work in the
 public repository, and the private repository's deployment from the pinned digest of a public release (`DEC-1`).
 
+**`F-018` Directed deposits and the bridge web app.** The `DirectedDeposit` contract (`DEC-21`), its observation by the
+EVM endpoint, directed deposits and their returns in the store and the core, the public status route, and the web app
+(`DEC-22`); `features/F-018-directed-deposits/plan.md` has the design (amendment 0029). Done when `AC-A6.1`–`AC-A6.6`
+pass and the `M-4` criterion for directed deposits holds.
+
 ## 5. Milestones
 
 | Milestone | Claim that becomes true | Features | Exit criteria |
@@ -773,11 +829,11 @@ public repository, and the private repository's deployment from the pinned diges
 | `M-1` bUSDC end to end on the test bed | A bUSDC deposit and withdrawal work between Polygon Amoy and zombienet | `F-004`, `F-007`, `F-008`, `F-009` (Polygon), `F-012` (first module), `F-014` (runbooks and alerts on the test bed) | An arrival at the vault, claimed by its coordinate, is minted only after Polygon's finality. A redemption is paid out from the vault. A payout proven not executed ends in one refund mint. The reserve check runs every minute at zero divergence, and a daily statement is produced and kept |
 | `M-2` More assets, after the bUSDC launch | bEURC and bBTC work | `F-009` (Base, BNB Chain) | bEURC on Base Sepolia and bBTC on BNB Chain testnet pass the `M-1` criteria. A bBTC deposit's remainder lands in surplus and a payout scales exactly (`REQ-AS-9`, `REQ-AS-10`) |
 | `M-3` Attested fiat | COPM, MXNB and BRLB move through Swaps' reports and commitments | `F-011`, `F-012` (reports) | A reversal is exercised end to end (`REQ-BE-6`). Reports become observations with Swaps' ids. Relayed instructions match their commitment. The statement says the reserve is attested and names Swaps |
-| `M-4` Production | bezent carries value on Kreivo mainnet, bUSDC first | `F-010` (Polygon conversions), `F-013` (gate), `F-014`, `F-015` (mainnet, done), `F-016` | Bounds and budgets measured and recorded (`DEC-17`). Every runbook exercised (`NFR-9`). Kreivo 0.17.1 or later enacted on mainnet. The community owns the asset roles (done 2026-10-20). Every `[PENDING]` decision in this plan ruled. The §15 criteria hold on the test bed: zero divergence, sustained; every final source leg delivered, refunded, or held with an owner; every runbook exercised. A convertible deposit reports both amounts and is minted for what Swaps' swap delivered (`AC-A5.1`–`AC-A5.3`). Only bUSDC mints at launch (`DEC-17`). The 48-hour soak of `DEC-19` has passed on mainnet |
+| `M-4` Production | bezent carries value on Kreivo mainnet, bUSDC first | `F-010` (Polygon conversions), `F-013` (gate), `F-014`, `F-015` (mainnet, done), `F-016`, `F-018` | Bounds and budgets measured and recorded (`DEC-17`). Every runbook exercised (`NFR-9`). Kreivo 0.17.1 or later enacted on mainnet. The community owns the asset roles (done 2026-10-20). Every `[PENDING]` decision in this plan ruled. The §15 criteria hold on the test bed: zero divergence, sustained; every final source leg delivered, refunded, or held with an owner; every runbook exercised. A convertible deposit reports both amounts and is minted for what Swaps' swap delivered (`AC-A5.1`–`AC-A5.3`). Only bUSDC mints at launch (`DEC-17`). The 48-hour soak of `DEC-19` has passed on mainnet. Anyone bridges USDC on Polygon to bUSDC on Kreivo and back from the web app, with no requester: a round trip on mainnet starting with a 1 USDC deposit (amendment 0029, Open 14), a directed return exercised, the alerts for directed mints and returns in force, and every new runbook exercised. The release that opens directed deposits on mainnet is value-moving under amendment 0024 (amendment 0029, Open 11), so it runs inside the 48-hour soak of `DEC-19` |
 | `M-5` Open source | bezent's code and design are public (reached 2026-10-17) | `F-017` | The public tree builds and passes its tests alone. The IP review and trademark sign-off are recorded (@olanod, 2026-10-17). The public repository is open under the licences of `DEC-20`, with the DCO check on `main`. The private companion keeps every internal document and deploys from the public code by pinned commit |
 
 **Order in time** (@pandres95, `pl-busdc-first`, 2026-10-15; the milestones keep their numbers): `M-0`, `M-1`, then `M-4` with bUSDC
-alone, then `M-2` and `M-3`. `M-4` depends on the Polygon part of `F-009` and on `F-010`, and on nothing in `M-2` or `M-3`.
+alone, then `M-2` and `M-3`. `M-4` depends on the Polygon part of `F-009`, on `F-010` and on `F-018` (amendment 0029, Open 10), and on nothing in `M-2` or `M-3`.
 `M-5` was reached on 2026-10-17, when the repository opened (`DEC-20`): open source is how the remaining work is done, no
 longer a gate that waits for production.
 
@@ -822,10 +878,10 @@ No ruling is pending; all three steps are under way (2026-10-13).
 | Privacy (§4.5, `REQ-PV-*`) | Fiat instructions only as a commitment (`DEC-14`), checked in `F-011` and the contract (`F-006`) |
 | Provability (§4.6, `REQ-PR-*`) | Daily signed statement and its host (`DEC-16`), built in `F-004` |
 | Assets and routes (§5.1, `REQ-AS-*`, `REQ-LM-*`) | Asset ids, precision, dust rule, bounds (`DEC-7`, `DEC-17`), built in `F-015`, `F-004`, `F-016` |
-| Funding the reserve (§5.2 withdrawn by amendment 0007; §5.5) | Plain transfers into the vault, claimed by coordinate (`DEC-9`), observed in `F-009` |
+| Funding the reserve (§5.2 withdrawn by amendment 0007; §5.5) | Plain transfers into the vault, claimed by coordinate (`DEC-9`), observed in `F-009`; directed arrivals through `DirectedDeposit` (`DEC-21`), built in `F-018` |
 | Reserve equation and book (§5.3, `REQ-BK-*`) | Append-only store and the reserve check (`DEC-4`, `DEC-16`), built in `F-001`, `F-004` |
 | Transfers, refunds and review (§5.4–§5.9) | Process shape and store (`DEC-3`, `DEC-4`), lifecycle (`F-003`) |
-| Epic A, deposits | Lifecycle, EVM endpoint, Swaps' conversions (`F-003`, `F-008`, `F-009`, `F-010`) |
+| Epic A, deposits | Lifecycle, EVM endpoint, Swaps' conversions, directed deposits and the web app (`F-003`, `F-008`, `F-009`, `F-010`, `F-018`) |
 | Epic B, withdrawals | Lifecycle, contract, both endpoints, venues (`F-003`, `F-006`, `F-007`, `F-009`, `F-010`) |
 | Epic C, outcomes and proof | Light client, EVM finality, provider cross-check (`DEC-5`, `DEC-8`, `DEC-12`), built in `F-007`, `F-009` |
 | Epic D, exactly once | Store, stored bytes, nonce lanes (`DEC-4`, `DEC-5`, `DEC-8`), built in `F-001`, `F-002`, `F-005` |

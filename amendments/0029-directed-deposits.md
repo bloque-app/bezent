@@ -9,7 +9,7 @@ SPDX-License-Identifier: CC-BY-4.0
 applied by this pull request. Open 1 to 13 were ruled on the decision form on 2026-11-09 (`d-0029-window` to
 `d-0029-gas`). Open 15 was ruled the same day (`d-mixed-sweeps-2`). Open 14 is corrected and is no longer a question.
 Amendment 0026 (a deposit binds only an arrival from its requester's declared senders) is withdrawn
-(`d-0026-holdout`, 2026-11-09), so nothing below relies on it.
+(`d-0026-holdout`, 2026-11-09), so nothing below relies on it. Applied in `SPEC.md` v0.5.13 and `PLAN.md` v0.6.12.
 **Target:** `SPEC.md` v0.5.12 and `PLAN.md` v0.6.11 on `develop` (amendment 0028 applied, 0026 withdrawn). Applied,
 they become `SPEC.md` v0.5.13 and `PLAN.md` v0.6.12. The plan's side lands inside milestone `M-4` (Open 10, ruled): no
 milestone is added, so the plan's §5 table keeps its six rows, and `M-4` gains `F-018` and its criteria.
@@ -233,7 +233,7 @@ in what it costs **bezent**, not the attacker.
 | **Cloned contracts and phishing pages.** A look-alike contract that does not go to the vault | The user's deposit, not bezent's | The endpoint watches only the declared code. The web app pins the address. The statement lists it |
 | **USDC blacklisting.** Circle can blacklist a depositor after a deposit | A return or payout to it reverts | Its dry run fails, and the payout goes to review as today. Nothing new |
 
-## Proposed text for `SPEC.md`
+## Text applied to `SPEC.md`
 
 Guardrail 1 holds: no network, token, standard or product is named below.
 
@@ -305,7 +305,7 @@ Guardrail 1 holds: no network, token, standard or product is named below.
 `REQ-PN-1`, `REQ-RQ-7`, `REQ-AR-*`, `REQ-BK-*` and the invariants are unchanged. (`REQ-PN-3` is withdrawn by amendment
 0026's withdrawal and is not touched here.) The transition table gains the one edge of Open 2.
 
-## Proposed text for `PLAN.md`
+## Text applied to `PLAN.md`
 
 - **`DEC-21` (new), Directed deposits on Polygon.** One `DirectedDeposit` contract per origin network that admits
   directed arrivals; Polygon first, for bUSDC. It pulls USDC from `msg.sender` to the vault with `transferFrom` in the
@@ -404,7 +404,7 @@ Each is one question for @pandres95, with a recommendation. Open 1 to 13 and Ope
 12. **Licence of the web app.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-licence`):
     "Apache-2.0 / MIT"** for `apps/bridge/`, which differs from the recommendation (GPL-3.0-or-later, by his rule for
     `DEC-20`). The row for `docs/oss/LICENSING.md` is: `The bridge web app | apps/bridge/** | Apache-2.0 OR MIT`
-    (proposed text for the plan, above). **To check:** the app ships smoldot, which is GPL-3.0-or-later with the
+    (text applied to the plan, above). **To check:** the app ships smoldot, which is GPL-3.0-or-later with the
     Classpath exception (`docs/oss/LICENSING.md` §4); whether shipping it inside an Apache-2.0 OR MIT bundle is
     compatible has to be confirmed before the first release, and recorded in `docs/oss/LICENSING.md`. *Question as
     put:* Which licence does `apps/bridge/` take?

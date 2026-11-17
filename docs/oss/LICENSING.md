@@ -23,6 +23,7 @@ by @olanod on 2026-10-17.**
 | Reusable crate | `crates/vault/**` | **Apache-2.0 OR MIT** | The Vault client and `SecretRef` the services read their secrets with; depends on no GPL code |
 | EVM contracts | `contracts/evm/{src,script,test}/**` | **Apache-2.0 OR MIT** | Reusable vault glue; the libraries under `lib/` are submodules with their own licences |
 | Test bed, tooling, workflows, research scripts | `e2e/**`, `tools/**`, `.github/**`, `deploy/**`, `research/**-scripts` | **Apache-2.0 OR MIT** | Nothing in them links GPL code |
+| The bridge web app | `apps/bridge/**` | **Apache-2.0 OR MIT** | @pandres95, 2026-11-09 (amendment 0029, Open 12): permissive, as the reusable crates. It ships smoldot (GPL-3.0-or-later with the Classpath exception, §4): to be checked before the first release (Open 12) |
 | Documents | `*.md`, `docs/*.html` | **CC-BY-4.0** | Prose, wherever it lives |
 | Kreivo's chain specification | `services/kreivo-endpoint/chain-specs/kreivo.json` | **GPL-3.0-only** (Kreivo's) | Published by Kreivo, kept verbatim |
 | Marks | `brand/*.svg` | `LicenseRef-Trademark-Marks` | Pagos Cube LLC's; not licensed with the code |
