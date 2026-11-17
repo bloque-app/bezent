@@ -29,6 +29,12 @@ describe('csp', () => {
     expect(directive(csp('production', { forMeta: true }), 'frame-ancestors')).toBeUndefined();
   });
 
+  it('adds the status route’s origin alone when a build names one, and nothing when it is unset (the default)', () => {
+    expect(directive(csp('production', { statusRoute: 'https://status.example/bezent' }), 'connect-src')).toBe("connect-src 'self' wss: https://status.example");
+    expect(directive(csp('production', { statusRoute: '' }), 'connect-src')).toBe("connect-src 'self' wss:");
+    expect(headersFile('production', 'https://status.example')).toContain("connect-src 'self' wss: https://status.example;");
+  });
+
   it('applies the headers to every path', () => {
     const h = headersFile('production');
     expect(h.startsWith('/*\n')).toBe(true);

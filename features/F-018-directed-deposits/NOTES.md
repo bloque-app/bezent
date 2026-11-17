@@ -87,6 +87,30 @@ Sources: [Virto's forum post](https://forum.polkadot.network/t/try-out-virto-con
 [papi-signers' `KreivoPassSigner`](https://virto-network.github.io/papi-signers/api/signer/src/classes/KreivoPassSigner.html),
 [Talisman's network support](https://docs.talisman.xyz/talisman/start/network-support/substrate).
 
+## Kreivo's signed extensions (T-018-15)
+
+Read from Kreivo mainnet's metadata on 2026-11-16 (spec 136, transaction version 14; the endpoint's fixture
+`services/kreivo-endpoint/fixtures/kreivo-spec-136.metadata` has the same list), in order: `PassAuthenticate`,
+`CheckNonZeroSender`, `CheckSpecVersion`, `CheckTxVersion`, `CheckGenesis`, `CheckMortality`, `CheckNonce`,
+`CheckWeight`, `ChargeAssetTxPayment`, `DynamicMaxBlockWeight`.
+
+- **Custom to Kreivo**, unknown to polkadot.js: `PassAuthenticate` (Virto's pass pallet,
+  `Option<{ device_id, credential }>`, one byte `0x00` when the account signs for itself) and `DynamicMaxBlockWeight` (a
+  wrapper, no data). `ChargeAssetTxPayment`'s asset is Kreivo's own location type, but the app pays in KSM, so it is
+  `None` and polkadot.js's definition encodes it the same.
+- **Without registration it fails.** A polkadot.js wallet builds the payload it signs from the page's JSON with its own
+  registry and treats an extension it does not know as "no effect", so it leaves out `PassAuthenticate`'s byte and signs
+  another payload; Kreivo rejects the signature. polkadot-api's own polkadot.js bridge refuses to sign at all (`PJS does
+  not support this signed-extension: PassAuthenticate`).
+- **The registration** is the `MetadataDef`'s `userExtensions` the page hands the wallet through
+  `injected.metadata.provide` before signing, the shape polkadot.js's `ApiPromise.create({ signedExtensions })` takes:
+  `PassAuthenticate: { extrinsic: { passAuthenticate: 'Option<u8>' }, payload: {} }` (only `None` is ever signed, so the
+  option's inner type is never encoded) and `DynamicMaxBlockWeight: { extrinsic: {}, payload: {} }`. The definition also
+  carries the runtime's V15 metadata, so the wallet can show the call. A wallet with no `metadata` interface signs only
+  if it knows the extensions itself; the page says so.
+- **Kreivo has `DryRunApi`**, so the exact batch is dry-run as the redeemer before signing, besides the contract's own
+  `ContractsApi.call` dry run of `redeem`, which alone cannot see the approval the batch adds first.
+
 ## Hosting
 
 Cloudflare Workers with static assets, not Pages. Both serve a static app. Cloudflare's own migration guide (updated

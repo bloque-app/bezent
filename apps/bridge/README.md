@@ -6,11 +6,12 @@ SPDX-License-Identifier: CC-BY-4.0
 # bezent bridge (web app)
 
 F-018, Milestone 3 (amendment 0029; `features/F-018-directed-deposits/plan.md`, part 4). A static, client-only page
-where anyone deposits USDC on Polygon through the `DirectedDeposit` contract, naming a Kreivo recipient. It holds no
-key and no secret, runs no server code, and loads no third-party script.
+where anyone deposits USDC on Polygon through the `DirectedDeposit` contract, naming a Kreivo recipient; redeems bUSDC
+on Kreivo for USDC on Polygon; and follows either from public chain data. It holds no key and no secret, runs no server
+code, and loads no third-party script.
 
-Built so far: the scaffold (T-018-12), the reference derivations (T-018-13) and the deposit (T-018-14). Redeem
-(T-018-15) and the status page (T-018-17) come next.
+Built: the scaffold (T-018-12), the reference derivations (T-018-13), the deposit (T-018-14), the redeem (T-018-15) and
+the status page (T-018-17). Their test-bed runs with real wallets are still to do (below, "Not yet shown").
 
 ## Layout
 
@@ -23,9 +24,14 @@ Built so far: the scaffold (T-018-12), the reference derivations (T-018-13) and 
 | `src/lib/amount.ts` | Amounts in minor units, inside the contract's limits |
 | `src/lib/recipient.ts` | Whether a Kreivo account can receive bUSDC (amendment 0029, Open 7) |
 | `src/evm/` | EIP-6963 discovery, the chain switch, the permit's typed data, `depositWithPermit` and the `approve` + `deposit` fallback, the arrival's coordinate from the receipt; `no-ccip.ts` stands in for viem's CCIP-Read code |
-| `src/review.ts` | The locked review: the snapshot taken at the Deposit click, the re-check on it, and the comparison of the receipt's `Directed` log with it |
-| `src/kreivo/` | Kreivo through polkadot-api: smoldot in a worker (live networks) or a loopback RPC (the local test bed only) |
-| `src/main.ts`, `index.html`, `src/ui/` | The page |
+| `src/review.ts` | The locked review: the snapshot taken at the Deposit click, the re-check on it, and the comparison of the receipt's `Directed` log with it (exactly one) |
+| `src/kreivo/client.ts`, `recipient.ts` | Kreivo through polkadot-api: smoldot in a worker (live networks) or a loopback RPC (the local test bed only); the recipient pre-check's reads |
+| `src/kreivo/bezent.ts`, `src/lib/scale.ts` | The bezent contract in SCALE: its `redeem` and read messages by ink! selector, their answers, its errors, and the `Redeemed` event |
+| `src/kreivo/extensions.ts`, `wallets.ts` | Kreivo's signed extensions, its two custom ones registered with the wallet (`metadata.provide`), and the bridge that has a polkadot.js wallet sign them |
+| `src/kreivo/redeem.ts` | The redeem's reads, the `batch_all[approve_transfer, Contracts.call(redeem)]`, its two dry runs and its submission |
+| `src/redeem.ts` | The locked redeem: the snapshot, the re-reads and dry runs on it, and the comparison of the `Redeemed` event with it |
+| `src/status/` | The status page's reads: a deposit by its coordinate, a payout by its on-chain reference, and the public status route |
+| `src/main.ts`, `index.html`, `src/ui/` | The page: the deposit (`main.ts`), the redeem (`ui/redeem.ts`), the status (`ui/status.ts`) |
 | `csp.ts` | The Content Security Policy and the `_headers` file |
 | `test/` | Unit tests; `test/vectors/` are generated from the Rust code |
 | `scripts/hash.mjs` | The build's hash |
@@ -47,11 +53,24 @@ bed build needs what the bed deployed: the contract, its `reserve()` and the kec
 
 ```sh
 BRIDGE_DEPLOYMENT=testbed BRIDGE_TESTBED_DIRECTED_DEPOSIT=0x… BRIDGE_TESTBED_RESERVE=0x… \
-  BRIDGE_TESTBED_CODE_HASH=0x… npm run build
+  BRIDGE_TESTBED_CODE_HASH=0x… BRIDGE_TESTBED_BEZENT=0x… BRIDGE_TESTBED_EMITTER=0x… \
+  BRIDGE_TESTBED_PAYOUTS_FROM=<block> npm run build
 ```
+
+`BRIDGE_TESTBED_BEZENT` is the bezent contract `e2e/kreivo/deploy.mjs` deployed, as 32 bytes of hex (left out, the
+page refuses to redeem); `BRIDGE_TESTBED_EMITTER` and `BRIDGE_TESTBED_PAYOUTS_FROM` are the bed vault's reference
+emitter and the block to search its payouts from (left out, the status page does not search payouts).
+
+`BRIDGE_STATUS_URL` names the public status route (T-018-10), https only (a test bed build may name a loopback http
+URL). It is unset by default, and then the status page reads chain data alone; set, the CSP admits its origin and
+nothing else, and its answer is shown beside the chain's as what bezent reports, never as an outcome.
 
 Point the wallet's chain 137 at the fork yourself: the app refuses a contract whose code hash, `token()` or
 `reserve()` is not the pinned one, so a wallet left on the real Polygon is refused, not sent there.
+
+`BRIDGE_LIVE_KREIVO_WS=wss://… npm test` also runs `test/live-kreivo.test.ts`, read-only against Kreivo mainnet
+through that RPC: the runtime's signed extensions, the contract's bounds and backends, and both dry runs of a
+redemption that must be refused. A public RPC is for that test only; the bundle reads Kreivo through smoldot.
 
 A network whose `DirectedDeposit` address, reserve or code hash is unset is refused: today that is Polygon Amoy
 (T-018-04 deploys it, and names the test Kreivo it mints on: none is named yet, and a test network never pairs with
@@ -107,6 +126,37 @@ BEZENT_WRITE_VECTORS=1 cargo test -p bezent-core-service --test bridge_app_vecto
   message, and the page stays usable. It also refuses an account at Kreivo's `MaxConsumers` (16), which a first
   mint of bUSDC cannot take a consumer reference from.
 - **No CCIP-Read**: viem's clients set `ccipRead: false`, and its CCIP code is left out of the bundle.
+- **One action at a time**: while a deposit or a redemption is in flight, every control that changes what is sent is
+  locked (the status page, which only reads, stays usable). A wallet read is tagged with a generation: an answer that
+  arrives after a newer read began, or after a deposit or redemption started, is dropped and read again once it ends,
+  and Deposit waits for a read in flight.
+- **Kreivo's signed extensions** (amendment 0029, Open 9): Kreivo signs `PassAuthenticate` (one byte, `None`, when the
+  account signs for itself) and `DynamicMaxBlockWeight` (none), which polkadot.js does not know. The page registers both
+  in the initialisation metadata it gives each wallet (`metadata.provide`, `userExtensions`) before anything is signed,
+  reads the runtime's extension list from its metadata at every signature, and refuses one it does not know. It signs
+  through its own polkadot.js bridge (polkadot-api's refuses `PassAuthenticate`), never takes a signed transaction from
+  the wallet, and puts the extrinsic together itself, so a wallet that signed something else yields an extrinsic
+  Kreivo rejects. `test/extensions.test.ts` shows the extrinsic is byte for byte polkadot-api's own, and that without
+  the registration the signature is over another payload.
+- **A locked redeem**: at the Redeem click the page freezes the redeemer, the amount (or the whole balance), the
+  backend (`Evm { chain_id }` of the network), the payout address (the connected EVM account by default, checksummed)
+  and a fresh random 32-byte reference. It reads the contract again on that snapshot (bounds and the redemption
+  minimum, backends, the four pause scopes, the balance, whether the reference was used), dry-runs `redeem` through
+  `ContractsApi.call` for the contract's own refusal, then dry-runs the exact `batch_all` through `DryRunApi`, whose
+  `Redeemed` must match the snapshot. After finality it decodes `Redeemed` and fails loudly on any difference. The
+  result names the on-chain reference (redeemer + reference), the bridge reference `bz-w-…` and the payout reference.
+- **The status page** reads Polygon through the wallet and Kreivo through the light client: a deposit's
+  `Transfer`/`Directed` pair at its coordinate and its finality, `mint_reference_used` on Kreivo, and a return by its
+  payout reference; a withdrawal's redemption record on Kreivo and its payout by the reference the vault's emitter
+  logs, checked against the redemption's address and amount.
+
+## Not yet shown
+
+- On the test bed, a redemption signed and paid out from each of Talisman, SubWallet and Polkadot.js, and a deposit
+  from MetaMask that mints, with the page in a browser (T-018-14, T-018-15). The flows are tested against models of
+  the chains and the wallets, and the Kreivo adapter read-only against mainnet.
+- The public status route's paths and fields are this app's expectation of T-018-10 (`src/status/route.ts`), to be
+  aligned when it is built.
 
 ## Licence
 

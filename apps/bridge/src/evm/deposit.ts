@@ -33,7 +33,7 @@ import {
 } from 'viem';
 import { directedDepositAbi, tokenAbi } from './abi';
 import { permitDeadline, permitTypedData } from './permit';
-import { directedArrivals, type DirectedArrival } from './coordinate';
+import { countDirected, directedArrivals, type DirectedArrival } from './coordinate';
 import type { ResolvedNetwork } from '../config/networks';
 
 export interface Session {
@@ -174,6 +174,8 @@ export interface DepositResult {
   /** Every arrival of the contract in the receipt, as decoded, to show what the chain recorded when it is not
    * what was asked. */
   arrivals: DirectedArrival[];
+  /** How many of the contract's logs in the receipt are `Directed`, paired with a `Transfer` or not. */
+  directedLogs: number;
   method: 'permit' | 'approve';
   /** With `approve`: whether an allowance already in place was used rather than a new approval. */
   reusedAllowance: boolean;
@@ -254,7 +256,7 @@ export async function deposit(s: Session, facts: ContractFacts, req: DepositRequ
       });
       progress('Waiting for the approval to be included.');
       await assertChain(s);
-      const r = await s.public.waitForTransactionReceipt({ hash: approval });
+      const r = await waitFor(s, approval, 'approval');
       if (r.status !== 'success') throw new Error(`The approval ${approval} failed.`);
     } else {
       reusedAllowance = true;
@@ -280,7 +282,7 @@ export async function deposit(s: Session, facts: ContractFacts, req: DepositRequ
       throw new Error(`The deposit ${sent} was sent, but its receipt cannot be read: ${(e as Error).message}`);
     });
   await onChain();
-  const receipt = await s.public.waitForTransactionReceipt({ hash });
+  const receipt = await waitFor(s, hash, 'deposit');
   await onChain();
   if (receipt.status !== 'success') throw new Error(`The deposit ${hash} reverted; nothing moved.`);
   const arrivals = directedArrivals(receipt.logs, {
@@ -292,5 +294,18 @@ export async function deposit(s: Session, facts: ContractFacts, req: DepositRequ
   const arrival = arrivals.find(
     (a) => a.sender === s.account && a.recipient === req.recipient && a.amount === req.amount && a.refund === s.account,
   );
-  return { hash, receipt, arrival, arrivals, method, reusedAllowance };
+  return { hash, receipt, arrival, arrivals, directedLogs: countDirected(receipt.logs, contract), method, reusedAllowance };
+}
+
+/** Waits for the receipt of a transaction already sent; when that fails, the error names the transaction, so the
+ * user can look it up rather than send again. */
+async function waitFor(s: Session, hash: Hex, what: 'approval' | 'deposit'): Promise<TransactionReceipt> {
+  try {
+    // viem's backoff between failed receipt reads (200 ms, doubling), never slower than the client polls.
+    const base = Math.min(200, s.public.pollingInterval);
+    return await s.public.waitForTransactionReceipt({ hash, retryDelay: ({ count }) => (1 << count) * base });
+  } catch (e) {
+    const why = (e as { shortMessage?: string }).shortMessage ?? (e as Error).message;
+    throw new Error(`The ${what} ${hash} was sent, but waiting for its receipt failed: ${why.replace(/\.?$/, '.')} Look it up before trying again.`);
+  }
 }

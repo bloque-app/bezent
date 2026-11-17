@@ -80,3 +80,20 @@ export function mintReference(c: Coordinate): Hex {
 export function unassociatedRefundPayoutReference(c: Coordinate): Hex {
   return toHex(tagged('bezent/unassociated-refund-reference/v0', [coordinateDigest(c)]));
 }
+
+/** The bridge reference of the withdrawal bound to the redemption (`redeemer`, `reference`) (`bz-w-…`; core
+ * `refs::withdrawal`): the redemption's on-chain reference, the redeemer's 32-byte account and the 32 bytes it
+ * chose (`REQ-OT-2`, amendment 0008). */
+export function withdrawalReference(redeemer: Hex, reference: Hex): string {
+  const account = fromHex(redeemer);
+  const ref = fromHex(reference);
+  if (account.length !== 32) throw new Error('a redeemer is a 32-byte account');
+  if (ref.length !== 32) throw new Error('a redemption reference is 32 bytes');
+  return short('bz-w-', tagged('bezent/withdrawal/v1', [account, ref]));
+}
+
+/** The 32 bytes the payout of the withdrawal whose bridge reference is `bridgeReference` writes on its origin
+ * network, in the vault's `Reference(bytes32)` log (core `refs::payout_reference`; PLAN `DEC-10`). */
+export function payoutReference(bridgeReference: string): Hex {
+  return toHex(tagged('bezent/payout-reference/v0', [utf8(bridgeReference)]));
+}

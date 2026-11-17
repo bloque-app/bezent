@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  bezentContract,
   KREIVO,
   KREIVO_TESTBED,
   networksFor,
@@ -140,5 +141,34 @@ describe('networksFor', () => {
     expect(POLYGON.network).toBe('polygon');
     expect(POLYGON_AMOY.network).toBe('polygon-amoy');
     expect(testbed(NO_TESTBED_PINS).network).toBe('polygon');
+  });
+});
+
+describe('the redeem’s and the status page’s pins', () => {
+  it('pin the bezent contract on Kreivo mainnet, and leave the test bed’s to its build', () => {
+    expect(KREIVO.bezent).toBe('0x361d9535ca78edf68a88c7abd44cdec7086f8e85bcb8aedb724462eb3f2e5821');
+    expect(KREIVO_TESTBED.bezent).toBe(UNSET);
+    expect(testbed({ ...PINS, bezent: CODE_HASH }).kreivo).toMatchObject({ bezent: CODE_HASH });
+  });
+
+  it('refuse to redeem where no contract is pinned, never the deposit', () => {
+    const n = resolveNetwork(AMOY);
+    expect(() => bezentContract(n)).toThrow(/bezent contract is not set in this build/);
+    expect(bezentContract(resolveNetwork({ ...AMOY, kreivo: { ...TEST_KREIVO, bezent: CODE_HASH } }))).toBe(CODE_HASH);
+  });
+
+  it('refuse a malformed contract or emitter, and an emitter that is one of the deposit’s addresses', () => {
+    expect(() => resolveNetwork({ ...AMOY, kreivo: { ...TEST_KREIVO, bezent: '0x1234' } })).toThrow(/not a 32-byte account/);
+    expect(() => resolveNetwork({ ...AMOY, kreivo: { ...TEST_KREIVO, bezent: `0x${'00'.repeat(32)}` } })).toThrow(/not a 32-byte account/);
+    expect(() => resolveNetwork({ ...AMOY, emitter: '0x12' as `0x${string}` })).toThrow(/reference emitter address 0x12 is malformed/);
+    expect(() => resolveNetwork({ ...AMOY, emitter: RESERVE })).toThrow(/reference emitter is the token/);
+    expect(() => resolveNetwork({ ...AMOY, payoutsFrom: -1n })).toThrow(/negative block/);
+  });
+
+  it('pin Amoy’s vault emitter and its first block, and leave Polygon’s unset until T-018-18', () => {
+    expect(POLYGON_AMOY.emitter).toBe('0xa1Ebae82c6Ebe16beB0864fc73D5350bE71370B9');
+    expect(POLYGON_AMOY.payoutsFrom).toBe(53_060_034n);
+    expect(POLYGON.emitter).toBe(UNSET);
+    expect(resolveNetwork(AMOY).emitter).toBe('0xa1Ebae82c6Ebe16beB0864fc73D5350bE71370B9');
   });
 });

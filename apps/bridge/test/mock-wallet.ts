@@ -4,7 +4,9 @@
 // reads, signs typed data with a published test key (or refuses to, as some wallets do), and records every
 // transaction it is asked to send, giving each deposit the `Transfer` then `Directed` logs the contract emits
 // (or, to test the post-receipt check, logs that say something else). It can also switch chain on its own
-// right after signing, as a user or a hostile wallet might.
+// right after signing or while the page waits for a receipt, as a user or a hostile wallet might, fail the receipt
+// wait, and serve the vault's payouts (a token Transfer from the reserve and the emitter's Reference log, in one
+// transaction) and blocks, for the status page.
 
 import {
   decodeFunctionData,
@@ -20,6 +22,7 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { directedDepositAbi, tokenAbi } from '../src/evm/abi';
+import { referenceEmitterAbi } from '../src/status/polygon';
 import { KREIVO_TESTBED, POLYGON_AMOY, resolveNetwork } from '../src/config/networks';
 
 // anvil's first published test key: a test value, never a real account's.
@@ -27,6 +30,7 @@ export const OWNER = privateKeyToAccount('0xac0974bec39a17e36ba4a6b4d238ff944bac
 export const CONTRACT: Address = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
 export const TOKEN: Address = '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582';
 export const RESERVE: Address = '0x000000000000000000000000000000000000Ba5e';
+export const EMITTER: Address = '0x00000000000000000000000000000000000E0111';
 export const BLOCK_HASH: Hex = `0x${'ab'.repeat(32)}`;
 /** The contract's runtime code in the mock, and its hash, as a network pins it. */
 export const CODE: Hex = '0x6080';
@@ -38,7 +42,9 @@ export const network = resolveNetwork({
   directedDeposit: CONTRACT,
   reserve: RESERVE,
   codeHash: CODE_HASH,
-  kreivo: { ...KREIVO_TESTBED, network: 'kreivo-test', deployment: 'test' },
+  kreivo: { ...KREIVO_TESTBED, network: 'kreivo-test', deployment: 'test', bezent: `0x${'c0'.repeat(32)}` },
+  emitter: EMITTER,
+  payoutsFrom: 10n,
 });
 
 export interface Sent {
@@ -60,6 +66,20 @@ export interface MockOptions {
   switchChainAfterSign?: number;
   /** What the deposit's logs record instead of what was sent. */
   record?: { recipient?: Hex; refund?: Address; amount?: bigint };
+  /** A second `Directed` log in the deposit's receipt: with its own `Transfer` (`paired`) or alone (`unpaired`). */
+  extraDirected?: 'paired' | 'unpaired';
+  /** The chain the wallet moves to while the page waits for a receipt. */
+  switchChainOnReceipt?: number;
+  /** The provider fails every receipt read, as a node that drops the connection. */
+  receiptFails?: boolean;
+  /** Payouts from the reserve already on chain: each one transaction with the Transfer and the Reference log. */
+  payouts?: { reference: Hex; to: Address; amount: bigint; block: number }[];
+  /** The finalized head (the latest block is 101). */
+  finalized?: number;
+  /** The largest block range `eth_getLogs` takes. */
+  maxLogRange?: number;
+  /** The latest block (101 by default). */
+  latest?: number;
 }
 
 export function mockWallet(o: MockOptions = {}) {
@@ -67,6 +87,7 @@ export function mockWallet(o: MockOptions = {}) {
   const sent: Sent[] = [];
   const requests: string[] = [];
   const receipts = new Map<Hex, unknown>();
+  const transactions = new Map<Hex, unknown>();
   let allowance = o.allowance ?? 0n;
   const typed = o.typedData ?? 'sign';
   const fail = (code: number, message: string) => Object.assign(new Error(message), { code });
@@ -98,9 +119,10 @@ export function mockWallet(o: MockOptions = {}) {
     throw fail(-32000, `no contract at ${to}`);
   };
 
-  const receipt = (hash: Hex, from: Address, to: Address, logs: unknown[]) => ({
-    blockHash: BLOCK_HASH,
-    blockNumber: numberToHex(100),
+  const blockHash = (n: number): Hex => (n === 100 ? BLOCK_HASH : keccak256(numberToHex(n, { size: 32 })));
+  const receipt = (hash: Hex, from: Address, to: Address, logs: unknown[], block = 100) => ({
+    blockHash: blockHash(block),
+    blockNumber: numberToHex(block),
     contractAddress: null,
     cumulativeGasUsed: '0x5208',
     effectiveGasPrice: '0x1',
@@ -115,17 +137,52 @@ export function mockWallet(o: MockOptions = {}) {
     type: '0x2',
   });
 
-  const log = (address: Address, topics: Hex[], data: Hex, index: number, hash: Hex) => ({
+  const log = (address: Address, topics: Hex[], data: Hex, index: number, hash: Hex, block = 100) => ({
     address,
     topics,
     data,
     logIndex: numberToHex(index),
-    blockHash: BLOCK_HASH,
-    blockNumber: numberToHex(100),
+    blockHash: blockHash(block),
+    blockNumber: numberToHex(block),
     transactionHash: hash,
     transactionIndex: '0x0',
     removed: false,
   });
+
+  // The payouts: a Transfer from the reserve, then the emitter's Reference, in one transaction each.
+  const payoutLogs: ReturnType<typeof log>[] = [];
+  (o.payouts ?? []).forEach((p, i) => {
+    const hash = keccak256(numberToHex(10_000 + i));
+    const transfer = log(TOKEN, encodeEventTopics({ abi: tokenAbi, eventName: 'Transfer', args: { from: RESERVE, to: p.to } }) as Hex[],
+      encodeAbiParameters([{ type: 'uint256' }], [p.amount]), 7, hash, p.block);
+    const reference = log(EMITTER, encodeEventTopics({ abi: referenceEmitterAbi, eventName: 'Reference', args: { ref: p.reference } }) as Hex[], '0x', 8, hash, p.block);
+    payoutLogs.push(reference);
+    receipts.set(hash, receipt(hash, RESERVE, RESERVE, [transfer, reference], p.block));
+  });
+  const block = (n: number) => ({
+    number: numberToHex(n),
+    hash: blockHash(n),
+    parentHash: blockHash(n - 1),
+    timestamp: numberToHex(1_700_000_000 + n),
+    nonce: '0x0000000000000000',
+    difficulty: '0x0',
+    gasLimit: '0x1c9c380',
+    gasUsed: '0x0',
+    miner: RESERVE,
+    extraData: '0x',
+    logsBloom: `0x${'00'.repeat(256)}`,
+    transactionsRoot: BLOCK_HASH,
+    stateRoot: BLOCK_HASH,
+    receiptsRoot: BLOCK_HASH,
+    sha3Uncles: BLOCK_HASH,
+    mixHash: BLOCK_HASH,
+    size: '0x0',
+    totalDifficulty: '0x0',
+    baseFeePerGas: '0x1',
+    transactions: [],
+    uncles: [],
+  });
+  const logRequests: { from: number; to: number }[] = [];
 
   const provider = {
     on: () => undefined,
@@ -149,7 +206,7 @@ export function mockWallet(o: MockOptions = {}) {
           chainId = Number(arg<{ chainId: Hex }>(0).chainId);
           return null;
         case 'eth_blockNumber':
-          return numberToHex(101);
+          return numberToHex(o.latest ?? 101);
         case 'eth_getCode':
           return getAddress(arg<Address>(0)) === CONTRACT ? (o.contractCode ?? CODE) : '0x';
         case 'eth_call': {
@@ -184,20 +241,62 @@ export function mockWallet(o: MockOptions = {}) {
             const amount = o.record?.amount ?? sentAmount;
             const recipient = o.record?.recipient ?? sentRecipient;
             const refund = o.record?.refund ?? sentRefund;
-            logs.push(
+            const transfer = (i: number) =>
               log(TOKEN, encodeEventTopics({ abi: tokenAbi, eventName: 'Transfer', args: { from: tx.from, to: RESERVE } }) as Hex[],
-                encodeAbiParameters([{ type: 'uint256' }], [amount]), 41, hash),
+                encodeAbiParameters([{ type: 'uint256' }], [amount]), i, hash);
+            const directed = (i: number) =>
               log(CONTRACT, encodeEventTopics({ abi: directedDepositAbi, eventName: 'Directed', args: { sender: tx.from, recipient } }) as Hex[],
-                encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }], [amount, refund]), 42, hash),
-            );
+                encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }], [amount, refund]), i, hash);
+            logs.push(transfer(41), directed(42));
+            if (o.extraDirected === 'paired') logs.push(transfer(43), directed(44));
+            if (o.extraDirected === 'unpaired') logs.push(directed(45));
           }
           receipts.set(hash, receipt(hash, tx.from, tx.to, logs));
+          transactions.set(hash, {
+            hash,
+            from: tx.from,
+            to: tx.to,
+            input: tx.data,
+            nonce: numberToHex(sent.length),
+            value: '0x0',
+            gas: '0x5208',
+            maxFeePerGas: '0x1',
+            maxPriorityFeePerGas: '0x1',
+            blockHash: BLOCK_HASH,
+            blockNumber: numberToHex(100),
+            transactionIndex: '0x0',
+            type: '0x2',
+            chainId: numberToHex(chainId),
+            v: '0x0',
+            r: BLOCK_HASH,
+            s: BLOCK_HASH,
+            yParity: '0x0',
+            accessList: [],
+          });
           return hash;
         }
-        case 'eth_getTransactionReceipt':
-          return receipts.get(arg<Hex>(0)) ?? null;
+        case 'eth_getTransactionReceipt': {
+          if (o.receiptFails) throw fail(-32000, 'header not found');
+          const r = receipts.get(arg<Hex>(0)) ?? null;
+          if (r && o.switchChainOnReceipt !== undefined) chainId = o.switchChainOnReceipt;
+          return r;
+        }
+        case 'eth_getBlockByNumber': {
+          const tag = arg<string>(0);
+          const n = tag === 'finalized' ? (o.finalized ?? 90) : tag === 'latest' ? (o.latest ?? 101) : Number(tag);
+          return block(n);
+        }
+        case 'eth_getLogs': {
+          const f = arg<{ address: Address; topics: (Hex | null)[]; fromBlock: Hex; toBlock: Hex }>(0);
+          const [from, to] = [Number(f.fromBlock), Number(f.toBlock)];
+          logRequests.push({ from, to });
+          if (o.maxLogRange !== undefined && to - from + 1 > o.maxLogRange) throw fail(-32000, 'query returned more than 10000 results');
+          return payoutLogs.filter(
+            (l) => getAddress(l.address) === getAddress(f.address) && l.topics[1] === f.topics[1] && Number(l.blockNumber) >= from && Number(l.blockNumber) <= to,
+          );
+        }
         case 'eth_getTransactionByHash':
-          return null;
+          return transactions.get(arg<Hex>(0)) ?? null;
         default:
           throw fail(-32601, `${method} is not supported by the mock`);
       }
@@ -209,6 +308,7 @@ export function mockWallet(o: MockOptions = {}) {
     sent,
     requests,
     chainId: () => chainId,
+    logRequests,
     /** Moves the wallet to another chain, as the user might at any moment. */
     switchTo: (id: number) => {
       chainId = id;

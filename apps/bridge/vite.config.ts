@@ -11,6 +11,11 @@
 //   BRIDGE_TESTBED_DIRECTED_DEPOSIT the test bed's DirectedDeposit address (testbed builds only)
 //   BRIDGE_TESTBED_RESERVE          its reserve() (testbed builds only)
 //   BRIDGE_TESTBED_CODE_HASH        keccak256 of its runtime code (testbed builds only)
+//   BRIDGE_TESTBED_BEZENT           the bezent contract the bed's Kreivo deployed, 32 bytes as hex (testbed only)
+//   BRIDGE_TESTBED_EMITTER          the bed's vault reference emitter (testbed builds only)
+//   BRIDGE_TESTBED_PAYOUTS_FROM     the block the status page searches payouts from (testbed builds only)
+//   BRIDGE_STATUS_URL               the public status route (T-018-10), https; unset (the default), the status
+//                                   page reads chain data alone
 //   BRIDGE_REVISION                 the revision shown in the page (default: git's full HEAD, else "unknown")
 
 import { execFileSync } from 'node:child_process';
@@ -40,7 +45,7 @@ function deployment(command: 'build' | 'serve'): Deployment {
   return d;
 }
 
-function testbedPins(d: Deployment): { directedDeposit: string; reserve: string; codeHash: string } {
+function testbedPins(d: Deployment): Record<'directedDeposit' | 'reserve' | 'codeHash' | 'bezent' | 'emitter' | 'payoutsFrom', string> {
   const read = (name: string, shape: RegExp, what: string) => {
     const v = process.env[name] ?? '';
     if (v === '') return '';
@@ -52,7 +57,30 @@ function testbedPins(d: Deployment): { directedDeposit: string; reserve: string;
     directedDeposit: read('BRIDGE_TESTBED_DIRECTED_DEPOSIT', /^0x[0-9a-fA-F]{40}$/, 'an address'),
     reserve: read('BRIDGE_TESTBED_RESERVE', /^0x[0-9a-fA-F]{40}$/, 'an address'),
     codeHash: read('BRIDGE_TESTBED_CODE_HASH', /^0x[0-9a-f]{64}$/, '32 bytes of lowercase hex'),
+    bezent: read('BRIDGE_TESTBED_BEZENT', /^0x[0-9a-f]{64}$/, '32 bytes of lowercase hex'),
+    emitter: read('BRIDGE_TESTBED_EMITTER', /^0x[0-9a-fA-F]{40}$/, 'an address'),
+    payoutsFrom: read('BRIDGE_TESTBED_PAYOUTS_FROM', /^(0|[1-9][0-9]{0,15})$/, 'a block number'),
   };
+}
+
+/** The public status route's base URL (T-018-10), or '' when unset: https only, or a loopback http URL for a test
+ * bed build, with no credentials, query or fragment. It is fixed in the build, so the bundle's hash covers it, and
+ * the CSP lets the page reach that origin alone. */
+function statusRoute(d: Deployment): string {
+  const v = process.env.BRIDGE_STATUS_URL ?? '';
+  if (v === '') return '';
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    throw new Error(`BRIDGE_STATUS_URL=${v}: not a URL`);
+  }
+  const loopback = /^(127\.0\.0\.1|localhost|\[::1\])$/.test(u.hostname);
+  if (!(u.protocol === 'https:' || (d === 'testbed' && u.protocol === 'http:' && loopback))) {
+    throw new Error(`BRIDGE_STATUS_URL=${v}: https only (a test bed build may name a loopback http URL)`);
+  }
+  if (u.username || u.password || u.search || u.hash) throw new Error(`BRIDGE_STATUS_URL=${v}: no credentials, query or fragment`);
+  return u.href.replace(/\/$/, '');
 }
 
 function revision(): string {
@@ -76,20 +104,20 @@ function checkNode(command: 'build' | 'serve') {
 
 /** Ships the chain specifications as their own files (Kreivo's is GPL-3.0-only data, Kusama's comes from
  * @polkadot-api/known-chains: docs/oss/LICENSING.md §4.4), writes `_headers`, and puts the CSP in the page. */
-function bridge(d: Deployment, specs: Record<'kreivo' | 'kusama', string>): Plugin {
+function bridge(d: Deployment, specs: Record<'kreivo' | 'kusama', string>, route: string): Plugin {
   return {
     name: 'bezent-bridge',
     transformIndexHtml: {
       order: 'pre',
       handler: (html, ctx) =>
         // The dev server injects its own client and talks to it over a WebSocket; only a build is strict.
-        html.replace('%BRIDGE_CSP_META%', ctx.server ? '' : csp(d, { forMeta: true })),
+        html.replace('%BRIDGE_CSP_META%', ctx.server ? '' : csp(d, { forMeta: true, statusRoute: route })),
     },
     generateBundle() {
       for (const [name, spec] of Object.entries(specs)) {
         this.emitFile({ type: 'asset', fileName: `chain-specs/${name}.json`, source: spec });
       }
-      this.emitFile({ type: 'asset', fileName: '_headers', source: headersFile(d) });
+      this.emitFile({ type: 'asset', fileName: '_headers', source: headersFile(d, route) });
     },
     configureServer(server) {
       for (const [name, spec] of Object.entries(specs)) {
@@ -192,16 +220,18 @@ export default defineConfig(async ({ command }) => {
   const { chainSpec: kusama } = await import('polkadot-api/chains/kusama');
   const specs = { kreivo: readFileSync(KREIVO_CHAIN_SPEC, 'utf8'), kusama };
   const n = notices();
+  const route = statusRoute(d);
   return {
     base: './',
     define: {
       __BRIDGE_DEPLOYMENT__: JSON.stringify(d),
       __BRIDGE_TESTBED__: JSON.stringify(testbedPins(d)),
       __BRIDGE_REVISION__: JSON.stringify(revision()),
+      __BRIDGE_STATUS_URL__: JSON.stringify(route),
       __KREIVO_CHAIN_SPEC_SHA256__: JSON.stringify(sha256(specs.kreivo)),
       __KUSAMA_CHAIN_SPEC_SHA256__: JSON.stringify(sha256(specs.kusama)),
     },
-    plugins: [noCcip(), bridge(d, specs), n.emit],
+    plugins: [noCcip(), bridge(d, specs, route), n.emit],
     build: {
       target: 'es2022',
       sourcemap: false,
@@ -214,6 +244,7 @@ export default defineConfig(async ({ command }) => {
     worker: { format: 'es' as const, plugins: () => [n.collect] },
     test: {
       include: ['test/**/*.test.ts'],
+      // Node by default; the page's own tests (test/page.test.ts) ask for happy-dom.
       environment: 'node',
     },
   };
