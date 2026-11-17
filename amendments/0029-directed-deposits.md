@@ -259,13 +259,13 @@ Guardrail 1 holds: no network, token, standard or product is named below.
   upgraded is code that holds reserve for `REQ-GV-3`.
 - **`REQ-IN-3`:** add, at the end, "A directed arrival is not bound by any request (`REQ-IN-10`)."
 - **`REQ-IN-10` (new):** a final directed arrival of an admitted token at a reserve address MUST become a deposit
-  without a request. It begins at `Source-Final` with a bridge reference derived deterministically from the coordinate.
+  without a request, unless `REQ-IN-11` returns it. It begins at `Source-Final` with a bridge reference derived deterministically from the coordinate.
   Its destination MUST be the one its directing code recorded, and its refund destination the `refund` address its caller named, the original depositor (`d-refund-dest-swaps`).
   The directing code MUST refuse a zero refund address, the reserve address and itself. No one chooses either afterwards. A request naming its coordinate MUST be refused (`ERR-SourceNotFound`) and binds nothing.
 - **`REQ-IN-11` (new):** a directed arrival that its route's limits, a pause, a hold or a bound on the issuing network
   keep from being minted MUST wait in the named condition that applies (§10), and resume by itself. One that can never
-  be minted under the route's current declaration, or whose destination bezent refuses by rule, MUST be returned to its
-  refund destination by a refund of an unassociated arrival (`REQ-RQ-6`) that bezent orders itself, with that address as destination
+  be minted under the route's current declaration, or whose destination bezent refuses by rule, MUST NOT become a
+  deposit: it stays an unassociated arrival and MUST be returned to its refund destination by a refund of an unassociated arrival (`REQ-RQ-6`) that bezent orders itself, with that address as destination
   and with no second approver (Open 3, ruled). Only the issuing network's refusal of a destination waits for review
   instead (`REQ-IN-9`); a review of that kind MAY resolve into a refund to the refund destination (Open 2, ruled, §5.4), with a
   second approver.
@@ -304,6 +304,20 @@ Guardrail 1 holds: no network, token, standard or product is named below.
 
 `REQ-PN-1`, `REQ-RQ-7`, `REQ-AR-*`, `REQ-BK-*` and the invariants are unchanged. (`REQ-PN-3` is withdrawn by amendment
 0026's withdrawal and is not touched here.) The transition table gains the one edge of Open 2.
+
+- **Wording that follows from the above (revised 2026-11-17, from the review of #119; no further behaviour):**
+  - §1.2 "to the destination named in the order or recorded by the directing code";
+  - §1.3, the requester fact "which account a deposit is for", except a directed arrival;
+  - §2 "Request reference", "A directed deposit has none";
+  - §4.2's first row also names the destination its directing code recorded;
+  - §4.3's second row, "Where a requester's deposit goes";
+  - §5.4's opening line, where a directed deposit has no request reference;
+  - §7.E publishes the directing code with the reserve addresses (`REQ-AS-11`);
+  - `REQ-RQ-6` names bezent's own return of a directed arrival (`REQ-IN-11`) as the one release with no second
+    approver;
+  - `REQ-RV-2` names the §5.4 edge of Open 2 as its one exception;
+  - `CND-Unassociated` excludes a directed arrival, except one that `REQ-IN-11` keeps from becoming a deposit;
+  - §15's V0 scope gains `US-A6` (Open 10: `F-018` is in `M-4`).
 
 ## Text applied to `PLAN.md`
 
@@ -432,7 +446,7 @@ Each is one question for @pandres95, with a recommendation. Open 1 to 13 and Ope
 | Action | Identifiers |
 |---|---|
 | Added | §2 "Directed arrival", §2 "Directing code", `REQ-AS-11`, `REQ-IN-10`, `REQ-IN-11`, `US-A6`, `AC-A6.1`–`AC-A6.6`; `REQ-ST-8` (Open 8, ruled); `CND-DepositWindow` (Open 1, ruled); in the plan `DEC-21`, `DEC-22`, `F-018`, `T-018-*` (`T-018-16`, the Virto spike, is retired by Open 9 and not reused); no `M-6` (Open 10, ruled) |
-| Revised | the refund destination of a directed deposit (`d-refund-dest-swaps`: `REQ-IN-10`, `REQ-IN-11`, `REQ-RF-2`, `AC-A6.1`, `AC-A6.2`, `AC-A6.4`); §1.2, §1.4, §3 (funder), §4.2 (first row), §4.3 (new row), `REQ-IN-3`, `REQ-IN-6`, `REQ-RF-2`, `REQ-RQ-3`, `REQ-ST-1`, `DEF-5`, §15; the §5.4 table (Open 2, ruled yes); in the plan `DEC-8`, `DEC-9`, `DEC-15`, `DEC-20` (a line), §4, §5 (`M-4`); `docs/oss/LICENSING.md` (one row) |
+| Revised | the refund destination of a directed deposit (`d-refund-dest-swaps`: `REQ-IN-10`, `REQ-IN-11`, `REQ-RF-2`, `AC-A6.1`, `AC-A6.2`, `AC-A6.4`); §1.2, §1.3, §1.4, §2 ("Request reference"), §3 (funder), §4.2 (first row), §4.3 (second row, new row), §5.4 (opening line), §7.E, `REQ-IN-3`, `REQ-IN-6`, `REQ-RF-2`, `REQ-RQ-3`, `REQ-RQ-6`, `REQ-RV-2`, `REQ-ST-1`, `CND-Unassociated`, `DEF-5`, §15 (and its V0 scope); the §5.4 table (Open 2, ruled yes); in the plan `DEC-8`, `DEC-9`, `DEC-15`, `DEC-20` (a line), §4, §5 (`M-4`); `docs/oss/LICENSING.md` (one row) |
 
 None of the new identifiers was used before. `REQ-RQ-10` is avoided because amendment 0016 (pull request #66) proposes
 it, and `AC-E2.3` is taken by amendment 0028 (pull request #112).
