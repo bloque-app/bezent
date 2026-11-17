@@ -1,0 +1,76 @@
+<!doctype html>
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="Content-Security-Policy" content="%BRIDGE_CSP_META%" />
+    <title>bezent bridge</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/src/ui/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>bezent <span>bridge</span></h1>
+      <p id="build" class="muted"></p>
+    </header>
+    <main>
+      <noscript><p class="error">The bridge needs JavaScript: it runs entirely in this page.</p></noscript>
+
+      <section aria-labelledby="h-network">
+        <h2 id="h-network">1. Network</h2>
+        <label for="network">Deposit on</label>
+        <select id="network"></select>
+        <dl id="network-facts" class="facts"></dl>
+        <p id="network-error" class="error" hidden></p>
+      </section>
+
+      <section aria-labelledby="h-wallet">
+        <h2 id="h-wallet">2. EVM wallet</h2>
+        <p class="muted">Wallets in this browser that announce themselves (EIP-6963).</p>
+        <div id="wallets" class="wallets"><p class="muted">Looking for wallets…</p></div>
+        <dl id="wallet-facts" class="facts"></dl>
+      </section>
+
+      <section aria-labelledby="h-recipient">
+        <h2 id="h-recipient">3. Recipient on Kreivo</h2>
+        <label for="recipient">Kreivo address (SS58)</label>
+        <input id="recipient" autocomplete="off" spellcheck="false" placeholder="H…" />
+        <p><button id="from-kreivo-wallet" type="button" class="link">Use an account from a Kreivo wallet</button></p>
+        <div id="kreivo-accounts" class="wallets"></div>
+        <p id="recipient-status" class="muted"></p>
+        <p id="kreivo-status" class="muted"></p>
+      </section>
+
+      <section aria-labelledby="h-amount">
+        <h2 id="h-amount">4. Amount</h2>
+        <label for="amount">USDC</label>
+        <input id="amount" inputmode="decimal" autocomplete="off" placeholder="0.00" />
+        <p id="amount-status" class="muted"></p>
+      </section>
+
+      <section aria-labelledby="h-review">
+        <h2 id="h-review">5. Review and deposit</h2>
+        <dl id="review" class="facts"></dl>
+        <p class="muted">
+          The recipient is written on Polygon next to your address, in public. If the deposit can never be minted,
+          bezent returns it to your address, the refund address above.
+        </p>
+        <button id="deposit" type="button" disabled>Deposit</button>
+        <ol id="progress" class="progress"></ol>
+        <dl id="result" class="facts"></dl>
+      </section>
+    </main>
+    <footer class="muted">
+      <p>
+        No server, no analytics, no third-party script: this page talks to your wallet and to Kreivo through a light
+        client in your browser.
+      </p>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
