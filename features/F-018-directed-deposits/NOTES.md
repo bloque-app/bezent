@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # F-018 — notes
 
-**Status: Proposed.** Research for amendment 0029, whose Open 1 to 13 are ruled (2026-11-09) and which is not applied.
+**Status:** research for amendment 0029, accepted 2026-11-17 and applied in `SPEC.md` v0.5.13.
 
 The facts this design rests on, as checked on 2026-11-08, and the choices made among standards and wallets. Not
 normative: amendment 0029 proposes, `SPEC.md` and `PLAN.md` decide. Removed when F-018 is built and its decisions are
@@ -104,11 +104,11 @@ leaves room for a rate-limiting front to the public status route (amendment 0029
   `msg.sender` would loop a refund into another sweep.
 - The original sender may be an exchange's shared hot wallet (SPEC `DEF-5` risk: returning there can lose the value),
   and the owner has ruled that the refund goes to the original depositor all the same (`d-refund-dest-swaps`).
-- **Open question, to the owner, not ruled (amendment 0029, Open 15):** a single sweep can mix funds from several
-  senders, because evmhot sweeps full balances and sub-minimum dust accumulates. A deposit has one refund address, so the
-  original depositor is undefined. Recommended: one directed call per inbound transfer, refund = that transfer's sender;
-  sub-minimum transfers are never combined across senders; dust from different senders stays in the deposit address. Not
-  applied anywhere.
+- **Ruled (amendment 0029, Open 15, `d-mixed-sweeps-2`: one sweep per transfer):** a single sweep can mix funds from several
+  senders, because evmhot sweeps full balances and sub-minimum dust accumulates. A deposit has one refund address, so
+  without a rule the original depositor would be undefined. The rule: one directed call per inbound transfer, with
+  refund = that transfer's sender. Sub-minimum transfers are never combined across senders, and dust from different
+  senders stays in the deposit address. It binds evmhot (plan, part 5).
 - Pairing at the `Transfer` log's coordinate, not the `Directed` log's: the arrival is the token's movement, as for
   every other arrival (`REQ-RN-3`). The reserve book and the existing bridge reference derivation then need no change.
 - The recipient is public on Polygon, next to the depositor's address. That is the user's own choice, and an account id

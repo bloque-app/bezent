@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # F-018 — tasks
 
-**Proposed.** None is started: each waits for amendment 0029 to be applied. Its Open 1 to 13 are ruled (2026-11-09);
+**Accepted.** Amendment 0029 is applied (`SPEC.md` v0.5.13). T-018-01 to T-018-03, T-018-05 and T-018-06 are drafted, in pull requests #121, #122 and #125. Its Open questions are ruled (2026-11-09);
 where a ruling removed a task, its identifier is retired and not reused. Sizes are rough, for one engineer with agents, review included. *S* is up to a week,
 *M* one to two weeks, *L* two to three.
 

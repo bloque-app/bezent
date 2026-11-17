@@ -5,19 +5,21 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Amendment 0029 — a deposit that names its own destination needs no requester
 
-**Status:** **Proposed**, 2026-11-08; **Open 1 to 13 ruled by @pandres95 on the decision form, 2026-11-09**
-(`d-0029-window` to `d-0029-gas`; see "Open"; Open 14 is corrected and is no longer a question). Nothing here is
-applied: `SPEC.md` and `PLAN.md` are unchanged, and every text below is a proposal, with those rulings written into it.
-The direction is @pandres95's ruling in chat, 2026-11-08 (below); the design that carries it out waits for his
-sign-off. Amendment 0026 (a deposit binds only an arrival from its requester's declared senders) is withdrawn
-(`d-0026-holdout`, ruled 2026-11-09), so nothing below relies on it.
-**Target:** `SPEC.md` v0.5.11 and `PLAN.md` v0.6.10, as pull request #112 (amendment 0028) leaves them; v0.5.10 and
-v0.6.9 on `develop` today. The plan's side lands inside milestone `M-4` (Open 10, ruled): no milestone is added, so
-the plan's §5 table keeps its six rows, and `M-4` gains `F-018` and its criteria. If applied, `SPEC.md` v0.5.12 and `PLAN.md` v0.6.11; if another amendment takes those
-versions first, this one takes what is next. The withdrawal of amendment 0026 (the revert of pull request #100) takes
-`SPEC.md` v0.5.11 and `PLAN.md` v0.6.10 too; whichever of it and #112 merges second renumbers.
+**Status:** **Accepted** by @pandres95 in chat, 2026-11-17 ("We need to revise this and make it happen"), and
+applied by this pull request. Open 1 to 13 were ruled on the decision form on 2026-11-09 (`d-0029-window` to
+`d-0029-gas`). Open 15 was ruled the same day (`d-mixed-sweeps-2`). Open 14 is corrected and is no longer a question.
+Amendment 0026 (a deposit binds only an arrival from its requester's declared senders) is withdrawn
+(`d-0026-holdout`, 2026-11-09), so nothing below relies on it.
+**Target:** `SPEC.md` v0.5.12 and `PLAN.md` v0.6.11 on `develop` (amendment 0028 applied, 0026 withdrawn). Applied,
+they become `SPEC.md` v0.5.13 and `PLAN.md` v0.6.12. The plan's side lands inside milestone `M-4` (Open 10, ruled): no
+milestone is added, so the plan's §5 table keeps its six rows, and `M-4` gains `F-018` and its criteria.
+**Revised 2026-11-17**, before applying:
+- the target versions, which #112 and the withdrawal of 0026 moved;
+- Open 15, ruled;
+- the evmhot sweep's recipient, which is now the bUSDC operator account (part 5 of the plan). Since 2026-11-14, that
+  account is where bezent mints Swaps' deposits (`F-011`).
 **Date:** 2026-11-08
-**Needs:** a ruling on the design (A1 to A6); each item under "Open" is ruled. The feature that builds it is `F-018`
+**Needs:** nothing: the design (A1 to A6) is accepted and every item under "Open" is ruled. The feature that builds it is `F-018`
 (`features/F-018-directed-deposits/`). Numbered 0029 because 0027 and 0028 are taken by open pull requests (#111, #112).
 **Rationale in one line:** today a deposit is minted only when a declared requester binds the arrival, because a plain
 transfer to the reserve carries no destination; if the funder names the destination in the same transaction as the
@@ -342,7 +344,7 @@ Guardrail 1 holds: no network, token, standard or product is named below.
 
 ## Open
 
-Each is one question for @pandres95, with a recommendation. Open 1 to 13 are ruled (2026-11-09, by @pandres95 on the decision form); Open 14 is corrected; Open 15 is to the owner, not ruled.
+Each is one question for @pandres95, with a recommendation. Open 1 to 13 and Open 15 are ruled (2026-11-09, by @pandres95 on the decision form), and Open 14 is corrected.
 
 1. **Window.** **Ruled by @pandres95 on the decision form, 2026-11-09 (`d-0029-window`): "Wait".** A directed deposit over
    what the route's window has left waits for it to roll over (`CND-DepositWindow`); it is not returned. *Question as put:* Should a directed deposit over what the route's window has left wait for the window to roll over, rather
@@ -417,20 +419,20 @@ Each is one question for @pandres95, with a recommendation. Open 1 to 13 are rul
     mainnet test deposits 1 USDC, mints 1 bUSDC and redeems it whole, with no top-up, and still proves a deposit at
     the route's 1 USDC minimum.
 
-15. **Several senders in one sweep (to the owner, not ruled).** With the refund destination ruled to be the original
-    depositor (`d-refund-dest-swaps`), one question is left open. evmhot sweeps a deposit address's full balance, and
-    sub-minimum dust accumulates there, so a single sweep can mix funds from several senders. A directed deposit has one
-    refund address, so for such a sweep "the original depositor" is undefined. *Recommended:* one directed call per
-    inbound transfer, its `refund` the sender of that transfer; sub-minimum transfers are never combined across senders;
-    dust from different senders stays in the deposit address. This is a recommendation to the owner and is applied
-    nowhere in this amendment or in `F-018`.
+15. **Several senders in one sweep.** **Ruled by @pandres95 on the decision form, 2026-11-09
+    (`d-mixed-sweeps-2`): "One sweep per transfer".** His note: "That's how it used to work before. Anyways, one single
+    hot wallet routes to one single user." The refund destination is the original depositor (`d-refund-dest-swaps`),
+    and a directed deposit has exactly one refund address. So a sweep makes one directed call per inbound transfer,
+    and its `refund` is the sender of that transfer. Sub-minimum transfers are never combined across senders, and dust
+    from different senders stays in the deposit address. This binds evmhot (plan, part 5), not bezent: the contract
+    and the endpoint already take one `refund` per call.
 
 ## Identifier ledger
 
 | Action | Identifiers |
 |---|---|
-| Added, if ruled | §2 "Directed arrival", §2 "Directing code", `REQ-AS-11`, `REQ-IN-10`, `REQ-IN-11`, `US-A6`, `AC-A6.1`–`AC-A6.6`; `REQ-ST-8` (Open 8, ruled); `CND-DepositWindow` (Open 1, ruled); in the plan `DEC-21`, `DEC-22`, `F-018`, `T-018-*` (`T-018-16`, the Virto spike, is retired by Open 9 and not reused); no `M-6` (Open 10, ruled) |
-| Revised, if ruled | the refund destination of a directed deposit (`d-refund-dest-swaps`: `REQ-IN-10`, `REQ-IN-11`, `REQ-RF-2`, `AC-A6.1`, `AC-A6.2`, `AC-A6.4`); §1.2, §1.4, §3 (funder), §4.2 (first row), §4.3 (new row), `REQ-IN-3`, `REQ-IN-6`, `REQ-RF-2`, `REQ-RQ-3`, `REQ-ST-1`, `DEF-5`, §15; the §5.4 table (Open 2, ruled yes); in the plan `DEC-8`, `DEC-9`, `DEC-15`, `DEC-20` (a line), §4, §5 (`M-4`); `docs/oss/LICENSING.md` (one row) |
+| Added | §2 "Directed arrival", §2 "Directing code", `REQ-AS-11`, `REQ-IN-10`, `REQ-IN-11`, `US-A6`, `AC-A6.1`–`AC-A6.6`; `REQ-ST-8` (Open 8, ruled); `CND-DepositWindow` (Open 1, ruled); in the plan `DEC-21`, `DEC-22`, `F-018`, `T-018-*` (`T-018-16`, the Virto spike, is retired by Open 9 and not reused); no `M-6` (Open 10, ruled) |
+| Revised | the refund destination of a directed deposit (`d-refund-dest-swaps`: `REQ-IN-10`, `REQ-IN-11`, `REQ-RF-2`, `AC-A6.1`, `AC-A6.2`, `AC-A6.4`); §1.2, §1.4, §3 (funder), §4.2 (first row), §4.3 (new row), `REQ-IN-3`, `REQ-IN-6`, `REQ-RF-2`, `REQ-RQ-3`, `REQ-ST-1`, `DEF-5`, §15; the §5.4 table (Open 2, ruled yes); in the plan `DEC-8`, `DEC-9`, `DEC-15`, `DEC-20` (a line), §4, §5 (`M-4`); `docs/oss/LICENSING.md` (one row) |
 
 None of the new identifiers was used before. `REQ-RQ-10` is avoided because amendment 0016 (pull request #66) proposes
 it, and `AC-E2.3` is taken by amendment 0028 (pull request #112).

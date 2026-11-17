@@ -5,11 +5,11 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # F-018 — Directed deposits and the bridge web app
 
-**Status: Proposed.** Nothing here is built. It is the feature that would carry out amendment 0029, which is itself
-proposed and not applied; its Open 1 to 13 are ruled (2026-11-09). Folded into milestone `M-4` (amendment 0029, Open 10,
-ruled: no `M-6`). Would serve `US-A6`, `AC-A6.1`–`AC-A6.6`,
-`REQ-AS-11`, `REQ-IN-10`, `REQ-IN-11`, `REQ-RN-5`, `REQ-LM-2`, `REQ-ST-1`, `REQ-ST-8`, `US-B5`, and would
-keep `INV-2`, `INV-6`, `INV-10` and `INV-14` (plan `DEC-21` and `DEC-22`, proposed; `DEC-8`, `DEC-9`, `DEC-10`,
+**Status: Accepted** (amendment 0029, accepted by @pandres95 on 2026-11-17 and applied in `SPEC.md` v0.5.13 and
+`PLAN.md` v0.6.12). In progress: parts 1 and 2 (the contract, the endpoint and the store) are drafted in pull requests
+#121, #122 and #125. Folded into milestone `M-4` (amendment 0029, Open 10, ruled: no `M-6`). Serves `US-A6`, `AC-A6.1`–`AC-A6.6`,
+`REQ-AS-11`, `REQ-IN-10`, `REQ-IN-11`, `REQ-RN-5`, `REQ-LM-2`, `REQ-ST-1`, `REQ-ST-8`, `US-B5`, and keeps
+`INV-2`, `INV-6`, `INV-10` and `INV-14` (plan `DEC-21` and `DEC-22`; `DEC-8`, `DEC-9`, `DEC-10`,
 `DEC-12`, `DEC-15`). Read amendment 0029 first, then `F-008` NOTES ("Deployment", "The two roles") and `F-009` NOTES
 (decisions 2, 4, 5, 7). `NOTES.md` here records the facts checked for this design.
 
@@ -161,8 +161,11 @@ UI copy says **bezent**.
 Ruled by @pandres95, 2026-11-08: Bloque's evmhot hot-wallet service sweeps each user's deposit address by calling the
 directing contract's `deposit` from that address (`depositWithPermit`, or `approve` and then `deposit`), instead of a
 plain transfer into the vault. Each sweep then names its Kreivo recipient on chain, in the same transaction as the
-value: a Bloque Kreivo account set per chain and token in evmhot's configuration (which one is @pandres95's call), with
-Swaps attributing each sweep to its user from the deposit address. A sweep is a directed arrival: it becomes a
+value: a Bloque Kreivo account set per chain and token in evmhot's configuration, with Swaps attributing each sweep to
+its user from the deposit address. For bUSDC that account is the bUSDC operator: test `Ck8DEx7jrqts4rctPtDMpKJJW3JQmi38X2EB3awmS2UVZWP`, prod
+`HWpDkzjD45YDC5AAQAk1EYNDry1TJdxHZR7YAYnfDwVZWeM`. Since `F-011` (2026-11-14), bezent already mints Swaps' deposits to
+it, and Swaps credits each user's ledger account from it. evmhot still reports each sweep to Swaps, which still
+attributes it and credits the user (`d-evmhot-requester`). The step that drops out is Swaps' deposit request to bezent. A sweep is a directed arrival: it becomes a
 deposit by itself (part 3) and needs no requester to bind it.
 
 - **Until then**, a sweep stays a plain transfer, and Swaps binds it by coordinate as today (amendment 0029, A3).
@@ -170,8 +173,8 @@ deposit by itself (part 3) and needs no requester to bind it.
   `Transfer` pairs with its `Directed` log like any other.
 - **What follows from the rule.** The funder is the deposit address, but the refund is the original depositor that evmhot
   names in the call (`d-refund-dest-swaps`), so a sweep that can never be minted is returned there (A5), and never back
-  to a deposit address that would sweep it again. A sweep that mixes several senders has no single original depositor
-  (amendment 0029, Open 15, to the owner, not ruled). A sweep must lie within the contract's limits (1 to 50 000 USDC), so a
+  to a deposit address that would sweep it again. A sweep never mixes senders: it makes one directed call per inbound transfer, and the `refund` is that transfer's sender
+  (amendment 0029, Open 15, ruled `d-mixed-sweeps-2`). A sweep must lie within the contract's limits (1 to 50 000 USDC), so a
   larger balance is swept in several calls and a smaller one waits. There is no share and no count cap (Open 5 and 6,
   ruled), so sweeps are bound by the route's window and the contract's limits alone, and count toward the alerts on
   directed mints.
