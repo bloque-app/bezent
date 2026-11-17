@@ -292,18 +292,15 @@ pub async fn serve(
             .await
             .map_err(|e| format!("[public]: cannot listen on {}: {e}", p.listen))?;
         tracing::info!(listen = %p.listen, "bezent-ingress serving the public status route (REQ-ST-8)");
-        let router = crate::public::public_router(crate::public::PublicApp::new(
-            public_pool.clone(),
-            p.max_in_flight,
-        ));
-        let mut stop = stop_rx.clone();
-        let task = tokio::spawn(async move {
-            axum::serve(public_listener, router)
-                .with_graceful_shutdown(async move {
-                    let _ = stop.wait_for(|s| *s).await;
-                })
-                .await
-        });
+        // Its listener bounds what an unauthenticated caller can hold open (review M1, L3 of PR
+        // #139): a request timeout, a header-read timeout, a bounded head and connections.
+        let router = crate::public::public_router_with(
+            crate::public::PublicApp::new(public_pool.clone(), p.max_in_flight),
+            Duration::from_millis(p.request_timeout_ms.max(1)),
+        );
+        let bounds = crate::public::ListenerBounds::of(p);
+        let stop = stop_rx.clone();
+        let task = tokio::spawn(crate::public::serve(public_listener, router, bounds, stop));
         public = Some((task, public_pool));
     }
     let stopping = async move {

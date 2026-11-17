@@ -28,6 +28,16 @@
 //!   shape).
 //! - It is public data, so any origin may read it (`Access-Control-Allow-Origin: *`, no credentials),
 //!   and it may be cached for a few seconds.
+//! - What an unauthenticated caller can make it do is bounded before any work (review M1, L2 and L3
+//!   of PR #139): a redeemer longer than an issuing-network account can be (49 base58 characters,
+//!   or 66 as `0x` hex) and a reference longer than 66 are refused before they are decoded, so no
+//!   query costs more than a few microseconds of parsing; a request URI is at most
+//!   [`MAX_URI_BYTES`] and a request head at most [`MAX_HEAD_BYTES`] in [`MAX_HEADERS`] headers; a
+//!   request is answered within `request_timeout_ms`, a head must arrive within
+//!   `header_read_timeout_ms`, and at most `max_http_connections` are held open ([`serve`]); and
+//!   `/health` takes a permit like a query. The origin should accept connections from the front
+//!   (Cloudflare) only, by the network's rules: these bounds are the listener's own, not a rate
+//!   limit.
 
 use crate::api::{CoordinateQuery, parse_hex, to_hex};
 use crate::config::PublicConfig;
@@ -42,10 +52,30 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use std::time::Duration;
+use tokio::net::TcpListener;
+use tokio::sync::{Semaphore, watch};
 
 /// How long a cache in front may keep an answer, in seconds.
 pub const CACHE_SECONDS: u32 = 5;
+
+/// The longest redeemer the route reads in SS58: an issuing-network account (32 bytes) with a
+/// prefix of one or two bytes and a checksum of two is at most 36 bytes, at most 49 base58
+/// characters (review M1 of PR #139).
+pub const MAX_SS58_CHARS: usize = 49;
+
+/// `0x` and 64 hex digits: a 32-byte account or reference in hex.
+pub const HEX32_CHARS: usize = 66;
+
+/// The longest request URI the route reads, in bytes: its longest query is some 300.
+pub const MAX_URI_BYTES: usize = 2048;
+
+/// The longest request head the listener reads, in bytes: hyper's least buffer, and some 25 times
+/// what a browser sends for these queries.
+pub const MAX_HEAD_BYTES: usize = 8192;
+
+/// The most headers the listener reads in one request.
+pub const MAX_HEADERS: usize = 32;
 
 /// The public route's state: its own pool, as `bezent_public`, and the bound on requests at once.
 #[derive(Clone)]
@@ -81,6 +111,8 @@ impl PublicApp {
 pub enum PublicError {
     /// The query does not parse (`ERR-Malformed`).
     Malformed(String),
+    /// The request URI is longer than [`MAX_URI_BYTES`] (`ERR-Malformed`, 414).
+    UriTooLong,
     /// No directed deposit or withdrawal has that key; or one a request made or reached
     /// (`REQ-ID-4`): the same answer.
     NotFound,
@@ -102,6 +134,11 @@ impl IntoResponse for PublicError {
     fn into_response(self) -> Response {
         let (status, error, detail) = match self {
             Self::Malformed(why) => (StatusCode::BAD_REQUEST, "ERR-Malformed", why),
+            Self::UriTooLong => (
+                StatusCode::URI_TOO_LONG,
+                "ERR-Malformed",
+                format!("the request URI is longer than {MAX_URI_BYTES} bytes"),
+            ),
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
                 "not-found",
@@ -395,12 +432,31 @@ async fn withdrawal_by_redemption(
     State(app): State<PublicApp>,
     Params(q): Params<RedemptionQuery>,
 ) -> Result<axum::Json<PublicStatus>, PublicError> {
-    let redeemer = refs::account32(q.redeemer.trim()).ok_or_else(|| {
+    // Review M1 of PR #139: base58 decoding is quadratic in its input, so nothing longer than an
+    // account can be is decoded, and the reference neither: refused before any work.
+    let redeemer = q.redeemer.trim();
+    let longest = if redeemer.starts_with("0x") {
+        HEX32_CHARS
+    } else {
+        MAX_SS58_CHARS
+    };
+    if redeemer.len() > longest {
+        return Err(PublicError::Malformed(format!(
+            "redeemer is an issuing-network account: SS58 (at most {MAX_SS58_CHARS} characters), or 0x and 64 hex digits"
+        )));
+    }
+    let reference = q.reference.trim();
+    if reference.len() > HEX32_CHARS {
+        return Err(PublicError::Malformed(
+            "reference is 0x and 64 hex digits, as the redemption chose it".to_owned(),
+        ));
+    }
+    let redeemer = refs::account32(redeemer).ok_or_else(|| {
         PublicError::Malformed(
             "redeemer is an issuing-network account: SS58, or 0x and 64 hex digits".to_owned(),
         )
     })?;
-    let reference = parse_hex("reference", q.reference.trim())?;
+    let reference = parse_hex("reference", reference)?;
     if reference.len() != 32 {
         return Err(PublicError::Malformed(
             "reference is 0x and 64 hex digits, as the redemption chose it".to_owned(),
@@ -414,10 +470,14 @@ async fn withdrawal_by_redemption(
     .await
 }
 
-/// `GET /health` on the public listener: the store answers this login.
+/// `GET /health` on the public listener: the store answers this login. It takes a permit as a
+/// query does (review L2 of PR #139), so a flood of it is bounded the same way.
 async fn health(
     State(app): State<PublicApp>,
 ) -> Result<axum::Json<serde_json::Value>, PublicError> {
+    let _permit = Arc::clone(&app.permits)
+        .try_acquire_owned()
+        .map_err(|_| PublicError::Overloaded)?;
     sqlx::query("SELECT 1").execute(app.pool()).await?;
     Ok(axum::Json(serde_json::json!({"status": "ok"})))
 }
@@ -427,12 +487,24 @@ async fn health(
 /// served.
 async fn headers(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let method = request.method().clone();
-    let mut response = if method == Method::OPTIONS {
+    let too_long = request
+        .uri()
+        .path_and_query()
+        .is_some_and(|p| p.as_str().len() > MAX_URI_BYTES);
+    let mut response = if too_long {
+        PublicError::UriTooLong.into_response()
+    } else if method == Method::OPTIONS {
         StatusCode::NO_CONTENT.into_response()
     } else {
         next.run(request).await
     };
+    let unavailable = response.status() == StatusCode::SERVICE_UNAVAILABLE;
     let h = response.headers_mut();
+    // The request timeout's answer (review M1 of PR #139) is `ERR-Overloaded`'s status; it says
+    // when to retry as `ERR-Overloaded` does.
+    if unavailable && !h.contains_key(header::RETRY_AFTER) {
+        h.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
     h.insert(
         header::ACCESS_CONTROL_ALLOW_ORIGIN,
         HeaderValue::from_static("*"),
@@ -464,7 +536,17 @@ async fn headers(request: axum::extract::Request, next: axum::middleware::Next) 
 }
 
 /// The public route, and nothing else: no request, query, webhook or operator path is served here.
+/// A request is answered within [`DEFAULT_REQUEST_TIMEOUT`].
 pub fn public_router(app: PublicApp) -> Router {
+    public_router_with(app, DEFAULT_REQUEST_TIMEOUT)
+}
+
+/// The request timeout of [`public_router`]: `[public] request_timeout_ms`'s default.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// [`public_router`], answering each request within `timeout` (review M1 of PR #139): beyond it, the
+/// handler is dropped and the answer is 503, retryable, as `ERR-Overloaded` is.
+pub fn public_router_with(app: PublicApp, timeout: Duration) -> Router {
     Router::new()
         .route("/health", get(health))
         .route(
@@ -475,8 +557,94 @@ pub fn public_router(app: PublicApp) -> Router {
             "/v0/public/withdrawals/by-redemption",
             get(withdrawal_by_redemption),
         )
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            timeout.max(Duration::from_millis(1)),
+        ))
         .layer(axum::middleware::from_fn(headers))
         .with_state(app)
+}
+
+/// The public listener's own bounds (review L3 of PR #139).
+#[derive(Clone, Copy, Debug)]
+pub struct ListenerBounds {
+    /// The longest a connection may take to send a request's head; then it is closed.
+    pub header_read_timeout: Duration,
+    /// Connections held open at once; one more waits to be accepted until one closes.
+    pub max_connections: usize,
+}
+
+impl ListenerBounds {
+    /// The bounds `[public]` names.
+    pub fn of(public: &PublicConfig) -> Self {
+        Self {
+            header_read_timeout: Duration::from_millis(public.header_read_timeout_ms.max(1)),
+            max_connections: public.max_http_connections.max(1),
+        }
+    }
+}
+
+/// Waits for `stop` to turn true, or for its sender to go.
+async fn stopped(stop: &mut watch::Receiver<bool>) {
+    let _ = stop.wait_for(|s| *s).await.map(|_| ());
+}
+
+/// Serves `router` on `listener` until `stop` turns true (review L3 of PR #139): HTTP/1 only, a
+/// request head of at most [`MAX_HEAD_BYTES`] in at most [`MAX_HEADERS`] headers (431 beyond), sent
+/// within the header-read timeout (the connection is closed otherwise, a slow head included), and at
+/// most `max_connections` connections open at once. On `stop` it accepts no more and lets the open
+/// ones finish for up to five seconds.
+pub async fn serve(
+    listener: TcpListener,
+    router: Router,
+    bounds: ListenerBounds,
+    mut stop: watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    use hyper_util::rt::{TokioIo, TokioTimer};
+    let open = Arc::new(Semaphore::new(bounds.max_connections.max(1)));
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let mut http = hyper::server::conn::http1::Builder::new();
+    http.timer(TokioTimer::new())
+        .header_read_timeout(bounds.header_read_timeout)
+        .max_buf_size(MAX_HEAD_BYTES)
+        .max_headers(MAX_HEADERS);
+    loop {
+        let permit = tokio::select! {
+            permit = Arc::clone(&open).acquire_owned() => match permit {
+                Ok(p) => p,
+                Err(_) => break,
+            },
+            () = stopped(&mut stop) => break,
+        };
+        let stream = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => stream,
+                Err(e) => {
+                    // Out of descriptors, say: wait a little rather than spin.
+                    tracing::warn!(error = %e, "the public listener could not accept a connection");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+            },
+            () = stopped(&mut stop) => break,
+        };
+        let service = hyper_util::service::TowerToHyperService::new(router.clone());
+        let connection = graceful.watch(http.serve_connection(TokioIo::new(stream), service));
+        tokio::spawn(async move {
+            let _open = permit;
+            if let Err(e) = connection.await {
+                tracing::debug!(error = %e, "a public connection ended with an error");
+            }
+        });
+    }
+    drop(listener);
+    if tokio::time::timeout(Duration::from_secs(5), graceful.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!("the public listener stopped with connections still open");
+    }
+    Ok(())
 }
 
 /// Connects the route's own pool and checks its login is a member of `bezent_public` and of nothing

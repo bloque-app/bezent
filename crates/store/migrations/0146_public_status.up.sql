@@ -83,8 +83,11 @@ $$;
 
 -- The rows anyone may read, and their keys. `lookup_reference` is the bridge reference a caller's
 -- coordinate or redemption derives; `subject` what was asked about; `role` what the row's transfer is
--- to it.
-CREATE VIEW public_status AS
+-- to it. A security barrier (review L1 of PR #139): the view reads as its owner for a login that reads
+-- no table, so no function of a caller's query is run on a row before the view's own conditions have
+-- kept it; the route's keys (`=` on text, `= ANY` of a text array) are leakproof, so they still reach
+-- the index (`services/ingress/tests/public_status.rs` holds the plan to that).
+CREATE VIEW public_status WITH (security_barrier) AS
 SELECT k.lookup_reference,
        k.subject,
        k.role,

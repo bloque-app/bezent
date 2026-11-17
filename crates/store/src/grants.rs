@@ -157,6 +157,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "directed_refusal_recorded(bigint,text,bigint,bytea,timestamp with time zone)",
             "directed_review_refund_open(bigint)",
             "directed_window_fits(bigint)",
+            // F-018 (migration 0148, review M3 of PR #139): whether a directed arrival's directing
+            // contract is declared, asked before the core decides it (REQ-AS-11).
+            "directing_declared(text,text,text,bigint)",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
             "ops_observables()",

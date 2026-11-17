@@ -512,6 +512,48 @@ async fn ac_e2_3_nfr_6_a_long_step_moves_the_watermark_and_records_only_its_own_
     assert_eq!(watermark, Some(12));
 }
 
+/// F-018, T-018-11 (`REQ-AS-11`): native USDC's real `Upgraded`. Circle's `FiatTokenProxy` emits
+/// `Upgraded(address implementation)` with the address **not** indexed: one topic and the address as
+/// a 32-byte data word. It is recorded exactly as the indexed form is, `token_upgrade` with the token
+/// and the new implementation, never an undecoded shape.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_as_11_native_usdcs_non_indexed_upgraded_is_recorded(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect, 3).await;
+    let h = f.chain.mine();
+    let implementation = Address::repeat_byte(0x2f);
+    f.chain.log(
+        h.number,
+        4,
+        tx(h.number as u8),
+        u64::from(h.number as u8),
+        usdc(),
+        vec![evm::UPGRADED_TOPIC],
+        implementation.into_word().to_vec(),
+    );
+    f.advance(2);
+    caught_up(&f).await;
+    let rows: Vec<(String, String, Option<String>, serde_json::Value)> = sqlx::query_as(
+        "SELECT kind::text, detail ->> 'event', amount::text, detail \
+             FROM observations WHERE network = 'polygon' ORDER BY position_index",
+    )
+    .fetch_all(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (kind, event, amount, detail) = &rows[0];
+    assert_eq!(
+        (kind.as_str(), event.as_str()),
+        ("token_upgrade", "TokenUpgraded")
+    );
+    assert_eq!(amount, &None);
+    assert_eq!(detail["token"], usdc().to_string());
+    assert_eq!(detail["implementation"], implementation.to_checksum(None));
+    assert!(detail.get("reason").is_none(), "{detail}");
+}
+
 /// F-018, T-018-11 (`REQ-AS-11`, `REQ-IC-2`): an admitted origin token's `Upgraded(address)` (EIP-1967:
 /// its implementation changed) is recorded once, at its log, as its own kind, `token_upgrade`, with
 /// the token and the new implementation, and is no movement: no amount, sender or recipient, so

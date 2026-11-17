@@ -27,10 +27,16 @@
 //!   refund of an unassociated arrival is, and the book posts it as one.
 //!
 //! An arrival of a token admitted for no asset can never be minted either (no route can name it), so
-//! it is returned the same way (review L3 of PR #136), its refund naming the observed token and no
-//! asset, as the refund of an unassociated arrival of such a token does (`REQ-IN-6`). A recipient or
+//! it would be returned the same way (review L3 of PR #136), its refund naming the observed token and
+//! no asset, as the refund of an unassociated arrival of such a token does (`REQ-IN-6`). Since
+//! review M3 of PR #139 it is not reached: a declaration names an admitted token, so such an arrival
+//! is one of undeclared directing code, below, and waits. A recipient or
 //! a list that cannot be read is not a refusal by rule: the deposit is made, and the core's check
 //! before the mint sends it to review (`REQ-IN-5`), which is never refunded (`REQ-RF-1`).
+//!
+//! An arrival whose directing contract is not declared (`directing_code`, for its token, from its
+//! block; `REQ-AS-11`) is neither: only declared directing code directs. It waits, final and
+//! unbound, and the log says so once an hour (review M3 of PR #139; the store refuses both, 0148).
 //!
 //! An arrival the core cannot decide (its detail lacks a recipient or a refund address, its route's
 //! declaration does not parse, or its step fails) stays as it is and is tried again every cycle; the
@@ -244,6 +250,29 @@ async fn intake_one(
         }
         return Ok(false);
     };
+    // REQ-AS-11 (review M3 of PR #139): only declared directing code directs. An arrival whose
+    // directing contract is not declared in `directing_code` for its token, from its block, is
+    // neither minted nor returned (the store refuses both, 0148); it waits, and the log says so.
+    let directing = o.detail.get("directing").and_then(Value::as_str);
+    let declared: bool = sqlx::query_scalar("SELECT directing_declared($1, $2, $3, $4)")
+        .bind(&o.network)
+        .bind(token)
+        .bind(directing)
+        .bind(o.block_number)
+        .fetch_one(&mut *conn)
+        .await?;
+    if !declared {
+        if undecided.due(o.id, "directing-undeclared") {
+            tracing::error!(
+                observation = o.id,
+                network = %o.network,
+                %token,
+                directing = directing.unwrap_or("(none)"),
+                "REQ-AS-11: a directed arrival's directing contract is not declared in directing_code for its token from its block; it is neither minted nor returned, and waits"
+            );
+        }
+        return Ok(false);
+    }
     let asset: Option<String> =
         sqlx::query_scalar("SELECT asset FROM admitted_tokens WHERE network = $1 AND token = $2")
             .bind(&o.network)

@@ -81,8 +81,19 @@ fn withdrawal_path(redeemer: &str, reference: &str) -> String {
     format!("/v0/public/withdrawals/by-redemption?redeemer={redeemer}&reference={reference}")
 }
 
-/// What the EVM endpoint records for a final directed arrival at (`ORIGIN`, `block`, log 0).
+/// What the EVM endpoint records for a final directed arrival at (`ORIGIN`, `block`, log 0), through
+/// [`DIRECTING`], which is declared (`REQ-AS-11`; once).
 async fn directed(pool: &PgPool, block: i64, amount: u64) {
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                 from_block, reference) \
+             VALUES ('{ASSET}', '{ORIGIN}', '{DIRECTING}', '{TOKEN}', 1, 1000000000, 0, \
+                 'test declaration') ON CONFLICT DO NOTHING"
+        ),
+    )
+    .await;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO observations (network, block_number, block_hash, block_time, position_kind, \
              position_index, token, amount, sender, recipient, executed, kind, detail) \
@@ -559,7 +570,8 @@ async fn req_st_8_the_route_reads_by_index_only_and_refuses_beyond_its_bound(poo
     }
     tx.rollback().await.unwrap();
 
-    // No permit left: refused at once, with a retry hint, and the store is not asked.
+    // No permit left: refused at once, with a retry hint, and the store is not asked; `/health`
+    // takes a permit too (review L2 of PR #139).
     let p = role_pool(&pool, bezent_store::PUBLIC_ROLE).await;
     let app = PublicApp::new(p, 1);
     let held = app.clone();
@@ -569,4 +581,202 @@ async fn req_st_8_the_route_reads_by_index_only_and_refuses_beyond_its_bound(poo
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["error"], "ERR-Overloaded");
     assert_eq!(headers[header::RETRY_AFTER], "1");
+    let (status, body) = get(&route, "/health").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"], "ERR-Overloaded");
+}
+
+/// `REQ-ST-8`, `REQ-LM-4` (review M1 of PR #139): an unauthenticated caller cannot make the route
+/// work on its input. A redeemer longer than an issuing-network account can be (49 base58
+/// characters, 66 as `0x` hex), a reference longer than 66, and a URI longer than the route reads,
+/// are refused at once, before any decoding and with no permit taken: 64 thousand characters of
+/// base58 took some two seconds of a worker to decode before.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_st_8_an_overlong_query_is_refused_at_once_before_any_decoding(pool: PgPool) {
+    seed(&pool).await;
+    let p = role_pool(&pool, bezent_store::PUBLIC_ROLE).await;
+    let app = PublicApp::new(p, 1);
+    let held = app.clone();
+    let route = public_router(app);
+    // Every permit is held: what is refused here is refused before one is asked for.
+    let _permit = held.hold_for_tests();
+    let long_base58 = "5".repeat(1500);
+    let long_hex = format!("0x{}", "ab".repeat(700));
+    for (what, path, status) in [
+        (
+            "a long base58 redeemer",
+            withdrawal_path(&long_base58, REDEMPTION),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "a redeemer one character too long",
+            withdrawal_path(&format!("{REDEEMER_42}5"), REDEMPTION),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "a long hex redeemer",
+            withdrawal_path(&long_hex, REDEMPTION),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "a long reference",
+            withdrawal_path(REDEEMER_42, &long_hex),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "a URI longer than the route reads",
+            withdrawal_path(&"5".repeat(64_000), REDEMPTION),
+            StatusCode::URI_TOO_LONG,
+        ),
+    ] {
+        let started = std::time::Instant::now();
+        let (got, body) = get(&route, &path).await;
+        assert_eq!(got, status, "{what}: {body}");
+        assert_eq!(body["error"], "ERR-Malformed", "{what}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "{what}: {:?}",
+            started.elapsed()
+        );
+    }
+    // The longest SS58 an account takes, and 0x and 64 hex digits, are still read (here, not
+    // found: the permit is held, so they reach the bound instead).
+    let (status, _) = get(&route, &withdrawal_path(REDEEMER_42, REDEMPTION)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Review M1 and L3 of PR #139: the public listener, served as the ingress serves it, bounds what a
+/// connection can hold. A request head larger than it reads is refused (431); a head that does not
+/// arrive within the header-read timeout closes the connection; connections beyond the bound wait to
+/// be accepted until one closes; and a request that takes longer than the request timeout answers
+/// 503, retryable.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_st_8_the_public_listener_bounds_heads_slow_clients_and_connections(pool: PgPool) {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    seed(&pool).await;
+    let p = role_pool(&pool, bezent_store::PUBLIC_ROLE).await;
+    let route =
+        bezent_ingress::public::public_router_with(PublicApp::new(p, 8), Duration::from_secs(5));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let bounds = bezent_ingress::public::ListenerBounds {
+        header_read_timeout: Duration::from_millis(300),
+        max_connections: 2,
+    };
+    let served = tokio::spawn(bezent_ingress::public::serve(
+        listener, route, bounds, stop_rx,
+    ));
+    async fn answer(stream: &mut tokio::net::TcpStream) -> String {
+        let mut out = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut out)).await;
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    // A healthy request is answered.
+    let mut ok = tokio::net::TcpStream::connect(address).await.unwrap();
+    ok.write_all(b"GET /health HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let got = answer(&mut ok).await;
+    assert!(got.starts_with("HTTP/1.1 200"), "{got}");
+
+    // A head larger than the listener reads: 431, the connection closed.
+    let mut big = tokio::net::TcpStream::connect(address).await.unwrap();
+    let filler = "a".repeat(bezent_ingress::public::MAX_HEAD_BYTES * 2);
+    big.write_all(
+        format!("GET /health HTTP/1.1\r\nhost: x\r\nx-filler: {filler}\r\n\r\n").as_bytes(),
+    )
+    .await
+    .ok();
+    let got = answer(&mut big).await;
+    assert!(got.starts_with("HTTP/1.1 431"), "{got}");
+
+    // A head that never finishes: closed after the header-read timeout, not held.
+    let mut slow = tokio::net::TcpStream::connect(address).await.unwrap();
+    slow.write_all(b"GET /health HTTP/1.1\r\nhost: x\r\n")
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let got = answer(&mut slow).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the slow head was held for {:?}: {got}",
+        started.elapsed()
+    );
+
+    // Two connections held open (the bound): a third is not served until one closes.
+    let mut first = tokio::net::TcpStream::connect(address).await.unwrap();
+    first
+        .write_all(b"GET /health HTTP/1.1\r\nhost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut second = tokio::net::TcpStream::connect(address).await.unwrap();
+    second
+        .write_all(b"GET /health HTTP/1.1\r\nhost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buffer = [0u8; 512];
+    for s in [&mut first, &mut second] {
+        let n = tokio::time::timeout(Duration::from_secs(3), s.read(&mut buffer))
+            .await
+            .expect("an answer")
+            .unwrap();
+        assert!(buffer[..n].starts_with(b"HTTP/1.1 200"));
+    }
+    let mut third = tokio::net::TcpStream::connect(address).await.unwrap();
+    third
+        .write_all(b"GET /health HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let waited = tokio::time::timeout(Duration::from_millis(200), third.read(&mut buffer)).await;
+    assert!(
+        waited.is_err(),
+        "a third connection was served beyond the bound"
+    );
+    drop(first);
+    let got = answer(&mut third).await;
+    assert!(got.starts_with("HTTP/1.1 200"), "once one closed: {got}");
+    drop(second);
+
+    stop_tx.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), served)
+        .await
+        .expect("the listener stops")
+        .unwrap()
+        .unwrap();
+}
+
+/// Review M1 of PR #139: a request the route takes longer than its request timeout to answer is
+/// answered 503, retryable, and its work dropped. A pool with no connection free stands in for a
+/// slow store.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_st_8_a_request_past_its_timeout_answers_503(pool: PgPool) {
+    use std::time::Duration;
+    seed(&pool).await;
+    let p = role_pool(&pool, bezent_store::PUBLIC_ROLE).await;
+    // Every connection of the route's pool busy (8, `role_pool`'s): its next query waits for one
+    // past the timeout.
+    let mut busy = Vec::new();
+    for _ in 0..8 {
+        busy.push(p.acquire().await.unwrap());
+    }
+    let route = bezent_ingress::public::public_router_with(
+        PublicApp::new(p, 8),
+        Duration::from_millis(100),
+    );
+    let started = std::time::Instant::now();
+    let (status, headers, _) = get_with_headers(&route, "/health").await;
+    drop(busy);
+    assert!(
+        matches!(status, StatusCode::SERVICE_UNAVAILABLE),
+        "{status}"
+    );
+    assert_eq!(headers[header::RETRY_AFTER], "1");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
 }

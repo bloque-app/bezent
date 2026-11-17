@@ -8,7 +8,7 @@ kind: pages
 covers: [REQ-IC-2, REQ-AS-11, REQ-AS-3]
 pages: [origin-token-upgraded]
 observables: [reserve_equation_outcome, pauses_in_force]
-tests: [services/core/tests/directed_alerts.rs::req_as_11_an_origin_tokens_upgrade_pages_and_pauses_nothing, services/evm-endpoint/tests/observe.rs::req_as_11_an_admitted_tokens_upgrade_is_recorded_as_its_own_kind]
+tests: [services/core/tests/directed_alerts.rs::req_as_11_an_origin_tokens_upgrade_pages_and_pauses_nothing, services/evm-endpoint/tests/observe.rs::req_as_11_an_admitted_tokens_upgrade_is_recorded_as_its_own_kind, services/evm-endpoint/tests/observe.rs::req_as_11_native_usdcs_non_indexed_upgraded_is_recorded]
 exercised: no
 ---
 # An origin token's implementation changed
@@ -16,9 +16,10 @@ exercised: no
 ## What it is
 
 An admitted origin token that is a proxy (native USDC on Polygon is: its implementation sits in the EIP-1967 slot) can
-have its code replaced by its issuer. The proxy then emits `Upgraded(address implementation)`. The EVM endpoint watches
-every admitted origin token for that event and records it as an observation of kind `token_upgrade` (migration 0147),
-which binds nothing. The core pages on it.
+have its code replaced by its issuer. The proxy then emits `Upgraded(address implementation)` (native USDC's with the
+address not indexed, in the data; others with it indexed: the endpoint reads both). The EVM endpoint watches every
+admitted origin token for that event and records it as an observation of kind `token_upgrade` (migration 0147), which
+binds nothing. The core pages on it.
 
 The token's behaviour after an upgrade is the issuer's: `permit`, `transfer`, the events the endpoint pairs, a blacklist.
 The directing code (amendment 0029) and the vault rely on that behaviour, and directed deposits are open to anyone. So an
@@ -31,6 +32,13 @@ ruled, only this page exists.
 `origin-token-upgraded`: an ERROR line
 `page: an admitted origin token's implementation changed (its proxy emitted Upgraded). ... kind=origin-token-upgraded observation=<id> at=<coordinate> token=<token> implementation=<implementation>`
 and an `event_log` entry of the same kind. Once per observation.
+
+### A page for a log that is not final
+
+The page fires when the observation is recorded, before it is final: an upgrade is worth a look at once. A reorganised
+log is observed again at its new coordinate, and that new observation pages too, so **one upgrade can page twice**. Two
+pages naming the same token and the same implementation, from the same transaction, are one upgrade; check the one whose
+observation is final (`observation_outcomes.outcome = 'final'`).
 
 ## Confirm
 

@@ -89,6 +89,20 @@ pub struct PublicConfig {
     /// index reads.
     #[serde(default = "default_public_statement_timeout_ms")]
     pub statement_timeout_ms: u64,
+    /// The longest a request may take, from its head read to its answer, in milliseconds: 5 s by
+    /// default; beyond, `ERR-Overloaded` (review M1 of PR #139).
+    #[serde(default = "default_public_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    /// The longest a connection may take to send a request's head, in milliseconds: 5 s by default;
+    /// beyond, the connection is closed (review L3 of PR #139).
+    #[serde(default = "default_public_header_read_timeout_ms")]
+    pub header_read_timeout_ms: u64,
+    /// Connections the listener holds open at once: 256 by default. One more waits to be accepted
+    /// until one closes (review L3 of PR #139). The origin should accept connections from the
+    /// rate-limiting front (Cloudflare) only, by the network's own rules: these bounds are the
+    /// listener's own, not a rate limit.
+    #[serde(default = "default_public_http_connections")]
+    pub max_http_connections: usize,
 }
 
 impl PublicConfig {
@@ -123,6 +137,9 @@ impl fmt::Debug for PublicConfig {
             .field("max_connections", &self.max_connections)
             .field("max_in_flight", &self.max_in_flight)
             .field("statement_timeout_ms", &self.statement_timeout_ms)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("header_read_timeout_ms", &self.header_read_timeout_ms)
+            .field("max_http_connections", &self.max_http_connections)
             .finish()
     }
 }
@@ -135,6 +152,15 @@ fn default_public_in_flight() -> usize {
 }
 fn default_public_statement_timeout_ms() -> u64 {
     2000
+}
+fn default_public_request_timeout_ms() -> u64 {
+    5000
+}
+fn default_public_header_read_timeout_ms() -> u64 {
+    5000
+}
+fn default_public_http_connections() -> usize {
+    256
 }
 
 /// The `[webhooks]` section.
@@ -514,6 +540,14 @@ mod tests {
         assert_eq!(
             (p.max_connections, p.max_in_flight, p.statement_timeout_ms),
             (4, 64, 2000)
+        );
+        assert_eq!(
+            (
+                p.request_timeout_ms,
+                p.header_read_timeout_ms,
+                p.max_http_connections
+            ),
+            (5000, 5000, 256)
         );
         assert!(!format!("{config:?}").contains("swordfish"));
         let same = read(

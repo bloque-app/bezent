@@ -136,7 +136,16 @@ part of the coordinate a bridge reference is derived from, and the lookup goes b
 - **Index reads only.** The coordinate derives `bz-d-` and `bz-u-`, the redemption `bz-w-` (the core's derivation, pinned
   by `apps/bridge/test/vectors/core-refs.json`), and every branch of the view starts at `transfers`' unique bridge
   reference; a test holds the plan to that on a few thousand rows. At most `max_in_flight` requests at once (64), on 4
-  connections with a 2 s statement bound; beyond, `ERR-Overloaded` at once. The rate limit itself is Cloudflare's, in front.
+  connections with a 2 s statement bound; beyond, `ERR-Overloaded` at once (`/health` too). The rate limit itself is
+  Cloudflare's, in front.
+- **Bounded before any work** (review M1, L1 to L3 of PR #139). A redeemer longer than an account can be (49 base58
+  characters, 66 as `0x` hex) and a reference longer than 66 are refused before they are decoded (base58 decoding is
+  quadratic: 64 thousand characters took two seconds of a worker). The listener is HTTP/1 only, reads a head of at most
+  8 KiB in 32 headers (431 beyond) and a URI of at most 2 KiB (414), closes a connection whose head takes longer than
+  `header_read_timeout_ms` (5 s), holds at most `max_http_connections` (256) open, and answers a request that takes
+  longer than `request_timeout_ms` (5 s) with 503, retryable. `public_status` is a security-barrier view; the route's
+  keys are leakproof, so its plan still starts at the unique index. **The origin should accept connections from
+  Cloudflare only** (security group or firewall): these are the listener's own bounds, not a rate limit.
 - **Public data**: `Access-Control-Allow-Origin: *`, no credentials, `Cache-Control: public, max-age=5` on an answer and on
   "not found".
 
@@ -145,8 +154,18 @@ part of the coordinate a bridge reference is derived from, and the lookup goes b
 (asset, network) it feeds, its limits and first block, with a reference. The statement lists it in `published_addresses`
 beside the reserve (`holds: "nothing"`, `feeds`: the reserve address) and in `directing_code` with its limits; a
 declaration made after the evaluation a statement states is left out of it, so a re-derived statement keeps its bytes.
-The EVM endpoint still watches the contracts its own `[[directing]]` names; the deployment keeps the two equal, and
-nothing checks one against the other yet.
+The EVM endpoint still watches the contracts its own `[[directing]]` names; the deployment keeps the two equal. Since
+review M3 of PR #139 the store holds the declaration to account (`REQ-AS-11` is a MUST; migration `0148`): the core's
+deposit of a directed arrival and its return are refused, whoever writes, unless the arrival's `detail.directing` is
+declared for its network and token from a block at or before its own (without case on an EVM network), and the core
+does not try one that is not (it logs `directing-undeclared` once an hour). Such an arrival waits, final and unbound,
+an unassociated arrival an operator sees, until it is declared or released by hand. So an arrival of a token admitted
+for no asset, which no declaration can name, now waits too, where review L3 of PR #136 returned it. The endpoint's
+login does not read `directing_code`, so it does not check its `[[directing]]` against it at start; it refuses a
+`[[directing]]` address that is an admitted token, the vault or one of its contracts. A declaration's address is kept
+in lower case on an EVM network and is none of the network's reserve addresses or admitted tokens, and `declared_at` is
+the clock's at the write, not the transaction's start, so a declaration committing while an evaluation is stated cannot
+make a re-derived statement differ (reviews L4, L5).
 
 **The alerts** (`services/core/src/directed_alerts.rs`; `deploy/runbooks/pages/directed-*.md`, `unpaired-direction.md`,
 `token-upgraded.md`). Per deposit route, each minute: directed deposits minted (`Delivered`) in the trailing 24 hours,
@@ -158,7 +177,10 @@ observation. Alerts only: nothing is capped, refused or held.
 
 **An origin token's upgrade.** The EVM endpoint now also reads every admitted origin token's `Upgraded(address)` (one
 query per range, the declared tokens' addresses and that topic) and records it as `token_upgrade`, which binds nothing; the
-core pages `origin-token-upgraded` once per observation and pauses nothing. Whether directed intake should hold on it is
+core pages `origin-token-upgraded` once per observation and pauses nothing. It reads the event in both forms (review M2 of
+PR #139): Circle's `FiatTokenProxy`, native USDC's proxy, emits `Upgraded(address implementation)` with the address **not**
+indexed (one topic, the address as a data word); an OpenZeppelin proxy indexes it (two topics, no data). A page fires on an
+observation that is not final yet, so a reorganised log can page twice (the runbooks say how to tell). Whether directed intake should hold on it is
 the owner's open ruling `d-f018-usdc-upgrade`; if it rules a hold, `page_observation` in `directed_alerts.rs` is where it
 goes (a hold of the token's asset, which the engine honours), and `token_upgrades_since` already reads what it would.
 

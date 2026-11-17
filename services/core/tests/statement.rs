@@ -1102,7 +1102,8 @@ async fn issue_58_what_the_core_writes_is_retained_and_cannot_be_shortened_or_de
 /// and the reserve it feeds, holding nothing, with the declaration's limits and first block. A
 /// verifier who sums the published reserve terms is unchanged by it (it holds no reserve). A
 /// declaration made after the evaluation the statement states is not in it, so a statement re-derived
-/// from that evaluation keeps its bytes.
+/// from that evaluation keeps its bytes. The address is published as the store keeps it, in lower
+/// case on an `evm` network (review L5 of PR #139).
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_as_11_req_bk_5_the_statement_publishes_the_directing_code_beside_the_reserve(
     options: PgPoolOptions,
@@ -1139,13 +1140,13 @@ async fn req_as_11_req_bk_5_the_statement_publishes_the_directing_code_beside_th
         doc["published_addresses"],
         json!([
             {"network": ORIGIN, "address": RESERVE, "token": TOKEN, "holds": "reserve"},
-            {"network": ORIGIN, "address": DIRECTING, "token": TOKEN, "holds": "nothing",
-             "directing_code": true, "feeds": RESERVE},
+            {"network": ORIGIN, "address": DIRECTING.to_lowercase(), "token": TOKEN,
+             "holds": "nothing", "directing_code": true, "feeds": RESERVE},
         ])
     );
     assert_eq!(
         doc["directing_code"],
-        json!([{"network": ORIGIN, "address": DIRECTING, "token": TOKEN, "feeds": RESERVE,
+        json!([{"network": ORIGIN, "address": DIRECTING.to_lowercase(), "token": TOKEN, "feeds": RESERVE,
                 "minimum": "1000000", "maximum": "50000000000", "from_block": 4}])
     );
     // The reserve terms name the reserve address only: the directing code holds no reserve.

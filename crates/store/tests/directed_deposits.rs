@@ -50,7 +50,11 @@ async fn declarations(pool: &PgPool) {
              INSERT INTO admitted_tokens (network, token, asset, precision) VALUES \
                ('origin-a', 'token-a', 'asset-a', 6); \
              INSERT INTO reserves (asset, network, address) VALUES \
-               ('asset-a', 'origin-a', '{RESERVE}')"
+               ('asset-a', 'origin-a', '{RESERVE}'); \
+             INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                 from_block, reference) VALUES \
+               ('asset-a', 'origin-a', '{DIRECTING}', 'token-a', 1, 6000000, 0, \
+                'directing code declared for the tests (REQ-AS-11)')"
         ),
     )
     .await;

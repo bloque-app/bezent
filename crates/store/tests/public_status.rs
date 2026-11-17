@@ -19,6 +19,7 @@ use sqlx::PgPool;
 
 const PASSWORD: &str = "test-only-public-status-password";
 const RESERVE: &str = "0xA0b86991c6218b36C1d19D4a2e9Eb0cE3606eB48";
+const OTHER_RESERVE: &str = "0x00000000000000000000000000000000000000b2";
 const DIRECTING: &str = "0xD1Ec7ed00000000000000000000000000000d1ec";
 const REFUND: &str = "0x52908400098527886E0F7030069857D2E4169EE7";
 const RECIPIENT: &str = "0x8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48";
@@ -46,6 +47,20 @@ async fn declarations(pool: &PgPool) {
                ('origin-a', 'token-a', 'asset-a', 6), ('origin-a', 'token-b', 'asset-b', 6); \
              INSERT INTO reserves (asset, network, address) VALUES \
                ('asset-a', 'origin-a', '{RESERVE}')"
+        ),
+    )
+    .await;
+}
+
+/// The directing code the directed arrivals name, declared for asset-a's reserve (REQ-AS-11).
+async fn declare_directing(pool: &PgPool) {
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                 from_block, reference) \
+             VALUES ('asset-a', 'origin-a', '{DIRECTING}', 'token-a', 1, 50000000000, 0, \
+                 'test declaration')"
         ),
     )
     .await;
@@ -143,6 +158,7 @@ async fn req_st_8_req_id_4_directed_deposits_and_returns_are_rows_and_a_requests
     pool: PgPool,
 ) {
     declarations(&pool).await;
+    declare_directing(&pool).await;
     let core = login(
         &pool,
         "public_status_core_for_tests",
@@ -240,8 +256,11 @@ async fn req_st_8_req_id_4_directed_deposits_and_returns_are_rows_and_a_requests
 }
 
 /// `REQ-AS-11`, `REQ-BK-5`: directing code is declared for a reserve with the token it moves, which
-/// must be admitted for that reserve's asset there, and it is never the reserve address itself. The
-/// declaration never changes or goes, and no service writes one; the core reads it.
+/// must be admitted for that reserve's asset there, and it is never a reserve address on the network
+/// (any asset's) nor an admitted token there (review L5 of PR #139). On an `evm` network its address
+/// is kept in lower case, so a second declaration in another case is the same key. Its time is the
+/// clock's at the write, not the transaction's start (review L4). The declaration never changes or
+/// goes, and no service writes one; the core reads it.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_as_11_directing_code_is_declared_for_a_reserve_once_and_never_changes(pool: PgPool) {
     declarations(&pool).await;
@@ -268,7 +287,56 @@ async fn req_as_11_directing_code_is_declared_for_a_reserve_once_and_never_chang
             .await
             .is_err()
     );
-    exec(&pool, &insert(DIRECTING, "token-a", "asset-a")).await;
+    // Review L5: another asset's reserve on the network, and an admitted token, are refused too.
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO reserves (asset, network, address) VALUES \
+               ('asset-b', 'origin-a', '{OTHER_RESERVE}')"
+        ),
+    )
+    .await;
+    assert_refused(
+        &pool,
+        &insert(OTHER_RESERVE, "token-a", "asset-a"),
+        "REQ-AS-11",
+    )
+    .await;
+    assert_refused(&pool, &insert("TOKEN-B", "token-a", "asset-a"), "REQ-AS-11").await;
+    // Review L4: the time is the clock's, after the transaction began, not its start.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_sleep(0.05)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::raw_sql(&insert(DIRECTING, "token-a", "asset-a"))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let (late, began, declared): (bool, String, String) = sqlx::query_as(
+        "SELECT declared_at >= now() + interval '50 milliseconds', now()::text, \
+                declared_at::text FROM directing_code",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        late,
+        "declared at {declared}, the transaction began at {began}"
+    );
+    // Review L5: kept in lower case, so the same contract in another case is the same key.
+    assert!(
+        sqlx::raw_sql(&insert(
+            &DIRECTING.to_uppercase().replace("0X", "0x"),
+            "token-a",
+            "asset-a"
+        ))
+        .execute(&pool)
+        .await
+        .is_err(),
+        "a second declaration of the same contract in another case"
+    );
     assert_refused(&pool, "UPDATE directing_code SET maximum = 1", "REQ-AS-11").await;
     assert_refused(&pool, "DELETE FROM directing_code", "REQ-AS-11").await;
     let core = login(
@@ -284,7 +352,11 @@ async fn req_as_11_directing_code_is_declared_for_a_reserve_once_and_never_chang
             .unwrap();
     assert_eq!(
         read,
-        ("origin-a".into(), DIRECTING.into(), "token-a".into())
+        (
+            "origin-a".into(),
+            DIRECTING.to_lowercase(),
+            "token-a".into()
+        )
     );
     let err = sqlx::raw_sql(&insert(
         "0x00000000000000000000000000000000000000d2",

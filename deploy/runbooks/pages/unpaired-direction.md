@@ -29,6 +29,14 @@ a reason the endpoint names: a sender that is the vault itself, or a refund addr
 `page: a declared directing contract's Directed log paired with no transfer into the reserve (AC-A6.6). ... kind=unpaired-direction observation=<id> at=<coordinate> directing=<contract> sender=<sender> reason=<reason>`
 and an `event_log` entry of the same kind, with the observation's detail. Once per observation.
 
+### A page for a log that is not final
+
+The page fires when the observation is recorded, before it is final: a direction is worth a look at once. A reorganised
+log is observed again at its new coordinate (another block hash, perhaps another index), and that new observation pages
+too, so **one log can page twice**. Before acting on a second page, compare the two entries' `detail` (the transaction
+hash, the contract, the sender, the amount): the same transaction at two coordinates is one event. Act on the one whose
+observation is final (`observation_outcomes.outcome = 'final'`); the other's is `withdrawn`.
+
 ## Confirm
 
 ```sql

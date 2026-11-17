@@ -31,8 +31,28 @@ const QUIET: Thresholds = Thresholds {
     window_share_percent: 100,
 };
 
-/// A final directed arrival of `amount` for `recipient` at (`ORIGIN`, `block`, log 0).
+/// Declares [`DIRECTING`] for the reserve, for [`TOKEN`], from block 0 (`REQ-AS-11`; once): only
+/// declared directing code directs (review M3 of PR #139).
+async fn declare_directing(pool: &PgPool) {
+    sqlx::query(
+        "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+             from_block, reference) \
+         VALUES ($1, $2, $3, $4, 1, 1000000000000000, 0, 'test declaration') \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(ASSET)
+    .bind(ORIGIN)
+    .bind(DIRECTING)
+    .bind(TOKEN)
+    .execute(pool)
+    .await
+    .expect("declare the directing code");
+}
+
+/// A final directed arrival of `amount` for `recipient` at (`ORIGIN`, `block`, log 0), through
+/// declared directing code.
 async fn final_directed(pool: &PgPool, block: i64, amount: u128, recipient: &str) -> i64 {
+    declare_directing(pool).await;
     let id = observe(
         pool,
         ORIGIN,

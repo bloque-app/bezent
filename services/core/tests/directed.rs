@@ -45,10 +45,29 @@ fn at(block: i64, index: i64) -> Coordinate {
     }
 }
 
+/// Declares [`DIRECTING`] for the reserve, for [`TOKEN`], from block 0 (`REQ-AS-11`; once): only
+/// declared directing code directs (review M3 of PR #139).
+async fn declare_directing(pool: &PgPool) {
+    sqlx::query(
+        "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+             from_block, reference) \
+         VALUES ($1, $2, $3, $4, 1, 1000000000000000, 0, 'test declaration') \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(ASSET)
+    .bind(ORIGIN)
+    .bind(DIRECTING)
+    .bind(TOKEN)
+    .execute(pool)
+    .await
+    .expect("declare the directing code");
+}
+
 /// What the EVM endpoint records for a directed arrival at (`ORIGIN`, `block`, log `index`): one
 /// observation at the `Transfer`'s coordinate, at the reserve, with the issuing network's recipient
-/// and the refund address in its detail (T-018-05).
+/// and the refund address in its detail (T-018-05), through declared directing code.
 async fn directed_to(pool: &PgPool, block: i64, index: i64, amount: u128, recipient: &str) -> i64 {
+    declare_directing(pool).await;
     observe(
         pool,
         ORIGIN,
@@ -1273,15 +1292,17 @@ async fn req_in_10_a_directed_arrival_bound_by_another_row_pages(
 /// A token at the reserve that is admitted for no bridged asset.
 const UNADMITTED: &str = "0x00000000000000000000000000000000000000bb";
 
-/// `REQ-IN-11`, `REQ-IN-6`, `AC-A6.4` (review L3 of PR #136): a directed arrival of a token
-/// admitted for no asset can never be minted, so bezent returns it to its refund address like the
-/// other never-mintable arrivals; the return names the token and no asset, and is paid out in it.
+/// `REQ-AS-11`, `REQ-IN-11` (review L3 of PR #136, as review M3 of PR #139 now reads it): a directed
+/// arrival of a token admitted for no asset can never be minted, but no directing code is declared
+/// for such a token either (a declaration names an admitted one), so only declared directing code
+/// directs and it is neither minted nor returned: it waits, final and unbound, and the core says so.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_in_11_a_directed_arrival_of_an_unadmitted_token_is_returned(
+async fn req_as_11_a_directed_arrival_of_an_unadmitted_token_waits_undeclared(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
+    declare_directing(&w.admin).await;
     let arrival = observe(
         &w.admin,
         ORIGIN,
@@ -1299,42 +1320,83 @@ async fn req_in_11_a_directed_arrival_of_an_unadmitted_token_is_returned(
     .await;
     decide(&w.admin, arrival, "final", 12).await;
     w.cycle(t0()).await;
-    let (id, kind) = bound(&w, 10, 0).await.expect("the return");
-    assert_eq!(kind, "refund");
-    let (asset, token, network, destination): (Option<String>, Option<String>, String, String) =
-        sqlx::query_as(
-            "SELECT asset, token, destination_network, destination FROM transfers WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_one(&w.admin)
-        .await
-        .unwrap();
-    assert_eq!(asset, None);
-    assert_eq!(token.as_deref(), Some(UNADMITTED));
-    assert_eq!((network.as_str(), destination.as_str()), (ORIGIN, REFUND));
-    let why: String = scalar(
-        &w.admin,
-        &format!(
-            "SELECT payload ->> 'reason' FROM event_log WHERE kind = 'directed-return' \
-               AND transfer_id = {id}"
-        ),
+    w.settle(t0()).await;
+    assert_eq!(bound(&w, 10, 0).await, None, "neither minted nor returned");
+    assert_eq!(w.count("SELECT count(*) FROM transfers").await, 0);
+    assert_eq!(
+        w.count("SELECT count(*) FROM event_log WHERE kind = 'directed-return'")
+            .await,
+        0
+    );
+}
+
+/// `REQ-AS-11` (a MUST; review M3 of PR #139): only declared directing code directs. A final
+/// directed arrival whose directing contract is not declared in `directing_code`, or is declared from
+/// a later block than its own, is neither made a deposit nor returned, however mintable or returnable
+/// it is otherwise; once a declaration covers it, the next cycle decides it.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_as_11_an_undeclared_directing_contracts_arrival_is_never_minted_or_returned(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    const UNDECLARED: &str = "0x00000000000000000000000000000000000000dd";
+    let w = World::new(options, connect).await;
+    let through = |block: i64, amount: u128| {
+        let admin = w.admin.clone();
+        async move {
+            let id = observe(
+                &admin,
+                ORIGIN,
+                block,
+                0,
+                TOKEN,
+                amount,
+                Some(FUNDER),
+                Some(RESERVE),
+                None,
+                true,
+                json!({"event": "DirectedArrival", "directing": UNDECLARED, "direction_log": 1,
+                       "recipient": DESTINATION_ACCOUNT, "refund": REFUND}),
+            )
+            .await;
+            decide(&admin, id, "final", block + 2).await;
+        }
+    };
+    // One that would be minted, and one that would be returned (above the route's maximum).
+    through(10, 5_000_000).await;
+    through(11, 2_000_000_000).await;
+    w.cycle(t0()).await;
+    w.settle(t0()).await;
+    assert_eq!(bound(&w, 10, 0).await, None, "never minted");
+    assert_eq!(bound(&w, 11, 0).await, None, "never returned");
+    // Declared from a block after theirs: still not theirs.
+    sqlx::query(
+        "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+             from_block, reference) \
+         VALUES ($1, $2, $3, $4, 1, 1000000000000000, 11, 'declared from block 11')",
     )
-    .await;
-    assert_eq!(why, "token-not-admitted");
+    .bind(ASSET)
+    .bind(ORIGIN)
+    .bind(UNDECLARED.to_uppercase().replace("0X", "0x"))
+    .bind(TOKEN)
+    .execute(&w.admin)
+    .await
+    .unwrap();
+    w.cycle(t0()).await;
+    assert_eq!(
+        bound(&w, 10, 0).await,
+        None,
+        "below the declaration's first block"
+    );
+    // From its first block on, it directs (its address compared without case): the arrival at
+    // block 11 is decided, here returned, above the route's maximum.
+    let (_, kind) = bound(&w, 11, 0).await.expect("decided once declared");
+    assert_eq!(kind, "refund");
     assert_eq!(
         w.count("SELECT count(*) FROM transfers WHERE kind = 'deposit'")
             .await,
         0
     );
-    w.settle(t0()).await;
-    let (_, payload) = order(&w.admin, id, 1).await.expect("the payout order");
-    assert_eq!(payload["amount"], "7000");
-    assert_eq!(payload["order"]["to"], REFUND);
-    assert_eq!(
-        payload["order"]["token"].as_str().map(str::to_lowercase),
-        Some(UNADMITTED.to_owned())
-    );
-    assert_eq!(returns(&w).await, 1);
 }
 
 /// `REQ-IN-9`, `CND-DepositWindow` (review L5 of PR #136): a directed deposit that waited for the

@@ -47,6 +47,10 @@ async fn declarations(pool: &PgPool) {
                ('origin-a', 'token-a', 'asset-a', 6); \
              INSERT INTO reserves (asset, network, address) VALUES \
                ('asset-a', 'origin-a', '{RESERVE}'); \
+             INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                 from_block, reference) VALUES \
+               ('asset-a', 'origin-a', '{DIRECTING}', 'token-a', 1, 6000000, 0, \
+                'directing code declared for the tests (REQ-AS-11)'); \
              INSERT INTO routes (asset, network, direction, minimum, maximum, window_limit, \
                  window_seconds, capacity, cutoffs, completion_budget_seconds) VALUES \
                ('asset-a', 'origin-a', 'deposit', 1, 6000000, 10000000, 86400, 100, '[]', 3600)"
@@ -58,6 +62,11 @@ async fn declarations(pool: &PgPool) {
 /// A final directed arrival at (`origin-a`, `block`, `\xaa`, log 1), with `kind` its observation's
 /// kind (`directed_arrival`, or `arrival` for a plain one).
 async fn final_arrival(pool: &PgPool, block: i64, kind: &str) {
+    final_arrival_by(pool, block, kind, DIRECTING).await;
+}
+
+/// [`final_arrival`], the directing contract `directing` recorded in its detail.
+async fn final_arrival_by(pool: &PgPool, block: i64, kind: &str, directing: &str) {
     let event = if kind == "directed_arrival" {
         "DirectedArrival"
     } else {
@@ -71,7 +80,7 @@ async fn final_arrival(pool: &PgPool, block: i64, kind: &str) {
                  detail) \
                VALUES ('origin-a', {block}, '\\xaa', '{BLOCK_TIME}', 'log', 1, 'token-a', {AMOUNT}, \
                  '0xfunder', '{RESERVE}', TRUE, '{kind}', \
-                 jsonb_build_object('event', '{event}', 'directing', '{DIRECTING}', \
+                 jsonb_build_object('event', '{event}', 'directing', '{directing}', \
                    'direction_log', 2, 'recipient', '{RECIPIENT}', 'refund', '{REFUND}')) \
                RETURNING id) \
              INSERT INTO observation_outcomes (observation_id, outcome, final_block_number, \
@@ -1049,5 +1058,143 @@ async fn req_lm_1_the_window_is_read_by_its_index(pool: PgPool) {
         )
         .await,
         "20"
+    );
+}
+
+/// `REQ-AS-11` (a MUST; review M3 of PR #139): only declared directing code directs. A directed
+/// arrival whose directing contract is not declared in `directing_code` on its network, for its
+/// token, from a block at or before its own, is neither made a deposit nor returned, whoever writes
+/// (the core, the owner); a declared one is, its address compared without case on an `evm` network.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_as_11_an_undeclared_directing_contracts_arrival_is_neither_deposited_nor_returned(
+    pool: PgPool,
+) {
+    const UNDECLARED: &str = "0x00000000000000000000000000000000000000dd";
+    const LATER: &str = "0x00000000000000000000000000000000000000de";
+    declarations(&pool).await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                 from_block, reference) VALUES \
+               ('asset-a', 'origin-a', '{LATER}', 'token-a', 1, 6000000, 100, \
+                'declared from block 100')"
+        ),
+    )
+    .await;
+    let core = login(&pool, "dc_core_m3_for_tests", bezent_store::CORE_ROLE).await;
+    let deposit = |block: i64| {
+        let core = core.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT directed_deposit('origin-a', $1, '\\xaa', 'log', 1)",
+            )
+            .bind(block)
+            .fetch_one(&core)
+            .await
+        }
+    };
+    let give_back = |block: i64, writer: PgPool| {
+        let owner = pool.clone();
+        async move {
+            let reference = return_reference(&owner, block).await;
+            sqlx::query_scalar::<_, i64>(
+                "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+                     destination_network, destination, state, source_network, \
+                     source_block_number, source_block_hash, source_position_kind, \
+                     source_position_index) \
+                 VALUES ($4, 'directed:return-' || $1, 'refund', 'asset-a', $2, 'origin-a', $3, \
+                     'Received', 'origin-a', $1, '\\xaa', 'log', 1) RETURNING id",
+            )
+            .bind(block)
+            .bind(AMOUNT)
+            .bind(REFUND)
+            .bind(reference)
+            .fetch_one(&writer)
+            .await
+        }
+    };
+
+    // An undeclared contract: no deposit, no return, by the core or by the owner.
+    final_arrival_by(&pool, 7, "directed_arrival", UNDECLARED).await;
+    let err = deposit(7)
+        .await
+        .expect_err("an undeclared contract's deposit");
+    assert_refusal(
+        &err,
+        "REQ-AS-11",
+        "the deposit of an undeclared contract's arrival",
+    );
+    let err = give_back(7, core.clone())
+        .await
+        .expect_err("an undeclared contract's return");
+    assert_refusal(
+        &err,
+        "REQ-AS-11",
+        "the return of an undeclared contract's arrival",
+    );
+    let err = give_back(7, pool.clone())
+        .await
+        .expect_err("the owner's return of it");
+    assert_refusal(
+        &err,
+        "REQ-AS-11",
+        "the owner's return of an undeclared contract's arrival",
+    );
+    // Declared, but from a later block than the arrival's: not declared for it.
+    final_arrival_by(&pool, 9, "directed_arrival", LATER).await;
+    assert_refusal(
+        &deposit(9).await.expect_err("below its from_block"),
+        "REQ-AS-11",
+        "an arrival below the declaration's first block",
+    );
+    assert_refusal(
+        &give_back(9, core.clone())
+            .await
+            .expect_err("below its from_block"),
+        "REQ-AS-11",
+        "the return of an arrival below the declaration's first block",
+    );
+    assert_eq!(
+        text(&pool, "SELECT count(*)::text FROM transfers").await,
+        "0",
+        "nothing binds an undeclared contract's arrival"
+    );
+
+    // Declared: the deposit is made, the address compared without case (the endpoint writes the
+    // checksummed spelling; the declaration is kept in lower case).
+    final_arrival_by(
+        &pool,
+        8,
+        "directed_arrival",
+        &DIRECTING.to_uppercase().replace("0X", "0x"),
+    )
+    .await;
+    assert!(
+        deposit(8)
+            .await
+            .expect("a declared contract's deposit")
+            .is_some()
+    );
+    // From its first block on, the later declaration directs too, and its return is taken.
+    final_arrival_by(&pool, 150, "directed_arrival", LATER).await;
+    let returned = give_back(150, core.clone())
+        .await
+        .expect("a declared contract's return");
+    exec(
+        &core,
+        &format!(
+            "INSERT INTO transitions (transfer_id, from_state, to_state) \
+             VALUES ({returned}, 'Received', 'Accepted')"
+        ),
+    )
+    .await;
+    assert_eq!(
+        text(
+            &pool,
+            &format!("SELECT state::text FROM transfers WHERE id = {returned}")
+        )
+        .await,
+        "Accepted"
     );
 }
