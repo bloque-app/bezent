@@ -138,6 +138,229 @@ impl Net {
     }
 }
 
+sol! {
+    /// `DirectedDeposit` (F-018, `contracts/evm/src/DirectedDeposit.sol`).
+    function deposit(uint256 amount, bytes32 recipient, address refund) external;
+    struct Call3 {
+        address target;
+        bool allowFailure;
+        bytes callData;
+    }
+    /// Multicall3, at the same address on every network: a batch is one transaction.
+    function aggregate3(Call3[] calls) external payable returns (bytes returnData);
+}
+
+/// Multicall3's address.
+const MULTICALL3: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
+
+/// Deploys `DirectedDeposit` for the vault on the fork with `forge create`: 1 to 50 000 USDC.
+fn deploy_directed(anvil: &Anvil, vault: Address) -> Address {
+    let out = Command::new("forge")
+        .current_dir(contracts_dir())
+        .args([
+            "create",
+            "src/DirectedDeposit.sol:DirectedDeposit",
+            "--rpc-url",
+            &anvil.url("127.0.0.1"),
+            "--private-key",
+            DEPLOYER_KEY,
+            "--broadcast",
+            "--json",
+            "--constructor-args",
+            &anvil.net.token().to_string(),
+            &vault.to_string(),
+            "1000000",
+            "50000000000",
+        ])
+        .output()
+        .expect("forge is on the PATH");
+    assert!(
+        out.status.success(),
+        "forge create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // forge prints the JSON over several lines.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let created: Value = serde_json::from_str(&stdout).expect("forge create's JSON");
+    created["deployedTo"]
+        .as_str()
+        .expect("the deployment's address")
+        .parse()
+        .unwrap()
+}
+
+/// `AC-A6.6`, `INV-10` (F-018, T-018-05): on the Polygon fork, with real USDC and the real
+/// `DirectedDeposit`, a deposit is one `directed_arrival` at the `Transfer`'s coordinate and never
+/// also an `Arrival`; a batch of two deposits in one transaction gives two pairs; a plain transfer
+/// into the vault stays an `Arrival`; and no `Directed` log goes unpaired.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn fork_ac_a6_6_a_real_directed_deposit_is_one_directed_arrival_at_the_transfers_coordinate(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    bounded(
+        concat!(module_path!(), "::fork_ac_a6_6_a_real_directed_deposit"),
+        async move {
+            let Some(upstream) = upstream(&POLYGON) else {
+                return;
+            };
+            let mut w = World::new(&POLYGON, &upstream, pool, connect).await;
+            let directed = deploy_directed(&w.anvil, w.vault.safe);
+            let block = w
+                .anvil
+                .rpc("eth_blockNumber", json!([]))
+                .await
+                .as_str()
+                .map(|n| u64::from_str_radix(n.trim_start_matches("0x"), 16).unwrap())
+                .unwrap();
+            w.directing = vec![(directed, block)];
+            let token = POLYGON.token();
+            let depositor: Address = DEPOSITOR.parse().unwrap();
+            let multicall: Address = MULTICALL3.parse().unwrap();
+            let recipient = B256::repeat_byte(0x5e);
+            // The original depositors the callers name (`d-refund-dest-swaps`): neither is the funder.
+            let refund_a = Address::repeat_byte(0xb1);
+            let refund_b = Address::repeat_byte(0xb2);
+            let usdc = |n: u64| U256::from(n) * U256::from(1_000_000u64);
+            let send = |from: Address, to: Address, data: Vec<u8>| {
+                json!({"from": from, "to": to, "data": format!("0x{}", hex::encode(data)),
+                   "gas": "0x7a120"})
+            };
+
+            // 1. A deposit: approve, then deposit.
+            w.anvil.fund_token(depositor, 100_000_000).await;
+            w.anvil
+                .send(send(
+                    depositor,
+                    token,
+                    approveCall {
+                        spender: directed,
+                        amount: usdc(10),
+                    }
+                    .abi_encode(),
+                ))
+                .await;
+            let first = w
+                .anvil
+                .send(send(
+                    depositor,
+                    directed,
+                    depositCall {
+                        amount: usdc(10),
+                        recipient,
+                        refund: refund_a,
+                    }
+                    .abi_encode(),
+                ))
+                .await;
+
+            // 2. A batch of two deposits in one transaction, by a contract (Multicall3 is the funder).
+            w.anvil.fund_token(multicall, 100_000_000).await;
+            let call = |target: Address, data: Vec<u8>| Call3 {
+                target,
+                allowFailure: false,
+                callData: data.into(),
+            };
+            let batch = aggregate3Call {
+                calls: vec![
+                    call(
+                        token,
+                        approveCall {
+                            spender: directed,
+                            amount: usdc(30),
+                        }
+                        .abi_encode(),
+                    ),
+                    call(
+                        directed,
+                        depositCall {
+                            amount: usdc(5),
+                            recipient,
+                            refund: refund_b,
+                        }
+                        .abi_encode(),
+                    ),
+                    call(
+                        directed,
+                        depositCall {
+                            amount: usdc(7),
+                            recipient: B256::repeat_byte(0x6f),
+                            refund: refund_b,
+                        }
+                        .abi_encode(),
+                    ),
+                ],
+            }
+            .abi_encode();
+            let second = w.anvil.send(send(depositor, multicall, batch)).await;
+
+            // 3. A plain transfer into the vault: an arrival, as ever.
+            let transfer = evm::transferCall {
+                to: w.vault.safe,
+                amount: usdc(3),
+            }
+            .abi_encode();
+            let plain = w.anvil.send(send(depositor, token, transfer)).await;
+
+            w.anvil.finalize().await;
+            w.follow().await;
+            w.follow().await;
+
+            type Obs = (String, i64, String, String, String, Value);
+            let rows: Vec<Obs> = sqlx::query_as(
+                "SELECT kind, position_index, amount::text, sender, detail ->> 'tx_hash', detail \
+             FROM observations WHERE network = 'polygon' AND position_kind = 'log' \
+               AND kind IN ('directed_arrival', 'unpaired_direction', 'arrival') \
+             ORDER BY block_number, position_index",
+            )
+            .fetch_all(&w.admin)
+            .await
+            .unwrap();
+            let kinds: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+            assert_eq!(
+                kinds,
+                [
+                    "directed_arrival",
+                    "directed_arrival",
+                    "directed_arrival",
+                    "arrival"
+                ],
+                "{rows:?}"
+            );
+            let hash = |r: &Obs| r.4.parse::<B256>().unwrap();
+            assert_eq!(hash(&rows[0]), first);
+            assert_eq!((hash(&rows[1]), hash(&rows[2])), (second, second));
+            assert_eq!(hash(&rows[3]), plain);
+            // The amounts, the funders and the recipients each deposit named.
+            assert_eq!(rows[0].2, usdc(10).to_string());
+            assert_eq!(
+                rows[0].3.to_lowercase(),
+                depositor.to_string().to_lowercase()
+            );
+            assert_eq!(rows[1].2, usdc(5).to_string());
+            assert_eq!(rows[2].2, usdc(7).to_string());
+            assert_eq!(
+                rows[1].3.to_lowercase(),
+                multicall.to_string().to_lowercase()
+            );
+            assert_eq!(rows[1].5["recipient"], format!("0x{}", "5e".repeat(32)));
+            assert_eq!(rows[2].5["recipient"], format!("0x{}", "6f".repeat(32)));
+            // The refund address each caller named, and not the funder.
+            assert_eq!(rows[0].5["refund"], refund_a.to_checksum(None));
+            assert_eq!(rows[1].5["refund"], refund_b.to_checksum(None));
+            assert_eq!(rows[2].5["refund"], refund_b.to_checksum(None));
+            // Each is at its Transfer's coordinate: the Directed log is the very next log, and the
+            // batch's two pairs are adjacent, four logs apart at most.
+            for r in &rows[..3] {
+                assert_eq!(r.5["direction_log"].as_i64(), Some(r.1 + 1), "{r:?}");
+                assert_eq!(r.5["directing"], directed.to_checksum(None));
+            }
+            assert!(rows[2].1 > rows[1].1);
+        },
+    )
+    .await;
+}
+
 /// Foundry's default accounts and keys (anvil's), all test keys.
 const DEPLOYER_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const OWNERS: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8,0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC,0x90F79bf6EB2c4f870365E785982E1f101E93b906";
@@ -517,6 +740,8 @@ struct World {
     vault: Vault,
     declarations: Declarations,
     convertibles: Vec<(Address, Address)>,
+    /// The declared directing contracts (F-018); none unless a test deploys one.
+    directing: Vec<(Address, u64)>,
 }
 
 impl World {
@@ -599,6 +824,7 @@ impl World {
             } else {
                 Vec::new()
             },
+            directing: Vec::new(),
         }
     }
 
@@ -622,6 +848,7 @@ impl World {
                 declarations: &self.declarations,
                 convertibles: &self.convertibles,
                 delivery: self.lane.address,
+                directing: &self.directing,
             },
             start_block: self.net.block + 1,
             max_range: 500,
