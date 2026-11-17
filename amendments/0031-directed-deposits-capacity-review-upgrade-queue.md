@@ -168,7 +168,8 @@ more than one window. First come first served among directed deposits holds.
 - **Amount.** What waiting deposits claim against requests is never more than one window's limit.
 - **Among directed deposits nothing changes.** A waiting deposit resumes only when the shares taken in the window, plus
   every directed deposit waiting ahead of it by coordinate (however long they have waited), plus its own amount, fit.
-  So the queue still drains in coordinate order, and the window's limit is never exceeded by what is actually minted.
+  So the queue still drains in coordinate order, and the window's limit is never exceeded by what is taken in (after a
+  token-upgrade hold, the held deposits mint together at the lift, as under a pause: part 3).
 - **The queue's head may still take a window's freed room before requests (pending `d-f018-window-reserve`).** The two
   points above are what is built, and they do not meet the ruling by themselves: the core cycles every few seconds, so
   as each window's room frees, the queue's head takes it within seconds, before a request can come, and a queue several

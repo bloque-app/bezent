@@ -18,7 +18,8 @@
 --     when it took the condition, and the waiting deposits together never more than the window's
 --     limit. directed_window_fits(), the core's question for one directed deposit, still counts every
 --     deposit waiting ahead of it by coordinate, however long, so the queue drains in order and what
---     is minted never exceeds the window.
+--     is taken in never exceeds the window (after a token-upgrade hold, held deposits mint together at
+--     the lift, as under a pause).
 --   * The requests' reserve: NOT IN FORCE. `routes.request_reserve` is 0 on every route and stays 0
 --     until the owner rules on `d-f018-window-reserve` (review M3 of PR #142 proposed it; the second
 --     review of #142 found it starves old deposits). At 0, directed_window_fits() is amendment
