@@ -16,15 +16,7 @@
 reason = "F-018 (amendment 0029, SPEC v0.5.13): its tests are drafted in pull requests #121, #122 and #125, not yet on the base"
 blocked_by = "#118"
 
-[exception."AC-A6.2"]
-reason = "F-018 (amendment 0029, SPEC v0.5.13): its tests are drafted in pull requests #121, #122 and #125, not yet on the base"
-blocked_by = "#118"
-
 [exception."AC-A6.3"]
-reason = "F-018 (amendment 0029, SPEC v0.5.13): its tests are drafted in pull requests #121, #122 and #125, not yet on the base"
-blocked_by = "#118"
-
-[exception."AC-A6.4"]
 reason = "F-018 (amendment 0029, SPEC v0.5.13): its tests are drafted in pull requests #121, #122 and #125, not yet on the base"
 blocked_by = "#118"
 
