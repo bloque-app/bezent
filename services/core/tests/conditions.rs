@@ -455,7 +455,7 @@ async fn cnd_destination_refused_mints_nothing_and_resumes_when_the_mint_applies
 ) {
     // REQ-IN-8, REQ-IN-9: bezent never checks the destination; the network's refusal holds it.
     let w = World::new(options, connect).await;
-    dry_run_condition(&w, "Kreivo(CannotCreate)", "CND-DestinationRefused").await;
+    dry_run_condition(&w, "Kreivo(Assets(CannotMint))", "CND-DestinationRefused").await;
 }
 
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -467,7 +467,7 @@ async fn cnd_destination_refused_past_its_deadline_goes_to_review(
     let id = source_final_deposit(&w).await;
     w.cycle(t0()).await;
     let (o, _) = order(&w.admin, id, 1).await.unwrap();
-    prepare(&w.admin, o, Some("Kreivo(CannotCreate)")).await;
+    prepare(&w.admin, o, Some("Kreivo(Assets(CannotMint))")).await;
     w.cycle(t0()).await;
     head(&w.admin, ISSUING, 100).await;
     w.cycle(t0()).await;

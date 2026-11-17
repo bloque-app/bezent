@@ -653,7 +653,7 @@ async fn dec_19_a_failed_dry_run_holds_its_condition(
     let w = World::new(options, connect).await;
     w.ok(
         "/driver/v0/dry-run-failures",
-        json!({"network": ISSUING, "reason": "Kreivo: Assets.CannotCreate"}),
+        json!({"network": ISSUING, "reason": "Kreivo(Assets(CannotMint))"}),
     )
     .await;
     let bridge = w.deposited("dep-refused", 1_000_000).await;

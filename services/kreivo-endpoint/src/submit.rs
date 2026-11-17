@@ -14,7 +14,8 @@
 //! 2. **Preparation** ([`Submitter::prepare`]). At the finalized head, the endpoint builds the call,
 //!    takes the lane's next nonce, builds a mortal era born at that head (`MAX_ERA`, `DEC-5`), dry-runs
 //!    the call through the light client as the delivery account, and records all of it, append-only,
-//!    in `prepared_transactions`, the dry run's outcome included.
+//!    in `prepared_transactions`, the dry run's outcome (an assets API refusal with its inner error,
+//!    [`kreivo::contract_error`]) and the block time of the head it ran at included.
 //! 3. **The signing intent** (the core's, `F-003`). For a prepared transaction whose dry run
 //!    passed, the core records an intent of the same network, purpose and reference with the
 //!    payload [`signing_intent_payload`]: the exact `message`, the `amount`, and the `prepared` id.
@@ -699,6 +700,12 @@ impl<C: Chain> Submitter<'_, C> {
             },
             Err(e) => return Ok(Prepared::Unavailable(e.to_string())),
         };
+        // The dry run's block time, read from the chain and recorded with it (review L-b of PR
+        // #136): a resolution resting on this dry run names it, never a time of its own.
+        let dry_run_time_ms = match self.chain.events(&finalized, &self.contract).await {
+            Ok(e) => e.time_ms,
+            Err(e) => return Ok(Prepared::Unavailable(e.to_string())),
+        };
         let call = kreivo::contracts_call(&self.contract, &dry_run.limits(LIMIT_MARGIN), &data);
         let era = Mortality::born_at(finalized.number);
         let params = TxParams {
@@ -722,8 +729,10 @@ impl<C: Chain> Submitter<'_, C> {
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO prepared_transactions (order_intent_id, attempt, network, lane, key_id, \
                nonce, valid_from_block, valid_until_block, checkpoint_hash, call, signing_payload, \
-               message, dry_run_block_number, dry_run_block_hash, dry_run_passed, dry_run) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $9, $14, $15::text::jsonb) \
+               message, dry_run_block_number, dry_run_block_hash, dry_run_passed, dry_run, \
+               dry_run_block_time) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $9, $14, $15::text::jsonb, \
+               to_timestamp(0) + $16 * interval '1 millisecond') \
              RETURNING id",
         )
         .bind(order_intent_id)
@@ -741,6 +750,7 @@ impl<C: Chain> Submitter<'_, C> {
         .bind(i64_of(finalized.number)?)
         .bind(dry_run.passed())
         .bind(dry_run.to_json().to_string())
+        .bind(i64_of(dry_run_time_ms)?)
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;

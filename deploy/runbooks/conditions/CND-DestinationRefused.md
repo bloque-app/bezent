@@ -16,8 +16,12 @@ exercised: no
 ## What it is
 
 The issuing network refused a deposit's mint because of its destination; nothing was minted (`REQ-IN-8`). bezent never
-checks whether a destination can receive the asset (`REQ-IN-9`): the core reads the refusal from the dry run (a reason
-the issuing network's assets API returns) and holds the condition in `Source-Final`. It orders again after its retry
+checks whether a destination can receive the asset (`REQ-IN-9`): the core reads the refusal from the dry run and holds
+the condition in `Source-Final`. Only the assets API's refusal to mint to the account is one: the Kreivo endpoint records
+it as `Kreivo(Assets(CannotMint))` (`bezent_store::DESTINATION_REFUSALS`). Any other `Kreivo(…)` reason
+(`Kreivo(UnknownError)`, `Kreivo(ExtQueryError)`, `Kreivo(Assets(NotAuthorised))`, `Kreivo(Assets(NotALocalAsset))`,
+and so on) or a bare `Kreivo` says nothing about the destination: it holds no condition, pages `payout-refusal-alert`
+when it keeps coming back, and goes to review at its deadline with no condition (PR #136, review M1). It orders again after its retry
 interval, and clears the hold if a later dry run passes (the test: "resumes when the mint applies"). Past the route's
 completion budget, counted from the source leg's finality on the destination network's final head, it is a condition
 that blocks delivery, and the transfer goes to `Needs-Review` with the condition kept (SPEC §5.4; `REQ-IN-9`).
@@ -55,10 +59,14 @@ correct: the destination is theirs.
    requester's refund path (`REQ-RQ-6`); not established here beyond that. The one exception is a **directed** deposit
    (amendment 0029, Open 2): when the issuing network itself refused its destination (attempt 1's dry run recorded the
    refusal) and it reached review at the condition's deadline, a resolution into `Refunding`, with a second approver,
-   returns it to its refund destination. Its evidence is the refused dry run's coordinate:
-   `SELECT p.network, p.dry_run_block_number, p.dry_run_block_hash FROM prepared_transactions p JOIN intents i ON i.id = p.order_intent_id WHERE i.transfer_id = <id> AND i.attempt = 1 AND NOT p.dry_run_passed;`
-   and `SELECT directed_review_refund_open(<id>)` says whether the exit is open. A review entered because the
-   destination or the declared list could not be read is an unknown, and is never refunded (`REQ-RF-1`).
+   returns it to its refund destination. Its evidence is the coordinate and block time of attempt 1's **latest** dry
+   run, which must be the refusal (`Kreivo(Assets(CannotMint))`); a later dry run that passed or was refused for
+   anything else closes the exit:
+   `SELECT p.network, p.dry_run_block_number, p.dry_run_block_hash, p.dry_run_block_time, p.dry_run ->> 'reason' FROM prepared_transactions p JOIN intents i ON i.id = p.order_intent_id WHERE i.transfer_id = <id> AND i.attempt = 1 AND i.purpose = 'mint' ORDER BY p.id DESC LIMIT 1;`
+   Name `dry_run_block_time` as the resolution's `block_time`, exactly: the core and the store refuse any other time.
+   `SELECT directed_review_refund_open(<id>)` says whether the exit is open. A review entered because the
+   destination or the declared list could not be read, one whose dry run the network refused for another reason, and
+   one with a delivery anomaly recorded for the deposit are unknowns, and are never refunded (`REQ-RF-1`).
 
 ## Never
 

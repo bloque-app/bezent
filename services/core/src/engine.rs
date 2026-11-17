@@ -262,10 +262,17 @@ fn dry_run_condition(dry_run: &Value, allowance: Option<&[u8; 32]>) -> Option<Co
         None
     } else if reason.contains("AboveWindow") || reason.contains("AboveCeiling") {
         Some(Condition::MintWindow)
-    } else if reason.starts_with("Kreivo") {
-        // Kreivo's assets API refused the mint: the destination cannot receive the asset
+    } else if bezent_store::DESTINATION_REFUSALS.contains(&reason) {
+        // Kreivo's assets API refused to mint to the destination: it cannot receive the asset
         // (REQ-IN-8, REQ-IN-9). bezent never checks the destination itself.
         Some(Condition::DestinationRefused)
+    } else if reason == "Kreivo" || reason.starts_with("Kreivo(") {
+        // Any other refusal of the assets API (an unknown error, a context the runtime could not
+        // read, the contract's community not authorised, an asset that is not local), or one whose
+        // inner error the endpoint could not read, is no refusal of the destination (review M1 of
+        // PR #136; REQ-RF-1, guardrail 4): no condition, so it is the refusal that names nothing,
+        // which pages and goes to review at its deadline, and never the fee rule below.
+        None
     } else if reason.to_ascii_lowercase().contains("fee")
         || reason.contains("Payment")
         || reason.contains("InsufficientBalance")
@@ -3468,9 +3475,11 @@ impl Core {
                 evidence.network == t.destination_network && !on_arrival
             }
             // F-018 (amendment 0029, Open 2): the directed exit rests on the issuing network's own
-            // refusal of the destination, the block of attempt 1's refused dry run as the store
-            // recorded it, not on just any final point there (review M1 of PR #136; REQ-IN-9,
-            // REQ-RF-1). Nothing was signed, so there is no proof of non-execution to name.
+            // refusal of the destination, the block of attempt 1's latest dry run, refused for it,
+            // with the block time the endpoint read from the chain and recorded with it, as the
+            // store holds them; not on just any final point there, nor on a time the resolution
+            // names (review M1, L-a and L-b of PR #136; REQ-IN-9, REQ-RF-1). Nothing was signed,
+            // so there is no proof of non-execution to name.
             (State::SourceFinal, State::Refunding) => {
                 // A head recorded at that block has the same time as the evidence names.
                 let head_agrees = store::final_point(
@@ -3485,12 +3494,13 @@ impl Core {
                     && head_agrees
                     && self.directed_review_refund_open(conn, t).await?
                     && sqlx::query_scalar::<_, bool>(
-                        "SELECT directed_refusal_recorded($1, $2, $3, $4)",
+                        "SELECT directed_refusal_recorded($1, $2, $3, $4, $5)",
                     )
                     .bind(t.id)
                     .bind(&evidence.network)
                     .bind(evidence.block_number)
                     .bind(&evidence.block_hash)
+                    .bind(evidence.block_time)
                     .fetch_one(&mut *conn)
                     .await?
             }
@@ -3614,9 +3624,27 @@ mod tests {
     fn req_in_9_a_mint_the_issuing_network_refuses_holds_cnd_destination_refused() {
         let reason = |r: &str| dry_run_condition(&json!({"outcome": "refused", "reason": r}), None);
         assert_eq!(
-            reason("Kreivo(Unknown)"),
+            reason("Kreivo(Assets(CannotMint))"),
             Some(Condition::DestinationRefused)
         );
+        // Review M1 of PR #136 (REQ-RF-1, guardrail 4): every other refusal of the assets API, and
+        // one with no inner error, is the refusal that names nothing, never the destination's and
+        // never a fee shortfall.
+        for other in [
+            "Kreivo",
+            "Kreivo(UnknownError)",
+            "Kreivo(ExtQueryError)",
+            "Kreivo(Assets(CannotDeposit))",
+            "Kreivo(Assets(CannotTransfer))",
+            "Kreivo(Assets(CannotBurn))",
+            "Kreivo(Assets(NotAGroupContract))",
+            "Kreivo(Assets(NotAuthorised))",
+            "Kreivo(Assets(NotALocalAsset))",
+            "Kreivo(0x0209)",
+            "Kreivo(Assets(CannotMint)) fee",
+        ] {
+            assert_eq!(reason(other), None, "{other}");
+        }
         assert_eq!(reason("AboveWindow"), Some(Condition::MintWindow));
         // A pause is bezent's own declaration (the gate); a contract that refuses as paused when
         // bezent declares no pause holds nothing and is retried.

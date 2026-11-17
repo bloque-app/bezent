@@ -21,7 +21,7 @@ mod common;
 
 use bezent_core_service::refs::{self, Coordinate};
 use bezent_core_service::reserve::coordinate_key;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use common::reserve::balance;
 use common::*;
 use serde_json::json;
@@ -113,15 +113,25 @@ async fn resolution(w: &World, id: i64, to: &str, network: &str, block: i64, by:
 }
 
 /// Operator `by` records a resolution of `id` into `Refunding`, resting on the coordinate of attempt
-/// 1's refused dry run on the issuing network, as the endpoint recorded it with the preparation
-/// (`common::prepare`: block 1, hash `\x05`; no head is recorded there on its own): the evidence of
-/// a directed deposit's review exit (review M1 of PR #136).
+/// 1's latest refused dry run on the issuing network, with the block time the endpoint recorded with
+/// it (`common::prepare`: block 1, hash `\x05`, `t0()` + 1 s; no head is recorded there on its own):
+/// the evidence of a directed deposit's review exit (review M1, L-a and L-b of PR #136).
 async fn resolution_on_refusal(w: &World, id: i64, by: usize) -> i64 {
-    let (network, block, hash): (String, i64, Vec<u8>) = sqlx::query_as(
-        "SELECT p.network, p.dry_run_block_number, p.dry_run_block_hash \
+    resolution_on_refusal_at(w, id, by, None).await
+}
+
+/// As [`resolution_on_refusal`], naming block time `time` instead of the recorded one, if given.
+async fn resolution_on_refusal_at(
+    w: &World,
+    id: i64,
+    by: usize,
+    time: Option<DateTime<Utc>>,
+) -> i64 {
+    let (network, block, hash, recorded): (String, i64, Vec<u8>, DateTime<Utc>) = sqlx::query_as(
+        "SELECT p.network, p.dry_run_block_number, p.dry_run_block_hash, p.dry_run_block_time \
          FROM prepared_transactions p JOIN intents i ON i.id = p.order_intent_id \
          WHERE i.transfer_id = $1 AND i.attempt = 1 AND NOT p.dry_run_passed \
-         ORDER BY p.id LIMIT 1",
+         ORDER BY p.id DESC LIMIT 1",
     )
     .bind(id)
     .fetch_one(&w.admin)
@@ -137,7 +147,7 @@ async fn resolution_on_refusal(w: &World, id: i64, by: usize) -> i64 {
     .bind(network)
     .bind(block)
     .bind(hash)
-    .bind(t0())
+    .bind(time.unwrap_or(recorded))
     .fetch_one(&w.ops[by])
     .await
     .unwrap()
@@ -609,7 +619,7 @@ async fn directed_in_review(w: &World) -> (i64, i64) {
     w.cycle(t0()).await;
     let (id, _) = bound(w, 10, 0).await.expect("the deposit");
     let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
-    prepare(&w.admin, o, Some("Kreivo(CannotCreate)")).await;
+    prepare(&w.admin, o, Some("Kreivo(Assets(CannotMint))")).await;
     w.cycle(t0()).await;
     assert_eq!(
         w.state(id).await,
@@ -767,7 +777,7 @@ async fn req_rv_2_no_other_deposit_gains_the_directed_review_exit(
     w.cycle(t0()).await;
     w.cycle(t0()).await;
     let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
-    prepare(&w.admin, o, Some("Kreivo(CannotCreate)")).await;
+    prepare(&w.admin, o, Some("Kreivo(Assets(CannotMint))")).await;
     w.cycle(t0()).await;
     let past = 12 + BUDGET + 1;
     head(&w.admin, ISSUING, past).await;
@@ -926,7 +936,7 @@ async fn req_rf_1_a_refusal_then_an_unknown_review_is_not_refunded(
     w.cycle(t0()).await;
     let (id, _) = bound(&w, 10, 0).await.expect("the deposit");
     let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
-    prepare(&w.admin, o, Some("Kreivo(CannotCreate)")).await;
+    prepare(&w.admin, o, Some("Kreivo(Assets(CannotMint))")).await;
     w.cycle(t0()).await;
     assert_eq!(
         w.state(id).await,
@@ -955,6 +965,195 @@ async fn req_rf_1_a_refusal_then_an_unknown_review_is_not_refunded(
     assert_eq!(
         w.count("SELECT count(*) FROM unsigned_attempt_cancellations")
             .await,
+        0
+    );
+}
+
+/// A directed deposit whose first dry run the issuing network refused with `reason`, which is not
+/// the refusal of its destination, taken to its deadline, with an approved resolution into
+/// `Refunding` resting on that dry run: it is never refunded (review M1 of PR #136; `REQ-RF-1`,
+/// guardrail 4).
+async fn an_unknown_refusal_never_opens_the_exit(w: &World, reason: &str) {
+    final_directed(&w.admin, 10, 0, 5_000_000).await;
+    w.cycle(t0()).await;
+    let (id, _) = bound(w, 10, 0).await.expect("the deposit");
+    let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, o, Some(reason)).await;
+    w.cycle(t0()).await;
+    let (state, condition) = w.state(id).await;
+    assert_eq!(state, "Source-Final", "{reason}");
+    assert_ne!(
+        condition.as_deref(),
+        Some("CND-DestinationRefused"),
+        "{reason}: no refusal of the destination"
+    );
+    let past = 12 + BUDGET + 1;
+    head(&w.admin, ISSUING, past).await;
+    w.cycle(t0()).await;
+    let (state, condition) = w.state(id).await;
+    assert_eq!(
+        state, "Needs-Review",
+        "{reason}: the refusal that names nothing, at its deadline"
+    );
+    assert_ne!(condition.as_deref(), Some("CND-DestinationRefused"));
+    let open: bool = scalar(
+        &w.admin,
+        &format!("SELECT directed_review_refund_open({id})"),
+    )
+    .await;
+    assert!(!open, "{reason}");
+    let action = resolution_on_refusal(w, id, 0).await;
+    approve_as(w, 1, action).await.unwrap();
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review", "{reason}");
+    assert_eq!(evidence_refused(w, action).await, 1, "{reason}");
+    assert_eq!(returns(w).await, 0, "{reason}");
+}
+
+/// `REQ-RF-1`, `REQ-IN-9`, guardrail 4 (review M1 of PR #136): the contract's community not
+/// authorised by the issuing network is no refusal of the destination.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_a_kreivo_not_authorised_refusal_never_opens_the_exit(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    an_unknown_refusal_never_opens_the_exit(&w, "Kreivo(Assets(NotAuthorised))").await;
+}
+
+/// `REQ-RF-1`, `REQ-IN-9`, guardrail 4 (review M1 of PR #136): an error the issuing network does not
+/// name is an unknown, and never refunds.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_a_kreivo_unknown_error_never_opens_the_exit(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    an_unknown_refusal_never_opens_the_exit(&w, "Kreivo(UnknownError)").await;
+}
+
+/// `REQ-RF-1`, `REQ-IN-9` (review L-a of PR #136): a refusal of the destination, then a dry run that
+/// passed, then the review's resolution resting on the refusal: the refusal is stale, what the
+/// network says now is that the mint applies, and nothing is refunded.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_a_refusal_then_a_passing_dry_run_is_not_refunded(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, _) = directed_in_review(&w).await;
+    let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, o, None).await;
+    let open: bool = scalar(
+        &w.admin,
+        &format!("SELECT directed_review_refund_open({id})"),
+    )
+    .await;
+    assert!(!open);
+    let action = resolution_on_refusal(&w, id, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(evidence_refused(&w, action).await, 1);
+    assert_eq!(returns(&w).await, 0);
+}
+
+/// `REQ-RV-2`, `REQ-RF-1` (review L-b of PR #136): the directed exit's evidence names the block time
+/// the endpoint read from the issuing network and recorded with the refused dry run. A resolution on
+/// the right block with another time is refused by the core and, whoever writes the edge, by the
+/// store; the one naming the recorded time runs.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_2_a_directed_exit_naming_another_block_time_is_refused(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, _) = directed_in_review(&w).await;
+    let typed = resolution_on_refusal_at(&w, id, 0, Some(t0() + Duration::hours(1))).await;
+    approve_as(&w, 1, typed).await.unwrap();
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(evidence_refused(&w, typed).await, 1);
+    assert_eq!(returns(&w).await, 0);
+    let mut tx = w.admin.begin().await.unwrap();
+    sqlx::query(&format!(
+        "INSERT INTO unsigned_attempt_cancellations (transfer_id, attempt, manual_action_id) \
+         VALUES ({id}, 1, {typed})"
+    ))
+    .execute(&mut *tx)
+    .await
+    .expect("the cancellation under the approved resolution");
+    let refused = sqlx::query(&format!(
+        "INSERT INTO transitions (transfer_id, from_state, to_state, network, block_number, \
+             block_hash, block_time, manual_action_id) \
+         SELECT {id}, 'Needs-Review', 'Refunding', network, block_number, block_hash, block_time, id \
+         FROM manual_actions WHERE id = {typed}"
+    ))
+    .execute(&mut *tx)
+    .await
+    .expect_err("the edge at another block time");
+    tx.rollback().await.unwrap();
+    assert!(
+        refused
+            .as_database_error()
+            .is_some_and(|e| e.code().as_deref() == Some("BZ001")
+                && e.message().contains("recorded refusal")),
+        "{refused}"
+    );
+
+    let action = resolution_on_refusal(&w, id, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Refunding");
+}
+
+/// `REQ-IN-10`, `AC-A6.2`, `INV-2` (review, info, of PR #136): a directed arrival bound by a row that
+/// is not bezent's own, here a requester's deposit bound to the coordinate before the arrival was
+/// observed as directed, is never decided by the intake and is no unassociated arrival either. The
+/// core pages `directed-binding-alert` once for it, and changes nothing.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_10_a_directed_arrival_bound_by_another_row_pages(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let requested = deposit(&w.admin, 10, 5_000_000).await;
+    final_directed(&w.admin, 10, 0, 5_000_000).await;
+    // The requester's deposit cannot become final on a directed arrival (the store refuses it,
+    // review H1 of PR #125), so its step fails every cycle; the page comes all the same.
+    for _ in 0..2 {
+        let report = w.core.cycle(t0()).await.expect("cycle");
+        assert_eq!(report.failed, 1, "{report:?}");
+        assert_eq!(report.directed, 0, "{report:?}");
+    }
+    let pages = w
+        .count(&format!(
+            "SELECT count(*) FROM event_log WHERE kind = 'directed-binding-alert' \
+               AND transfer_id = {requested}"
+        ))
+        .await;
+    assert_eq!(pages, 1, "once");
+    assert_eq!(bound(&w, 10, 0).await.map(|b| b.0), Some(requested));
+    assert_eq!(returns(&w).await, 0);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM intents WHERE transfer_id = {requested}"
+        ))
+        .await,
+        0,
+        "nothing minted for it"
+    );
+    // bezent's own deposit of another directed arrival does not page.
+    final_directed(&w.admin, 20, 0, 5_000_000).await;
+    let report = w.core.cycle(t0()).await.expect("cycle");
+    assert_eq!(report.directed, 1, "{report:?}");
+    let (own, _) = bound(&w, 20, 0).await.expect("the directed deposit");
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM event_log WHERE kind = 'directed-binding-alert' \
+               AND transfer_id = {own}"
+        ))
+        .await,
         0
     );
 }
@@ -1072,7 +1271,7 @@ async fn req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_de
     assert_eq!(w.state(b).await, ("Source-Final".into(), None));
     w.cycle(t0()).await;
     let (o, _) = order(&w.admin, b, 1).await.expect("the mint order");
-    prepare(&w.admin, o, Some("Kreivo(CannotCreate)")).await;
+    prepare(&w.admin, o, Some("Kreivo(Assets(CannotMint))")).await;
     w.cycle(t0()).await;
     assert_eq!(
         w.state(b).await,

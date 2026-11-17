@@ -6,9 +6,9 @@ SPDX-License-Identifier: CC-BY-4.0
 id: CND-Unassociated
 kind: condition
 covers: [REQ-IN-3, REQ-IN-6, REQ-RV-1, REQ-RQ-6, REQ-GV-5, REQ-ST-6]
-pages: []
+pages: [directed-binding-alert]
 observables: [unassociated_arrivals, unassociated_arrivals_oldest_age_seconds]
-tests: [services/core/tests/lifecycle.rs::ac_a4_1_an_arrival_that_cannot_become_a_deposit_is_unassociated_with_an_owner, services/core/tests/lifecycle.rs::ac_a4_2_an_unassociated_arrival_is_never_minted_and_leaves_only_by_a_two_person_release, services/core/tests/conversions.rs::ac_a5_2_req_cv_2_req_cv_5_inv_6_an_output_named_directly_is_bound_and_minted]
+tests: [services/core/tests/lifecycle.rs::ac_a4_1_an_arrival_that_cannot_become_a_deposit_is_unassociated_with_an_owner, services/core/tests/directed.rs::req_in_10_a_directed_arrival_bound_by_another_row_pages, services/core/tests/lifecycle.rs::ac_a4_2_an_unassociated_arrival_is_never_minted_and_leaves_only_by_a_two_person_release, services/core/tests/conversions.rs::ac_a5_2_req_cv_2_req_cv_5_inv_6_an_output_named_directly_is_bound_and_minted]
 exercised: no
 ---
 # CND-Unassociated
@@ -24,8 +24,16 @@ with a deposit request that names its coordinate (`REQ-IN-3`), or by a two-perso
 
 ## Pages
 
-No page. The signal is the metric `unassociated_arrivals` (count per asset and network) and
-`unassociated_arrivals_oldest_age_seconds`; compare the age with the one-business-day due time (`REQ-ST-6`).
+No page for an unassociated arrival itself. The signal is the metric `unassociated_arrivals` (count per asset and
+network) and `unassociated_arrivals_oldest_age_seconds`; compare the age with the one-business-day due time (`REQ-ST-6`).
+
+`directed-binding-alert` (`F-018`): a **directed** arrival is bound by a transfer that is not bezent's own deposit or
+return (its request reference is not the coordinate's `directed:` label, or a request answers it), for example a
+requester's deposit bound to the coordinate before the endpoint observed the arrival as directed, which the store refuses
+to make final. Such an arrival is neither decided by the core nor listed in `unassociated_arrivals`, so this page is the
+only signal. Once per transfer; nothing changes. Find it with
+`SELECT transfer_id, payload FROM event_log WHERE kind = 'directed-binding-alert' ORDER BY seq DESC;`, and take the
+transfer to its requester: no request binds a directed arrival (`REQ-IN-10`, `AC-A6.2`).
 
 ## Confirm
 

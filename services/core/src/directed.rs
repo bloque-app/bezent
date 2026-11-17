@@ -148,10 +148,49 @@ async fn pending(pool: &PgPool) -> sqlx::Result<Vec<Observation>> {
     .await
 }
 
+/// Pages a human, once per transfer, for every directed arrival a transfer binds that is not one of
+/// bezent's own rows (review, info, of PR #136; `REQ-IN-10`, `AC-A6.2`, `INV-2`): a transfer whose
+/// request reference is not the coordinate's `directed:` label, or that a request answers. The store
+/// refuses to write one (0144), but one can exist: a requester's deposit bound to the coordinate
+/// before the endpoint observed the arrival as directed, which the store then refuses to make final
+/// (review H1 of PR #125), or a row the owner wrote. The arrival is then bound, so the intake never
+/// decides it and it is not an unassociated arrival either: nothing would show it. It changes
+/// nothing; what to do is the operator's (`directed-binding-alert`, in the event log too).
+async fn foreign_bindings(pool: &PgPool) -> sqlx::Result<usize> {
+    let rows: Vec<(i64, String, String, String, i64)> = sqlx::query_as(
+        "SELECT t.id, t.bridge_reference, t.kind, t.state::text, o.id FROM observations o \
+         JOIN transfers t ON t.source_network = o.network AND t.source_block_number = o.block_number \
+          AND t.source_block_hash = o.block_hash AND t.source_position_kind = o.position_kind \
+          AND t.source_position_index = o.position_index \
+         WHERE o.kind = 'directed_arrival' AND t.refund_of IS NULL \
+           AND (NOT starts_with(t.request_reference, 'directed:') \
+                OR EXISTS (SELECT 1 FROM intake_answers a WHERE a.transfer_id = t.id)) \
+           AND NOT EXISTS (SELECT 1 FROM event_log e \
+                           WHERE e.kind = 'directed-binding-alert' AND e.transfer_id = t.id) \
+         ORDER BY t.id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut conn = pool.acquire().await?;
+    for (id, bridge_reference, kind, state, observation) in &rows {
+        let detail = json!({"spec": "REQ-IN-10, AC-A6.2, INV-2",
+                            "bridge_reference": bridge_reference, "kind": kind, "state": state,
+                            "observation": observation});
+        store::event(&mut conn, "directed-binding-alert", Some(*id), &detail).await?;
+        tracing::error!(kind = %"directed-binding-alert", transfer = %bridge_reference, %detail,
+            "page: a directed arrival is bound by a transfer that is not bezent's own deposit or return; bezent will not decide it");
+    }
+    Ok(rows.len())
+}
+
 /// Decides every pending directed arrival (see the module documentation), each in a transaction of
 /// its own. Returns how many it decided; one whose step fails is logged (once an hour, `undecided`)
-/// and tried again next cycle.
+/// and tried again next cycle. First, a directed arrival another row binds pages
+/// ([`foreign_bindings`]); a failure of that is logged and the intake runs.
 pub async fn intake(pool: &PgPool, undecided: &Undecided) -> sqlx::Result<usize> {
+    if let Err(e) = foreign_bindings(pool).await {
+        tracing::warn!(error = %e, "REQ-IN-10: the directed bindings were not checked this cycle; tried again next cycle");
+    }
     let mut decided = 0;
     let pending = pending(pool).await?;
     undecided.keep_only(&pending.iter().map(|o| o.id).collect());

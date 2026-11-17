@@ -73,7 +73,7 @@ Each row: the page that sends you to the runbook, the observable that shows the 
 | `CND-Paused` | `reserve-divergence`, `reserve-blind`, `reserve-check-incomplete`, `supply-mismatch-pause`, `book-quarantine` | `pauses_in_force`, `holds_in_force`, `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | [CND-Paused](conditions/CND-Paused.md) | `cnd_paused_new_work_waits_and_resumes_when_the_route_reopens` (+3) |
 | `CND-PayoutWindow` | `payout-window-alert` | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds`, `reserve_amount` | [CND-PayoutWindow](conditions/CND-PayoutWindow.md) | `cnd_payout_window_m1_a_spent_allowance_holds_the_withdrawal_never_review_never_refund` (+4) |
 | `CND-ReserveShort` | none | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds`, `reserve_amount`, `reserve_equation_outcome` | [CND-ReserveShort](conditions/CND-ReserveShort.md) | `cnd_reserve_short_ac_b3_1_holds_and_raises_one_condition_per_asset_and_network` (+1) |
-| `CND-Unassociated` | none | `unassociated_arrivals`, `unassociated_arrivals_oldest_age_seconds` | [CND-Unassociated](conditions/CND-Unassociated.md) | `ac_a4_1_an_arrival_that_cannot_become_a_deposit_is_unassociated_with_an_owner` (+2) |
+| `CND-Unassociated` | `directed-binding-alert` | `unassociated_arrivals`, `unassociated_arrivals_oldest_age_seconds` | [CND-Unassociated](conditions/CND-Unassociated.md) | `ac_a4_1_an_arrival_that_cannot_become_a_deposit_is_unassociated_with_an_owner` (+3) |
 | `CND-Withdrawn` | none | `reviews_open`, `reviews_oldest_age_seconds`, `open_gaps`, `nonfinal_transfers` | [CND-Withdrawn](conditions/CND-Withdrawn.md) | `cnd_withdrawn_an_inclusion_that_stops_matching_the_chain_goes_to_review` (+1) |
 
 ### Incident classes (`notes/BRIDGE-REQUIREMENTS.md` §5)
