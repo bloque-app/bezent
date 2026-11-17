@@ -26,12 +26,10 @@ database_url_file = "/run/secrets/bezent-evm-polygon-amoy-db"
 # Public nodes signed transactions are sent to, and only those (amendment 0023). No secret: written here.
 broadcast = ["https://rpc-amoy.polygon.technology", "https://polygon-amoy-bor-rpc.publicnode.com", "https://polygon-amoy.drpc.org"]
 
-# The directing code in front of the vault (F-018, T-018-04), deployed at block 53060139. The endpoint reads it once
-# the `directing` configuration of T-018-05 (pull request #122) is merged; until then this stays a comment, since
-# the parser refuses an unknown field.
-# [[directing]]
-# address = "0xB8F75BeAE2723637313072fC89C69B7C15EdAec7"
-# from_block = 53060139
+# The directing code in front of the vault (F-018, T-018-04), deployed at block 53060139.
+[[directing]]
+address = "0xB8F75BeAE2723637313072fC89C69B7C15EdAec7"
+from_block = 53060139
 
 [[providers]]
 name = "a"

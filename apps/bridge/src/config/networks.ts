@@ -137,11 +137,11 @@ export const POLYGON_AMOY: OriginNetwork = {
   },
   // Circle's test USDC on Amoy (domain "USDC"/"2"; features/F-018-directed-deposits/NOTES.md).
   token: '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582',
-  // Not deployed yet: T-018-04 deploys it and pins its address, its reserve and its code hash here.
-  directedDeposit: UNSET,
-  reserve: UNSET,
-  codeHash: UNSET,
-  // No test Kreivo is named yet (T-018-04 names it). Never live Kreivo: a test deposit must not mint real bUSDC,
+  // T-018-04, deployed at block 53060139 (contracts/evm/deployments/polygon-amoy.json).
+  directedDeposit: '0xB8F75BeAE2723637313072fC89C69B7C15EdAec7',
+  reserve: '0x3530dBB6986Dc584bf3D83a0ed4cbE027238204a',
+  codeHash: '0x6c32ce3fe773ad4f2bb35e6f83948766d3058c0dbc016ffed003b891489307f0',
+  // No test Kreivo is named yet, so Amoy is still refused until one is. Never live Kreivo: a test deposit must not mint real bUSDC,
   // and `resolveNetwork` refuses a test origin network paired with a production issuing network.
   kreivo: UNSET,
 };
