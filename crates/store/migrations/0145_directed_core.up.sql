@@ -77,42 +77,69 @@ CREATE FUNCTION directed_return(p_transfer BIGINT) RETURNS BOOLEAN
           AND o.kind = 'directed_arrival')
 $$;
 
+-- The block time of a preparation's dry run (review L-b of PR #136): the endpoint reads it from the
+-- finalized block it dry-ran at and records it with the row, so that evidence resting on that block
+-- names its time as the network gave it, not one an operator types. NULL on rows recorded before it,
+-- and on the EVM endpoint's, which no rule here reads.
+ALTER TABLE prepared_transactions ADD COLUMN dry_run_block_time TIMESTAMPTZ;
+
+COMMENT ON COLUMN prepared_transactions.dry_run_block_time IS
+    'The block time of the finalized block the dry run ran at (dry_run_block_number, '
+    'dry_run_block_hash), as the endpoint read it from the chain.';
+
+-- The dry-run reasons that are the issuing network's refusal of a mint's destination, and no
+-- others (REQ-IN-8, REQ-IN-9; review M1 of PR #136): the Kreivo endpoint records the assets API's
+-- inner error with the contract's `Kreivo` (services/kreivo-endpoint/src/kreivo.rs,
+-- contract_error()), and only its refusal to mint to the account is the destination's. Every other
+-- `Kreivo(...)` (an unknown error, a context the runtime could not read, the contract's community not
+-- authorised, an asset that is not local) and a bare `Kreivo` are an unknown: guardrail 4. The same
+-- list as bezent_store::DESTINATION_REFUSALS (crates/store/src/lib.rs), which a test holds equal; the
+-- core reads that one (services/core/src/engine.rs, dry_run_condition()).
+CREATE FUNCTION directed_destination_refusals() RETURNS TEXT[]
+    LANGUAGE sql IMMUTABLE
+    SET search_path = pg_catalog, public
+    AS $$
+    SELECT ARRAY['Kreivo(Assets(CannotMint))']::text[]
+$$;
+
+COMMENT ON FUNCTION directed_destination_refusals() IS
+    'REQ-IN-8, REQ-IN-9, REQ-RF-1: the dry-run reasons that are the issuing network''s refusal of a '
+    'destination; bezent_store::DESTINATION_REFUSALS, which a test holds equal.';
+
 -- Whether the issuing network refused directed deposit `p_transfer`'s destination, as its first
--- attempt recorded it (REQ-IN-8, REQ-IN-9; review M1 of PR #136): a preparation of attempt 1's mint
--- order, on the deposit's destination network, whose dry run that network refused for the reason the
--- core reads as CND-DestinationRefused (services/core/src/engine.rs, dry_run_condition(): the issuing
--- network's assets API, a reason that begins `Kreivo`, and not a mint window bound or a role
--- violation). With a coordinate, only the dry run at that block: the evidence a resolution of the
--- review into Refunding rests on. A destination or a list bezent cannot read is no such refusal.
+-- attempt recorded it (REQ-IN-8, REQ-IN-9; review M1 of PR #136): the latest preparation of attempt
+-- 1's mint orders on the deposit's destination network (review L-a: a later dry run that passed, or
+-- that was refused for anything else, is what the network says now, and the refusal before it is
+-- no longer evidence) was refused for a reason in directed_destination_refusals(). With a
+-- coordinate, only that dry run, at that block and with the block time it recorded (review L-b):
+-- the evidence a resolution of the review into Refunding rests on. A destination or a list bezent
+-- cannot read is no such refusal, nor is any other refusal of the assets API.
 CREATE FUNCTION directed_refusal_recorded(
-    p_transfer BIGINT, p_network TEXT, p_block BIGINT, p_hash BYTEA)
+    p_transfer BIGINT, p_network TEXT, p_block BIGINT, p_hash BYTEA, p_time TIMESTAMPTZ)
     RETURNS BOOLEAN
     LANGUAGE sql STABLE
     SECURITY DEFINER
     SET search_path = public, pg_temp
     AS $$
-    SELECT EXISTS (
-        SELECT 1 FROM transfers t
+    SELECT COALESCE((
+        SELECT NOT p.dry_run_passed
+           AND p.dry_run ->> 'outcome' = 'refused'
+           AND p.dry_run ->> 'reason' = ANY (directed_destination_refusals())
+           AND (p_network IS NULL
+                OR (p.network = p_network AND p.dry_run_block_number = p_block
+                    AND p.dry_run_block_hash = p_hash AND p.dry_run_block_time = p_time))
+        FROM transfers t
         JOIN intents i ON i.transfer_id = t.id AND i.attempt = 1 AND i.purpose = 'mint'
         JOIN prepared_transactions p ON p.order_intent_id = i.id
         WHERE t.id = p_transfer AND i.network = t.destination_network
           AND p.network = t.destination_network
-          AND NOT p.dry_run_passed
-          AND p.dry_run ->> 'outcome' = 'refused'
-          AND starts_with(coalesce(p.dry_run ->> 'reason', ''), 'Kreivo')
-          AND strpos(p.dry_run ->> 'reason', 'AboveWindow') = 0
-          AND strpos(p.dry_run ->> 'reason', 'AboveCeiling') = 0
-          AND strpos(p.dry_run ->> 'reason', 'ConditionViolation(') = 0
-          AND jsonb_typeof(p.dry_run -> 'violation') IS DISTINCT FROM 'object'
-          AND (p_network IS NULL
-               OR (p.network = p_network AND p.dry_run_block_number = p_block
-                   AND p.dry_run_block_hash = p_hash)))
+        ORDER BY p.id DESC LIMIT 1), FALSE)
 $$;
 
-COMMENT ON FUNCTION directed_refusal_recorded(BIGINT, TEXT, BIGINT, BYTEA) IS
-    'REQ-IN-8, REQ-IN-9, REQ-RF-1 (amendment 0029, Open 2): whether attempt 1 of a directed '
-    'deposit recorded the issuing network''s refusal of its destination in a dry run (at the given '
-    'block, when one is given). Guardrail 4: an unknown is no refusal.';
+COMMENT ON FUNCTION directed_refusal_recorded(BIGINT, TEXT, BIGINT, BYTEA, TIMESTAMPTZ) IS
+    'REQ-IN-8, REQ-IN-9, REQ-RF-1 (amendment 0029, Open 2): whether the latest dry run of attempt 1 '
+    'of a directed deposit recorded the issuing network''s refusal of its destination (at the given '
+    'block and block time, when one is given). Guardrail 4: an unknown is no refusal.';
 
 -- Whether directed deposit `p_transfer` may be resolved from its review into Refunding (amendment
 -- 0029, Open 2): a deposit bound to a directed arrival, in Needs-Review, entered from Source-Final
@@ -124,7 +151,11 @@ COMMENT ON FUNCTION directed_refusal_recorded(BIGINT, TEXT, BIGINT, BYTEA) IS
 -- destination network's final head (the core's destination_review(), for a destination or a list it
 -- cannot read, records no coordinate and is no such review), and attempt 1's dry run recorded the
 -- network's refusal (directed_refusal_recorded()). Defence in depth (review, info): no mint carrying
--- the deposit's mint reference is observed on the destination network, executed or not.
+-- the deposit's mint reference is observed on the destination network, executed or not; and no
+-- delivery anomaly is recorded for it (review, info): one the core surfaced for the transfer, or
+-- one of its destination network that names an intent or a signed transaction of it, as the core
+-- matches them (services/core/src/engine.rs, surface_anomalies()). An anomaly says what the
+-- endpoint read contradicts itself, so the leg is unknown (REQ-RF-1).
 -- SECURITY DEFINER now: it derives the mint reference with 0144's helpers, which are no role's to
 -- call; it reads and writes nothing else, and no role is granted more.
 CREATE FUNCTION directed_review_refund_open(p_transfer BIGINT) RETURNS BOOLEAN
@@ -147,9 +178,21 @@ CREATE FUNCTION directed_review_refund_open(p_transfer BIGINT) RETURNS BOOLEAN
           AND t.state = 'Needs-Review' AND o.kind = 'directed_arrival'
           AND e.from_state = 'Source-Final' AND e.condition = 'CND-DestinationRefused'
           AND e.network IS NOT DISTINCT FROM t.destination_network
-          AND directed_refusal_recorded(t.id, NULL, NULL, NULL)
+          AND directed_refusal_recorded(t.id, NULL, NULL, NULL, NULL)
           AND NOT EXISTS (SELECT 1 FROM intents i JOIN signatures s ON s.intent_id = i.id
                           WHERE i.transfer_id = t.id)
+          AND NOT EXISTS (SELECT 1 FROM event_log a
+                          WHERE a.kind = 'delivery-anomaly-surfaced' AND a.transfer_id = t.id)
+          AND NOT EXISTS (
+              SELECT 1 FROM event_log a
+              WHERE a.kind = 'delivery-anomaly' AND a.payload ->> 'network' = t.destination_network
+                AND (EXISTS (SELECT 1 FROM intents i
+                             WHERE i.transfer_id = t.id AND i.id::text = a.payload ->> 'intent')
+                     OR EXISTS (SELECT 1 FROM intents i JOIN signed_transactions st
+                                  ON st.intent_id = i.id
+                                WHERE i.transfer_id = t.id
+                                  AND st.id::text IN (a.payload ->> 'signed_transaction',
+                                                      a.payload ->> 'signed'))))
           AND NOT EXISTS (SELECT 1 FROM intents i JOIN signed_transactions st ON st.intent_id = i.id
                           WHERE i.transfer_id = t.id)
           AND NOT EXISTS (
@@ -166,8 +209,8 @@ COMMENT ON FUNCTION directed_review_refund_open(BIGINT) IS
     'REQ-IN-11, REQ-RV-2, INV-8 (amendment 0029, Open 2): whether a directed deposit, in review '
     'entered from Source-Final at the deadline of the issuing network''s recorded refusal of its '
     'destination (CND-DestinationRefused; never an unreadable destination or list), with no mint '
-    'attempt ever signed and no mint of it observed, may be resolved into Refunding (with a second '
-    'approver, REQ-GV-5). No other transfer may.';
+    'attempt ever signed, no mint of it observed and no delivery anomaly recorded for it, may be '
+    'resolved into Refunding (with a second approver, REQ-GV-5). No other transfer may.';
 
 -- ---------------------------------------------------------------------------------------------
 -- The lifecycle (0014), with the return accepted by the core and the one review edge.
@@ -223,11 +266,13 @@ BEGIN
     -- other transfer gains it: transfer_edge() still says Source-Final -> Refunding is no edge.
     directed_refund := review_exit AND edge_from = 'Source-Final' AND NEW.to_state = 'Refunding'
         AND directed_review_refund_open(t.id);
-    -- Review M1 of PR #136: its evidence is the recorded refusal, the dry run's block on the
-    -- issuing network, not just any final point there.
+    -- Review M1 of PR #136: its evidence is the recorded refusal, the latest dry run's block on the
+    -- issuing network with the block time the endpoint recorded with it (review L-a, L-b), not just
+    -- any final point there, nor a time the resolution names.
     IF directed_refund
-       AND NOT directed_refusal_recorded(t.id, NEW.network, NEW.block_number, NEW.block_hash) THEN
-        RAISE EXCEPTION 'transfer %: Needs-Review -> Refunding of a directed deposit rests on the issuing network''s recorded refusal of its destination, the coordinate of attempt 1''s refused dry run (REQ-IN-9, REQ-RV-2, REQ-RF-1)',
+       AND NOT directed_refusal_recorded(t.id, NEW.network, NEW.block_number, NEW.block_hash,
+                                         NEW.block_time) THEN
+        RAISE EXCEPTION 'transfer %: Needs-Review -> Refunding of a directed deposit rests on the issuing network''s recorded refusal of its destination, the coordinate and block time of attempt 1''s latest dry run, refused for it (REQ-IN-9, REQ-RV-2, REQ-RF-1)',
             t.bridge_reference
             USING ERRCODE = 'BZ001';
     END IF;
@@ -1019,7 +1064,10 @@ $$;
 -- from transitions_deposit_window, as an array, so the primary key serves them), and only then
 -- applies the rule above. No row the rule counts is left out: a transfer holds CND-DepositWindow
 -- only by a transition that names it (0003, REQ-TR-2), so one that holds it or held it is among
--- the ids, and every other is counted by its `created_at`, which the range keeps.
+-- the ids, and every other is counted by its `created_at`, which the range keeps. Review L-c: each
+-- names the route's network by the index's own expression (`CASE kind WHEN 'deposit' THEN
+-- source_network ELSE destination_network END`), so that the planner can use it; for a deposit it
+-- is its source network, so nothing is counted differently.
 
 CREATE OR REPLACE FUNCTION route_usage_locked(
     p_asset TEXT, p_network TEXT, p_direction TEXT, p_window_seconds BIGINT,
@@ -1090,7 +1138,9 @@ BEGIN
     PERFORM route_usage_locked(t.asset, t.source_network, 'deposit', r.window_seconds);
     SELECT COALESCE(sum(d.amount), 0) INTO taken
     FROM transfers d
-    WHERE d.asset = t.asset AND d.kind = 'deposit' AND d.source_network = t.source_network
+    WHERE d.asset = t.asset AND d.kind = 'deposit'
+      AND (CASE d.kind WHEN 'deposit' THEN d.source_network ELSE d.destination_network END)
+          = t.source_network
       AND d.id <> t.id
       AND d.state NOT IN ('Refused', 'Expired', 'Withdrawn')
       AND d.condition IS DISTINCT FROM 'CND-DepositWindow'
@@ -1110,7 +1160,9 @@ BEGIN
       END;
     SELECT COALESCE(sum(d.amount), 0) INTO ahead
     FROM transfers d
-    WHERE d.asset = t.asset AND d.kind = 'deposit' AND d.source_network = t.source_network
+    WHERE d.asset = t.asset AND d.kind = 'deposit'
+      AND (CASE d.kind WHEN 'deposit' THEN d.source_network ELSE d.destination_network END)
+          = t.source_network
       AND d.id <> t.id
       AND d.condition = 'CND-DepositWindow'
       AND d.id = ANY (ARRAY(SELECT w.transfer_id FROM transitions w
@@ -1133,11 +1185,12 @@ COMMENT ON FUNCTION directed_window_fits(BIGINT) IS
 REVOKE EXECUTE ON FUNCTION
     directed_return_reference(TEXT, BIGINT, BYTEA, position_kind, BIGINT),
     directed_return(BIGINT),
-    directed_refusal_recorded(BIGINT, TEXT, BIGINT, BYTEA),
+    directed_destination_refusals(),
+    directed_refusal_recorded(BIGINT, TEXT, BIGINT, BYTEA, TIMESTAMPTZ),
     directed_review_refund_open(BIGINT),
     directed_window_fits(BIGINT)
 FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION directed_review_refund_open(BIGINT), directed_window_fits(BIGINT),
-    directed_refusal_recorded(BIGINT, TEXT, BIGINT, BYTEA)
+    directed_refusal_recorded(BIGINT, TEXT, BIGINT, BYTEA, TIMESTAMPTZ)
     TO bezent_core;

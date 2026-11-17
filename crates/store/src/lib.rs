@@ -105,6 +105,18 @@ pub const INGRESS_ROLE: &str = "bezent_ingress";
 /// cursor, and writes deliveries. A member of no other role.
 pub const WEBHOOKS_ROLE: &str = "bezent_webhooks";
 
+/// The dry-run reasons that are the issuing network's refusal of a mint's destination, and no
+/// others (`REQ-IN-8`, `REQ-IN-9`; review M1 of PR #136): what the Kreivo endpoint records for the
+/// contract's `Error::Kreivo(KreivoApiError::Assets(AssetsApiError::CannotMint))`, the assets API
+/// refusing to mint to the account. The core holds `CND-DestinationRefused` on exactly these
+/// (`services/core/src/engine.rs`, `dry_run_condition()`), and the store's
+/// `directed_destination_refusals()` (migration 0145) returns the same list, which
+/// `directed_refusal_recorded()` reads; a test holds the two equal. Every other `Kreivo(…)` reason
+/// (`UnknownError`, `ExtQueryError`, `NotAuthorised`, `NotALocalAsset`, `NotAGroupContract`, the
+/// deposit, transfer and burn refusals) and a bare `Kreivo` are a fault of the contract's standing
+/// with the network or an unknown, never the destination's: guardrail 4, no refund on unknown.
+pub const DESTINATION_REFUSALS: &[&str] = &["Kreivo(Assets(CannotMint))"];
+
 /// bezent's migrations, embedded at build time. Up migrations only: production never reverts a
 /// migration, so the down migrations are not in this crate's `migrations/` and no service binary
 /// carries them. They live with the tests, under `tests/migrations/`.

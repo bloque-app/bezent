@@ -151,7 +151,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             // deposit's destination is recorded (the evidence of its review exit), whether the
             // deposit may leave its review into Refunding, and whether it fits in what its route's
             // window has left.
-            "directed_refusal_recorded(bigint,text,bigint,bytea)",
+            "directed_refusal_recorded(bigint,text,bigint,bytea,timestamp with time zone)",
             "directed_review_refund_open(bigint)",
             "directed_window_fits(bigint)",
             "funding_arrival(text,text,text,bigint)",

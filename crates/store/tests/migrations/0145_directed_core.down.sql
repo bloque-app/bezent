@@ -744,7 +744,9 @@ END
 $$;
 
 DROP FUNCTION directed_review_refund_open(BIGINT);
-DROP FUNCTION directed_refusal_recorded(BIGINT, TEXT, BIGINT, BYTEA);
+DROP FUNCTION directed_refusal_recorded(BIGINT, TEXT, BIGINT, BYTEA, TIMESTAMPTZ);
+DROP FUNCTION directed_destination_refusals();
+ALTER TABLE prepared_transactions DROP COLUMN dry_run_block_time;
 DROP FUNCTION directed_return(BIGINT);
 DROP FUNCTION directed_return_reference(TEXT, BIGINT, BYTEA, position_kind, BIGINT);
 
