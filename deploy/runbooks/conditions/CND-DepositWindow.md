@@ -8,7 +8,7 @@ kind: condition
 covers: [REQ-IN-11, REQ-LM-1, REQ-LM-3]
 pages: [deposit-window-alert]
 observables: [nonfinal_transfers, oldest_nonfinal_transfer_age_seconds]
-tests: [services/core/tests/directed.rs::ac_a6_3_cnd_deposit_window_waits_first_come_first_served_and_resumes_as_it_rolls_over, services/core/tests/directed.rs::cnd_deposit_window_a_window_that_can_never_fit_pages, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline]
+tests: [services/core/tests/directed.rs::ac_a6_3_cnd_deposit_window_waits_first_come_first_served_and_resumes_as_it_rolls_over, services/core/tests/directed.rs::cnd_deposit_window_a_window_that_can_never_fit_pages, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_signed_mint_after_the_window_gets_its_whole_delivering_deadline]
 exercised: no
 ---
 # CND-DepositWindow
@@ -19,7 +19,8 @@ A directed deposit (amendment 0029) over what its route's window has left. There
 value has already moved, so the deposit waits at `Source-Final`, mints nothing, and resumes by itself as the window rolls
 over, in the order of arrival (SPEC §10, `REQ-IN-11`). It is never returned for this reason (amendment 0029, Open 1,
 ruled: wait). Directed deposits and requesters' deposits share the one window. A deposit that waited gets the whole of
-the route's deadline for a later `CND-DestinationRefused`, counted from when it left the condition.
+the route's deadline for a later `CND-DestinationRefused`, counted from when it left the condition, and so does its
+signed mint in `Delivering` (unknown past its deadline; PR #136, review M-a).
 
 ## Pages
 

@@ -242,14 +242,22 @@ pub async fn final_point(
 /// A hold still open counts nothing here. A deadline leaves the time held out and starts when the
 /// first hold was taken (review M-1: the clock restarts when the hold is left); summing keeps a
 /// provider that flaps in and out of the hold from restarting it each time (issue #35).
+///
+/// `since`, a final head of the destination (the holds' own clock), counts only what was held
+/// after it: a hold left at or before it counts nothing, one that straddles it counts from it. A
+/// clock that already starts at `since` (the first head after the attempt was ordered, review L-a
+/// of PR #136) leaves out no time it never counted.
 pub async fn held_under_window(
     conn: &mut PgConnection,
     transfer: i64,
     after: i32,
     start: Option<DateTime<Utc>>,
+    since: Option<DateTime<Utc>>,
 ) -> sqlx::Result<Option<(DateTime<Utc>, chrono::Duration)>> {
     let row: (Option<DateTime<Utc>>, Option<i64>) = sqlx::query_as(
-        "SELECT min(i.taken), sum(extract(epoch FROM i.released - i.taken))::bigint FROM ( \
+        "SELECT min(i.taken), \
+                sum(extract(epoch FROM i.released - greatest(i.taken, $4::timestamptz)))::bigint \
+         FROM ( \
              SELECT coalesce(x.block_time, $2) AS taken, \
                     (SELECT y.block_time FROM transitions y \
                       WHERE y.transfer_id = x.transfer_id AND y.id > x.id \
@@ -262,11 +270,13 @@ pub async fn held_under_window(
                AND x.before IS DISTINCT FROM 'CND-PayoutWindow' \
                AND x.id > coalesce((SELECT max(id) FROM transitions \
                                      WHERE transfer_id = $1 AND attempt <= $3), 0)) i \
-         WHERE i.taken IS NOT NULL AND i.released IS NOT NULL",
+         WHERE i.taken IS NOT NULL AND i.released IS NOT NULL \
+           AND ($4::timestamptz IS NULL OR i.released > $4::timestamptz)",
     )
     .bind(transfer)
     .bind(start)
     .bind(after)
+    .bind(since)
     .fetch_one(conn)
     .await?;
     Ok(match row {
@@ -284,11 +294,13 @@ pub async fn held_under_window(
 /// only the holds recorded after it count here, and no time is left out twice. Each is measured
 /// from the final head it was taken at to the one it was left at (the core records the
 /// destination's head on both, [`crate::engine`]'s `hold`); a hold still open, or one either end of
-/// which rests on no head, counts nothing, so the time counts, as before.
+/// which rests on no head, counts nothing, so the time counts, as before. `since` counts only what
+/// was held after it, as for [`held_under_window`].
 pub async fn held_under_pause_or_cutoff(
     conn: &mut PgConnection,
     transfer: i64,
     after: i32,
+    since: Option<DateTime<Utc>>,
 ) -> sqlx::Result<chrono::Duration> {
     let secs: i64 = sqlx::query_scalar(
         "WITH x AS ( \
@@ -303,7 +315,8 @@ pub async fn held_under_pause_or_cutoff(
                AND x.before IS DISTINCT FROM 'CND-PayoutWindow' AND x.id > entry.id \
                AND EXISTS (SELECT 1 FROM transitions y WHERE y.transfer_id = $1 AND y.id > x.id \
                              AND y.condition IS DISTINCT FROM 'CND-PayoutWindow')) \
-         SELECT coalesce(sum(extract(epoch FROM r.released - x.block_time)), 0)::bigint \
+         SELECT coalesce(sum(extract(epoch FROM \
+                    r.released - greatest(x.block_time, $3::timestamptz))), 0)::bigint \
          FROM x CROSS JOIN entry CROSS JOIN window_first w \
          CROSS JOIN LATERAL ( \
              SELECT y.block_time AS released FROM transitions y \
@@ -314,10 +327,12 @@ pub async fn held_under_pause_or_cutoff(
            AND x.before IS DISTINCT FROM x.condition \
            AND x.id > greatest(entry.id, coalesce(w.id, 0)) \
            AND x.block_time IS NOT NULL AND r.released IS NOT NULL \
-           AND r.released > x.block_time",
+           AND r.released > x.block_time \
+           AND ($3::timestamptz IS NULL OR r.released > $3::timestamptz)",
     )
     .bind(transfer)
     .bind(after)
+    .bind(since)
     .fetch_one(conn)
     .await?;
     Ok(chrono::Duration::seconds(secs))

@@ -752,23 +752,29 @@ impl Core {
     /// the payout clock, so a mint (a deposit's or a refund mint) keeps the clock it had, and time
     /// under a pause counts toward its deadline (amendment 0019, open question). Time under any
     /// other condition counts.
+    ///
+    /// `since` is the first final head seen after the attempt was ordered, when the clock starts
+    /// no earlier than it ([`Core::unprepared_deadline`]): a hold, or the part of one, from before it
+    /// was never on the clock, so it is not left out again (review L-a of PR #136).
     async fn deadline_held(
         &self,
         conn: &mut PgConnection,
         t: &Transfer,
         attempt: i32,
         start: DateTime<Utc>,
+        since: Option<DateTime<Utc>>,
     ) -> sqlx::Result<DateTime<Utc>> {
         // Payouts only (`d-payout-late-signing`): a mint's clock is what it was before A1d.
         let gated = if purpose(t).0 == "payout" {
-            store::held_under_pause_or_cutoff(conn, t.id, attempt - 1).await?
+            store::held_under_pause_or_cutoff(conn, t.id, attempt - 1, since).await?
         } else {
             chrono::Duration::zero()
         };
-        let deadline = match store::held_under_window(conn, t.id, attempt - 1, Some(start)).await? {
-            Some((first, held)) => self.deadline(conn, t, first.max(start)).await? + held,
-            None => self.deadline(conn, t, start).await?,
-        };
+        let deadline =
+            match store::held_under_window(conn, t.id, attempt - 1, Some(start), since).await? {
+                Some((first, held)) => self.deadline(conn, t, first.max(start)).await? + held,
+                None => self.deadline(conn, t, start).await?,
+            };
         Ok(deadline + gated)
     }
 
@@ -1002,7 +1008,7 @@ impl Core {
         // The holds of this attempt already left count too: a provider that flaps in and out of
         // the hold does not start the page over (issue #35).
         let after = store::current_attempt(conn, t.id).await?;
-        let before = store::held_under_window(conn, t.id, after, None)
+        let before = store::held_under_window(conn, t.id, after, None, None)
             .await?
             .map_or(Duration::zero(), |(_, held)| held);
         if head.block_time <= since + bound - before.min(bound) {
@@ -1912,7 +1918,7 @@ impl Core {
             // Ordered, and the endpoint has prepared nothing (it is down): the same deadline as a
             // refused preparation (issue #48). Only this endpoint path reads it.
             return self
-                .unprepared_deadline(conn, t, None, from, attempt, Some(order_id))
+                .unprepared_deadline(conn, t, None, from, attempt, Some(order_id), manual)
                 .await;
         };
         if prepared_network != order_network || order_network != t.destination_network {
@@ -1923,7 +1929,7 @@ impl Core {
         if passed && prepared_order != order_id {
             // A passing row of an earlier order (it arrived late) is never signed over.
             return self
-                .unprepared_deadline(conn, t, None, from, attempt, Some(order_id))
+                .unprepared_deadline(conn, t, None, from, attempt, Some(order_id), manual)
                 .await;
         }
         if !passed {
@@ -1934,11 +1940,14 @@ impl Core {
             let kept = t
                 .condition()
                 .filter(|c| !matches!(c, Condition::PayoutWindow | Condition::DestinationRefused));
-            // A mint's first attempt decides on the dry run the store reads for the directed
-            // review exit (`directed_refusal_recorded()`, 0145): the newest refusal across the
-            // attempt's orders by block, then row, so a late row of a superseded order cannot hold
-            // the destination's condition the store will not accept, or drop one it would (review
-            // L1 of PR #136). A resolution's delivery reads no row from before it (INV-9).
+            // Every deposit's first mint attempt, a requester's as well as a directed one, decides
+            // its hold on the dry run the store reads for the directed review exit
+            // (`directed_refusal_recorded()`, 0145, which asks nothing of how the deposit was made):
+            // the newest refusal across the attempt's orders by block, then row, so a late row of a
+            // superseded order cannot hold the destination's condition the store will not accept,
+            // or drop one it would (review L1 of PR #136). A refund mint (`refund-mint`) and later
+            // attempts keep the current order's own row. A resolution's delivery reads no row from
+            // before it (INV-9).
             let first_mint = attempt == 1 && purpose == "mint" && manual.is_none();
             let dry_run = if first_mint {
                 self.newest_first_mint_refusal(conn, t)
@@ -1958,7 +1967,7 @@ impl Core {
                 // A new order waits for its preparation; a refusal that keeps coming back still
                 // has its deadline (issue #25).
                 return self
-                    .unprepared_deadline(conn, t, held, from, attempt, None)
+                    .unprepared_deadline(conn, t, held, from, attempt, None, manual)
                     .await;
             }
             if from != State::NeedsReview {
@@ -1983,7 +1992,7 @@ impl Core {
             }
             if !did.moved {
                 let due = self
-                    .unprepared_deadline(conn, t, held, from, attempt, None)
+                    .unprepared_deadline(conn, t, held, from, attempt, None, manual)
                     .await?;
                 did.moved |= due.moved;
             }
@@ -2281,8 +2290,10 @@ impl Core {
 
     /// `Delivering`, unknown: review past its deadline, never a refund or a retry (`REQ-RV-1`,
     /// `AC-B1.4`). The attempt's clock is the chain's: it starts at the final point it rests on
-    /// (the previous attempt's proof), or at the source leg's finality for the first; and it
-    /// restarts at the final head where the transfer last left `CND-PayoutWindow`, so a payout
+    /// (the previous attempt's proof), or for the first at the source leg's finality, or when a
+    /// directed deposit left `CND-DepositWindow` if it waited there ([`Core::mint_clock_start`];
+    /// review M-a of PR #136); and it restarts at the final head where the transfer last left
+    /// `CND-PayoutWindow`, so a payout
     /// released after its original deadline is neither reviewed nor cancelled for the time it
     /// waited (amendment 0012; review M-1); the time it waited under a pause or a cut-off is left
     /// out the same way (amendment 0019, A1d; [`Core::deadline_held`]). On a network
@@ -2305,8 +2316,17 @@ impl Core {
         .bind(attempt)
         .fetch_one(&mut *conn)
         .await?;
-        let started = started.or(t.source_final_block_time).unwrap_or(now);
-        let deadline = self.deadline_held(conn, t, attempt, started).await?;
+        let started = match started {
+            Some(at) => at,
+            // The first attempt out of `Source-Final` records no point of its own: its clock is the
+            // mint's, the source leg's finality, or, for a directed deposit that waited in
+            // `CND-DepositWindow`, when it left the window, so the wait takes nothing from the
+            // signed mint's deadline either (review M-a of PR #136; `REQ-IN-9`). A transfer that
+            // never waited (a withdrawal, a requester's deposit) starts at its finality, as before.
+            None if attempt == 1 => self.mint_clock_start(conn, t, now).await?,
+            None => t.source_final_block_time.unwrap_or(now),
+        };
+        let deadline = self.deadline_held(conn, t, attempt, started, None).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
         };
@@ -2385,15 +2405,19 @@ impl Core {
     /// resume by themselves (§10), and `CND-DestinationRefused` has its own deadline.
     ///
     /// A preparation that never happens (the endpoint is down, so no row exists) has the same
-    /// deadline (issue #48), counted from the later of the attempt's clock and the first final head
-    /// the core saw at or after the order (`ordered`). The budget is the route's time on the
+    /// deadline (issue #48). Both are counted from the later of the attempt's clock and the first
+    /// final head the core saw at or after the attempt's first order (after the resolution's action
+    /// `manual`, for a delivery a resolution runs), as §5.4 words it for both (review L-a of PR #136):
+    /// a retry's new order does not restart it. The budget is the route's time on the
     /// destination's clock from that head; it is not promised to be the whole of it in wall time: a
     /// head older than the order (an observer that lags) or a stall after that head both count.
-    /// Only the endpoint path in [`Core::deliver`] asks.
+    /// `ordered` is the order with no preparation, which only the endpoint path in [`Core::deliver`]
+    /// names.
     ///
     /// A delivery a review resolution runs is not moved to review again: the transfer is in review
     /// already. Where such an order has no preparation after the same time it pages, once per order
     /// ([`Core::resolution_unprepared_page`]).
+    #[allow(clippy::too_many_arguments)]
     async fn unprepared_deadline(
         &self,
         conn: &mut PgConnection,
@@ -2402,6 +2426,7 @@ impl Core {
         from: State,
         attempt: i32,
         ordered: Option<i64>,
+        manual: Option<i64>,
     ) -> sqlx::Result<Did> {
         if held.is_some() || t.condition().is_some() {
             return Ok(Did::default());
@@ -2429,28 +2454,41 @@ impl Core {
         let Some(start) = start else {
             return Ok(Did::default());
         };
-        let mut start = start;
-        if let Some(order) = ordered {
-            // The endpoint is given the route's time from the first final head the core sees at or
-            // after the order, on the destination's clock. A head read before the order would count
-            // the time the head feed stood still against an endpoint that was never asked: after a
-            // stall of the route's length the first head would send a healthy order to review. No
-            // such head yet: the order has not started to age.
-            let at: Option<DateTime<Utc>> = sqlx::query_scalar(
-                "SELECT h.block_time FROM final_heads h JOIN intents o ON o.id = $1 \
-                 WHERE h.network = $2 AND h.seen_at >= o.recorded_at \
-                 ORDER BY h.seen_at, h.block_number LIMIT 1",
-            )
-            .bind(order)
-            .bind(&t.destination_network)
-            .fetch_optional(&mut *conn)
+        // §5.4 (amendment 0020), for a preparation refused without a named condition and for one that
+        // never happened alike: the route's time counts from the later of the attempt's clock and the
+        // first final head the core sees at or after the attempt was ordered, on the destination's
+        // clock. A head read before the order would count the time the head feed stood still against
+        // an endpoint that was never asked: after a stall of the route's length the first head would
+        // send a healthy order to review. The attempt's FIRST order sets it, so the new order each
+        // refusal makes after its retry interval does not restart the clock; for a resolution's
+        // delivery, its first order after the action (INV-9: nothing from before it is read). No
+        // such head yet: the attempt has not started to age (review L-a of PR #136).
+        let (purpose, _) = purpose(t);
+        let at: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT h.block_time FROM final_heads h, \
+                 (SELECT o.recorded_at FROM intents o \
+                  WHERE o.transfer_id = $1 AND o.attempt = $2 AND o.purpose = $3 \
+                    AND o.payload ? 'order' \
+                    AND ($5::bigint IS NULL OR o.recorded_at >= \
+                         (SELECT recorded_at FROM manual_actions WHERE id = $5)) \
+                  ORDER BY o.id LIMIT 1) first \
+             WHERE h.network = $4 AND h.seen_at >= first.recorded_at \
+             ORDER BY h.seen_at, h.block_number LIMIT 1",
+        )
+        .bind(t.id)
+        .bind(attempt)
+        .bind(purpose)
+        .bind(&t.destination_network)
+        .bind(manual)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(at) = at else {
+            return Ok(Did::default());
+        };
+        let start = at.max(start);
+        let deadline = self
+            .deadline_held(conn, t, attempt, start, Some(at))
             .await?;
-            let Some(at) = at else {
-                return Ok(Did::default());
-            };
-            start = at.max(start);
-        }
-        let deadline = self.deadline_held(conn, t, attempt, start).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
         };

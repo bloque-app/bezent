@@ -988,6 +988,8 @@ async fn an_unknown_refusal_with_asset_never_opens_the_exit(
     w.cycle(t0()).await;
     let (id, _) = bound(w, 10, 0).await.expect("the deposit");
     let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    // The first final head after the attempt was ordered: the order starts to age (§5.4).
+    head(&w.admin, ISSUING, 13).await;
     match status {
         Some(status) => {
             prepare_refused_with_asset(&w.admin, o, reason, status).await;
@@ -1004,7 +1006,7 @@ async fn an_unknown_refusal_with_asset_never_opens_the_exit(
         Some("CND-DestinationRefused"),
         "{reason}: no refusal of the destination"
     );
-    let past = 12 + BUDGET + 1;
+    let past = 13 + BUDGET + 1;
     head(&w.admin, ISSUING, past).await;
     w.cycle(t0()).await;
     let (state, condition) = w.state(id).await;
@@ -1098,6 +1100,8 @@ async fn req_rf_1_a_refusal_then_a_frozen_asset_drops_the_destination_hold(
     w.cycle(t0()).await;
     let (id, _) = bound(&w, 10, 0).await.expect("the deposit");
     let (first, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    // The first final head after the attempt was ordered: the order starts to age (§5.4).
+    head(&w.admin, ISSUING, 13).await;
     prepare(&w.admin, first, Some("Kreivo(Assets(CannotMint))")).await;
     w.cycle(t0()).await;
     assert_eq!(
@@ -1117,7 +1121,7 @@ async fn req_rf_1_a_refusal_then_a_frozen_asset_drops_the_destination_hold(
     let (state, condition) = w.state(id).await;
     assert_eq!(state, "Source-Final");
     assert_ne!(condition.as_deref(), Some("CND-DestinationRefused"));
-    let past = 12 + BUDGET + 1;
+    let past = 13 + BUDGET + 1;
     head(&w.admin, ISSUING, past).await;
     w.cycle(t0()).await;
     let (state, condition) = w.state(id).await;
@@ -1395,8 +1399,9 @@ async fn req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_de
 }
 
 /// A second directed deposit that waited in `CND-DepositWindow` past its arrival's deadline, then
-/// left it on the issuing network's head `left`, its first mint ordered: returns it, `left` and
-/// the order (as `req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline`).
+/// left it on the issuing network's head `left`, its first mint ordered, and the issuing network's
+/// next head, `left + 1`, seen after the order: returns it, `left` and the order (as
+/// `req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline`).
 async fn waited_for_the_window(w: &World) -> (i64, i64, i64) {
     exec(
         &w.admin,
@@ -1430,12 +1435,13 @@ async fn waited_for_the_window(w: &World) -> (i64, i64, i64) {
     assert_eq!(w.state(b).await, ("Source-Final".into(), None));
     w.cycle(t0()).await;
     let (o, _) = order(&w.admin, b, 1).await.expect("the mint order");
+    head(&w.admin, ISSUING, left + 1).await;
     (b, left, o)
 }
 
-/// Takes `b`, refused for nothing it names after it left the window on head `left`, to its
-/// deadline: still `Source-Final` with no condition just before `left` plus the route's time, in
-/// review without `CND-DestinationRefused` just after.
+/// Takes `b`, refused for nothing it names after it left the window on head `left` (and was
+/// ordered before head `left + 1`), to its deadline: still `Source-Final` with no condition just
+/// before `left + 1` plus the route's time, in review without `CND-DestinationRefused` just after.
 async fn the_refusal_that_names_nothing_waits_from_the_window(w: &World, b: i64, left: i64) {
     let (state, condition) = w.state(b).await;
     assert_eq!(
@@ -1443,10 +1449,11 @@ async fn the_refusal_that_names_nothing_waits_from_the_window(w: &World, b: i64,
         "not sent to review at once: the first attempt's clock started when it left the window"
     );
     assert_eq!(condition, None);
-    head(&w.admin, ISSUING, left + BUDGET - 1).await;
+    let aged = left + 1;
+    head(&w.admin, ISSUING, aged + BUDGET - 1).await;
     w.cycle(t0()).await;
     assert_eq!(w.state(b).await, ("Source-Final".into(), None));
-    head(&w.admin, ISSUING, left + BUDGET + 1).await;
+    head(&w.admin, ISSUING, aged + BUDGET + 1).await;
     w.cycle(t0()).await;
     let (state, condition) = w.state(b).await;
     assert_eq!(
@@ -1606,5 +1613,145 @@ async fn cnd_deposit_window_a_window_that_can_never_fit_pages(
         ("Source-Final".into(), Some("CND-DepositWindow".into()))
     );
     assert!(order(&w.admin, b, 1).await.is_none());
+    assert_eq!(returns(&w).await, 0);
+}
+
+/// `REQ-IN-9`, `REQ-RV-1`, `CND-DepositWindow` (review M-a of PR #136): a directed deposit that
+/// waited for the route's window, whose mint then passed its dry run and was signed, is not sent to
+/// review on the next head for the time it waited: the signed attempt's deadline in `Delivering`
+/// counts from when it left the window, as the unsigned one's does, and is reviewed only past it.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_9_a_signed_mint_after_the_window_gets_its_whole_delivering_deadline(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (b, left, o) = waited_for_the_window(&w).await;
+    prepare(&w.admin, o, None).await;
+    w.cycle(t0()).await;
+    let (s, _) = signing_intent(&w.admin, b, 1)
+        .await
+        .expect("signing intent");
+    sign(&w, s).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(b).await, ("Delivering".into(), None));
+    // The next head, before the inclusion is seen: still delivering.
+    head(&w.admin, ISSUING, left + 2).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(b).await,
+        ("Delivering".into(), None),
+        "not sent to review at once: the mint's clock started when it left the window"
+    );
+    head(&w.admin, ISSUING, left + BUDGET - 1).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(b).await, ("Delivering".into(), None));
+    head(&w.admin, ISSUING, left + BUDGET + 1).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(b).await.0,
+        "Needs-Review",
+        "unknown past its deadline (REQ-RV-1)"
+    );
+    assert_eq!(returns(&w).await, 0, "REQ-RF-1: no refund on unknown");
+}
+
+/// `REQ-EO-3`, `REQ-RV-1`, `REQ-IN-11`, SPEC §5.4's `Source-Final` → `Needs-Review` row (review L-a
+/// of PR #136): a directed deposit held in `CND-Paused` past the route's budget, whose first order,
+/// made when the pause lifts, is refused for nothing it names, is not reviewed on the next head: the
+/// route's deadline counts from the later of the source leg's finality and the first final head
+/// seen after the attempt was ordered, for a refused preparation as for one that never happened.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_eo_3_a_refusal_after_a_long_pause_counts_from_the_first_head_after_the_order(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    exec(
+        &w.admin,
+        &format!("INSERT INTO pauses (asset) VALUES ('{ASSET}')"),
+    )
+    .await;
+    final_directed(&w.admin, 10, 0, 5_000_000).await;
+    w.settle(t0()).await;
+    let (id, _) = bound(&w, 10, 0).await.expect("the deposit");
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    // Held past the route's budget, counted from the arrival's finality (block 12).
+    let lifted = 12 + BUDGET + 100;
+    head(&w.admin, ISSUING, lifted).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    exec(&w.admin, "DELETE FROM pauses").await;
+    w.settle(t0()).await;
+    let (o, _) = order(&w.admin, id, 1).await.expect("the first order");
+    // The first final head after the order, then the refusal that names nothing.
+    let aged = lifted + 1;
+    head(&w.admin, ISSUING, aged).await;
+    prepare(&w.admin, o, Some("Kreivo(UnknownError)")).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), None),
+        "not sent to review on the next head: the order has only started to age"
+    );
+    head(&w.admin, ISSUING, aged + BUDGET - 1).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    head(&w.admin, ISSUING, aged + BUDGET + 1).await;
+    w.cycle(t0()).await;
+    let (state, condition) = w.state(id).await;
+    assert_eq!(
+        state, "Needs-Review",
+        "the refusal that names nothing, at its deadline"
+    );
+    assert_ne!(condition.as_deref(), Some("CND-DestinationRefused"));
+    assert_eq!(returns(&w).await, 0);
+}
+
+/// `REQ-EO-3`, `REQ-RV-1` (review L-a of PR #136): the first final head after the attempt's FIRST
+/// order sets the clock of a refusal that names nothing; the new order each refusal makes after
+/// its retry interval does not restart it, however late that order's own first head comes.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_eo_3_a_retry_does_not_restart_the_refused_attempts_clock(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    final_directed(&w.admin, 10, 0, 5_000_000).await;
+    w.cycle(t0()).await;
+    let (id, _) = bound(&w, 10, 0).await.expect("the deposit");
+    let (first, _) = order(&w.admin, id, 1).await.expect("the first order");
+    // The first final head after the first order: later than the arrival's finality (block 12).
+    let aged = 20;
+    head(&w.admin, ISSUING, aged).await;
+    prepare(&w.admin, first, Some("Kreivo(UnknownError)")).await;
+    w.cycle(t0()).await;
+    let (second, _) = order(&w.admin, id, 1).await.expect("a retry");
+    assert_ne!(first, second);
+    // The retry's own first head comes much later.
+    head(&w.admin, ISSUING, aged + 1_000).await;
+    prepare(&w.admin, second, Some("Kreivo(UnknownError)")).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    head(&w.admin, ISSUING, aged + BUDGET - 1).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), None),
+        "counted from the first head after the first order, not the arrival's finality"
+    );
+    head(&w.admin, ISSUING, aged + BUDGET + 1).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(id).await.0,
+        "Needs-Review",
+        "the retry did not restart the clock"
+    );
     assert_eq!(returns(&w).await, 0);
 }

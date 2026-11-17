@@ -8,7 +8,7 @@ kind: condition
 covers: [REQ-IN-8, REQ-IN-9, REQ-RV-1, REQ-RV-2, REQ-GV-5]
 pages: []
 observables: [reviews_open, reviews_oldest_age_seconds, nonfinal_transfers, oldest_nonfinal_transfer_age_seconds]
-tests: [services/core/tests/conditions.rs::cnd_destination_refused_mints_nothing_and_resumes_when_the_mint_applies, services/core/tests/directed.rs::req_rf_1_a_refusal_to_mint_a_frozen_asset_never_opens_the_exit, services/kreivo-endpoint/tests/submit.rs::req_in_9_a_refusal_to_mint_is_recorded_with_the_assets_status, services/core/tests/conditions.rs::cnd_destination_refused_past_its_deadline_goes_to_review, services/core/src/engine.rs::req_in_9_a_mint_the_issuing_network_refuses_holds_cnd_destination_refused, services/core/tests/review.rs::req_rv_2_a_review_ends_by_evidence_bezent_verifies_then_the_ordinary_step_runs, services/core/tests/review.rs::req_gv_5_a_resolution_that_moves_value_waits_for_its_second_approver, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_unnamed_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_dropped_destination_hold_after_the_window_gets_its_whole_deadline, services/core/tests/directed.rs::req_rf_1_a_late_row_of_a_superseded_order_decides_the_destination_hold, services/kreivo-endpoint/tests/submit.rs::req_rf_1_an_asset_that_cannot_be_read_is_never_the_destinations_refusal]
+tests: [services/core/tests/conditions.rs::cnd_destination_refused_mints_nothing_and_resumes_when_the_mint_applies, services/core/tests/directed.rs::req_rf_1_a_refusal_to_mint_a_frozen_asset_never_opens_the_exit, services/kreivo-endpoint/tests/submit.rs::req_in_9_a_refusal_to_mint_is_recorded_with_the_assets_status, services/core/tests/conditions.rs::cnd_destination_refused_past_its_deadline_goes_to_review, services/core/src/engine.rs::req_in_9_a_mint_the_issuing_network_refuses_holds_cnd_destination_refused, services/core/tests/review.rs::req_rv_2_a_review_ends_by_evidence_bezent_verifies_then_the_ordinary_step_runs, services/core/tests/review.rs::req_gv_5_a_resolution_that_moves_value_waits_for_its_second_approver, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_unnamed_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_dropped_destination_hold_after_the_window_gets_its_whole_deadline, services/core/tests/directed.rs::req_rf_1_a_late_row_of_a_superseded_order_decides_the_destination_hold, services/kreivo-endpoint/tests/submit.rs::req_rf_1_an_asset_that_cannot_be_read_is_never_the_destinations_refusal, services/core/tests/directed.rs::req_eo_3_a_refusal_after_a_long_pause_counts_from_the_first_head_after_the_order, services/core/tests/directed.rs::req_eo_3_a_retry_does_not_restart_the_refused_attempts_clock]
 exercised: no
 ---
 # CND-DestinationRefused
@@ -32,7 +32,10 @@ completion budget, counted from the source leg's finality on the destination net
 that blocks delivery, and the transfer goes to `Needs-Review` with the condition kept (SPEC §5.4; `REQ-IN-9`). For a
 directed deposit that waited in `CND-DepositWindow`, both deadlines (this condition's and that of the refusal that names
 nothing) count from the head it left the window on instead, so the wait takes nothing from them (PR #136, reviews L5 and
-M1). On the first attempt the core decides the hold on the dry run the directed exit rests on (below): the newest of the
+M1). The refusal that names nothing counts, as SPEC §5.4 words it, from the later of that clock and the first final head
+the core saw after the attempt's **first** order: a deposit held under a pause past the route's time is not reviewed on
+the head after its first refused order, and the new order each refusal makes does not restart the clock (PR #136, review
+L-a). On the first attempt the core decides the hold on the dry run the directed exit rests on (below): the newest of the
 attempt's orders by block, then by row, so a late row of a superseded order decides it as it decides the exit (PR #136,
 review L1).
 
@@ -100,6 +103,13 @@ is the requester's to correct: the destination is theirs.
       `SELECT p.network, p.dry_run_block_number, p.dry_run_block_hash, p.dry_run_block_time, p.dry_run ->> 'reason' AS reason, p.dry_run -> 'asset' ->> 'status' AS asset_status FROM prepared_transactions p JOIN intents i ON i.id = p.order_intent_id WHERE i.transfer_id = <id> AND i.attempt = 1 AND i.purpose = 'mint' AND p.network = i.network ORDER BY p.dry_run_block_number DESC, p.id DESC LIMIT 1;`
    Name `dry_run_block_time` as the resolution's `block_time`, exactly: the core and the store refuse any other time,
    and a refusal recorded without one (by an endpoint older than PR #136) is no evidence.
+   **More than one resolution recorded.** The core takes the deposit's unconsumed review resolutions one at a time,
+   the lowest `id` first: a pending resolution into `Delivering` recorded before one into `Refunding` is evaluated
+   first, and while it waits (for its second approver, a gate, or its preparation) the later one is not looked at. It
+   is looked at only once the earlier one has run (a transition rests on it) or the core has refused its evidence
+   (`review-evidence-refused`). And the newest dry run, by block, is what both the hold and the exit read, whichever
+   order it belongs to: a late passing row of a superseded order drops the hold and closes the exit. That is the safer
+   outcome, since the newest evidence is that the destination can receive; resolve into `Delivering` then.
    `SELECT directed_review_refund_open(<id>)` says whether the exit is open. A review entered because the
    destination or the declared list could not be read, one whose dry run the network refused for another reason, and
    one with a delivery anomaly recorded for the deposit are unknowns, and are never refunded (`REQ-RF-1`).
