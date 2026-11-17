@@ -1394,6 +1394,159 @@ async fn req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_de
     );
 }
 
+/// A second directed deposit that waited in `CND-DepositWindow` past its arrival's deadline, then
+/// left it on the issuing network's head `left`, its first mint ordered: returns it, `left` and
+/// the order (as `req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline`).
+async fn waited_for_the_window(w: &World) -> (i64, i64, i64) {
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET maximum = 6000000, window_limit = 10000000, \
+                 window_seconds = 86400 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    final_directed(&w.admin, 10, 0, 6_000_000).await;
+    final_directed(&w.admin, 11, 0, 6_000_000).await;
+    w.cycle(t0()).await;
+    let (b, _) = bound(w, 11, 0).await.expect("deposit b");
+    assert_eq!(
+        w.state(b).await,
+        ("Source-Final".into(), Some("CND-DepositWindow".into()))
+    );
+    let left = 13 + BUDGET + 100;
+    head(&w.admin, ISSUING, left).await;
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET window_seconds = 1 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(b).await, ("Source-Final".into(), None));
+    w.cycle(t0()).await;
+    let (o, _) = order(&w.admin, b, 1).await.expect("the mint order");
+    (b, left, o)
+}
+
+/// Takes `b`, refused for nothing it names after it left the window on head `left`, to its
+/// deadline: still `Source-Final` with no condition just before `left` plus the route's time, in
+/// review without `CND-DestinationRefused` just after.
+async fn the_refusal_that_names_nothing_waits_from_the_window(w: &World, b: i64, left: i64) {
+    let (state, condition) = w.state(b).await;
+    assert_eq!(
+        state, "Source-Final",
+        "not sent to review at once: the first attempt's clock started when it left the window"
+    );
+    assert_eq!(condition, None);
+    head(&w.admin, ISSUING, left + BUDGET - 1).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(b).await, ("Source-Final".into(), None));
+    head(&w.admin, ISSUING, left + BUDGET + 1).await;
+    w.cycle(t0()).await;
+    let (state, condition) = w.state(b).await;
+    assert_eq!(
+        state, "Needs-Review",
+        "the refusal that names nothing, at its deadline"
+    );
+    assert_ne!(condition.as_deref(), Some("CND-DestinationRefused"));
+}
+
+/// `REQ-IN-9`, `REQ-RV-1`, `CND-DepositWindow` (review M1 of PR #136): a directed deposit that
+/// waited for the route's window, refused for nothing it names, gets the whole of the route's
+/// deadline counted from when it left the window, not from its arrival's finality, which the wait
+/// had already used up.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_unnamed_refusal_deadline(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (b, left, o) = waited_for_the_window(&w).await;
+    prepare(&w.admin, o, Some("Kreivo(UnknownError)")).await;
+    w.cycle(t0()).await;
+    w.cycle(t0()).await;
+    the_refusal_that_names_nothing_waits_from_the_window(&w, b, left).await;
+}
+
+/// `REQ-IN-9`, `REQ-RV-1`, `CND-DepositWindow` (review M1 of PR #136): a directed deposit that
+/// waited for the route's window, then held in `CND-DestinationRefused`, whose hold a refusal to
+/// mint a frozen asset drops: the refusal that names nothing has the whole of the route's deadline
+/// from when it left the window too.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_9_a_dropped_destination_hold_after_the_window_gets_its_whole_deadline(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (b, left, first) = waited_for_the_window(&w).await;
+    prepare(&w.admin, first, Some("Kreivo(Assets(CannotMint))")).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(b).await,
+        ("Source-Final".into(), Some("CND-DestinationRefused".into()))
+    );
+    let (second, _) = order(&w.admin, b, 1).await.expect("a new order");
+    assert_ne!(first, second);
+    prepare_refused_with_asset(
+        &w.admin,
+        second,
+        "Kreivo(Assets(CannotMint))",
+        json!("Frozen"),
+    )
+    .await;
+    w.cycle(t0()).await;
+    w.cycle(t0()).await;
+    the_refusal_that_names_nothing_waits_from_the_window(&w, b, left).await;
+}
+
+/// `REQ-IN-9`, `REQ-RF-1` (review L1 of PR #136): the core holds `CND-DestinationRefused` on the
+/// dry run the store reads for the directed exit, the newest of the first attempt's by block, then
+/// row. A late row of a superseded order, at a later block, refused for a frozen asset, drops the
+/// hold the current order's own row (the destination refused at an earlier block) would keep; so
+/// the deposit is never in review for the destination while the store would refuse its exit.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_a_late_row_of_a_superseded_order_decides_the_destination_hold(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    final_directed(&w.admin, 10, 0, 5_000_000).await;
+    w.cycle(t0()).await;
+    let (id, _) = bound(&w, 10, 0).await.expect("the deposit");
+    let (first, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, first, Some("Kreivo(Assets(CannotMint))")).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-DestinationRefused".into()))
+    );
+    let (second, _) = order(&w.admin, id, 1).await.expect("a new order");
+    assert_ne!(first, second);
+    prepare(&w.admin, second, Some("Kreivo(Assets(CannotMint))")).await;
+    // The superseded order's late row, at a later head.
+    let dry_run = json!({"outcome": "refused", "reason": "Kreivo(Assets(CannotMint))",
+                         "asset": {"id": "Here(1)", "status": "Frozen", "supply": "0"}});
+    prepare_dry_run_at(&w.admin, first, false, dry_run, 2).await;
+    let recorded: bool = scalar(
+        &w.admin,
+        &format!("SELECT directed_refusal_recorded({id}, NULL, NULL, NULL, NULL)"),
+    )
+    .await;
+    assert!(
+        !recorded,
+        "the store reads the newest row: the frozen asset's"
+    );
+    w.cycle(t0()).await;
+    let (state, condition) = w.state(id).await;
+    assert_eq!(state, "Source-Final");
+    assert_ne!(condition.as_deref(), Some("CND-DestinationRefused"));
+}
+
 /// `CND-DepositWindow`, `REQ-LM-1` (review L2 of PR #136): a directed deposit waiting for a window
 /// that, as its route is declared now, can never take it (the window's limit lowered below its
 /// amount, or the route removed) is not left to wait in silence: it pages (`deposit-window-alert`,

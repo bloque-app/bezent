@@ -8,7 +8,7 @@ kind: condition
 covers: [REQ-IN-8, REQ-IN-9, REQ-RV-1, REQ-RV-2, REQ-GV-5]
 pages: []
 observables: [reviews_open, reviews_oldest_age_seconds, nonfinal_transfers, oldest_nonfinal_transfer_age_seconds]
-tests: [services/core/tests/conditions.rs::cnd_destination_refused_mints_nothing_and_resumes_when_the_mint_applies, services/core/tests/directed.rs::req_rf_1_a_refusal_to_mint_a_frozen_asset_never_opens_the_exit, services/kreivo-endpoint/tests/submit.rs::req_in_9_a_refusal_to_mint_is_recorded_with_the_assets_status, services/core/tests/conditions.rs::cnd_destination_refused_past_its_deadline_goes_to_review, services/core/src/engine.rs::req_in_9_a_mint_the_issuing_network_refuses_holds_cnd_destination_refused, services/core/tests/review.rs::req_rv_2_a_review_ends_by_evidence_bezent_verifies_then_the_ordinary_step_runs, services/core/tests/review.rs::req_gv_5_a_resolution_that_moves_value_waits_for_its_second_approver]
+tests: [services/core/tests/conditions.rs::cnd_destination_refused_mints_nothing_and_resumes_when_the_mint_applies, services/core/tests/directed.rs::req_rf_1_a_refusal_to_mint_a_frozen_asset_never_opens_the_exit, services/kreivo-endpoint/tests/submit.rs::req_in_9_a_refusal_to_mint_is_recorded_with_the_assets_status, services/core/tests/conditions.rs::cnd_destination_refused_past_its_deadline_goes_to_review, services/core/src/engine.rs::req_in_9_a_mint_the_issuing_network_refuses_holds_cnd_destination_refused, services/core/tests/review.rs::req_rv_2_a_review_ends_by_evidence_bezent_verifies_then_the_ordinary_step_runs, services/core/tests/review.rs::req_gv_5_a_resolution_that_moves_value_waits_for_its_second_approver, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_unnamed_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_dropped_destination_hold_after_the_window_gets_its_whole_deadline, services/core/tests/directed.rs::req_rf_1_a_late_row_of_a_superseded_order_decides_the_destination_hold, services/kreivo-endpoint/tests/submit.rs::req_rf_1_an_asset_that_cannot_be_read_is_never_the_destinations_refusal]
 exercised: no
 ---
 # CND-DestinationRefused
@@ -29,7 +29,12 @@ and so on) or a bare `Kreivo` says nothing about the destination: it holds no co
 when it keeps coming back, and goes to review at its deadline with no condition (PR #136, review M1). It orders again after its retry
 interval, and clears the hold if a later dry run passes (the test: "resumes when the mint applies"). Past the route's
 completion budget, counted from the source leg's finality on the destination network's final head, it is a condition
-that blocks delivery, and the transfer goes to `Needs-Review` with the condition kept (SPEC §5.4; `REQ-IN-9`).
+that blocks delivery, and the transfer goes to `Needs-Review` with the condition kept (SPEC §5.4; `REQ-IN-9`). For a
+directed deposit that waited in `CND-DepositWindow`, both deadlines (this condition's and that of the refusal that names
+nothing) count from the head it left the window on instead, so the wait takes nothing from them (PR #136, reviews L5 and
+M1). On the first attempt the core decides the hold on the dry run the directed exit rests on (below): the newest of the
+attempt's orders by block, then by row, so a late row of a superseded order decides it as it decides the exit (PR #136,
+review L1).
 
 ## Pages
 
@@ -49,10 +54,15 @@ The core's log carries the refusal text. Confirm the asset was `Live` at the ref
 destination is at fault:
 
 ```sql
-SELECT p.dry_run ->> 'reason' AS reason, p.dry_run -> 'asset' ->> 'status' AS asset_status, p.dry_run_block_number
+SELECT p.dry_run_passed, p.dry_run ->> 'reason' AS reason, p.dry_run -> 'asset' ->> 'status' AS asset_status,
+       p.dry_run_block_number
 FROM prepared_transactions p JOIN intents i ON i.id = p.order_intent_id
-WHERE i.transfer_id = <id> AND NOT p.dry_run_passed ORDER BY p.dry_run_block_number DESC, p.id DESC LIMIT 1;
+WHERE i.transfer_id = <id> AND i.attempt = 1 AND i.purpose = 'mint' AND p.network = i.network
+ORDER BY p.dry_run_block_number DESC, p.id DESC LIMIT 1;
 ```
+
+It reads the same row as the evidence query in Do, step 3, and as the core: attempt 1's newest mint dry run on the
+issuing network. A row that passed means the mint applies now and the hold clears.
 
 A refusal with any other status is the asset's, not the destination's: the whole bridged asset is frozen or being
 destroyed on the issuing network, an incident for every deposit of it, not this one; escalate it and do not tell the
@@ -93,6 +103,15 @@ is the requester's to correct: the destination is theirs.
    `SELECT directed_review_refund_open(<id>)` says whether the exit is open. A review entered because the
    destination or the declared list could not be read, one whose dry run the network refused for another reason, and
    one with a delivery anomaly recorded for the deposit are unknowns, and are never refunded (`REQ-RF-1`).
+
+   A review entered **without** the condition cannot take the directed exit, whatever a later dry run says: the store
+   reads the condition the deposit held when it entered review. That covers the refusal that names nothing at its
+   deadline, and a destination hold dropped by a later refusal that is not the destination's (a frozen asset, say).
+   Resolve it into a new delivery attempt (`Delivering`, with a second approver) once the cause is understood. That
+   attempt runs from review: if its dry run passes, the mint goes through. If the network refuses it again, the deposit
+   stays in `Needs-Review`; it is not entered into review again, so a fresh refusal and its deadline do not open the
+   exit either. A directed deposit in that state whose destination cannot receive is an operator matter under the
+   governed process; do not try to reach `Refunding` by any other edge.
 
 ## Never
 

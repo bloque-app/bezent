@@ -596,6 +596,25 @@ pub async fn prepare_refused_with_asset(
 /// The endpoint prepares order `order` with the dry run `dry_run`, which passed or not, at block 1
 /// (hash `\x05`), whose block time it records with it, `t0()` + 1 s.
 pub async fn prepare_dry_run(pool: &PgPool, order: i64, passed: bool, dry_run: Value) -> i64 {
+    prepare_dry_run_at(pool, order, passed, dry_run, 1).await
+}
+
+/// As [`prepare_dry_run`], at block `block` of the order's network (hash `\x05` and the block's
+/// number, `\x05` alone at block 1), whose block time it records with it, `t0()` + `block` s.
+pub async fn prepare_dry_run_at(
+    pool: &PgPool,
+    order: i64,
+    passed: bool,
+    dry_run: Value,
+    block: i64,
+) -> i64 {
+    let block_hash: Vec<u8> = if block == 1 {
+        vec![0x05]
+    } else {
+        let mut h = vec![0x05];
+        h.extend_from_slice(&block.to_be_bytes());
+        h
+    };
     // The exact bytes the order's endpoint builds (the signer decodes them and compares them with
     // the order: audit must-fix 2): a payout through the vault's delivery role on the origin
     // network, a call of the on-chain component on the issuing network. An order the endpoint
@@ -607,7 +626,7 @@ pub async fn prepare_dry_run(pool: &PgPool, order: i64, passed: bool, dry_run: V
              dry_run_block_number, dry_run_block_hash, dry_run_passed, dry_run, dry_run_block_time) \
          SELECT $1, COALESCE((SELECT max(attempt) FROM prepared_transactions WHERE order_intent_id = $1), 0) + 1, \
              network, '\\x01', 'kreivo-mint', 0, 0, 0, '\\x02', '\\x03', $5, \
-             $4, 1, '\\x05', $2, $3, $6 \
+             $4, $7, $8, $2, $3, $6 \
          FROM intents WHERE id = $1 RETURNING id",
     )
     .bind(order)
@@ -615,7 +634,9 @@ pub async fn prepare_dry_run(pool: &PgPool, order: i64, passed: bool, dry_run: V
     .bind(dry_run)
     .bind(message)
     .bind(payload)
-    .bind(t0() + Duration::seconds(1))
+    .bind(t0() + Duration::seconds(block))
+    .bind(block)
+    .bind(block_hash)
     .fetch_one(pool)
     .await
     .unwrap()

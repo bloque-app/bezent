@@ -1099,11 +1099,49 @@ impl Core {
             .await
     }
 
+    /// The newest dry run of `t`'s first mint attempt, across its orders, as the store orders
+    /// them for the directed review exit (`directed_refusal_recorded()`, 0145: by block, then row),
+    /// if it is a refusal (review L1 of PR #136).
+    async fn newest_first_mint_refusal(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+    ) -> sqlx::Result<Option<Value>> {
+        let newest: Option<(Value, bool)> = sqlx::query_as(
+            "SELECT p.dry_run, p.dry_run_passed FROM prepared_transactions p \
+             JOIN intents i ON i.id = p.order_intent_id \
+             WHERE i.transfer_id = $1 AND i.attempt = 1 AND i.purpose = 'mint' \
+               AND i.network = $2 AND p.network = $2 \
+             ORDER BY p.dry_run_block_number DESC, p.id DESC LIMIT 1",
+        )
+        .bind(t.id)
+        .bind(&t.destination_network)
+        .fetch_optional(&mut *conn)
+        .await?;
+        Ok(newest.and_then(|(dry_run, passed)| (!passed).then_some(dry_run)))
+    }
+
+    /// The store's answer: whether that dry run recorded the issuing network's refusal of the
+    /// destination, the asset Live at its head (`directed_refusal_recorded()`, 0145). The core holds
+    /// `CND-DestinationRefused` on a first mint attempt only when it did (review L1 of PR #136).
+    async fn first_mint_refusal_recorded(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+    ) -> sqlx::Result<bool> {
+        sqlx::query_scalar("SELECT directed_refusal_recorded($1, NULL, NULL, NULL, NULL)")
+            .bind(t.id)
+            .fetch_one(&mut *conn)
+            .await
+    }
+
     /// When the clock of a deposit's blocking condition (`CND-DestinationRefused`,
-    /// `CND-AwaitingConversion`) starts: the source leg's finality, or, for a directed deposit that
-    /// waited in `CND-DepositWindow`, the later moment it left the condition, on the destination's
-    /// final head it rested on then (its wall time when no head was recorded), so that the wait for
-    /// the window takes nothing from the route's deadline (review L5 of PR #136; `REQ-IN-9`).
+    /// `CND-AwaitingConversion`), and of its first attempt's refusal that names nothing
+    /// ([`Core::unprepared_deadline`]), starts: the source leg's finality, or, for a directed
+    /// deposit that waited in `CND-DepositWindow`, the later moment it left the condition, on the
+    /// destination's final head it rested on then (its wall time when no head was recorded), so
+    /// that the wait for the window takes nothing from the route's deadline (reviews L5 and M1 of
+    /// PR #136; `REQ-IN-9`).
     async fn mint_clock_start(
         &self,
         conn: &mut PgConnection,
@@ -1893,9 +1931,29 @@ impl Core {
             // one that is not the destination's a destination hold: a refusal to mint while the
             // asset is not Live is no evidence against the destination (review of PR #136).
             let allowance = self.delivery_allowance(conn, t).await?;
-            let held = dry_run_condition(&dry_run, allowance.as_ref()).or(t
+            let kept = t
                 .condition()
-                .filter(|c| !matches!(c, Condition::PayoutWindow | Condition::DestinationRefused)));
+                .filter(|c| !matches!(c, Condition::PayoutWindow | Condition::DestinationRefused));
+            // A mint's first attempt decides on the dry run the store reads for the directed
+            // review exit (`directed_refusal_recorded()`, 0145): the newest refusal across the
+            // attempt's orders by block, then row, so a late row of a superseded order cannot hold
+            // the destination's condition the store will not accept, or drop one it would (review
+            // L1 of PR #136). A resolution's delivery reads no row from before it (INV-9).
+            let first_mint = attempt == 1 && purpose == "mint" && manual.is_none();
+            let dry_run = if first_mint {
+                self.newest_first_mint_refusal(conn, t)
+                    .await?
+                    .unwrap_or(dry_run)
+            } else {
+                dry_run
+            };
+            let mut held = dry_run_condition(&dry_run, allowance.as_ref()).or(kept);
+            if first_mint
+                && held == Some(Condition::DestinationRefused)
+                && !self.first_mint_refusal_recorded(conn, t).await?
+            {
+                held = kept;
+            }
             if prepared_order != order_id {
                 // A new order waits for its preparation; a refusal that keeps coming back still
                 // has its deadline (issue #25).
@@ -2318,10 +2376,11 @@ impl Core {
     /// withdrawal, the refund: the cancellation in [`Core::refund`]). It is never refunded or failed on its
     /// own (`REQ-RF-1`).
     ///
-    /// The clock is the attempt's: the source leg's finality for the first attempt, the previous
-    /// attempt's proof of non-execution for a later one, with the time held in `CND-PayoutWindow`
-    /// left out (amendment 0012), and the time held under a pause or a cut-off (amendment 0019,
-    /// A1d). Time under the other conditions counts, since only a
+    /// The clock is the attempt's: for the first attempt, the source leg's finality, or when a
+    /// directed deposit left `CND-DepositWindow` if it waited there ([`Core::mint_clock_start`];
+    /// review M1 of PR #136); the previous attempt's proof of non-execution for a later one; with
+    /// the time held in `CND-PayoutWindow` left out (amendment 0012), and the time held under a
+    /// pause or a cut-off (amendment 0019, A1d). Time under the other conditions counts, since only a
     /// refusal that names nothing is measured: `CND-FeeShort`, `CND-MintWindow` and the gates
     /// resume by themselves (§10), and `CND-DestinationRefused` has its own deadline.
     ///
@@ -2353,7 +2412,14 @@ impl Core {
             return Ok(Did::default());
         }
         let start = if attempt <= 1 {
-            t.source_final_block_time
+            // The first attempt's clock is the mint's (review M1 of PR #136, L5; §5.4): the source
+            // leg's finality, or, for a directed deposit that waited in `CND-DepositWindow`, when it
+            // left the window, so the wait takes nothing from the route's deadline here either. A
+            // deposit that never waited (a requester's, say) starts at its finality, as before.
+            match t.source_final_block_time {
+                Some(finality) => Some(self.mint_clock_start(conn, t, finality).await?),
+                None => None,
+            }
         } else {
             match store::proof_of(conn, t.id, attempt - 1).await? {
                 Some(ProofPoint::Final(p)) => Some(p.block_time),

@@ -106,6 +106,8 @@ struct State {
     metadata: Option<Vec<u8>>,
     /// What `runtime_metadata` fails with instead of answering, if anything (issue #104).
     metadata_error: Option<ChainError>,
+    /// What `asset_details` fails with instead of answering, if anything (review I1 of PR #136).
+    asset_error: Option<ChainError>,
     /// What the contract's `roles()` answers; none fails the getter (issue #104).
     roles: Option<kreivo::Roles>,
     /// Whether [`Chain::header_hint`] answers, and the blocks whose hint is a lie.
@@ -193,6 +195,7 @@ impl FakeChain {
                 balance_log: Vec::new(),
                 metadata: None,
                 metadata_error: None,
+                asset_error: None,
                 roles: None,
                 hints: false,
                 lying_hints: HashSet::new(),
@@ -385,6 +388,12 @@ impl FakeChain {
     /// count and `issuance` as its issuance (issue #42).
     pub fn set_supply(&self, asset: u32, contract: u128, issuance: u128) {
         self.lock().supply.insert(asset, (contract, issuance));
+    }
+
+    /// Makes `asset_details` fail with `error` (`None` answers again): `Unavailable` is a chain that
+    /// did not answer, `Invalid` one whose answer cannot be used (review I1 of PR #136).
+    pub fn set_asset_error(&self, error: Option<ChainError>) {
+        self.lock().asset_error = error;
     }
 
     /// From the next block on, local asset `Here(asset)` has status `status` (and exists, with
@@ -906,6 +915,9 @@ impl Chain for FakeChain {
 
     async fn asset_details(&self, at: &BlockRef, asset: u32) -> ChainResult<Option<AssetDetails>> {
         self.answer(|s| {
+            if let Some(e) = &s.asset_error {
+                return Err(e.clone());
+            }
             let block = Self::block_at(s, at)?;
             let supply = block.supply.get(&asset).map(|(_, issuance)| *issuance);
             let status = block.statuses.get(&asset).copied();
