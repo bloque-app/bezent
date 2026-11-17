@@ -35,9 +35,33 @@
 --     before the evaluation's time and commits after the read is waited for, not missed; a statement
 --     re-derived from the same evaluation lists what the first listed. Writes to `directing_code`
 --     are the migration owner's and rare; they wait for the read, which is short.
+--   * directed_return() (review M1 of PR #139, third round): false for a refund on whose transfer a
+--     `release-unassociated` manual action exists. The question was whether the arrival is declared
+--     now, so a declaration that landed after an operator's release made the operator's return the
+--     core's own, accepted and paid with no second approver. Now the return of a release always
+--     reaches its second approver through received(), whatever happens to the declaration.
 --
 -- Replaced, as their latest migration made them plus these lines: transfers_guard_writer() and
--- transfers_guard_directed() (0145), transfers_guard_directing_declared() (0148).
+-- transfers_guard_directed() (0145), transfers_guard_directing_declared() (0148), directed_return()
+-- (0148).
+
+-- 0148's, and no release recorded on the transfer (above).
+CREATE OR REPLACE FUNCTION directed_return(p_transfer BIGINT) RETURNS BOOLEAN
+    LANGUAGE sql STABLE
+    SET search_path = public, pg_temp
+    AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM transfers t
+        JOIN observations o
+          ON o.network = t.source_network AND o.block_number = t.source_block_number
+         AND o.block_hash = t.source_block_hash AND o.position_kind = t.source_position_kind
+         AND o.position_index = t.source_position_index
+        WHERE t.id = p_transfer AND t.kind = 'refund' AND t.refund_of IS NULL
+          AND o.kind = 'directed_arrival'
+          AND directing_declared(o.network, o.token, o.detail ->> 'directing', o.block_number)
+          AND NOT EXISTS (SELECT 1 FROM manual_actions a
+                          WHERE a.transfer_id = t.id AND a.kind = 'release-unassociated'))
+$$;
 
 CREATE FUNCTION operator_release_directed_arrival(
     p_network TEXT, p_block BIGINT, p_hash BYTEA, p_kind position_kind, p_index BIGINT,

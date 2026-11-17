@@ -1375,3 +1375,87 @@ async fn req_in_6_an_undeclared_directed_arrival_leaves_only_by_a_two_person_rel
         "0"
     );
 }
+
+/// `REQ-IN-6`, `REQ-GV-5`, `REQ-IN-11` (review M1 of PR #139, third round; migration 0149): the
+/// return an operator's release made is never the core's own return, whatever happens to the
+/// declaration afterwards. A declaration that lands after the release covers the arrival, and the
+/// core's acceptance with no approval is still refused; it takes the second login's approval.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_6_a_declaration_after_a_release_does_not_waive_its_second_approver(pool: PgPool) {
+    const LATE: &str = "0x00000000000000000000000000000000000000d7";
+    declarations(&pool).await;
+    let core = login(&pool, "dc_core_late_for_tests", bezent_store::CORE_ROLE).await;
+    let ops = [
+        login(&pool, "dc_ops_c_for_tests", bezent_store::OPERATOR_ROLE).await,
+        login(&pool, "dc_ops_d_for_tests", bezent_store::OPERATOR_ROLE).await,
+    ];
+    final_arrival_by(&pool, 9, "directed_arrival", LATE).await;
+    let action: i64 = sqlx::query_scalar(
+        "SELECT operator_release_directed_arrival('origin-a', 9, '\\xaa', 'log', 1, \
+             'undeclared at the time: never mintable')",
+    )
+    .fetch_one(&ops[0])
+    .await
+    .expect("the release");
+    let id: i64 = sqlx::query_scalar("SELECT transfer_id FROM manual_actions WHERE id = $1")
+        .bind(action)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // The declaration lands afterwards and covers the arrival.
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                 from_block, reference) VALUES \
+               ('asset-a', 'origin-a', '{LATE}', 'token-a', 1, 6000000, 0, \
+                'declared after the release')"
+        ),
+    )
+    .await;
+    assert_eq!(
+        text(&pool, &format!("SELECT directed_return({id})::text")).await,
+        "false",
+        "the release's return is no core return, declared or not"
+    );
+    let accept = |action: Option<i64>| {
+        let core = core.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO transitions (transfer_id, from_state, to_state, manual_action_id) \
+                 VALUES ($1, 'Received', 'Accepted', $2)",
+            )
+            .bind(id)
+            .bind(action)
+            .execute(&core)
+            .await
+        }
+    };
+    assert_refusal(
+        &accept(None).await.expect_err("with no approval"),
+        "REQ-IN-6",
+        "the core's acceptance of the release's return with no release, once declared",
+    );
+    assert_refusal(
+        &accept(Some(action)).await.expect_err("unapproved"),
+        "REQ-IN-6",
+        "the release not yet approved",
+    );
+    sqlx::query("INSERT INTO manual_approvals (action_id, justification) VALUES ($1, 'checked')")
+        .bind(action)
+        .execute(&ops[1])
+        .await
+        .expect("the second login's approval");
+    accept(Some(action))
+        .await
+        .expect("accepted under the approved release");
+    assert_eq!(
+        text(
+            &pool,
+            &format!("SELECT state::text FROM transfers WHERE id = {id}")
+        )
+        .await,
+        "Accepted"
+    );
+}

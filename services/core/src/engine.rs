@@ -1347,7 +1347,8 @@ impl Core {
     /// the refund of an unassociated arrival bound to one whose directing contract is declared
     /// (`REQ-IN-11`, `REQ-AS-11`; the store fixes its destination to the recorded refund address,
     /// 0144, and asks the same, 0148). The return of an undeclared one is an operator's release
-    /// (0149), accepted only under its approved release (`REQ-IN-6`, `REQ-GV-5`).
+    /// (0149), accepted only under its approved release (`REQ-IN-6`, `REQ-GV-5`), and a return with a
+    /// release recorded on it stays one, whatever is declared afterwards.
     async fn directed_return(&self, conn: &mut PgConnection, t: &Transfer) -> sqlx::Result<bool> {
         if t.kind != "refund" || t.refund_of.is_some() {
             return Ok(false);
@@ -1359,6 +1360,19 @@ impl Core {
             return Ok(false);
         };
         if o.kind != "directed_arrival" {
+            return Ok(false);
+        }
+        // Review M1 of PR #139, third round: not one an operator released. A declaration that lands
+        // after the release must not make its return the core's own and waive its approver; the
+        // store asks the same (`directed_return()`, 0149).
+        let released: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM manual_actions \
+               WHERE transfer_id = $1 AND kind = 'release-unassociated')",
+        )
+        .bind(t.id)
+        .fetch_one(&mut *conn)
+        .await?;
+        if released {
             return Ok(false);
         }
         sqlx::query_scalar("SELECT directing_declared($1, $2, $3, $4)")

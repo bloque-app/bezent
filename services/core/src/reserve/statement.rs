@@ -441,6 +441,10 @@ impl StatementStore for DirectoryStore {
     }
 }
 
+/// How long the publisher waits for the declarations' lock (`directing_code_hold()`, 0149) before it
+/// fails the attempt (review S1 of PR #139, third round).
+const DECLARATION_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Why a statement was not published.
 #[derive(Debug)]
 pub enum StatementError {
@@ -455,6 +459,9 @@ pub enum StatementError {
     /// The store holds the statement's name from an earlier attempt that did not finish, and it is
     /// not one bezent can adopt (review S7).
     Stuck(String),
+    /// The declarations stayed locked past [`DECLARATION_LOCK_TIMEOUT`]; nothing was written, and the
+    /// next cycle tries again.
+    Busy(String),
 }
 
 impl fmt::Display for StatementError {
@@ -465,6 +472,7 @@ impl fmt::Display for StatementError {
             Self::Store(e) => write!(f, "{e}"),
             Self::Db(e) => write!(f, "store: {e}"),
             Self::Stuck(why) => write!(f, "statement chain stuck: {why}"),
+            Self::Busy(why) => write!(f, "statement deferred: {why}"),
         }
     }
 }
@@ -756,9 +764,31 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
         // Review L4 of PR #139 (REQ-BK-5): the declarations held still while they are read, so a
         // declaration being written when the evaluation was made is waited for, not missed, and a
         // statement re-derived from the same evaluation lists the directing code this one does.
-        sqlx::query("SELECT directing_code_hold()")
+        // The wait is bounded (review S1 of PR #139, third round): a declaration's transaction that
+        // holds the table for long fails this attempt, which the next cycle retries, instead of
+        // holding the asset's publisher (and its advisory lock) behind it.
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(format!("{}ms", DECLARATION_LOCK_TIMEOUT.as_millis()))
             .execute(&mut *tx)
             .await?;
+        if let Err(e) = sqlx::query("SELECT directing_code_hold()")
+            .execute(&mut *tx)
+            .await
+        {
+            return Err(
+                if e.as_database_error()
+                    .and_then(|d| d.code())
+                    .is_some_and(|c| c == "55P03")
+                {
+                    StatementError::Busy(format!(
+                        "{asset}: the declarations were locked for over {:?}",
+                        DECLARATION_LOCK_TIMEOUT
+                    ))
+                } else {
+                    e.into()
+                },
+            );
+        }
         let Some(a) = Asset::load(&mut tx, asset).await? else {
             return Err(StatementError::NoEvaluation(asset.to_owned()));
         };

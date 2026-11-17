@@ -5,6 +5,21 @@
 DROP FUNCTION operator_release_directed_arrival(TEXT, BIGINT, BYTEA, position_kind, BIGINT, TEXT);
 DROP FUNCTION directing_code_hold();
 
+CREATE OR REPLACE FUNCTION directed_return(p_transfer BIGINT) RETURNS BOOLEAN
+    LANGUAGE sql STABLE
+    SET search_path = public, pg_temp
+    AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM transfers t
+        JOIN observations o
+          ON o.network = t.source_network AND o.block_number = t.source_block_number
+         AND o.block_hash = t.source_block_hash AND o.position_kind = t.source_position_kind
+         AND o.position_index = t.source_position_index
+        WHERE t.id = p_transfer AND t.kind = 'refund' AND t.refund_of IS NULL
+          AND o.kind = 'directed_arrival'
+          AND directing_declared(o.network, o.token, o.detail ->> 'directing', o.block_number))
+$$;
+
 CREATE OR REPLACE FUNCTION transfers_guard_directing_declared() RETURNS trigger
     LANGUAGE plpgsql
     SECURITY DEFINER

@@ -831,7 +831,7 @@ async fn req_st_8_a_client_that_never_reads_its_answers_is_dropped_at_the_connec
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
     socket.set_recv_buffer_size(4096).unwrap();
     let slow = socket.connect(address).await.unwrap();
-    let (_unread, mut writes) = slow.into_split();
+    let (mut unread, mut writes) = slow.into_split();
     let pipelined = tokio::spawn(async move {
         let one = b"GET /nothing-here HTTP/1.1\r\nhost: x\r\n\r\n";
         for _ in 0..200_000 {
@@ -865,6 +865,22 @@ async fn req_st_8_a_client_that_never_reads_its_answers_is_dropped_at_the_connec
         answered < timeout + bezent_ingress::public::CONNECTION_GRACE + Duration::from_secs(5),
         "served only after {answered:?}"
     );
+    // Third round of PR #139 (N3): it was dropped with a reset, not a lingering close that a peer
+    // with a zero window would keep waiting on: what it was owed is discarded, not drained.
+    let mut sink = vec![0_u8; 65536];
+    let reset = tokio::time::timeout(Duration::from_secs(5), async {
+        use tokio::io::AsyncReadExt;
+        loop {
+            match unread.read(&mut sink).await {
+                Ok(0) => return None,
+                Ok(_) => {}
+                Err(e) => return Some(e.kind()),
+            }
+        }
+    })
+    .await
+    .expect("the dropped connection ended");
+    assert_eq!(reset, Some(std::io::ErrorKind::ConnectionReset));
     stop_listening(stop, served).await;
 }
 

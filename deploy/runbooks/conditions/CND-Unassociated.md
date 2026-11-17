@@ -90,6 +90,13 @@ observes is covered. On Polygon Amoy, `DirectedDeposit` was deployed at block 53
 (`contracts/evm/deployments/polygon-amoy.json`), and the smoke deposit is at 53,060,226: its declaration must use
 `from_block` at or below 53,060,139.
 
+**A declaration's migration contains only the `INSERT`.** The statement's publisher holds `directing_code` in SHARE mode
+while it reads the declarations (`directing_code_hold()`), and gives up that wait after 5 seconds, so the publish attempt
+fails cleanly and is retried at the next cycle. A migration that adds a declaration and then does slow work in the same
+transaction keeps the table locked for all of it and fails the statements meanwhile: keep the `INSERT` alone, and do
+anything else in another migration. A declaration made after an operator's release does not change the release: its
+return still waits for the second approver.
+
 ## Never
 
 - Do not mint against it, or treat it as a deposit by matching on amount or time (`REQ-OT-2`, `REQ-OT-2`, `INV-6`).

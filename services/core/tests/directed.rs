@@ -1505,6 +1505,97 @@ async fn req_in_6_an_undeclared_directed_arrival_is_returned_only_by_a_two_perso
     );
 }
 
+/// `REQ-IN-6`, `REQ-GV-5`, `REQ-IN-11` (review M1 of PR #139, third round; migration 0149): the
+/// return an operator's release made stays the release's, whatever happens to the declaration
+/// afterwards. A declaration that lands after the release must not turn it into the core's own
+/// return, accepted with no second approver: it is not paid until a second operator approves, and
+/// then once.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_6_a_declaration_after_a_release_does_not_waive_its_second_approver(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    const LATE: &str = "0x00000000000000000000000000000000000000d7";
+    let w = World::new(options, connect).await;
+    let now = t0() + Duration::minutes(5);
+    let arrival = observe(
+        &w.admin,
+        ORIGIN,
+        10,
+        0,
+        TOKEN,
+        5_000_000,
+        Some(FUNDER),
+        Some(RESERVE),
+        None,
+        true,
+        json!({"event": "DirectedArrival", "directing": LATE, "direction_log": 1,
+               "recipient": DESTINATION_ACCOUNT, "refund": REFUND}),
+    )
+    .await;
+    decide(&w.admin, arrival, "final", 12).await;
+    w.cycle(now).await;
+    assert_eq!(bound(&w, 10, 0).await, None, "undeclared: never decided");
+
+    let action: i64 = sqlx::query_scalar(&format!(
+        "SELECT operator_release_directed_arrival('{ORIGIN}', 10, '\\x{}', 'log', 0, \
+             'undeclared at the time: never mintable')",
+        hex::encode(hash(ORIGIN, 10))
+    ))
+    .fetch_one(&w.ops[0])
+    .await
+    .expect("the release");
+    let (id, kind) = bound(&w, 10, 0).await.expect("the return");
+    assert_eq!(kind, "refund");
+
+    // The declaration lands after the release, covering the arrival.
+    sqlx::query(
+        "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+             from_block, reference) \
+         VALUES ($1, $2, $3, $4, 1, 1000000000000000, 0, 'declared after the release')",
+    )
+    .bind(ASSET)
+    .bind(ORIGIN)
+    .bind(LATE)
+    .bind(TOKEN)
+    .execute(&w.admin)
+    .await
+    .unwrap();
+    for _ in 0..3 {
+        w.cycle(now).await;
+    }
+    assert_eq!(
+        w.state(id).await.0,
+        "Received",
+        "the release's return waits for its second approver, declared or not"
+    );
+    assert_eq!(
+        w.count("SELECT count(*) FROM intents").await,
+        0,
+        "nothing is paid before the approval"
+    );
+
+    approve_as(&w, 1, action).await.expect("the second login");
+    w.cycle(now).await;
+    w.cycle(now).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    w.cycle(now).await;
+    let (_, payload) = order(&w.admin, id, 1).await.expect("the payout order");
+    assert_eq!(payload["order"]["to"], REFUND);
+    deliver(&w, id, 1, now).await;
+    let reference = reference_of(&w.admin, id).await;
+    paid_out(&w, 60, 5_000_000, REFUND, &reference).await;
+    w.settle(now).await;
+    assert_eq!(w.state(id).await, ("Completed".into(), None));
+    assert_eq!(
+        w.count("SELECT count(*) FROM book_entries WHERE kind = 'unassociated-refund'")
+            .await,
+        1,
+        "paid once"
+    );
+    assert_eq!(w.count("SELECT count(*) FROM transfers").await, 1, "once");
+}
+
 /// `REQ-IN-9`, `CND-DepositWindow` (review L5 of PR #136): a directed deposit that waited for the
 /// route's window gets the whole of the route's deadline for `CND-DestinationRefused`, counted from
 /// when it left the window (on the issuing network's head it rested on then), not from its arrival's

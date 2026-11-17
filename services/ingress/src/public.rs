@@ -724,11 +724,10 @@ impl Watch {
                     true
                 }
                 Phase::Idle => {
-                    // A request hyper had read already, behind the one answered.
+                    // A request hyper had read already, behind the one answered. (Idle means
+                    // every answer was written and flushed, so this is the exchange's start.)
                     p.phase = Phase::Busy;
-                    if !p.unflushed {
-                        p.exchange = now;
-                    }
+                    p.exchange = now;
                     true
                 }
             }
@@ -955,6 +954,9 @@ pub async fn serve(
             continue;
         };
         let watch = Watch::new();
+        // A second handle on the socket, kept to reset it when the connection is dropped at a
+        // deadline (review N3 of PR #139): see `reset_on_close`.
+        let reset = std::os::fd::AsFd::as_fd(&stream).try_clone_to_owned().ok();
         let io = TokioIo::new(Paced {
             io: stream,
             watch: Arc::clone(&watch),
@@ -987,6 +989,9 @@ pub async fn serve(
                             connection.as_mut().graceful_shutdown();
                             let _ = tokio::time::timeout(CONNECTION_GRACE, connection.as_mut()).await;
                         }
+                        if phase != Phase::Idle {
+                            reset_on_close(reset);
+                        }
                         return;
                     }
                     () = stopped(&mut stop) => {
@@ -1011,6 +1016,26 @@ pub async fn serve(
         tracing::warn!("the public listener stopped with connections still open");
     }
     Ok(())
+}
+
+/// Makes the socket `reset` names close with a reset (`SO_LINGER` of zero) when the connection that
+/// owns it is dropped next, review N3 of PR #139: a peer that stopped reading (a zero window) would
+/// otherwise keep a closing socket, and its unsent bytes, lingering on the server. `reset` is a
+/// second handle on the same socket; it is closed here, and the socket by the connection's drop.
+fn reset_on_close(reset: Option<std::os::fd::OwnedFd>) {
+    let Some(fd) = reset else {
+        return;
+    };
+    match tokio::net::TcpStream::from_std(std::net::TcpStream::from(fd)) {
+        Ok(handle) => {
+            if let Err(e) = handle.set_zero_linger() {
+                tracing::debug!(error = %e, "a public connection's socket could not be set to reset on close");
+            }
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "a public connection's socket could not be set to reset on close");
+        }
+    }
 }
 
 /// Connects the route's own pool and checks its login is a member of `bezent_public` and of nothing
