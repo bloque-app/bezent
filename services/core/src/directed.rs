@@ -16,7 +16,12 @@
 //!   over what the route's window has left, it holds `CND-DepositWindow` from the start and leaves
 //!   it by itself once it fits, behind every directed deposit waiting ahead of it by coordinate
 //!   ([`crate::engine`], `directed_window_fits()`); it is never returned for it (Open 1, ruled:
-//!   wait). There is no share of the window and no count cap (Open 5 and 6).
+//!   wait). There is no share of the window and no count cap (Open 5 and 6). When it fits the
+//!   window and the route carries as many transfers as its capacity, it holds
+//!   `CND-DepositCapacity` and leaves it by itself once the route has room, in coordinate order
+//!   (`directed_capacity_fits()`; amendment 0031, `d-f018-capacity`): never returned for it either.
+//!   An upgrade of its token at or before its arrival holds it in `CND-TokenUpgraded` until two
+//!   operators lift the hold ([`crate::engine`]'s gate; amendment 0031, `d-f018-usdc-upgrade`).
 //! - **A return** (`REQ-IN-11`, `AC-A6.4`), when it can never be minted under the route's current
 //!   declaration (the route is not declared, or the amount is outside its limits) or its recipient
 //!   is refused by rule: the refund of an unassociated arrival (`REQ-RQ-6`), which bezent orders
@@ -39,6 +44,13 @@
 //! (`REQ-GV-5`), and pays out as it pays any refund of an unassociated arrival. An arrival of a token
 //! admitted for no asset is one of these: a declaration names a token admitted for its asset, so no
 //! declaration covers it (review L3 of PR #136 returned it; the operator's release does now).
+//!
+//! While an upgrade of its token holds an arrival (`directed_arrival_token_held()`, 0150), one that
+//! would be returned is not: a return is a payout of that token, ordered by bezent with no second
+//! approver, and the hold exists because nobody has yet checked how the new code moves value
+//! (amendment 0031, `d-f018-usdc-upgrade`: nothing is returned for it). It waits, final and
+//! unbound, and is decided once the hold is lifted. One that becomes a deposit is held by the
+//! engine's gate.
 //!
 //! An arrival the core cannot decide (its detail lacks a recipient or a refund address, its route's
 //! declaration does not parse, or its step fails) stays as it is and is tried again every cycle; the
@@ -328,11 +340,33 @@ async fn intake_one(
     let listing = recipient_listing(conn, recipient).await?;
     match decide(amount, limits.as_ref(), listing) {
         Decision::Deposit => deposit(conn, o).await,
+        Decision::Return(_) if token_held(conn, o, token).await? => {
+            if undecided.due(o.id, "token-upgraded") {
+                tracing::warn!(
+                    observation = o.id,
+                    network = %o.network,
+                    %token,
+                    "REQ-AS-12: a directed arrival that can never be minted is not returned while an upgrade of its token holds directed intake; it waits for two operators to lift the hold"
+                );
+            }
+            Ok(false)
+        }
         Decision::Return(why) => {
             give_back(conn, o, &asset, amount, refund, why).await?;
             Ok(true)
         }
     }
+}
+
+/// Whether an upgrade of `token`, at or before `o`'s block and not lifted, holds directed intake of
+/// it (`directed_arrival_token_held()`, 0150; amendment 0031, `REQ-AS-12`).
+async fn token_held(conn: &mut PgConnection, o: &Observation, token: &str) -> sqlx::Result<bool> {
+    sqlx::query_scalar("SELECT directed_arrival_token_held($1, $2, $3)")
+        .bind(&o.network)
+        .bind(token)
+        .bind(o.block_number)
+        .fetch_one(conn)
+        .await
 }
 
 /// How the refused list reads `recipient` on the issuing network (`REQ-IN-5`, PLAN `DEC-15`).
@@ -353,7 +387,9 @@ async fn recipient_listing(conn: &mut PgConnection, recipient: &str) -> sqlx::Re
 }
 
 /// The deposit (`REQ-IN-10`): made by the store from the observation, and, over what the route's
-/// window has left, held in `CND-DepositWindow` in the same transaction, under the route's lock.
+/// window has left, held in `CND-DepositWindow` in the same transaction, under the route's lock; or,
+/// within the window but over the route's capacity, held in `CND-DepositCapacity` (amendment 0031,
+/// `d-f018-capacity`).
 async fn deposit(conn: &mut PgConnection, o: &Observation) -> sqlx::Result<bool> {
     let c = o.coordinate();
     let id: Option<i64> =
@@ -373,18 +409,33 @@ async fn deposit(conn: &mut PgConnection, o: &Observation) -> sqlx::Result<bool>
         .bind(id)
         .fetch_one(&mut *conn)
         .await?;
-    if !fits {
+    let wait = if !fits {
         tracing::info!(
             transfer = id,
             "CND-DepositWindow: a directed deposit over what its route's window has left waits for it"
         );
+        Some(Condition::DepositWindow)
+    } else if !sqlx::query_scalar::<_, bool>("SELECT directed_capacity_fits($1)")
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await?
+    {
+        tracing::info!(
+            transfer = id,
+            "CND-DepositCapacity: a directed deposit over its route's capacity waits for room"
+        );
+        Some(Condition::DepositCapacity)
+    } else {
+        None
+    };
+    if let Some(condition) = wait {
         store::append(
             conn,
             id,
             &Move {
                 from: State::SourceFinal,
                 to: State::SourceFinal,
-                condition: Some(Condition::DepositWindow),
+                condition: Some(condition),
                 point: None,
                 attempt: None,
                 manual_action: None,

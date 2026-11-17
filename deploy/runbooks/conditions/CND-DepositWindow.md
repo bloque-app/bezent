@@ -5,10 +5,10 @@ SPDX-License-Identifier: CC-BY-4.0
 ---
 id: CND-DepositWindow
 kind: condition
-covers: [REQ-IN-11, REQ-LM-1, REQ-LM-3]
+covers: [REQ-IN-11, REQ-LM-1, REQ-LM-3, AC-A6.7]
 pages: [deposit-window-alert]
 observables: [nonfinal_transfers, oldest_nonfinal_transfer_age_seconds]
-tests: [services/core/tests/directed.rs::ac_a6_3_cnd_deposit_window_waits_first_come_first_served_and_resumes_as_it_rolls_over, services/core/tests/directed.rs::cnd_deposit_window_a_window_that_can_never_fit_pages, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_signed_mint_after_the_window_gets_its_whole_delivering_deadline]
+tests: [services/core/tests/directed.rs::ac_a6_3_cnd_deposit_window_waits_first_come_first_served_and_resumes_as_it_rolls_over, services/core/tests/directed.rs::cnd_deposit_window_a_window_that_can_never_fit_pages, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_signed_mint_after_the_window_gets_its_whole_delivering_deadline, services/core/tests/directed.rs::ac_a6_7_a_queue_of_several_windows_leaves_requesters_room_after_one_window]
 exercised: no
 ---
 # CND-DepositWindow
@@ -21,6 +21,13 @@ over, in the order of arrival (SPEC §10, `REQ-IN-11`). It is never returned for
 ruled: wait). Directed deposits and requesters' deposits share the one window. A deposit that waited gets the whole of
 the route's deadline for a later `CND-DestinationRefused`, counted from when it left the condition, and so does its
 signed mint in `Delivering` (unknown past its deadline; PR #136, review M-a).
+
+The queue claims one window at most (amendment 0031, `d-f018-window-queue`). A waiting deposit counts against
+requesters' room in the window only for one window (the route's window length) from when it began to wait, and the
+waiting deposits together for no more than the window's limit (`route_window_used()`, which the ingress's checks and its
+route table read). A deposit that has waited longer still waits, and still goes before every later directed deposit,
+but requesters' deposits no longer see it: once room frees, a request may take it, and the queue waits for the room
+after. When it leaves the window, a deposit whose route is at its capacity waits on in `CND-DepositCapacity`.
 
 ## Pages
 

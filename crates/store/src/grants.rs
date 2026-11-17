@@ -46,6 +46,8 @@ pub const ROLES: &[&str] = &[
 pub const PUBLIC_FUNCTIONS: &[&str] = &[
     "is_terminal_state(transfer_state)",
     "route_usage_locked(text,text,text,bigint)",
+    // F-018 (migration 0150, amendment 0031): what a route's window has used as a request sees it.
+    "route_window_used(text,text,text,bigint)",
     "transfer_edge_needs_coordinate(transfer_state,transfer_state)",
 ];
 
@@ -148,6 +150,10 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "attempts_unproven(bigint)",
             "bezent_applied_migrations()",
             "bezent_writer_holds(text,oid)",
+            // F-018 (migration 0150, amendment 0031): whether an upgrade of a directed arrival's
+            // token holds it, and whether a directed deposit fits in its route's capacity.
+            "directed_arrival_token_held(text,text,bigint)",
+            "directed_capacity_fits(bigint)",
             // F-018 (migration 0144): the core's deposit for a final directed arrival.
             "directed_deposit(text,bigint,bytea,position_kind,bigint)",
             // F-018 (migration 0145): whether the issuing network's refusal of a directed
@@ -156,6 +162,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             // window has left.
             "directed_refusal_recorded(bigint,text,bigint,bytea,timestamp with time zone)",
             "directed_review_refund_open(bigint)",
+            "directed_token_held(bigint)",
             "directed_window_fits(bigint)",
             // F-018 (migration 0148, review M3 of PR #139): whether a directed arrival's directing
             // contract is declared, asked before the core decides it (REQ-AS-11).
@@ -381,6 +388,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "bezent_applied_migrations()",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
+            // F-018 (migration 0150, amendment 0031): the two-person lift of the hold on an upgrade
+            // of an origin token.
+            "operator_approve_token_hold_lift(bigint,text)",
             "operator_approve_unpause(bigint,text)",
             "ops_observables()",
             "operator_pause(text,text,text,text)",
@@ -388,6 +398,7 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             // F-018 (migration 0149, review M3 of PR #139): the release of a directed arrival
             // whose directing contract is not declared, to the refund address it recorded.
             "operator_release_directed_arrival(text,bigint,bytea,position_kind,bigint,text)",
+            "operator_request_token_hold_lift(bigint,text)",
             "operator_request_unpause(bigint,text)",
             "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
         ],

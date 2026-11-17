@@ -946,7 +946,7 @@ async fn req_rf_1_a_delivery_anomaly_closes_the_exit(pool: PgPool) {
 
 /// `REQ-LM-1` (review L1 of PR #136): what the window has used is read through the route's
 /// `created_at` index, not by a scan of every transfer of the route. The planner is asked about the
-/// sum `route_usage_locked()` runs, and the one `directed_window_fits()` runs for what the other
+/// sum `route_usage_locked()` runs (through `route_window_used()`, migration 0150), and the one `directed_window_fits()` runs for what the other
 /// deposits took (review L-c), as the functions write them (the test reads their source to be sure
 /// they still do), over a route with a long history and few transfers in the window.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
@@ -974,8 +974,14 @@ async fn req_lm_1_the_window_is_read_by_its_index(pool: PgPool) {
     )
     .await;
     for (function, prefilter) in [
+        // Amendment 0031 (migration 0150): route_usage_locked() reads the window through
+        // route_window_used(), which runs that sum.
         (
             "route_usage_locked",
+            "used := route_window_used(p_asset, p_network, p_direction, p_window_seconds);",
+        ),
+        (
+            "route_window_used",
             "AND (t.created_at > now() - make_interval(secs => p_window_seconds)\n           \
              OR t.id = ANY (ARRAY(SELECT w.transfer_id FROM transitions w",
         ),

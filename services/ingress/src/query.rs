@@ -370,7 +370,10 @@ struct RouteRow {
 
 /// The routes, with what each one's trailing window has used and what it carries now. A route's
 /// transfers are those of its asset and kind on its origin network: the source network of a
-/// deposit, the destination network of a withdrawal.
+/// deposit, the destination network of a withdrawal. What the window has used is the store's
+/// `route_window_used()` (migration 0150), the same count a request is checked against: the shares
+/// taken in it, plus the claims of directed deposits that began to wait for it within the window,
+/// together at most one window's limit (amendment 0031, `d-f018-window-queue`).
 const ROUTES: &str = "\
     SELECT r.asset, r.network, r.direction, r.minimum::text AS minimum, r.maximum::text AS maximum, \
            r.venue_minimum::text AS venue_minimum, r.window_limit::text AS window_limit, \
@@ -382,9 +385,7 @@ const ROUTES: &str = "\
            u.used::text AS used, u.in_flight \
     FROM routes r \
     CROSS JOIN LATERAL ( \
-        SELECT COALESCE(sum(t.amount) FILTER ( \
-                   WHERE t.state NOT IN ('Refused', 'Expired', 'Withdrawn') \
-                     AND t.created_at > now() - make_interval(secs => r.window_seconds)), 0) AS used, \
+        SELECT route_window_used(r.asset, r.network, r.direction, r.window_seconds) AS used, \
                count(*) FILTER (WHERE NOT is_terminal_state(t.state)) AS in_flight \
         FROM transfers t \
         WHERE t.asset = r.asset AND t.kind = r.direction \

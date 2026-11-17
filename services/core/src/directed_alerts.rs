@@ -23,12 +23,18 @@
 //!   transfer into the reserve (`AC-A6.6`). With the declared code it should never happen; it binds
 //!   nothing (migration 0143), and a person must find out why.
 //! - `origin-token-upgraded`: an admitted origin token's proxy emitted `Upgraded` (EIP-1967): its
-//!   implementation changed (migration 0147). It **pages and does not pause**. Whether directed intake
-//!   should also hold on it is the owner's open ruling `d-f018-usdc-upgrade`; until it is ruled
-//!   nothing holds. If it rules a hold, [`page_observation`] is the one place to add it: in the same
-//!   transaction as the page's marker, a hold of the token's asset, which the engine already honours
-//!   for every deposit (`CND-Paused`); and [`token_upgrades_since`] already answers "has the token been
-//!   upgraded since", for a hold that lifts on a recorded review instead.
+//!   implementation changed (migration 0147). It pages and does not pause. It **holds directed
+//!   intake** of that token (amendment 0031, `d-f018-usdc-upgrade`, ruled: hold and alert): the
+//!   store reads the observation itself (`directed_arrival_token_held()`, migration 0150), so the
+//!   hold needs nothing from this page and starts with the observation, not with the page. A
+//!   directed deposit of that token at or after the upgrade waits in `CND-TokenUpgraded`, and
+//!   nothing of it is returned, until two operators lift the hold after the fork suite has been run
+//!   against the new implementation (`operator_request_token_hold_lift`,
+//!   `operator_approve_token_hold_lift`). A requester's deposit is not held.
+//!
+//! The returns alert also watches the exposure amendment 0031 accepted (`d-f018-return-routing`):
+//! a funder can route value through the reserve to a third party's refund address, at bezent's gas
+//! cost, by sending what can never be minted; every such return counts here.
 //!
 //! At least once: a page is logged before the entry that remembers it, so a failure between the two
 //! repeats the page rather than losing it.
@@ -345,9 +351,9 @@ async fn threshold_alert(
     }))
 }
 
-/// Pages one observation of [`UNPAIRED`] or [`UPGRADED`] and remembers it. It pauses nothing and holds
-/// nothing (the open ruling `d-f018-usdc-upgrade`; see the module documentation for where a hold
-/// would go).
+/// Pages one observation of [`UNPAIRED`] or [`UPGRADED`] and remembers it. It pauses nothing; the
+/// hold on directed intake an upgrade makes is the store's, from the observation itself (see the
+/// module documentation).
 #[allow(clippy::too_many_arguments)]
 async fn page_observation(
     pool: &PgPool,
@@ -375,7 +381,7 @@ async fn page_observation(
         tracing::error!(
             kind = %"origin-token-upgraded", observation = id, at = %at, token = %token,
             implementation = %implementation,
-            "page: an admitted origin token's implementation changed (its proxy emitted Upgraded). Nothing is paused or held; whether directed intake should hold is the open ruling d-f018-usdc-upgrade. Review the new implementation now (deploy/runbooks/pages/token-upgraded.md)"
+            "page: an admitted origin token's implementation changed (its proxy emitted Upgraded). Directed intake of the token is held (CND-TokenUpgraded) until two operators lift it after the fork suite has been run against the new implementation; nothing is paused. Review the new implementation now (deploy/runbooks/pages/token-upgraded.md)"
         );
     }
     let mut conn = pool.acquire().await?;
@@ -391,8 +397,8 @@ async fn page_observation(
 }
 
 /// The `token_upgrade` observations of `token` on `network` after observation `after` (by id),
-/// final: what a hold on an upgrade would read, were one ruled (`d-f018-usdc-upgrade`). Nothing reads
-/// it to hold anything today.
+/// final: the upgrades a runbook names when it requests the lift of their hold (amendment 0031,
+/// `d-f018-usdc-upgrade`). The hold itself is the store's (`directed_arrival_token_held()`).
 pub async fn token_upgrades_since(
     pool: &PgPool,
     network: &str,

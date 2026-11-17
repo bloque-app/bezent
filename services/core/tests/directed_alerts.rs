@@ -345,10 +345,12 @@ async fn ac_a6_6_an_unpaired_direction_pages_once(
     );
 }
 
-/// `REQ-AS-11`, `REQ-IC-2` (open ruling `d-f018-usdc-upgrade`): an admitted origin token's `Upgraded`
-/// pages, once, and pauses and holds nothing: a directed deposit made after it is minted as before.
+/// `REQ-AS-12`, `REQ-AS-11`, `REQ-IC-2` (amendment 0031, `d-f018-usdc-upgrade`, ruled: hold and
+/// alert): an admitted origin token's `Upgraded` pages, once, and pauses nothing; it holds the
+/// directed deposits of the token made after it (`CND-TokenUpgraded`), with nothing ordered, until
+/// two operators lift the hold (`services/core/tests/directed.rs`, `ac_a6_8_…`).
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
-async fn req_as_11_an_origin_tokens_upgrade_pages_and_pauses_nothing(
+async fn req_as_12_an_origin_tokens_upgrade_pages_once_and_holds_directed_intake(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -391,12 +393,16 @@ async fn req_as_11_an_origin_tokens_upgrade_pages_and_pauses_nothing(
             .await
             .unwrap(),
         vec![id],
-        "what a hold would read, were one ruled"
+        "the upgrades a lift names"
     );
     final_directed(&w.admin, 40, 5_000_000, DESTINATION_ACCOUNT).await;
     w.settle(t0()).await;
     let (d, kind) = bound(&w, 40).await;
     assert_eq!(kind, "deposit");
-    assert_eq!(w.state(d).await, ("Source-Final".into(), None), "not held");
-    assert!(order(&w.admin, d, 1).await.is_some(), "its mint is ordered");
+    assert_eq!(
+        w.state(d).await,
+        ("Source-Final".into(), Some("CND-TokenUpgraded".into())),
+        "held"
+    );
+    assert!(order(&w.admin, d, 1).await.is_none(), "nothing ordered");
 }

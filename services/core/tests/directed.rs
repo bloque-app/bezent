@@ -2014,3 +2014,567 @@ async fn req_eo_3_a_retry_does_not_restart_the_refused_attempts_clock(
     );
     assert_eq!(returns(&w).await, 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Amendment 0031 (SPEC v0.5.14): capacity, the window's queue, the hold on an upgrade of the
+// origin token, and the review edge judged at resolution.
+
+/// Sets the deposit route's declared capacity.
+async fn capacity(w: &World, n: i64) {
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET capacity = {n} \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+}
+
+/// The deposit route's transfers in flight, as the ingress reads them (`route_usage_locked()`).
+async fn in_flight(w: &World) -> i64 {
+    scalar(
+        &w.admin,
+        &format!(
+            "SELECT in_flight FROM route_usage_locked('{ASSET}', '{ORIGIN}', 'deposit', 86400)"
+        ),
+    )
+    .await
+}
+
+/// `AC-A6.3`, `REQ-LM-4`, `REQ-IN-11` (amendment 0031, `d-f018-capacity`, ruled: wait): a directed
+/// deposit over its route's capacity waits in `CND-DepositCapacity`, with nothing ordered and nothing
+/// returned, even past its deadline; one behind it by coordinate waits behind it. While they wait
+/// they are in flight, so a request sees the route full (`ERR-Overloaded`, first come first served).
+/// As room comes, they resume by themselves, in coordinate order, and are minted.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a6_3_cnd_deposit_capacity_waits_in_order_resumes_and_is_never_returned(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    capacity(&w, 2).await;
+    for block in [10, 11, 12, 13] {
+        final_directed(&w.admin, block, 0, 5_000_000).await;
+    }
+    w.cycle(t0()).await;
+    let ids: Vec<i64> = {
+        let mut v = Vec::new();
+        for block in [10, 11, 12, 13] {
+            v.push(bound(&w, block, 0).await.expect("a deposit").0);
+        }
+        v
+    };
+    let (a, b, c, d) = (ids[0], ids[1], ids[2], ids[3]);
+    for id in [a, b] {
+        assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    }
+    for id in [c, d] {
+        assert_eq!(
+            w.state(id).await,
+            ("Source-Final".into(), Some("CND-DepositCapacity".into())),
+            "deposit {id} waits for room"
+        );
+    }
+    assert_eq!(in_flight(&w).await, 4, "the waiting are in flight");
+    // Past their deadline they still wait: no order, no review, no return.
+    head(&w.admin, ISSUING, 15 + BUDGET + 100).await;
+    w.settle(t0()).await;
+    for id in [c, d] {
+        assert_eq!(
+            w.state(id).await,
+            ("Source-Final".into(), Some("CND-DepositCapacity".into()))
+        );
+        assert!(order(&w.admin, id, 1).await.is_none());
+    }
+    assert_eq!(returns(&w).await, 0);
+
+    // Room for one more: c, first by coordinate, resumes; d still waits behind it.
+    capacity(&w, 3).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(c).await, ("Source-Final".into(), None));
+    assert_eq!(
+        w.state(d).await,
+        ("Source-Final".into(), Some("CND-DepositCapacity".into()))
+    );
+    capacity(&w, 4).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(d).await, ("Source-Final".into(), None));
+    w.cycle(t0()).await;
+    for id in [a, b, c, d] {
+        assert!(order(&w.admin, id, 1).await.is_some(), "{id} is minted");
+    }
+    assert_eq!(returns(&w).await, 0);
+}
+
+/// `REQ-IN-11`, `REQ-IN-9`, `CND-DepositCapacity` (amendment 0031): a directed deposit that waited
+/// for its route's capacity gets the whole of the route's deadline for `CND-DestinationRefused`,
+/// counted from when it left the wait, not from its arrival's finality.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_11_a_deposit_that_waited_for_capacity_gets_its_whole_refusal_deadline(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    capacity(&w, 1).await;
+    final_directed(&w.admin, 10, 0, 5_000_000).await;
+    final_directed(&w.admin, 11, 0, 5_000_000).await;
+    w.cycle(t0()).await;
+    let (b, _) = bound(&w, 11, 0).await.expect("deposit b");
+    assert_eq!(
+        w.state(b).await,
+        ("Source-Final".into(), Some("CND-DepositCapacity".into()))
+    );
+    let left = 13 + BUDGET + 100;
+    head(&w.admin, ISSUING, left).await;
+    capacity(&w, 2).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(b).await, ("Source-Final".into(), None));
+    w.cycle(t0()).await;
+    let (o, _) = order(&w.admin, b, 1).await.expect("the mint order");
+    prepare(&w.admin, o, Some("Kreivo(Assets(CannotMint))")).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(b).await,
+        ("Source-Final".into(), Some("CND-DestinationRefused".into())),
+        "not sent to review at once: its clock started when it left the wait"
+    );
+    head(&w.admin, ISSUING, left + BUDGET - 1).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(b).await.0, "Source-Final");
+    head(&w.admin, ISSUING, left + BUDGET + 1).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(b).await,
+        ("Needs-Review".into(), Some("CND-DestinationRefused".into()))
+    );
+    assert_eq!(returns(&w).await, 0);
+}
+
+/// `AC-A6.7`, `REQ-IN-11`, `REQ-LM-1` (amendment 0031, `d-f018-window-queue`, ruled: cap what waits
+/// to one window): a queue of directed deposits three windows deep claims, against requests, one
+/// window's limit at most, and only for one window from when it began to wait. After that window a
+/// request sees room and its deposit is taken, and the queue still drains in coordinate order,
+/// behind it, never past the window's limit.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a6_7_a_queue_of_several_windows_leaves_requesters_room_after_one_window(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET maximum = 10000000, window_limit = 10000000, \
+                 window_seconds = 86400 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    for block in [10, 11, 12, 13] {
+        final_directed(&w.admin, block, 0, 10_000_000).await;
+    }
+    w.cycle(t0()).await;
+    let mut ids = Vec::new();
+    for block in [10, 11, 12, 13] {
+        ids.push(bound(&w, block, 0).await.expect("a deposit").0);
+    }
+    let (a, queue) = (ids[0], ids[1..].to_vec());
+    assert_eq!(w.state(a).await, ("Source-Final".into(), None));
+    for id in &queue {
+        assert_eq!(
+            w.state(*id).await,
+            ("Source-Final".into(), Some("CND-DepositWindow".into()))
+        );
+    }
+    // Within the window: a's share and the queue's claim, capped at one window (30 waiting, 10
+    // counted): a request is refused, as before.
+    assert_eq!(window_used(&w, 86400).await, "20000000");
+
+    // One window on (the route's window made one second long): a's share has left it, and so has
+    // every claim of the queue, which began to wait more than a window ago. A request sees room.
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET window_seconds = 1 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(
+        window_used(&w, 1).await,
+        "0",
+        "the queue no longer locks requests out"
+    );
+    // A requester's deposit is taken in that room (as the ingress does, under the route's lock).
+    let r_arrival = arrival(&w.admin, 30, 6_000_000).await;
+    decide(&w.admin, r_arrival, "final", 32).await;
+    let requested = deposit(&w.admin, 30, 6_000_000).await;
+    assert_eq!(window_used(&w, 1).await, "6000000");
+    // The queue's head waits behind it: 6 taken plus its 10 is over the window.
+    w.cycle(t0()).await;
+    for id in &queue {
+        assert_eq!(
+            w.state(*id).await.1.as_deref(),
+            Some("CND-DepositWindow"),
+            "deposit {id} waits behind the request"
+        );
+    }
+    assert_ne!(
+        w.state(requested).await.0,
+        "Refused",
+        "the request was taken"
+    );
+
+    // Window by window the queue drains in coordinate order, one at a time.
+    for (n, id) in queue.iter().enumerate() {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        w.cycle(t0()).await;
+        assert_eq!(
+            w.state(*id).await,
+            ("Source-Final".into(), None),
+            "{n}: next by coordinate"
+        );
+        for later in &queue[n + 1..] {
+            assert_eq!(
+                w.state(*later).await.1.as_deref(),
+                Some("CND-DepositWindow"),
+                "{n}: {later} still waits"
+            );
+        }
+    }
+    assert_eq!(returns(&w).await, 0);
+}
+
+/// An upgrade of the origin token at (`ORIGIN`, `block`), final two blocks later, as the EVM
+/// endpoint records it (`token_upgrade`, migration 0147).
+async fn upgraded(w: &World, block: i64) -> i64 {
+    let id = observe(
+        &w.admin,
+        ORIGIN,
+        block,
+        0,
+        TOKEN,
+        0,
+        None,
+        None,
+        None,
+        true,
+        json!({"event": "TokenUpgraded", "token": TOKEN,
+               "implementation": "0x0000000000000000000000000000000000000abc"}),
+    )
+    .await;
+    decide(&w.admin, id, "final", block + 2).await;
+    id
+}
+
+/// `AC-A6.8`, `REQ-AS-12`, `REQ-GV-5` (amendment 0031, `d-f018-usdc-upgrade`, ruled: hold and
+/// alert): after an upgrade of the origin token, a directed deposit of it waits in
+/// `CND-TokenUpgraded` with nothing ordered, and one that could never be minted is not returned;
+/// a directed deposit from before the upgrade, and a requester's deposit, are not held. The store
+/// refuses a mint order for the held deposit. One operator alone cannot lift the hold; once a
+/// second approves the lift, the held deposit resumes and is minted, and the never-mintable arrival
+/// is returned.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a6_8_an_upgrade_holds_directed_intake_until_two_operators_lift_it(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    final_directed(&w.admin, 20, 0, 5_000_000).await;
+    let upgrade = upgraded(&w, 30).await;
+    final_directed(&w.admin, 40, 0, 5_000_000).await;
+    // Above the route's maximum: never mintable, and returned only once the hold is lifted.
+    final_directed(&w.admin, 41, 0, 2_000_000_000).await;
+    let r = arrival(&w.admin, 42, 5_000_000).await;
+    decide(&w.admin, r, "final", 44).await;
+    let requested = deposit(&w.admin, 42, 5_000_000).await;
+    w.settle(t0()).await;
+
+    let (before, _) = bound(&w, 20, 0)
+        .await
+        .expect("the deposit before the upgrade");
+    assert!(
+        order(&w.admin, before, 1).await.is_some(),
+        "made before the upgrade: not held"
+    );
+    assert!(
+        order(&w.admin, requested, 1).await.is_some(),
+        "a requester's deposit: not held"
+    );
+    let (held, _) = bound(&w, 40, 0)
+        .await
+        .expect("the deposit after the upgrade");
+    assert_eq!(
+        w.state(held).await,
+        ("Source-Final".into(), Some("CND-TokenUpgraded".into()))
+    );
+    assert!(order(&w.admin, held, 1).await.is_none(), "nothing ordered");
+    assert!(bound(&w, 41, 0).await.is_none(), "nothing returned");
+    assert_eq!(returns(&w).await, 0);
+
+    // The store refuses a mint order for the held deposit, whoever but the owner writes it: the
+    // order made for the deposit before the upgrade, copied onto it, as the core's own login.
+    let (_, payload) = order(&w.admin, before, 1).await.unwrap();
+    let refused = sqlx::query(
+        "INSERT INTO intents (transfer_id, network, purpose, on_chain_reference, \
+             reference_scope, attempt, payload) \
+         SELECT id, $2, 'mint', on_chain_reference, redeemer, 1, $3 FROM transfers \
+         WHERE id = $1",
+    )
+    .bind(held)
+    .bind(ISSUING)
+    .bind(&payload)
+    .execute(w.core.pool())
+    .await
+    .expect_err("a mint order for a held deposit");
+    assert!(
+        refused.as_database_error().is_some_and(
+            |e| e.code().as_deref() == Some("BZ001") && e.message().contains("REQ-AS-12")
+        ),
+        "{refused}"
+    );
+
+    // One operator requests the lift; the same login cannot approve it.
+    let request: i64 = sqlx::query_scalar(
+        "SELECT operator_request_token_hold_lift($1, 'fork suite run against the new implementation')",
+    )
+    .bind(upgrade)
+    .fetch_one(&w.ops[0])
+    .await
+    .unwrap();
+    sqlx::query_scalar::<_, i64>("SELECT operator_approve_token_hold_lift($1, 'checked')")
+        .bind(request)
+        .fetch_one(&w.ops[0])
+        .await
+        .expect_err("the requester approves its own lift");
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(held).await,
+        ("Source-Final".into(), Some("CND-TokenUpgraded".into())),
+        "one operator is not enough"
+    );
+    sqlx::query_scalar::<_, i64>("SELECT operator_approve_token_hold_lift($1, 'checked')")
+        .bind(request)
+        .fetch_one(&w.ops[1])
+        .await
+        .unwrap();
+    w.settle(t0()).await;
+    assert_eq!(w.state(held).await.1, None, "the hold is lifted");
+    assert!(
+        order(&w.admin, held, 1).await.is_some(),
+        "and the deposit is minted"
+    );
+    let (returned, kind) = bound(&w, 41, 0).await.expect("the return, now");
+    assert_eq!(kind, "refund");
+    assert!(returned > 0);
+}
+
+/// A directed deposit whose first order was never prepared, past the route's deadline: in review
+/// from `Source-Final`, with no condition (`REQ-EO-3`), an unknown. Returns it and the final head
+/// (`ISSUING`, block) past the deadline.
+async fn directed_in_review_for_an_unknown(w: &World) -> (i64, i64) {
+    final_directed(&w.admin, 10, 0, 5_000_000).await;
+    w.cycle(t0()).await;
+    let (id, _) = bound(w, 10, 0).await.expect("the deposit");
+    assert!(order(&w.admin, id, 1).await.is_some());
+    head(&w.admin, ISSUING, 20).await;
+    let past = 20 + BUDGET + 1;
+    head(&w.admin, ISSUING, past).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await, ("Needs-Review".into(), None));
+    let open: bool = scalar(
+        &w.admin,
+        &format!("SELECT directed_review_refund_open({id})"),
+    )
+    .await;
+    assert!(!open, "an unknown opens nothing");
+    (id, past)
+}
+
+/// A resolution of `id`'s review into `Delivering`, resting on the issuing network's head `past`,
+/// with its second approver, run: its mint order is recorded. Returns the action and the order.
+async fn resolved_into_delivering(w: &World, id: i64, past: i64) -> (i64, i64) {
+    let before = order(&w.admin, id, 1).await.map(|(o, _)| o);
+    let action = resolution(w, id, "Delivering", ISSUING, past, 0).await;
+    approve_as(w, 1, action).await.unwrap();
+    w.cycle(t0()).await;
+    let (o, _) = order(&w.admin, id, 1)
+        .await
+        .expect("the resolution's order");
+    assert_ne!(Some(o), before, "a new order, the resolution's");
+    (action, o)
+}
+
+/// `AC-A6.9`, `REQ-RV-2`, `REQ-GV-5`, `REQ-RF-1` (amendment 0031, `d-f018-review-exit-later`): a
+/// directed deposit that entered review for an unknown, and whose resolution's delivery the issuing
+/// network then refuses for its destination (the asset Live), is judged on that evidence: it may be
+/// refunded, by a resolution with its second approver, which supersedes the resolution into
+/// `Delivering` that waits on the refusal.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a6_9_a_review_for_an_unknown_then_a_live_refusal_is_refundable_with_two_approvers(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, past) = directed_in_review_for_an_unknown(&w).await;
+    let (delivering, o) = resolved_into_delivering(&w, id, past).await;
+    prepare(&w.admin, o, Some("Kreivo(Assets(CannotMint))")).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    let open: bool = scalar(
+        &w.admin,
+        &format!("SELECT directed_review_refund_open({id})"),
+    )
+    .await;
+    assert!(
+        open,
+        "the refusal made since the review began is the evidence"
+    );
+
+    let action = resolution_on_refusal(&w, id, 0).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await.0,
+        "Needs-Review",
+        "REQ-GV-5: one approver"
+    );
+    assert_eq!(returns(&w).await, 0);
+    approve_as(&w, 1, action).await.unwrap();
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Refunding");
+    assert_eq!(evidence_refused(&w, delivering).await, 1, "superseded");
+    let (refund, destination): (i64, String) =
+        sqlx::query_as("SELECT id, destination FROM transfers WHERE refund_of = $1")
+            .bind(id)
+            .fetch_one(&w.admin)
+            .await
+            .unwrap();
+    assert!(refund > 0);
+    assert_eq!(destination, REFUND);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM unsigned_attempt_cancellations \
+               WHERE transfer_id = {id} AND attempt = 1 AND manual_action_id = {action}"
+        ))
+        .await,
+        1,
+        "the unsigned order is closed to signing"
+    );
+}
+
+/// `AC-A6.9`, `REQ-RF-1` (amendment 0031): once a later dry run of the first mint passes, the
+/// refusal before it is no longer the evidence: the edge closes, and an approved resolution into
+/// `Refunding` does not run.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a6_9_a_later_passing_dry_run_closes_the_exit(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, past) = directed_in_review_for_an_unknown(&w).await;
+    let (_, o) = resolved_into_delivering(&w, id, past).await;
+    prepare(&w.admin, o, Some("Kreivo(Assets(CannotMint))")).await;
+    let open: bool = scalar(
+        &w.admin,
+        &format!("SELECT directed_review_refund_open({id})"),
+    )
+    .await;
+    assert!(open);
+    // The account can receive now: the next dry run, at a later block, passes.
+    prepare_dry_run_at(
+        &w.admin,
+        o,
+        true,
+        json!({"outcome": "passed", "reason": null}),
+        2,
+    )
+    .await;
+    let open: bool = scalar(
+        &w.admin,
+        &format!("SELECT directed_review_refund_open({id})"),
+    )
+    .await;
+    assert!(!open, "a passing dry run closes the edge");
+    let action = resolution_on_refusal(&w, id, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    w.settle(t0()).await;
+    assert_ne!(w.state(id).await.0, "Refunding");
+    assert_eq!(returns(&w).await, 0);
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE refund_of IS NOT NULL")
+            .await,
+        0
+    );
+}
+
+/// `AC-A6.9`, `REQ-RF-1`, guardrail 4 (amendment 0031): a refusal of the destination recorded
+/// before a review that began for an unknown is stale; and a resolution's dry run refused for
+/// something bezent cannot name is newer still. Neither opens the edge: an approved resolution into
+/// `Refunding` does not run, and nothing is refunded.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a6_9_a_stale_refusal_followed_by_an_unknown_keeps_the_exit_closed(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    final_directed(&w.admin, 10, 0, 5_000_000).await;
+    w.cycle(t0()).await;
+    let (id, _) = bound(&w, 10, 0).await.expect("the deposit");
+    let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, o, Some("Kreivo(Assets(CannotMint))")).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-DestinationRefused".into()))
+    );
+    // Then the declared list stops reading back: the review begins for an unknown.
+    let typo = DESTINATION.replace('Q', "R");
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO ledger_accounts (network, address, reason) \
+             VALUES ('{ISSUING}', '{typo}', 'a ledger holds value here')"
+        ),
+    )
+    .await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    let open: bool = scalar(
+        &w.admin,
+        &format!("SELECT directed_review_refund_open({id})"),
+    )
+    .await;
+    assert!(!open, "the refusal before the unknown is stale");
+
+    // A resolution's delivery, refused for an error bezent cannot name, at a later block.
+    let past = 12 + BUDGET + 1;
+    head(&w.admin, ISSUING, past).await;
+    let (_, o2) = resolved_into_delivering(&w, id, past).await;
+    prepare_dry_run_at(
+        &w.admin,
+        o2,
+        false,
+        json!({"outcome": "refused", "reason": "Kreivo(UnknownError)"}),
+        2,
+    )
+    .await;
+    w.cycle(t0()).await;
+    let open: bool = scalar(
+        &w.admin,
+        &format!("SELECT directed_review_refund_open({id})"),
+    )
+    .await;
+    assert!(!open, "the newest dry run is an unknown");
+    let action = resolution(&w, id, "Refunding", ISSUING, past, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(returns(&w).await, 0);
+    assert_eq!(
+        w.count("SELECT count(*) FROM unsigned_attempt_cancellations")
+            .await,
+        0
+    );
+}

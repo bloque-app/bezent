@@ -121,11 +121,11 @@ Who may **call** what (EXECUTE; the functions that run as the owner are marked *
 
 | Role | Calls |
 |---|---|
-| core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `directed_deposit` *definer* (0144: the deposit of a final directed arrival), `directed_window_fits` and `directed_review_refund_open` (0145: whether a directed deposit fits in its route's window, and whether it may leave its review into `Refunding`), `directing_declared` (0148), `directing_code_hold` *definer* (0149: the statement holds the declarations while it reads them), `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
+| core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `directed_deposit` *definer* (0144: the deposit of a final directed arrival), `directed_window_fits` and `directed_review_refund_open` (0145: whether a directed deposit fits in its route's window, and whether it may leave its review into `Refunding`), `directing_declared` (0148), `directed_capacity_fits`, `directed_token_held` *definer* and `directed_arrival_token_held` *definer* (0150: whether a directed deposit fits in its route's capacity, and whether an upgrade of its token holds it), `directing_code_hold` *definer* (0149: the statement holds the declarations while it reads them), `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
 | ingress | `source_bindable`, `funding_arrival`, `bezent_writer_holds` |
 | Kreivo endpoint, EVM endpoint | `bezent_writer_holds`, `bezent_endpoint_writer`, `bezent_evm_endpoint_writer`, `bezent_row_network`, `observation_kind_on_network`, `observation_kind_for_event`, `observation_writer_covers` (the guards' helpers, which run as the inserting login) |
 | signer | `attempt_gate_open` *definer*, `pause_holds_intent` *definer* (0125: whether a pause holds a signing intent whose attempt has no signature, amendment 0022 A1b), `statement_place_refusal` *definer* |
-| operators | `ops_observables` *definer* (0090), `source_bindable`, `funding_arrival`, `one_business_day_after`, `operator_pause` *definer*, `operator_request_unpause` *definer*, `operator_approve_unpause` *definer*, `operator_record` *definer*, `operator_release_directed_arrival` *definer* (0149: the release of a directed arrival whose directing contract is not declared) |
+| operators | `ops_observables` *definer* (0090), `source_bindable`, `funding_arrival`, `one_business_day_after`, `operator_pause` *definer*, `operator_request_unpause` *definer*, `operator_approve_unpause` *definer*, `operator_record` *definer*, `operator_release_directed_arrival` *definer* (0149: the release of a directed arrival whose directing contract is not declared), `operator_request_token_hold_lift` *definer* and `operator_approve_token_hold_lift` *definer* (0150: the two-person lift of the hold an upgrade of an origin token puts on directed intake) |
 
 Every service and the operators also call `bezent_applied_migrations()` *definer*, which lists the
 migrations applied to the store, for the start-up check. The trigger functions that run as the owner
@@ -210,6 +210,17 @@ into `Refunding` by an approved resolution (Open 2): its first attempt, ordered 
 table now takes a first attempt of such a deposit), and its refund is a transfer with `refund_of` the deposit, its asset and
 amount, to its refund destination, with the return's `bz-u-` bridge reference and payout reference, so the arrival is returned
 once whichever way. No other transfer gains that edge.
+
+Since 0150 (F-018 T-018-22 to T-018-25, amendment 0031) a directed deposit over its route's capacity holds
+`CND-DepositCapacity` and leaves it in coordinate order (`directed_capacity_fits()`, under the route's lock; while it waits it is
+in flight for `route_usage_locked()`); what a request sees of the window is `route_window_used()`, which counts a waiting directed
+deposit only for one window from when it began to wait, and the waiting ones together for at most the window's limit
+(`directed_window_fits()` still counts every one waiting ahead, so the queue drains in order); an upgrade of an admitted origin
+token (`token_upgrade`, 0147), not withdrawn, holds every directed deposit of it at or after its block in `CND-TokenUpgraded`
+(`directed_token_held()`; `intents_guard_token_hold()` refuses a mint order for one) until one operator requests the lift and
+another approves it (`admin_actions` kinds `token-hold-lift-request` and `token-hold-lift`); and `directed_review_refund_open()` is
+judged on the evidence at resolution: the newest attempt-1 dry run must be the destination's refusal with the asset Live, either
+the one whose deadline began the review or one ordered after it began, never a refusal older than an unknown.
 
 An attempt that was ordered and never signed (issue #25, 0051) stood in the way of a withdrawal's refund for
 good: it has an intent and, there being no signed transaction, no proof of non-execution to record. The core
