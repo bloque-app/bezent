@@ -221,6 +221,16 @@ BEGIN
     -- transfers_guard_directed()'s.
     IF observed_kind = 'directed_arrival' THEN
         purpose := CASE purpose WHEN 'deposit' THEN 'directed_deposit' ELSE 'directed_return' END;
+        -- Review H1 of PR #125: the two directed purposes are bezent's own rows, which no request
+        -- answers and whose request reference is the coordinate's `directed:` label. A requester's
+        -- deposit bound before the arrival was observed (0144's checks then saw no directed arrival)
+        -- is refused here when it would become final on it, so it is never minted (AC-A6.2, INV-2).
+        IF NOT starts_with(coalesce(NEW.request_reference, ''), 'directed:')
+           OR EXISTS (SELECT 1 FROM intake_answers a WHERE a.transfer_id = NEW.id) THEN
+            RAISE EXCEPTION '% % refused: its source is a directed arrival, which only bezent''s own deposit or return binds, with no request answering it and the coordinate''s directed: label as its request reference (REQ-IN-10, REQ-RQ-3, AC-A6.2, INV-2)',
+                NEW.kind, NEW.bridge_reference
+                USING ERRCODE = 'BZ001';
+        END IF;
     END IF;
     IF finalising AND NOT observed
        AND EXISTS (SELECT 1 FROM networks WHERE network = NEW.source_network AND role = 'origin') THEN
@@ -382,6 +392,22 @@ BEGIN
                              AND ob.position_kind = NEW.source_position_kind
                              AND ob.position_index = NEW.source_position_index
                              AND ob.kind IN ('directed_arrival', 'unpaired_direction')) THEN
+            -- Review H1 of PR #125 (REQ-RQ-3, REQ-RQ-6): a request names the coordinate of an
+            -- arrival the store has observed (the ingress's `intake::source` reads it before it
+            -- binds, and answers ERR-SourceNotFound otherwise), so a binding to a coordinate with no
+            -- observation is no request's. Refused, so nothing observed there later (a directed
+            -- arrival) is bound by it.
+            IF NEW.source_network IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM observations ob
+                               WHERE ob.network = NEW.source_network
+                                 AND ob.block_number = NEW.source_block_number
+                                 AND ob.block_hash = NEW.source_block_hash
+                                 AND ob.position_kind = NEW.source_position_kind
+                                 AND ob.position_index = NEW.source_position_index) THEN
+                RAISE EXCEPTION 'transfer % (%) refused for %: its source names a coordinate on % with no observation; a request binds only an arrival the store has observed (REQ-RQ-3, REQ-RQ-6, ERR-SourceNotFound, INV-2)',
+                    NEW.bridge_reference, NEW.kind, writer, NEW.source_network
+                    USING ERRCODE = 'BZ001';
+            END IF;
             RETURN NEW;
         END IF;
         RAISE EXCEPTION 'transfer % (%, %) refused for %: the ingress creates only what a request makes, a deposit or the refund of an unassociated arrival, in Received, bound to an origin network, with none of the core''s keys; a withdrawal, a refund of one and anything at Source-Final or later rest on chain data and are the core''s (INV-6, INV-8, REQ-RQ-7, REQ-RF-3, REQ-RF-4)',
@@ -531,10 +557,13 @@ BEGIN
 END
 $$;
 
+-- Review H1 of PR #125: also on the move to Source-Final (the lifecycle writes source_final_* and
+-- then state) and on every state change, so a transfer bound before its coordinate's directed
+-- arrival was observed is checked, who writes it and what it answers, before it becomes final there.
 CREATE TRIGGER transfers_guard_directed
     BEFORE INSERT OR UPDATE OF source_network, source_block_number, source_block_hash,
         source_position_kind, source_position_index, kind, refund_of, destination_network,
-        destination, refund_destination_network, refund_destination
+        destination, refund_destination_network, refund_destination, source_final_network, state
     ON transfers
     FOR EACH ROW EXECUTE FUNCTION transfers_guard_directed();
 
@@ -670,6 +699,16 @@ BEGIN
     IF made IS NOT NULL AND dead IN ('Refused', 'Withdrawn', 'Expired', 'Refunded') THEN
         RAISE EXCEPTION 'directed_deposit refused: the coordinate''s deposit is % and no longer live; it is not returned as the arrival''s deposit (REQ-IN-10, INV-2)',
             dead
+            USING ERRCODE = 'BZ001';
+    END IF;
+    -- Review H1 of PR #125: a deposit a request answers, or that is not bezent's own (no
+    -- `directed:` label), is not the arrival's deposit either, even under the coordinate's
+    -- reference (one bound before the arrival was observed): it is refused by name, never returned.
+    IF made IS NOT NULL
+       AND (EXISTS (SELECT 1 FROM intake_answers a WHERE a.transfer_id = made)
+            OR NOT EXISTS (SELECT 1 FROM transfers t
+                           WHERE t.id = made AND starts_with(t.request_reference, 'directed:'))) THEN
+        RAISE EXCEPTION 'directed_deposit refused: the coordinate''s reference is held by a deposit a request made, not by bezent''s own; it is not returned as the arrival''s deposit (REQ-IN-10, AC-A6.2, INV-2)'
             USING ERRCODE = 'BZ001';
     END IF;
     RETURN made;

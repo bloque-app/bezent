@@ -124,14 +124,16 @@ async fn count_transfers(pool: &PgPool) -> i64 {
 }
 
 /// A deposit row naming the directed arrival at `block`, in `Received`, as a writer that is not
-/// the core would: the destination and the refund are the caller's.
+/// the core would: the destination and the refund are the caller's. Its request reference is the
+/// `directed:` label a row of bezent's own carries (a restore of one), so only what the test varies
+/// stands in its way.
 fn deposit_sql(reference: &str, block: i64, destination: &str, refund: &str) -> String {
     format!(
         "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
              destination_network, destination, refund_destination_network, refund_destination, \
              state, source_network, source_block_number, source_block_hash, source_position_kind, \
              source_position_index) \
-         VALUES ('{reference}', 'req-{reference}', 'deposit', 'asset-a', {AMOUNT}, 'issuing', \
+         VALUES ('{reference}', 'directed:{reference}', 'deposit', 'asset-a', {AMOUNT}, 'issuing', \
              '{destination}', 'origin-a', '{refund}', 'Received', 'origin-a', {block}, '\\xaa', \
              'log', 1)"
     )
@@ -143,7 +145,7 @@ fn return_sql(reference: &str, block: i64, destination: &str) -> String {
         "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
              destination_network, destination, state, source_network, source_block_number, \
              source_block_hash, source_position_kind, source_position_index) \
-         VALUES ('{reference}', 'req-{reference}', 'refund', 'asset-a', {AMOUNT}, 'origin-a', \
+         VALUES ('{reference}', 'directed:{reference}', 'refund', 'asset-a', {AMOUNT}, 'origin-a', \
              '{destination}', 'Received', 'origin-a', {block}, '\\xaa', 'log', 1)"
     )
 }
@@ -1047,4 +1049,125 @@ async fn req_st_1_the_views_read_a_deposit_without_an_answer(pool: PgPool) {
 
 async fn text_as(pool: &PgPool, sql: &str) -> String {
     sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+}
+
+/// `AC-A6.2`, `INV-2` (review H1 of PR #125): a requester's deposit bound to a coordinate before
+/// anything was observed there is never minted against the directed arrival observed there later.
+///
+/// The sequence the review names: a deposit naming an unobserved coordinate, answered to its
+/// request; the endpoint then records a directed arrival there and it becomes final; the core's
+/// `Accepted -> Source-Final` would make it mintable to the requester's destination. The store
+/// refuses it at every step: the ingress cannot bind an unobserved coordinate (fix c); a row that
+/// got there anyway (written by the owner here) is refused at finality by the destination guard,
+/// which now runs on the move to `Source-Final` (fix a), and by the binding rule, which refuses the
+/// directed purposes to a row a request answers or that does not carry the `directed:` label (fix
+/// b). Nothing reaches `Source-Final`, and `directed_deposit()` does not answer with either row as
+/// the arrival's deposit.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a6_2_inv_2_a_deposit_bound_before_its_directed_arrival_is_observed_is_never_minted(
+    pool: PgPool,
+) {
+    declarations(&pool).await;
+    let ingress = login(&pool, "dd_ingress_h1_for_tests", bezent_store::INGRESS_ROLE).await;
+    let core = login(&pool, "dd_core_h1_for_tests", bezent_store::CORE_ROLE).await;
+    let reference_7 = deposit_ref(&pool, 7).await;
+    let reference_8 = deposit_ref(&pool, 8).await;
+
+    // 1. The ingress binds a coordinate nothing was observed at: refused (fix c), as a request
+    //    naming it is (ERR-SourceNotFound).
+    let forged = format!(
+        "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+             destination_network, destination, refund_destination_network, refund_destination, \
+             state, source_network, source_block_number, source_block_hash, source_position_kind, \
+             source_position_index) \
+         VALUES ('{reference_7}', 'ref-h1', 'deposit', 'asset-a', {AMOUNT}, 'issuing', \
+             '{OTHER_RECIPIENT}', 'origin-a', '{OTHER_ADDRESS}', 'Received', 'origin-a', 7, \
+             '\\xaa', 'log', 1)"
+    );
+    let err = sqlx::raw_sql(&forged)
+        .execute(&ingress)
+        .await
+        .expect_err("the ingress binds an unobserved coordinate");
+    assert_refusal(&err, "REQ-RQ-3", "an unobserved coordinate");
+    assert_eq!(count_transfers(&pool).await, 0);
+
+    // The same rows as if they had got there (the owner is exempt from the writer guard): one
+    // answered to a request with the attacker's destination, at block 7; one with every field the
+    // arrival will record but a request's own reference, unanswered, at block 8. Both Accepted.
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO requesters (requester) VALUES ('alpha'); \
+             INSERT INTO intake (request_reference, requester, kind, body, body_digest) \
+               VALUES ('ref-h1', 'alpha', 'deposit', '{{}}', '\\x01'); \
+             {forged}; \
+             INSERT INTO intake_answers (intake_id, transfer_id, bridge_reference) \
+               SELECT i.id, t.id, t.bridge_reference FROM intake i, transfers t \
+               WHERE i.request_reference = 'ref-h1' AND t.bridge_reference = '{reference_7}'; \
+             INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+                 destination_network, destination, refund_destination_network, \
+                 refund_destination, state, source_network, source_block_number, \
+                 source_block_hash, source_position_kind, source_position_index) \
+               VALUES ('{reference_8}', 'ref-h1-b', 'deposit', 'asset-a', {AMOUNT}, 'issuing', \
+                 '{RECIPIENT}', 'origin-a', '{REFUND}', 'Received', 'origin-a', 8, '\\xaa', \
+                 'log', 1); \
+             INSERT INTO transitions (transfer_id, from_state, to_state) \
+               SELECT id, 'Received', 'Accepted' FROM transfers"
+        ),
+    )
+    .await;
+
+    // 2. The endpoint records a directed arrival at both coordinates, and both become final.
+    final_directed(&pool, 7).await;
+    final_directed(&pool, 8).await;
+
+    // 3. The core's Accepted -> Source-Final, on the final head, is refused for both: the answered
+    //    one by the destination guard on finalisation (fix a), the unanswered one by the binding
+    //    rule's directed purpose (fix b). The owner is held to it as well.
+    for (block, reference, why) in [
+        (7, &reference_7, "a request already answers this transfer"),
+        (8, &reference_8, "directed: label"),
+    ] {
+        let finalise = format!(
+            "INSERT INTO transitions (transfer_id, from_state, to_state, network, block_number, \
+                 block_hash, block_time) \
+             SELECT id, 'Accepted', 'Source-Final', 'origin-a', {block} + 20, '\\xff', \
+                 '{BLOCK_TIME}' FROM transfers WHERE bridge_reference = '{reference}'"
+        );
+        let err = sqlx::raw_sql(&finalise)
+            .execute(&core)
+            .await
+            .expect_err("a requester's deposit becomes final on a directed arrival");
+        assert_refusal(&err, "REQ-IN-10", &finalise);
+        assert!(
+            err.as_database_error().unwrap().message().contains(why),
+            "{err}"
+        );
+        assert_refused(&pool, &finalise, "REQ-IN-10").await;
+    }
+    assert_eq!(
+        text(
+            &pool,
+            "SELECT string_agg(state::text, ',' ORDER BY id) FROM transfers"
+        )
+        .await,
+        "Accepted,Accepted"
+    );
+    assert!(
+        flag(
+            &pool,
+            "SELECT bool_and(source_final_network IS NULL) FROM transfers"
+        )
+        .await
+    );
+    for block in [7, 8] {
+        let err = directed_deposit(&core, block)
+            .await
+            .expect_err("a requester's deposit answered as the arrival's");
+        assert_refusal(
+            &err,
+            "AC-A6.2",
+            "directed_deposit over a requester's deposit",
+        );
+    }
 }
