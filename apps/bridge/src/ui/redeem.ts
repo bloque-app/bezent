@@ -376,9 +376,9 @@ export function initRedeem(host: RedeemHost) {
       const snap = live();
       if (snap) rows.push(...redeemRows(snap));
     }
-    if (r.pending) rows.push(['Reference', `locked: the redemption ${r.pending.txHash} may still be included, so this reference is kept until Kreivo records it or it can no longer be included`]);
+    if (r.pending) rows.push(['Reference', `locked: the redemption ${r.pending.txHash} may still be included, so this reference is kept, and Redeem is off, until Kreivo records it or it can no longer be included`]);
     facts($('redeem-review'), rows);
-    button.disabled = host.busy() || r.reading || !n || !r.facts || !live();
+    button.disabled = host.busy() || r.reading || !!r.pending || !n || !r.facts || !live();
     // After the page's lock (main.ts draws it first): an unclear redemption keeps its reference.
     $<HTMLButtonElement>('redeem-new-reference').disabled = host.busy() || !!r.pending;
   }
@@ -395,6 +395,11 @@ export function initRedeem(host: RedeemHost) {
   button.addEventListener('click', () => void onRedeem());
   async function onRedeem() {
     if (host.busy() || r.reading) return;
+    if (r.pending) {
+      // L6: a second redemption could pay out twice while the first may still be included.
+      progressList($('redeem-progress'))(`The redemption ${r.pending.txHash} may still be included, so no other is sent until Kreivo records it or it can no longer be included. Nothing was signed.`, 'error');
+      return;
+    }
     const t = contract();
     const a = r.account;
     // The snapshot: from here on the redemption uses only this, never the form.
@@ -447,8 +452,6 @@ export function initRedeem(host: RedeemHost) {
       link.href = host.statusLink(snap.redeemer.address, snap.reference);
       link.textContent = 'Follow this redemption’s status';
       $('redeem-link').replaceChildren(link);
-      // The contract now records this reference: an earlier unclear redemption with it is settled too.
-      if (r.pending?.reference === snap.reference) r.pending = undefined;
       r.reference = freshReference();
     } catch (e) {
       step(errorText(e), 'error');
@@ -507,6 +510,7 @@ export function initRedeem(host: RedeemHost) {
     /** The network or Kreivo changed: what was read is for another chain. */
     reset() {
       r.gen++;
+      r.pending = undefined; // Its watcher stops (`settle`'s `stopped`): it read the chain that has gone.
       r.account = undefined;
       r.facts = undefined;
       r.reading = false;

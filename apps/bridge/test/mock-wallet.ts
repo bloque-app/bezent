@@ -155,12 +155,15 @@ export function mockWallet(o: MockOptions = {}) {
 
   // The payouts: a Transfer from the reserve, then the emitter's Reference, in one transaction each.
   const payoutLogs: ReturnType<typeof log>[] = [];
+  // The token's Transfer logs from the reserve (a search reads these to find which transactions to read first).
+  const reserveLogs: ReturnType<typeof log>[] = [];
   (o.payouts ?? []).forEach((p, i) => {
     const hash = keccak256(numberToHex(10_000 + i));
     const transfer = log(TOKEN, encodeEventTopics({ abi: tokenAbi, eventName: 'Transfer', args: { from: RESERVE, to: p.to } }) as Hex[],
       encodeAbiParameters([{ type: 'uint256' }], [p.amount]), 7, hash, p.block);
     const reference = log(EMITTER, encodeEventTopics({ abi: referenceEmitterAbi, eventName: 'Reference', args: { ref: p.reference } }) as Hex[], '0x', 8, hash, p.block);
     payoutLogs.push(reference);
+    reserveLogs.push(transfer);
     receipts.set(hash, receipt(hash, RESERVE, RESERVE, [transfer, reference], p.block));
   });
   (o.bogusReferences ?? []).forEach((b, i) => {
@@ -171,6 +174,7 @@ export function mockWallet(o: MockOptions = {}) {
     const logs = [transfer(OWNER.address, 3), ...Array.from({ length: b.reserveTransfers ?? 0 }, (_, k) => transfer(RESERVE, 4 + k))];
     const reference = log(EMITTER, encodeEventTopics({ abi: referenceEmitterAbi, eventName: 'Reference', args: { ref: b.reference } }) as Hex[], '0x', 9, hash, b.block);
     payoutLogs.push(reference);
+    reserveLogs.push(...logs.filter((l) => l.topics[1] === encodeEventTopics({ abi: tokenAbi, eventName: 'Transfer', args: { from: RESERVE } })[1]));
     receipts.set(hash, receipt(hash, OWNER.address, EMITTER, [...logs, reference], b.block));
   });
   const block = (n: number) => ({
@@ -303,9 +307,10 @@ export function mockWallet(o: MockOptions = {}) {
         case 'eth_getLogs': {
           const f = arg<{ address: Address; topics: (Hex | null)[]; fromBlock: Hex; toBlock: Hex }>(0);
           const [from, to] = [Number(f.fromBlock), Number(f.toBlock)];
-          logRequests.push({ from, to });
+          const ofReserve = getAddress(f.address) === TOKEN;
+          if (!ofReserve) logRequests.push({ from, to }); // The emitter's searches only.
           if (o.maxLogRange !== undefined && to - from + 1 > o.maxLogRange) throw fail(-32000, 'query returned more than 10000 results');
-          return payoutLogs.filter(
+          return (ofReserve ? reserveLogs : payoutLogs).filter(
             (l) => getAddress(l.address) === getAddress(f.address) && l.topics[1] === f.topics[1] && Number(l.blockNumber) >= from && Number(l.blockNumber) <= to,
           );
         }

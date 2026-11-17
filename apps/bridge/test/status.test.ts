@@ -99,6 +99,26 @@ describe('a payout by its reference', () => {
     expect(capped).toMatchObject({ others: [], unexamined: 1 });
   });
 
+  it('reads Reference logs whose transaction transfers from the reserve first, so spam cannot push the payout past the cap', async () => {
+    const { s } = await session({
+      payouts: [{ reference: REF, to: TO, amount: 5_000_000n, block: 60 }],
+      // 120 newer Reference logs anyone could emit, none with a transfer from the reserve.
+      bogusReferences: Array.from({ length: 120 }, () => ({ reference: REF, block: 95 })),
+      finalized: 90,
+    });
+    const r = await findPayout(s.public, network, EMITTER, 10n, REF);
+    expect(r.found).toMatchObject({ blockNumber: 60n, transfers: [{ to: TO, amount: 5_000_000n }] });
+    expect(r.unpaid).toHaveLength(99);
+    expect(r.unexamined).toBe(21);
+  });
+
+  it('reports what it could not examine when spam past the cap hides every Reference log with a transfer', async () => {
+    const { s } = await session({ bogusReferences: Array.from({ length: 120 }, () => ({ reference: REF, block: 95 })) });
+    const r = await findPayout(s.public, network, EMITTER, 10n, REF);
+    expect(r.found).toBeUndefined();
+    expect(r.unexamined).toBe(20);
+  });
+
   it('flags a payout to another address, or of another amount: no fee comes out of a delivery', async () => {
     const { s } = await session({ payouts: [{ reference: REF, to: TO, amount: 4_990_000n, block: 60 }] });
     const r = await findPayout(s.public, network, EMITTER, 10n, REF);

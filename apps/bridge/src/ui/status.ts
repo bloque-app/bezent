@@ -82,7 +82,7 @@ function routeRows(r: RouteResult): [string, string][] {
 }
 
 /** What a payout search says, for the headline: `no` and `reorged` leave it as it was. */
-type Paid = 'yes' | 'pending' | 'reorged' | 'no' | 'bad' | 'twice';
+type Paid = 'yes' | 'pending' | 'reorged' | 'no' | 'bad' | 'twice' | 'unknown';
 
 export const UNPAID_LABEL = 'Reference logs without a payout (anyone can emit these)';
 
@@ -91,8 +91,14 @@ function searchRows(label: string, s: PayoutSearch, check: { to: Address; amount
   const rows: [string, string][] = [];
   let paid: Paid = 'no';
   const p = s.found;
-  if (!p) rows.push([label, `none found in ${where}`]);
-  else {
+  if (!p) {
+    rows.push([label, `none found${s.unexamined ? ' among those examined' : ''} in ${where}`]);
+    // Past the cap, a real payout may be among the Reference logs not read: that is not "not paid".
+    if (s.unexamined) {
+      rows.push(['Undetermined', `${s.unexamined} more Reference logs carry this reference than the page reads (anyone can emit them), so whether a payout exists is not determined`]);
+      paid = 'unknown';
+    }
+  } else {
     rows.push([label, `${p.txHash}, Reference log ${p.referenceLog}; ${finalText(p.finality)}`]);
     const settled = p.finality.canonical && p.finality.final;
     const as = settled ? 'Paid' : p.finality.canonical ? 'Transfer (included, not final)' : 'Transfer (reorganised away)';
@@ -104,7 +110,8 @@ function searchRows(label: string, s: PayoutSearch, check: { to: Address; amount
   }
   for (const o of s.others) {
     rows.push([`Another ${label.toLowerCase()} with the same reference`, `${o.txHash}, Reference log ${o.referenceLog}; ${finalText(o.finality)}`]);
-    paid = 'twice';
+    // Only a payout that is final and canonical is a second one: an included or reorganised one decides nothing.
+    if (o.finality.canonical && o.finality.final) paid = 'twice';
   }
   for (const u of s.unpaid) {
     const why = u.transfers.length === 0 ? 'its transaction moves nothing from the reserve' : `its transaction moves ${u.transfers.length} transfers from the reserve, not one`;
@@ -186,7 +193,9 @@ export function initStatus(host: StatusHost) {
           const from = c.blockNumber > (n.payoutsFrom as bigint) ? c.blockNumber : (n.payoutsFrom as bigint);
           const sr = searchRows('Return', await findPayout(s.public, n, n.emitter as Address, from, ref), { to: a.refund, amount: a.amount });
           rows.push(...sr.rows);
-          if (sr.paid !== 'no' && sr.paid !== 'reorged') {
+          if (sr.paid === 'unknown') {
+            if (!minted) state = 'could not be determined: too many Reference logs carry the return’s reference to read them all (anyone can emit them)';
+          } else if (sr.paid !== 'no' && sr.paid !== 'reorged') {
             // A return follows only a deposit that can never be minted: both at once is an incident, not a state.
             state = minted
               ? 'minted on Kreivo, and a return carries its reference: both should never happen; report it'
@@ -261,7 +270,9 @@ export function initStatus(host: StatusHost) {
             await assertChain(p.s);
             const sr = searchRows('Payout', await findPayout(p.s.public, n, n.emitter as Address, n.payoutsFrom as bigint, payoutRef), { to, amount: red.amount });
             rows.push(...sr.rows);
-            if (sr.paid !== 'no' && sr.paid !== 'reorged') {
+            if (sr.paid === 'unknown') {
+              if (!red.refunded) state = 'redeemed on Kreivo; whether it was paid out could not be determined: too many Reference logs carry its reference to read them all (anyone can emit them)';
+            } else if (sr.paid !== 'no' && sr.paid !== 'reorged') {
               // A refund mint follows only a payout proven not executed: both at once is an incident, not a state.
               state = red.refunded
                 ? 'refunded on Kreivo, and a payout carries its reference: both should never happen; report it'

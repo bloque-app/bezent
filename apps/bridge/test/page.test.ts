@@ -440,6 +440,21 @@ describe('a signature over another payload, and an unclear outcome', () => {
     expect($('redeem-progress').textContent).toMatch(/until block 1064 is final; the reference stays locked meanwhile/);
   });
 
+  it('keeps Redeem off, and refuses a second redemption, until the first settles (L6)', async () => {
+    const { UnclearOutcome } = await redeeming();
+    fake.head = 1_000;
+    fake.redeems[0]!.reject(new UnclearOutcome('The redemption 0x77… was broadcast, but following it failed.', `0x${'77'.repeat(32)}`, 1_064));
+    await flush();
+    expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+    expect($('redeem-review').textContent).toMatch(/Redeem is off/);
+    // A click that reaches the handler anyway (the attribute is not the lock) starts nothing.
+    $<HTMLButtonElement>('redeem').disabled = false;
+    $<HTMLButtonElement>('redeem').click();
+    await flush();
+    expect(fake.redeems).toHaveLength(1);
+    expect($('redeem-progress').textContent).toMatch(/no other is sent until Kreivo records it.* Nothing was signed/);
+  });
+
   it('frees the reference once Kreivo records the redemption, and links to its status', async () => {
     const { reference, UnclearOutcome } = await redeeming();
     fake.recorded = {

@@ -209,6 +209,26 @@ describe('a withdrawal’s status', () => {
     expect(r[UNPAID_LABEL]).toMatch(/block 85/);
   });
 
+  it('more Reference logs than the page reads, and none a payout, is “could not be determined”, not “not paid”', async () => {
+    kreivo.redemption = record();
+    const { status } = await page({ bogusReferences: Array.from({ length: 120 }, () => ({ reference: ref, block: 85 })) });
+    await status.withdrawal(ALICE_SS58, REF);
+    const r = rows();
+    expect(r['State (from chain data)']).toMatch(/could not be determined: too many Reference logs/);
+    expect(r['State (from chain data)']).not.toMatch(/payout not found yet/);
+    expect(r['Undetermined']).toMatch(/^20 more Reference logs/);
+  });
+
+  it('a real payout is found even behind more than 100 Reference logs anyone emitted', async () => {
+    kreivo.redemption = record();
+    const { status } = await page({
+      payouts: [{ reference: ref, to: TO, amount: 5_000_000n, block: 80 }],
+      bogusReferences: Array.from({ length: 120 }, () => ({ reference: ref, block: 95 })),
+    });
+    await status.withdrawal(ALICE_SS58, REF);
+    expect(rows()['State (from chain data)']).toBe('paid out on Polygon');
+  });
+
   it('a payout included but not final yet is not “paid”', async () => {
     kreivo.redemption = record();
     const { status } = await page({ finalized: 79, payouts: [{ reference: ref, to: TO, amount: 5_000_000n, block: 80 }] });

@@ -108,7 +108,8 @@ export interface PayoutSearch {
   /** `Reference` logs carrying the reference whose transaction moves nothing, or more than one transfer, from the
    * reserve. Anyone can emit these: they are no payout, and decide nothing. */
   unpaid: ReferenceLog[];
-  /** `Reference` logs found but not examined, past `maxHits`. */
+  /** `Reference` logs found but not examined, past `maxHits` (those whose transaction moves nothing from the
+   * reserve go last). When there are any and nothing was found, whether a payout exists is not determined. */
   unexamined: number;
   /** The blocks searched, newest first; `complete` when they reach `from`. */
   searched: { from: bigint; to: bigint };
@@ -138,12 +139,19 @@ export async function findPayout(pc: Reads, n: ResolvedNetwork, emitter: Address
   // Newest first; one per transaction.
   const hits: { txHash: Hex; logIndex: number; blockNumber: bigint; blockHash: Hex }[] = [];
   const seen = new Set<string>();
+  // Transactions holding a transfer of the token from the reserve in the blocks searched. Only the reserve moves
+  // these, so spam cannot add to them: a `Reference` hit in one of them is read before any other.
+  const fromReserve = new Set<string>();
   while (to >= from && requests < maxRequests) {
     const lo = to - chunk + 1n > from ? to - chunk + 1n : from;
     requests++;
     let logs;
+    let reserved;
     try {
-      logs = await pc.getLogs({ address: emitter, event: referenceEmitterAbi[0], args: { ref: reference }, fromBlock: lo, toBlock: to, strict: true });
+      [logs, reserved] = await Promise.all([
+        pc.getLogs({ address: emitter, event: referenceEmitterAbi[0], args: { ref: reference }, fromBlock: lo, toBlock: to, strict: true }),
+        pc.getLogs({ address: n.token, event: tokenAbi.find((a) => a.type === 'event' && a.name === 'Transfer')!, args: { from: n.reserve }, fromBlock: lo, toBlock: to, strict: true }),
+      ]);
     } catch (e) {
       if (chunk > 1_000n) {
         chunk /= 2n;
@@ -151,6 +159,7 @@ export async function findPayout(pc: Reads, n: ResolvedNetwork, emitter: Address
       }
       throw new Error(`${n.label} refused the log search (${(e as Error).message.split('\n')[0]}).`);
     }
+    for (const t of reserved) if (t.transactionHash) fromReserve.add(t.transactionHash.toLowerCase());
     const inChunk = logs
       .filter((l) => l.args.ref?.toLowerCase() === reference.toLowerCase() && l.transactionHash && l.blockHash && l.logIndex !== null && l.blockNumber !== null)
       .sort((a, b) => (a.blockNumber === b.blockNumber ? b.logIndex! - a.logIndex! : a.blockNumber! > b.blockNumber! ? -1 : 1));
@@ -167,7 +176,15 @@ export async function findPayout(pc: Reads, n: ResolvedNetwork, emitter: Address
     }
     to = lo - 1n;
   }
-  const examined = hits.slice(0, maxHits);
+  // Those whose transaction transfers from the reserve first (newest first within each), so that Reference logs
+  // anyone emitted cannot push the real payout past `maxHits`; shown newest first.
+  const rank = (h: { txHash: Hex }) => (fromReserve.has(h.txHash.toLowerCase()) ? 0 : 1);
+  const examined = hits
+    .map((h, i) => ({ h, i }))
+    .sort((a, b) => rank(a.h) - rank(b.h) || a.i - b.i)
+    .slice(0, maxHits)
+    .sort((a, b) => a.i - b.i)
+    .map((x) => x.h);
   const logs = await Promise.all(examined.map((h) => referenceAt(pc, n, h.txHash, h.logIndex, h.blockNumber, h.blockHash)));
   const payouts = await Promise.all(
     logs.filter((l) => l.transfers.length === 1).map(async (l) => ({ ...l, finality: await finality(pc, l.blockNumber, l.blockHash) })),
