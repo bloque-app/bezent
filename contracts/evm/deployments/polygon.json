@@ -1,0 +1,31 @@
+{
+  "network": "polygon",
+  "chainId": 137,
+  "purpose": "Directing code for bUSDC on Polygon PoS mainnet (F-018, T-018-18), in front of the production vault. Native USDC only.",
+  "config": "contracts/evm/config/polygon.json",
+  "deployer": "0x73e9d0921F4C596d22a1C3C5B6c76Cc2D19E1e1C",
+  "vault": {
+    "safe": "0x584A9E72ebC1cdBA2F20233764eef08d528792ca",
+    "emitter": "0xd8a9cfC1993e1B0C7D2FA96561688ca9d5cB4EC3",
+    "lastDeploymentBlock": 96814452,
+    "note": "Deployed and verified with script/DeployVault.s.sol on 2026-11-06 (F-008). Only the addresses the directing code and the web app pin are recorded here."
+  },
+  "directed": {
+    "script": "script/DeployDirected.s.sol",
+    "address": "0x35495A8273F7450fb7D25bCe6bcd5Ad4aa3F824E",
+    "block": 97485770,
+    "tx": "0x83535c5cca4df35b57fa904db90c1198dcc5aaa19ecb311cab55f384cf3daba5",
+    "codeHash": "0x399c8e357fde99f5f3b8b7db3e77d68dcaad5b71fe705d39f4619674e3feb1ba",
+    "token": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+    "reserve": "0x584A9E72ebC1cdBA2F20233764eef08d528792ca",
+    "minimum": "1000000",
+    "maximum": "50000000000",
+    "kreivoPerTransferMax": {
+      "value": "50000000000",
+      "source": "bounds(Here(101)) of the bezent contract 0x361d9535ca78edf68a88c7abd44cdec7086f8e85bcb8aedb724462eb3f2e5821 on Kreivo mainnet, read at release time"
+    }
+  },
+  "verified": {
+    "result": "deployed and verified on Polygon mainnet; the runtime code hash (eth_getCode, immutables included) matches a local build with this file's token, reserve and limits"
+  }
+}

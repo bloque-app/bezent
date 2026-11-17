@@ -77,9 +77,24 @@ reused.
 
 | ID | Task | Traces | Done when |
 |---|---|---|---|
-| T-018-18 | Deploy `DirectedDeposit` on Polygon mainnet; declaration (`REQ-AS-11`); endpoint configuration; verifier passes | `REQ-AS-11`, `REQ-GV-3` | Verifier green against mainnet; address published with the vault |
+| T-018-18 | Deploy `DirectedDeposit` on Polygon mainnet; declaration (`REQ-AS-11`); endpoint configuration; verifier passes. **Contract step done** 2026-11-17, below | `REQ-AS-11`, `REQ-GV-3` | Verifier green against mainnet; address published with the vault |
 | T-018-19 | Runbooks: a return that fails, spam at the minimum (alerts only), an `UnpairedDirection` | `REQ-IC-6`, `NFR-9` | Each exercised on the test bed |
 | T-018-20 | Round trip from `bridge.bloque.network`: a 1 USDC deposit, mint, redeem the 1 bUSDC (production's redemption minimum is 1 bUSDC, Open 14), payout; one return exercised | `M-4` | Every leg at its coordinate, the reserve check at zero divergence throughout, the statement shows it |
+
+**T-018-18, the contract step done (2026-11-17).** `DirectedDeposit` is deployed and verified on Polygon PoS mainnet
+(chain 137) at `0x35495A8273F7450fb7D25bCe6bcd5Ad4aa3F824E`, in
+`0x83535c5cca4df35b57fa904db90c1198dcc5aaa19ecb311cab55f384cf3daba5` (block 97 485 770), in front of the production
+vault `0x584A9E72ebC1cdBA2F20233764eef08d528792ca`, for native USDC, limits 1 to 50 000 USDC. Its runtime code hash,
+`0x399c…b1ba`, matches a local build. `KREIVO_PER_TRANSFER_MAX` was read from Kreivo mainnet at release time:
+50 000 000 000. Every value is in `contracts/evm/deployments/polygon.json`. The web app pins the contract, the vault,
+the code hash and the vault's reference emitter for Polygon, and Kreivo's refused recipients (the bezent contract's
+account and aledgent's two settlement contracts on Kreivo mainnet, complete for the known ledgers), so a production
+build resolves Polygon (`apps/bridge/src/config/networks.ts`). The app refuses those recipients; the production store
+does not yet declare them, and the core refuses only `ledger_accounts_listed`. What is left of T-018-18 is the
+deployment's: the declaration (`directing_code`, and the refused recipients in `ledger_accounts`, the deploy
+repository's `ledger-accounts-kreivo.sql`), the EVM endpoint's `[[directing]]` (the same address, `from_block`
+97 485 770), and the release that carries them. **Release step:** declare the refused recipients in the production
+store before directed deposits open; until then the app is the only guard.
 
 **T-018-19, done (2026-11-17).** Three runbooks, each exercised on the full-chain bed (`services/full-chain`, Polygon an
 anvil fork with the real USDC and the vault and `DirectedDeposit` from the repository's scripts, Kreivo the in-memory

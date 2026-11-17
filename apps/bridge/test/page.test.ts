@@ -46,6 +46,10 @@ const fake = vi.hoisted(() => ({
   head: 1,
   /** The finalized head cannot be read. */
   fail: false,
+  /** The Web Locks held, shared by every page of a test as a browser shares them across its tabs. */
+  held: new Set<string>(),
+  /** The names of the Web Locks the page asked for, in order. */
+  asked: [] as string[],
 }));
 
 vi.mock('../src/config/build', async () => {
@@ -168,7 +172,24 @@ const answerRead = async (i = 0) => {
 /** The page's storage, kept across `load({ keep: true })` as a browser keeps it across a reload. */
 let store = new Map<string, string>();
 
-async function load(o: { keep?: boolean; blocked?: boolean; stuck?: boolean } = {}) {
+/** A Web Locks manager over `fake.held`: `ifAvailable` answers `null` while another holds the name. */
+const webLocks = {
+  request: async (name: string, opts: { ifAvailable?: boolean }, cb: (lock: { name: string; mode: string } | null) => Promise<unknown>) => {
+    fake.asked.push(name);
+    if (fake.held.has(name)) {
+      if (!opts.ifAvailable) throw new Error('the fake waits for no one');
+      return cb(null);
+    }
+    fake.held.add(name);
+    try {
+      return await cb({ name, mode: 'exclusive' });
+    } finally {
+      fake.held.delete(name);
+    }
+  },
+};
+
+async function load(o: { keep?: boolean; blocked?: boolean; stuck?: boolean; unreadableKey?: string; noLocks?: boolean; full?: boolean } = {}) {
   vi.resetModules();
   fake.connects.length = 0;
   fake.deposits.length = 0;
@@ -180,6 +201,10 @@ async function load(o: { keep?: boolean; blocked?: boolean; stuck?: boolean } = 
   fake.head = 1;
   fake.fail = false;
   fake.onRedemption = undefined;
+  fake.held.clear();
+  fake.asked.length = 0;
+  // happy-dom has no Web Locks (`navigator.locks` is null): the page gets the fake, or none.
+  Object.defineProperty(navigator, 'locks', { configurable: true, get: () => (o.noLocks ? null : webLocks) });
   // A storage of the test's own: Node's global localStorage, where it has one, is not the page's.
   if (!o.keep) store = new Map<string, string>();
   const refused = () => {
@@ -190,8 +215,14 @@ async function load(o: { keep?: boolean; blocked?: boolean; stuck?: boolean } = 
     o.blocked
       ? { getItem: refused, setItem: refused, removeItem: refused, clear: refused, key: refused, get length(): number { return refused(); } }
       : {
-          getItem: (k: string) => store.get(k) ?? null,
-          setItem: (k: string, v: string) => void store.set(k, String(v)),
+          getItem: (k: string) => {
+            if (k === o.unreadableKey) throw new DOMException('unreadable', 'UnknownError');
+            return store.get(k) ?? null;
+          },
+          setItem: (k: string, v: string) => {
+            if (o.full && k.startsWith('bezent.bridge.pending/')) throw new DOMException('full', 'QuotaExceededError');
+            store.set(k, String(v));
+          },
           removeItem: (k: string) => {
             if (o.stuck && k.startsWith('bezent.bridge.pending/')) throw new DOMException('stuck', 'QuotaExceededError');
             store.delete(k);
@@ -239,6 +270,7 @@ afterEach(() => {
   for (const [type, fn] of registered.splice(0)) window.removeEventListener(type, fn);
   document.body.innerHTML = '';
   vi.unstubAllGlobals();
+  delete (navigator as unknown as Record<string, unknown>).locks;
 });
 
 describe('the page’s wallet reads', () => {
@@ -718,6 +750,27 @@ describe('a signature over another payload, and an unclear outcome', () => {
     expect(lockRow()).toMatch(/storage unavailable/);
   });
 
+  it('counts a record whose read throws as unreadable: it locks Redeem, it does not fail open', async () => {
+    store = new Map();
+    store.set(pendingKey, record());
+    await load({ keep: true, unreadableKey: pendingKey });
+    expect(lockRow()).toMatch(/a stored redemption record can’t be read \(reading it failed: .*\); Redeem is off until you check it/);
+    expect(lockRow()).not.toMatch(/storage unavailable/);
+    await connectAccount();
+    expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+    $<HTMLButtonElement>('redeem').disabled = false;
+    $<HTMLButtonElement>('redeem').click();
+    await flush();
+    expect(fake.redeems).toHaveLength(0);
+    // Cleared on confirmation, while its read still throws.
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    window.confirm = () => true;
+    clearButton()!.click();
+    await flush();
+    expect(store.has(pendingKey)).toBe(false);
+    expect(lockRow()).not.toMatch(/can’t be read/);
+  });
+
   it('says nothing about storage when it is readable', async () => {
     await load();
     expect(lockRow()).not.toMatch(/storage unavailable/);
@@ -768,6 +821,131 @@ describe('a signature over another payload, and an unclear outcome', () => {
       expect($('redeem-reference').textContent).toBe(`0x${'34'.repeat(32)}`);
       expect($('redeem-progress').textContent).toMatch(/Another tab already holds a lock for this redeemer .*0x9{64}.*0x7{64}, is not stored/);
       expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+    });
+
+    it('watches this tab’s unstored redemption as a second lock: Redeem stays off after the adopted lock settles, until its own does', async () => {
+      const { UnclearOutcome } = await redeeming();
+      // The adopted record can no longer be included at head 2 000; this tab's own redemption, valid to 5 000, can.
+      fake.head = 2_000;
+      const theirs = record({ txHash: `0x${'99'.repeat(32)}`, reference: `0x${'34'.repeat(32)}`, validUntil: 1_500 }, { reference: `0x${'34'.repeat(32)}` });
+      store.set(pendingKey, theirs);
+      fake.redeems[0]!.reject(new UnclearOutcome('x', `0x${'77'.repeat(32)}`, 5_000));
+      await flush();
+      // The adopted lock settled (nothing recorded, past its mortality) and was removed from storage.
+      expect($('redeem-progress').textContent).toMatch(/Block 2000 is final, past the transaction’s mortality/);
+      expect(store.has(pendingKey)).toBe(false);
+      expect(lockRow()).not.toMatch(/locked: the redemption 0x9{64}/);
+      // This tab's own is still held in memory, watched, and keeps Redeem off.
+      expect(lockRow()).toMatch(/Also unclear.*this tab’s redemption 0x7{64} .* may still be included\. It is not stored/);
+      expect(lockRow()).toMatch(/Its watcher last checked at block 2000 \(finalized\)/);
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+      const e = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(e);
+      expect(e.defaultPrevented).toBe(true);
+      // A click that reaches the handler anyway signs nothing.
+      $<HTMLButtonElement>('redeem').disabled = false;
+      $<HTMLButtonElement>('redeem').click();
+      await flush();
+      expect(fake.redeems).toHaveLength(1);
+      expect($('redeem-progress').textContent).toMatch(/The redemption 0x7{64} may still be included, so no other is sent.* Nothing was signed/);
+    });
+
+    it('frees this tab’s unstored redemption once it settles, and only then', async () => {
+      const { UnclearOutcome } = await redeeming();
+      fake.head = 2_000;
+      const theirs = record({ txHash: `0x${'99'.repeat(32)}`, reference: `0x${'34'.repeat(32)}`, validUntil: 5_000 }, { reference: `0x${'34'.repeat(32)}` });
+      store.set(pendingKey, theirs);
+      // This tab's own can no longer be included at head 2 000: it settles at once, the adopted lock stays.
+      fake.redeems[0]!.reject(new UnclearOutcome('x', `0x${'77'.repeat(32)}`, 1_064));
+      await flush();
+      expect($('redeem-progress').textContent).toMatch(/past the mortality of this tab’s redemption 0x7{64}.*nothing was redeemed by it/);
+      expect(lockRow()).not.toMatch(/Also unclear/);
+      expect(lockRow()).toMatch(/locked: the redemption 0x9{64}/);
+      expect(store.get(pendingKey)).toBe(theirs);
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+    });
+
+    it('runs the redemption inside the Web Lock bezent.bridge.redeem, and holds it until the redemption ends', async () => {
+      await redeeming();
+      expect(fake.asked).toEqual(['bezent.bridge.redeem']);
+      expect(fake.held.has('bezent.bridge.redeem')).toBe(true);
+      fake.redeems[0]!.reject(new Error('the wallet declined'));
+      await flush();
+      expect(fake.held.has('bezent.bridge.redeem')).toBe(false);
+    });
+
+    /** What a second tab of the browser gets when it asks for the redeem lock as its click does. */
+    const secondTab = () => webLocks.request('bezent.bridge.redeem', { ifAvailable: true }, async (lock) => lock);
+    /** The watcher's 12 s wait runs in 40 ms (undone with the test's globals), so a test can let it settle. */
+    function fastWatcher() {
+      const real = globalThis.setTimeout;
+      vi.stubGlobal('setTimeout', ((fn: () => void, ms?: number, ...rest: unknown[]) => real(fn, ms === 12_000 ? 40 : ms, ...rest)) as typeof setTimeout);
+    }
+    /** The head moves past the transaction's mortality, and the watcher reads it. */
+    async function settleNow() {
+      fake.head = 2_000;
+      await new Promise((r) => setTimeout(r, 200));
+      await flush();
+    }
+
+    it('keeps the Web Lock after an unclear outcome whose record could not be stored, until it settles', async () => {
+      fastWatcher();
+      await pend({ full: true });
+      expect(store.has(pendingKey)).toBe(false);
+      expect(lockRow()).toMatch(/could not store the lock/);
+      // A second tab reads no record, and is refused the lock: it signs nothing.
+      expect(fake.held.has('bezent.bridge.redeem')).toBe(true);
+      expect(await secondTab()).toBeNull();
+      await settleNow();
+      expect($('redeem-progress').textContent).toMatch(/nothing was redeemed/);
+      expect(fake.held.has('bezent.bridge.redeem')).toBe(false);
+      expect(await secondTab()).not.toBeNull();
+    });
+
+    it('keeps the Web Lock while this tab’s unclear redemption is only in memory (another tab’s record is the lock), until it settles', async () => {
+      fastWatcher();
+      const { UnclearOutcome } = await redeeming();
+      fake.head = 1_000;
+      store.set(pendingKey, record({ txHash: `0x${'99'.repeat(32)}`, reference: `0x${'34'.repeat(32)}`, validUntil: 1_064 }, { reference: `0x${'34'.repeat(32)}` }));
+      fake.redeems[0]!.reject(new UnclearOutcome('x', `0x${'77'.repeat(32)}`, 1_064));
+      await flush();
+      expect(lockRow()).toMatch(/Also unclear/);
+      expect(fake.held.has('bezent.bridge.redeem')).toBe(true);
+      expect(await secondTab()).toBeNull();
+      await settleNow();
+      expect(lockRow()).not.toMatch(/Also unclear/);
+      expect(fake.held.has('bezent.bridge.redeem')).toBe(false);
+    });
+
+    it('lets go of the Web Lock at once when the unclear outcome is stored', async () => {
+      await pend();
+      expect(store.has(pendingKey)).toBe(true);
+      expect(fake.held.has('bezent.bridge.redeem')).toBe(false);
+    });
+
+    it('signs nothing while another tab holds the redeem lock (two tabs clicking Redeem together)', async () => {
+      await load();
+      await connectAccount();
+      fake.held.add('bezent.bridge.redeem'); // Another tab is signing.
+      $<HTMLButtonElement>('redeem').click();
+      await flush();
+      expect(fake.redeems).toHaveLength(0);
+      expect($('redeem-progress').textContent).toMatch(/Another tab of this page is redeeming right now.* Nothing was signed/);
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(false);
+      // Once it lets go, this tab redeems.
+      fake.held.delete('bezent.bridge.redeem');
+      $<HTMLButtonElement>('redeem').click();
+      await flush();
+      expect(fake.redeems).toHaveLength(1);
+    });
+
+    it('refuses to redeem in a browser without Web Locks', async () => {
+      await load({ noLocks: true });
+      await connectAccount();
+      $<HTMLButtonElement>('redeem').click();
+      await flush();
+      expect(fake.redeems).toHaveLength(0);
+      expect($('redeem-progress').textContent).toMatch(/does not offer Web Locks.* Nothing was signed/);
     });
 
     it('signs nothing when another tab left a lock since this page read the storage', async () => {

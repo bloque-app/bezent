@@ -330,17 +330,19 @@ export interface PendingConfig {
 }
 
 /** Why a record that decodes is still not one this build could have written: it names a network the build does not
- * carry, or an address, asset, backend or payout the network's configuration contradicts. `undefined` when it holds.
- * A record that fails is as unreadable as a malformed one (it locks, and is cleared only on confirmation). */
+ * carry, or an address, asset or backend the network's configuration contradicts. `undefined` when it holds. Only
+ * the stable fields are checked (the network's key, the Kreivo network, the backend's chain id, the asset's id and
+ * decimals, and the SS58 address derived from the redeemer's account): the network's label and the asset's symbol
+ * are display only, and a later rename must not make a genuine lock unreadable. A record that fails is as unreadable
+ * as a malformed one (it locks, and is cleared only on confirmation). */
 export function pendingProblem(p: Pending, networks: readonly PendingConfig[]): string | undefined {
   const n = networks.find((x) => x.key === p.network);
   if (!n?.kreivo) return `the network ${p.network} is not one this build carries`;
   const k = n.kreivo;
   const s = p.snapshot;
-  if (p.networkLabel !== n.label) return 'its network label does not match';
   if (p.kreivo !== k.network) return `it was sent on ${p.kreivo}, not ${k.network}`;
   if (s.redeemer.address !== encodeSs58(fromHex(p.redeemer), k.ss58Prefix)) return 'its redeemer address does not match its account';
-  if (s.asset.id !== k.asset.id || s.asset.decimals !== k.asset.decimals || s.asset.symbol !== k.asset.symbol) return 'its asset is not the network’s';
+  if (s.asset.id !== k.asset.id || s.asset.decimals !== k.asset.decimals) return 'its asset is not the network’s';
   if (s.backend.kind !== 'evm' || s.backend.chainId !== BigInt(n.chainId)) return 'its backend is not the network’s';
   return undefined;
 }
