@@ -753,9 +753,10 @@ impl Core {
     /// under a pause counts toward its deadline (amendment 0019, open question). Time under any
     /// other condition counts.
     ///
-    /// `since` is the first final head seen after the attempt was ordered, when the clock starts
-    /// no earlier than it ([`Core::unprepared_deadline`]): a hold, or the part of one, from before it
-    /// was never on the clock, so it is not left out again (review L-a of PR #136).
+    /// `since` is where the attempt's clock starts, when it starts later than the holds may have
+    /// ([`Core::unprepared_deadline`]: the later of the attempt's point and the first final head
+    /// seen after it was ordered): a hold, or the part of one, from before it was never on the
+    /// clock, so it is not left out again (reviews L-a of PR #136 and of its fifth fix round).
     async fn deadline_held(
         &self,
         conn: &mut PgConnection,
@@ -2487,7 +2488,7 @@ impl Core {
         };
         let start = at.max(start);
         let deadline = self
-            .deadline_held(conn, t, attempt, start, Some(at))
+            .deadline_held(conn, t, attempt, start, Some(start))
             .await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());

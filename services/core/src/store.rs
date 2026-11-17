@@ -244,9 +244,11 @@ pub async fn final_point(
 /// provider that flaps in and out of the hold from restarting it each time (issue #35).
 ///
 /// `since`, a final head of the destination (the holds' own clock), counts only what was held
-/// after it: a hold left at or before it counts nothing, one that straddles it counts from it. A
-/// clock that already starts at `since` (the first head after the attempt was ordered, review L-a
-/// of PR #136) leaves out no time it never counted.
+/// after it: a hold left at or before it adds nothing to the time held, one that straddles it
+/// counts from it. The first hold is still the first of ALL the holds: the clock restarts where it
+/// was taken whether or not it ended before `since` (review of the fifth fix round), so a later
+/// hold never moves the restart point. A clock that already starts at `since` (the attempt's start,
+/// review L-a of PR #136) leaves out no time it never counted.
 pub async fn held_under_window(
     conn: &mut PgConnection,
     transfer: i64,
@@ -256,7 +258,9 @@ pub async fn held_under_window(
 ) -> sqlx::Result<Option<(DateTime<Utc>, chrono::Duration)>> {
     let row: (Option<DateTime<Utc>>, Option<i64>) = sqlx::query_as(
         "SELECT min(i.taken), \
-                sum(extract(epoch FROM i.released - greatest(i.taken, $4::timestamptz)))::bigint \
+                sum(CASE WHEN $4::timestamptz IS NULL OR i.released > $4::timestamptz \
+                         THEN extract(epoch FROM i.released - greatest(i.taken, $4::timestamptz)) \
+                         ELSE 0 END)::bigint \
          FROM ( \
              SELECT coalesce(x.block_time, $2) AS taken, \
                     (SELECT y.block_time FROM transitions y \
@@ -270,8 +274,7 @@ pub async fn held_under_window(
                AND x.before IS DISTINCT FROM 'CND-PayoutWindow' \
                AND x.id > coalesce((SELECT max(id) FROM transitions \
                                      WHERE transfer_id = $1 AND attempt <= $3), 0)) i \
-         WHERE i.taken IS NOT NULL AND i.released IS NOT NULL \
-           AND ($4::timestamptz IS NULL OR i.released > $4::timestamptz)",
+         WHERE i.taken IS NOT NULL AND i.released IS NOT NULL",
     )
     .bind(transfer)
     .bind(start)

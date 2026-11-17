@@ -904,6 +904,131 @@ async fn req_rv_1_issue_35_a_flapping_refusal_does_not_restart_the_deadline_each
     assert_eq!(refunds(&w).await, 0, "REQ-RF-1: no refund on unknown");
 }
 
+/// REQ-RV-1, REQ-EO-3, CND-PayoutWindow, issue #35 point 1, review of the fifth fix round: the
+/// setup this test had before the first head after the order was recorded. The attempt is held at
+/// head 30, a head from before its order, and left at 1 022, the first head after it. That hold
+/// was never on the clock; the one from 1 522 to 3 000 was. The clock restarts where the FIRST
+/// hold was taken, never later than the attempt's own start (1 022), so it restarts at 1 022
+/// and 1 478 s are left out: review at 2 500 + BUDGET. Taking the first hold from the holds that
+/// count would restart the clock at 1 522, and review would be 500 s late.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_1_issue_35_a_flapping_refusal_with_no_head_after_the_order_keeps_the_restart_point(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [60; 32], 700).await;
+    head(&w.admin, ORIGIN, 30).await;
+    w.cycle(t0()).await;
+    spend(&w, id).await; // held at 30
+    head(&w.admin, ORIGIN, 1_022).await;
+    refuse(&w, id, &disagreed()).await; // left at 1 022: held 992 s, none of it on the clock
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    head(&w.admin, ORIGIN, 1_522).await;
+    spend(&w, id).await; // held again at 1 522
+    head(&w.admin, ORIGIN, 3_000).await;
+    refuse(&w, id, &disagreed()).await; // left at 3 000: held 1 478 s
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+
+    let deadline = 1_022 + BUDGET + 1_478;
+    head(&w.admin, ORIGIN, deadline - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    head(&w.admin, ORIGIN, deadline + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(refunds(&w).await, 0, "REQ-RF-1: no refund on unknown");
+}
+
+/// CND-PayoutWindow, REQ-EO-3, SPEC §5.4 (review of the fifth fix round): a withdrawal is ordered
+/// and no head follows. The allowance's refusal holds it at head 30, a refusal that names nothing
+/// releases it at 1 022 (the first head after the order, where the clock starts), and it is held
+/// again from 1 522 to 3 000. The first hold, though it left nothing on the clock, is where the
+/// restart point is taken from: review at 2 500 + BUDGET (1 022 + the 1 478 s held again), not at
+/// 3 000 + BUDGET.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_eo_3_a_hold_clipped_away_by_the_first_head_still_gives_the_restart_point(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [91; 32], 700).await;
+    head(&w.admin, ORIGIN, 30).await;
+    w.cycle(t0()).await; // ordered, no head after it
+    spend(&w, id).await; // held at 30
+    head(&w.admin, ORIGIN, 1_022).await; // the first head after the order
+    refuse(&w, id, &disagreed()).await; // left at 1 022
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    head(&w.admin, ORIGIN, 1_522).await;
+    spend(&w, id).await; // held again at 1 522
+    head(&w.admin, ORIGIN, 3_000).await;
+    refuse(&w, id, &disagreed()).await; // left at 3 000
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+
+    let deadline = 2_500 + BUDGET;
+    head(&w.admin, ORIGIN, deadline - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await.0,
+        "Source-Final",
+        "reviewed late or early"
+    );
+    head(&w.admin, ORIGIN, deadline + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(refunds(&w).await, 0, "REQ-RF-1: no refund on unknown");
+}
+
+/// As above, with a pause from 1 100 to 1 400 between the two holds. The pause is on the clock
+/// (it is after 1 022) and is left out once: the clock restarts at 1 022, 1 478 s of the second
+/// hold and 300 s of the pause are left out, review at 2 800 + BUDGET. A restart point taken from
+/// the second hold would leave the pause out twice, and review would be 300 s late.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_eo_3_a_pause_between_the_holds_is_left_out_once(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    reserve(&w.admin, 1_000_000).await;
+    let id = withdrawal(&w, 20, [92; 32], 700).await;
+    head(&w.admin, ORIGIN, 30).await;
+    w.cycle(t0()).await; // ordered, no head after it
+    spend(&w, id).await; // held at 30
+    head(&w.admin, ORIGIN, 1_022).await;
+    refuse(&w, id, &disagreed()).await; // left at 1 022
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    head(&w.admin, ORIGIN, 1_100).await;
+    exec(&w.admin, "INSERT INTO pauses (asset) VALUES (NULL)").await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-Paused".into()))
+    );
+    head(&w.admin, ORIGIN, 1_400).await;
+    exec(&w.admin, "DELETE FROM pauses").await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+    head(&w.admin, ORIGIN, 1_522).await;
+    spend(&w, id).await; // held again at 1 522
+    head(&w.admin, ORIGIN, 3_000).await;
+    refuse(&w, id, &disagreed()).await; // left at 3 000
+    assert_eq!(w.state(id).await, ("Source-Final".into(), None));
+
+    let deadline = 2_800 + BUDGET;
+    head(&w.admin, ORIGIN, deadline - 10).await;
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Source-Final", "reviewed early");
+    head(&w.admin, ORIGIN, deadline + 10).await;
+    w.settle(t0()).await;
+    assert_eq!(
+        w.state(id).await.0,
+        "Needs-Review",
+        "the pause was left out twice"
+    );
+}
+
 /// CND-PayoutWindow, issue #35 point 4 (built by pull request #70; amendment 0019 asks the owner
 /// to rule it): of an attempt that takes and leaves the hold more than once, the time *between*
 /// two holds counts toward its deadline, the time *before* the first hold does not (the clock
@@ -1510,9 +1635,10 @@ async fn cnd_payout_window_issue_35_a_hold_at_a_lagging_destination_head_still_c
     refuse(&w, id, &disagreed()).await; // left at 1 010: held 999 s
     assert_eq!(w.state(id).await, ("Source-Final".into(), None));
 
-    // The clock started at 22 (the later of the source's final block, the first head after the
-    // order and the hold), with 999 s held left out.
-    let deadline = 22 + BUDGET + 999;
+    // The clock started at 22 (the later of the source's final block and the first head after the
+    // order, 11). The hold from 11 to 1 010 began before the clock did, at 22: only the 988 s
+    // after it were on the clock.
+    let deadline = 22 + BUDGET + 988;
     head(&w.admin, ORIGIN, deadline - 10).await;
     w.settle(t0()).await;
     assert_eq!(w.state(id).await.0, "Source-Final");
