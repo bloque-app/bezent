@@ -21,6 +21,7 @@ interface IPermitToken {
         external;
 
     function allowance(address owner, address spender) external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
 
@@ -35,7 +36,11 @@ interface IPermitToken {
 /// so a permit someone else submits first only sets an allowance this contract then uses. Every function takes the
 /// `refund` address, the original depositor, which is where a return goes (the owner's ruling `d-refund-dest-swaps`,
 /// 2026-11-09). The funder chooses it, so bezent never chooses a refund destination (REQ-RF-2); it is never the zero
-/// address, the reserve or this contract.
+/// address, the reserve or this contract. The reserve itself may not call it: a token that accepts `from == to` would
+/// emit a `Transfer` and `Directed` pair while the reserve gains nothing. The reserve's balance must rise by exactly
+/// `amount` across the `transferFrom`, or the call reverts and nothing moves, so a fee on transfer or any short or
+/// long delivery (an upgraded token) never yields a `Directed`. The check cannot see a token that delivers exactly but
+/// emits another log between its `Transfer` and `Directed`; the endpoint then records the direction as unpaired.
 /// Tokens sent to this contract directly are lost (amendment 0029, "Stray tokens").
 contract DirectedDeposit {
     /// The admitted origin token.
@@ -58,8 +63,10 @@ contract DirectedDeposit {
     error ZeroRefund();
     error RefundIsReserve();
     error RefundIsSelf();
+    error SenderIsReserve();
     error AllowanceTooLow();
     error TransferFailed();
+    error ReserveDeltaMismatch();
 
     constructor(address token_, address reserve_, uint256 minimum_, uint256 maximum_) {
         if (token_ == address(0) || reserve_ == address(0)) revert ZeroAddress();
@@ -106,6 +113,7 @@ contract DirectedDeposit {
     }
 
     function _check(uint256 amount, bytes32 recipient, address refund) internal view {
+        if (msg.sender == reserve) revert SenderIsReserve();
         if (amount < minimum) revert BelowMinimum();
         if (amount > maximum) revert AboveMaximum();
         if (recipient == bytes32(0)) revert ZeroRecipient();
@@ -114,10 +122,13 @@ contract DirectedDeposit {
         if (refund == address(this)) revert RefundIsSelf();
     }
 
-    /// The transfer, then the event, with nothing between them.
+    /// The transfer, then the event, with nothing between them. The reserve's balance is read before and after the
+    /// transfer, and the call reverts unless it grew by exactly `amount`.
     function _pull(uint256 amount, bytes32 recipient, address refund) internal {
         if (token.allowance(msg.sender, address(this)) < amount) revert AllowanceTooLow();
+        uint256 before = token.balanceOf(reserve);
         if (!token.transferFrom(msg.sender, reserve, amount)) revert TransferFailed();
+        if (token.balanceOf(reserve) != before + amount) revert ReserveDeltaMismatch();
         emit Directed(msg.sender, amount, recipient, refund);
     }
 }

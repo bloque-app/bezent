@@ -3,6 +3,7 @@
 pragma solidity 0.8.28;
 
 import {Vm} from "forge-std/Test.sol";
+import {Enum} from "@gnosis.pm/safe-contracts/contracts/common/Enum.sol";
 
 import {DeployDirected} from "../../script/DeployDirected.s.sol";
 import {DeployVault} from "../../script/DeployVault.s.sol";
@@ -53,6 +54,21 @@ contract TwoDeposits {
     }
 }
 
+/// A look-alike: the same four getters as `DirectedDeposit` and none of its code (review of PR #121).
+contract LookAlike {
+    address public immutable token;
+    address public immutable reserve;
+    uint256 public immutable minimum;
+    uint256 public immutable maximum;
+
+    constructor(address token_, address reserve_, uint256 minimum_, uint256 maximum_) {
+        token = token_;
+        reserve = reserve_;
+        minimum = minimum_;
+        maximum = maximum_;
+    }
+}
+
 /// T-018-02 and T-018-03 on a Polygon fork at the pinned block (e2e/evm/forks.env), against native USDC and a vault
 /// that DeployVault deployed: permit with the domain read from the token, a front-run permit, the bytes-signature
 /// permit from an EOA and from a Safe, two deposits in one transaction, the limits, the deployment's refusals and
@@ -71,6 +87,9 @@ contract DirectedDepositForkTest is VaultFork {
     // Safe 1.4.1's CompatibilityFallbackHandler on Polygon (safe-deployments).
     address internal constant FALLBACK_HANDLER = 0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99;
     bytes32 internal constant RECIPIENT = keccak256("a Kreivo account");
+    /// Stands in for the Kreivo contract's per-transfer maximum that a release reads from Kreivo's chain
+    /// (KREIVO_PER_TRANSFER_MAX), in raw units.
+    uint256 internal constant KREIVO_PER_TRANSFER_MAX = 50_000e6;
 
     /// The original depositor the caller names: not the caller (d-refund-dest-swaps).
     address internal refundTo = makeAddr("bezent.directed.original-depositor");
@@ -98,7 +117,7 @@ contract DirectedDepositForkTest is VaultFork {
     }
 
     function params() internal view virtual returns (DeployDirected.Params memory) {
-        return DeployDirected.Params({reserve: d.safe});
+        return DeployDirected.Params({reserve: d.safe, kreivoPerTransferMax: KREIVO_PER_TRANSFER_MAX});
     }
 
     // ------------------------------------------------------------------ the token
@@ -261,13 +280,53 @@ contract DirectedDepositForkTest is VaultFork {
         assertNoBalance();
     }
 
+    // ------------------------------------------------------------------ the vault as caller (review of PR #121)
+
+    /// AC-A6.6, INV-10: native USDC accepts `from == to`, so a deposit by the vault itself would emit
+    /// `Transfer(vault, vault, amount)` and then `Directed(vault, ...)`, an A4 pair, with the vault's balance unchanged.
+    /// The directing code refuses the reserve as caller, and nothing moves.
+    function test_AC_A6_6_usdcReserveAsCallerReverts() public {
+        deal(cfg.originToken, d.safe, 1_000e6);
+        vm.prank(d.safe);
+        usdc.approve(address(directed), 1_000e6);
+        vm.recordLogs();
+        vm.prank(d.safe);
+        vm.expectRevert(DirectedDeposit.SenderIsReserve.selector);
+        directed.deposit(1_000e6, keccak256("someone on Kreivo"), owners[0]);
+        assertEq(vm.getRecordedLogs().length, 0);
+        assertEq(usdc.balanceOf(d.safe), 1_000e6);
+        assertNoBalance();
+    }
+
+    /// DEC-21: the owners cannot make the vault approve or call the directing code at once; the guard refuses both
+    /// (only a widening through the Delay could). The contract's `SenderIsReserve` covers what the guard does not.
+    function test_DEC_21_guardRefusesOwnersDirectCall() public {
+        (bool ok,) = ownersTry(
+            cfg.originToken, abi.encodeCall(IUSDC.approve, (address(directed), 1e6)), Enum.Operation.Call, 2
+        );
+        assertFalse(ok, "approve");
+        (ok,) = ownersTry(
+            address(directed),
+            abi.encodeCall(DirectedDeposit.deposit, (1e6, keccak256("r"), owners[0])),
+            Enum.Operation.Call,
+            2
+        );
+        assertFalse(ok, "deposit");
+    }
+
     // ------------------------------------------------------------------ deployment and verifier
 
-    /// T-018-03: the deployment's refusals.
+    /// T-018-03: the deployment's refusals. The Kreivo per-transfer maximum is checked twice: against the value read
+    /// from Kreivo's chain (the bound that counts) and against the configuration's record of it (a cross-check).
     function test_REQ_AS_11_deployRefusals() public {
+        DeployDirected.Params memory p = params();
+        p.kreivoPerTransferMax = dcfg.maximum - 1;
+        vm.expectRevert("DeployDirected: maximum above the Kreivo per-transfer maximum read from Kreivo");
+        deployScript.check(dcfg, p);
+
         DeployDirected.Config memory c = dcfg;
         c.kreivoPerTransferMax = c.maximum - 1;
-        vm.expectRevert("DeployDirected: maximum above the Kreivo per-transfer maximum");
+        vm.expectRevert("DeployDirected: maximum above the configuration's Kreivo per-transfer maximum");
         deployScript.check(c, params());
 
         c = dcfg;
@@ -275,7 +334,7 @@ contract DirectedDepositForkTest is VaultFork {
         vm.expectRevert("DeployDirected: bad limits");
         deployScript.check(c, params());
 
-        DeployDirected.Params memory p = params();
+        p = params();
         p.reserve = user;
         vm.expectRevert("DeployDirected: reserve is not a contract");
         deployScript.check(dcfg, p);
@@ -285,23 +344,49 @@ contract DirectedDepositForkTest is VaultFork {
     /// per-transfer maximum.
     function test_REQ_AS_11_verifierChecksDirected() public {
         VerifyVault verifier = new VerifyVault();
-        verifier.checkDirected(dcfg, cfg, d, address(directed));
+        verifier.checkDirected(dcfg, cfg, d, address(directed), KREIVO_PER_TRANSFER_MAX);
 
         DeployDirected.Config memory c = dcfg;
         c.minimum = 2e6;
         DirectedDeposit changed = deployScript.deployAs(c, params(), deployer);
         vm.expectRevert("VerifyVault: directed minimum");
-        verifier.checkDirected(dcfg, cfg, d, address(changed));
+        verifier.checkDirected(dcfg, cfg, d, address(changed), KREIVO_PER_TRANSFER_MAX);
+
+        // The bound read from Kreivo refuses on its own, with the configuration unchanged.
+        vm.expectRevert(
+            "VerifyVault: directed maximum above the Kreivo per-transfer maximum read from Kreivo"
+        );
+        verifier.checkDirected(dcfg, cfg, d, address(directed), dcfg.maximum - 1);
 
         c = dcfg;
         c.kreivoPerTransferMax = c.maximum - 1;
-        vm.expectRevert("VerifyVault: directed maximum above the Kreivo per-transfer maximum");
-        verifier.checkDirected(c, cfg, d, address(directed));
+        vm.expectRevert("VerifyVault: directed maximum above the configuration's Kreivo per-transfer maximum");
+        verifier.checkDirected(c, cfg, d, address(directed), KREIVO_PER_TRANSFER_MAX);
 
         DeployVault.Deployment memory other = d;
         other.safe = user;
         vm.expectRevert("VerifyVault: directed reserve");
-        verifier.checkDirected(dcfg, cfg, other, address(directed));
+        verifier.checkDirected(dcfg, cfg, other, address(directed), KREIVO_PER_TRANSFER_MAX);
+    }
+
+    /// T-018-03: a contract with the right getters is refused only by the code hash.
+    function test_REQ_AS_11_verifierRefusesLookAlike() public {
+        VerifyVault verifier = new VerifyVault();
+        LookAlike fake = new LookAlike(cfg.originToken, d.safe, dcfg.minimum, dcfg.maximum);
+        vm.expectRevert("VerifyVault: directed code");
+        verifier.checkDirected(dcfg, cfg, d, address(fake), KREIVO_PER_TRANSFER_MAX);
+    }
+
+    /// T-018-03: a changed maximum and a changed token are refused too.
+    function test_REQ_AS_11_verifierRefusesChangedMaximumAndToken() public {
+        VerifyVault verifier = new VerifyVault();
+        DirectedDeposit m = new DirectedDeposit(cfg.originToken, d.safe, dcfg.minimum, dcfg.maximum - 1);
+        vm.expectRevert("VerifyVault: directed maximum");
+        verifier.checkDirected(dcfg, cfg, d, address(m), KREIVO_PER_TRANSFER_MAX);
+
+        DirectedDeposit t = new DirectedDeposit(cfg.convertibles[0].token, d.safe, dcfg.minimum, dcfg.maximum);
+        vm.expectRevert("VerifyVault: directed token");
+        verifier.checkDirected(dcfg, cfg, d, address(t), KREIVO_PER_TRANSFER_MAX);
     }
 
     // ------------------------------------------------------------------ helpers

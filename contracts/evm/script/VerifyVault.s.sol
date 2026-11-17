@@ -34,7 +34,10 @@ import {ISafe, IRoles, IRolesEvents, IDelay} from "../src/interfaces/External.so
 ///
 /// With DIRECTED_DEPOSIT=<address> (F-018, T-018-03), it also checks the vault's directing code (`checkDirected`):
 /// the runtime code of this repository's `DirectedDeposit` built for this vault and config/<NETWORK>.json's
-/// `directed` limits, byte for byte, immutables included.
+/// `directed` limits, byte for byte, immutables included. It then also requires KREIVO_PER_TRANSFER_MAX, the Kreivo
+/// contract's per-transfer maximum for the bridged asset in raw units, read from Kreivo's chain at release time: the
+/// directed maximum must not exceed it. The configuration's `directed.kreivoPerTransferMax` is a second cross-check
+/// only, since it comes from the same file as the maximum.
 ///
 /// Roles keeps its permissions in mappings that cannot be listed, so the check replays every event each of
 /// the two Roles modifiers (the vault's and the guardian's) has emitted since its creation (VAULT_FROM_BLOCK must be at or before the block that created it;
@@ -103,7 +106,13 @@ contract VerifyVault is Script {
         check(deploy, cfg, gov, d, logs, guardianLogs);
         address directed = vm.envOr("DIRECTED_DEPOSIT", address(0));
         if (directed != address(0)) {
-            checkDirected(new DeployDirected().load(cfg.network), cfg, d, directed);
+            checkDirected(
+                new DeployDirected().load(cfg.network),
+                cfg,
+                d,
+                directed,
+                vm.envUint("KREIVO_PER_TRANSFER_MAX")
+            );
             console.log("VerifyVault: directing code matches its configuration:", directed);
         }
         console.log(
@@ -465,17 +474,24 @@ contract VerifyVault is Script {
 
     /// F-018 (plan DEC-21, proposed): reverts unless `directed` is this repository's `DirectedDeposit` for the
     /// vault `d`, the vault's origin token and the route's limits in `dcfg`, and its maximum is within the Kreivo
-    /// per-transfer maximum. The reads name what differs; the code hash pins everything else.
+    /// per-transfer maximum. `kreivoPerTransferMax` is the bound that counts: read from the Kreivo contract on
+    /// Kreivo's chain (KREIVO_PER_TRANSFER_MAX), independent of `dcfg`. `dcfg.kreivoPerTransferMax`, from the same
+    /// file as the maximum, is a second cross-check. The reads name what differs; the code hash pins everything else.
     function checkDirected(
         DeployDirected.Config memory dcfg,
         DeployVault.NetworkConfig memory cfg,
         DeployVault.Deployment memory d,
-        address directed
+        address directed,
+        uint256 kreivoPerTransferMax
     ) public {
         require(dcfg.token == cfg.originToken, "VerifyVault: directed token is not the vault's origin token");
         require(
+            dcfg.maximum <= kreivoPerTransferMax,
+            "VerifyVault: directed maximum above the Kreivo per-transfer maximum read from Kreivo"
+        );
+        require(
             dcfg.maximum <= dcfg.kreivoPerTransferMax,
-            "VerifyVault: directed maximum above the Kreivo per-transfer maximum"
+            "VerifyVault: directed maximum above the configuration's Kreivo per-transfer maximum"
         );
         DirectedDeposit dd = DirectedDeposit(directed);
         require(address(dd.token()) == cfg.originToken, "VerifyVault: directed token");
