@@ -79,8 +79,10 @@ WHERE kind = 'deposit' AND request_reference LIKE 'directed:%' GROUP BY state;
 
 ## Exercise
 
-On the test bed: set `mints_per_day` to 1, make two directed deposits through the directing code, see one page and then
-none while it stands, raise the threshold and see `directed-alert-cleared`.
+On the test bed (`s9` of the full-chain suite does each step): set `mints_per_day` to 3, make five directed deposits at
+the contract's minimum through the directing code, see one page and then none while it stands, raise the threshold and
+see `directed-alert-cleared`.
 
 Status: exercised on the full-chain bed on 2026-11-17 (`EXERCISES.md`; NFR-9), by an automated scenario, with the Kreivo half a
-model. Not yet on Kreivo's own runtime.
+model. The page is raised by calling `directed_alerts::check` with the thresholds, as the core's `Watch` loop does; the bed
+does not run that loop or read `[directed_alerts]` from a configuration file. Not yet on Kreivo's own runtime.

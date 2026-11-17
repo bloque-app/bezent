@@ -230,7 +230,8 @@ impl Anvil {
                 // some hundreds of blocks, and once it has, an `anvil_setStorageAt` on a contract
                 // (`fund_usdc` on the token) makes a later read at a past block fail with "missing
                 // bytecode for code hash": the reserve check reads the token at the final head, 64
-                // blocks back. A scenario mines a few thousand blocks at most.
+                // blocks back. A scenario mines a few thousand blocks at most. We found it here and
+                // know of no public foundry issue for it.
                 "--prune-history",
                 "10000",
             ])

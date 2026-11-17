@@ -74,4 +74,5 @@ contract at the declared address on a fork), see the observation recorded as `un
 code that emits `Directed` alone, then put back.
 
 Status: exercised on the full-chain bed on 2026-11-17 (`EXERCISES.md`; NFR-9), by an automated scenario, with the Kreivo half a
-model. Not yet on Kreivo's own runtime.
+model. The page is raised by calling `directed_alerts::check` directly, not by the core's `Watch` loop, which the bed does not
+run. Not yet on Kreivo's own runtime.

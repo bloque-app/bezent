@@ -45,7 +45,7 @@ The return, its state and why it was made:
 ```sql
 SELECT t.id, t.bridge_reference, t.state, t.condition, t.destination, e.payload ->> 'reason' AS why
 FROM transfers t JOIN event_log e ON e.transfer_id = t.id AND e.kind = 'directed-return'
-WHERE t.kind = 'refund' AND t.request_reference LIKE 'directed:%' AND t.state NOT IN ('Completed', 'Refused')
+WHERE t.kind = 'refund' AND t.request_reference LIKE 'directed:%' AND t.state NOT IN ('Completed', 'Refused', 'Refunded', 'Expired', 'Withdrawn')
 ORDER BY t.id;
 ```
 
@@ -71,8 +71,8 @@ SELECT metric, value FROM ops_observables() WHERE metric IN ('reserve_amount', '
 
 ## Do
 
-1. **Leave it.** A return the token refuses waits; there is nothing to pause and nothing to move. It holds no window
-   and no allowance while it is refused (nothing is signed).
+1. **Leave it.** A return the token refuses waits; there is nothing to pause and nothing to move. Nothing is signed
+   while it is refused.
 2. Record what you found the same day (`operator_record`): the transfer, the refund address, the token's reason, and
    that the value is held in the reserve.
 3. Tell whoever asks about the deposit that its return is **delayed**, not failed, and why: the address it named for
@@ -105,4 +105,4 @@ the vault and the reserve check at zero divergence; lift the blacklist, resolve 
 alone moves nothing), and see the return paid once to the same address.
 
 Status: exercised on the full-chain bed on 2026-11-17 (`EXERCISES.md`; NFR-9), by an automated scenario, with the Kreivo half a
-model. Not yet on Kreivo's own runtime.
+model. The `payout-refusal-alert` is the core's own, raised by its payout loop in the scenario. Not yet on Kreivo's own runtime.

@@ -48,6 +48,8 @@ const USER_KEY: &str = "dbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d62
 /// A user with no key the bed knows, impersonated on the fork: the fallback path (`approve`, then
 /// `deposit`), as a wallet that cannot sign typed data takes it.
 const PLAIN_USER: Address = Address::repeat_byte(0xa7);
+/// A user who tries the contract's limits (`AC-A6.5`).
+const LIMIT_USER: Address = Address::repeat_byte(0xa9);
 /// The original depositor each call names as `refund` (`d-refund-dest-swaps`): not the caller.
 const REFUND: Address = Address::repeat_byte(0xaf);
 /// A refund address the token refuses to pay (USDC-blacklisted in `s8`).
@@ -86,6 +88,24 @@ async fn call(bed: &Bed, to: Address, data: Vec<u8>) -> Vec<u8> {
         )
         .await;
     hex::decode(out.as_str().unwrap().trim_start_matches("0x")).unwrap()
+}
+
+/// As [`send`], with a gas limit given so the node mines the call instead of refusing it at the
+/// estimate: the receipt of a transaction that must revert, `status` `0x0`.
+async fn send_reverting(bed: &Bed, from: Address, to: Address, data: Vec<u8>) -> Value {
+    bed.anvil
+        .rpc("anvil_impersonateAccount", json!([from]))
+        .await;
+    bed.anvil
+        .rpc("anvil_setBalance", json!([from, "0x56BC75E2D63100000"]))
+        .await;
+    let tx = bed
+        .anvil
+        .send(json!({"from": from, "to": to, "data": word_hex(&data), "gas": "0x7a120"}))
+        .await;
+    let receipt = bed.anvil.receipt(tx).await;
+    assert_eq!(receipt["status"], "0x0", "it did not revert: {receipt}");
+    receipt
 }
 
 fn usdc() -> Address {
@@ -259,8 +279,10 @@ fn directed_coordinate(
 }
 
 /// The reserve check at zero divergence (`INV-1`): it holds, and what the networks show and what the
-/// book holds do not differ. Unlike [`Bed::assert_balanced`] it says nothing of the terms, so it
-/// also holds while a payout is owed.
+/// book holds do not differ. Unlike [`Bed::assert_balanced`] it does not compare the terms, on
+/// purpose: it is called while an arrival is not final or a mint or payout is owed, when the
+/// chain's and the book's terms differ by exactly what is in flight, and only the divergence is
+/// then the invariant. Where nothing is in flight a scenario uses `assert_balanced`.
 async fn assert_zero_divergence(bed: &Bed, when: &str) {
     use bezent_core_service::reserve::check::Outcome;
     let e = bed.check_reserve().await;
@@ -372,7 +394,57 @@ async fn s7_ac_a6_1_ac_a6_4_a_directed_round_trip_and_a_return(
         U256::from(DIRECTED_MAXIMUM)
     );
     bed.turn(0).await;
-    assert_zero_divergence(&bed, "before anything").await;
+    bed.assert_balanced(0, 0).await;
+
+    // The contract's limits (AC-A6.5): a deposit below the minimum and one above the maximum
+    // revert and move nothing. The caller holds the amount and has approved it, so only the limit
+    // can be what refuses it.
+    for amount in [DIRECTED_MINIMUM - 1, DIRECTED_MAXIMUM + 1] {
+        bed.anvil.fund_usdc(LIMIT_USER, amount).await;
+        send(
+            &bed,
+            LIMIT_USER,
+            usdc(),
+            approveCall {
+                spender: directed,
+                amount: U256::from(amount),
+            }
+            .abi_encode(),
+        )
+        .await;
+        let receipt = send_reverting(
+            &bed,
+            LIMIT_USER,
+            directed,
+            depositCall {
+                amount: U256::from(amount),
+                recipient: B256::from(ALICE_ACCOUNT),
+                refund: REFUND,
+            }
+            .abi_encode(),
+        )
+        .await;
+        assert!(receipt["logs"].as_array().unwrap().is_empty(), "{receipt}");
+        assert_eq!(
+            bed.anvil.usdc_balance(LIMIT_USER).await,
+            U256::from(amount),
+            "a deposit outside the limits moved the caller's balance ({amount})"
+        );
+        assert_eq!(
+            bed.reserve_balance().await,
+            0,
+            "a deposit outside the limits reached the vault ({amount})"
+        );
+        assert_eq!(bed.anvil.usdc_balance(directed).await, U256::ZERO);
+    }
+    bed.anvil.finalize().await;
+    bed.evm_pass().await;
+    assert_eq!(
+        bed.count("SELECT count(*) FROM observations").await,
+        0,
+        "a reverted deposit was observed"
+    );
+    bed.assert_balanced(0, 0).await;
 
     // The user's deposit, with a permit for exactly the amount.
     let key = user_key();
@@ -426,6 +498,26 @@ async fn s7_ac_a6_1_ac_a6_4_a_directed_round_trip_and_a_return(
         )
         .await;
     crate::assert_source_not_found(status, &body);
+    // Nor can a requester have it refunded as an unassociated arrival (AC-A6.2): its bridge
+    // reference is the directed arrival's, and the refund path does not take it.
+    let (status, body) = bed
+        .http(
+            "POST",
+            "/v0/refunds",
+            Some(&json!({
+                "request_reference": "ref-directed",
+                "coordinate": coordinate.clone(),
+                "destination": {"network": POLYGON, "address": format!("{PLAIN_USER:#x}")},
+            })),
+        )
+        .await;
+    crate::assert_source_not_found(status, &body);
+    assert_eq!(
+        bed.count("SELECT count(*) FROM transfers WHERE kind = 'refund'")
+            .await,
+        0,
+        "a requester's refund bound a directed arrival"
+    );
 
     // The core makes the deposit with no request and mints it to the recipient (AC-A6.1).
     bed.until("the directed deposit is completed", 12, 0, || async {
@@ -507,6 +599,9 @@ async fn s7_ac_a6_1_ac_a6_4_a_directed_round_trip_and_a_return(
     .unwrap();
     assert_eq!(why, "recipient-refused");
     assert_eq!(bed.anvil.usdc_balance(REFUND).await, U256::from(DIRECTED));
+    // To no one else (AC-A6.4): not the caller, not the other address the bed knows.
+    assert_eq!(bed.anvil.usdc_balance(PLAIN_USER).await, U256::ZERO);
+    assert_eq!(bed.anvil.usdc_balance(REFUND_BLOCKED).await, U256::ZERO);
     assert_eq!(
         directed_transfers(&bed, "deposit").await.len(),
         1,
@@ -692,6 +787,9 @@ async fn s8_req_rf_2_a_return_that_fails_waits_in_review_and_is_paid_once_to_its
         "paid other than once, in full, to the refund address"
     );
     assert_eq!(bed.reserve_balance().await, 0);
+    // To no one else (AC-A6.4): not the caller, not the other refund address.
+    assert_eq!(bed.anvil.usdc_balance(PLAIN_USER).await, U256::ZERO);
+    assert_eq!(bed.anvil.usdc_balance(REFUND).await, U256::ZERO);
     assert_eq!(
         bed.count("SELECT count(*) FROM observations WHERE detail ->> 'event' = 'Payout'")
             .await,

@@ -75,4 +75,5 @@ page made once. Through the declared contract an amount below the minimum revert
 contract's, so `s7` of the full-chain suite names a recipient bezent refuses instead.
 
 Status: exercised on the full-chain bed on 2026-11-17 (`EXERCISES.md`; NFR-9), by an automated scenario, with the Kreivo half a
-model. Not yet on Kreivo's own runtime.
+model. The page is raised by calling `directed_alerts::check` directly, not by the core's `Watch` loop, which the bed does not
+run (nor its `[directed_alerts]` configuration). Not yet on Kreivo's own runtime.

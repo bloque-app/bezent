@@ -92,5 +92,9 @@ while it stands; pause the deposit route, send one more and see it wait in `CND-
 with two operators and see it minted; raise the threshold and see `directed-alert-cleared`. The reserve check stays at zero
 divergence throughout.
 
-Status: exercised on the full-chain bed on 2026-11-17 (`EXERCISES.md`; NFR-9), by an automated scenario, with the Kreivo half a
-model. Not yet on Kreivo's own runtime.
+Status: exercised in part on the full-chain bed on 2026-11-17 (`EXERCISES.md`; NFR-9), by an automated scenario, with the
+Kreivo half a model. Exercised: the `directed-mints-alert` page and its clearing (raised by calling
+`directed_alerts::check` directly; the bed does not run the core's `Watch` loop or read `[directed_alerts]`), every deposit
+at the minimum minted and none returned, the pause of the deposit route (a deposit waits in `CND-Paused`), and its lifting by
+two operators. Not exercised: `directed-window-alert` (no scenario fills the window) and `fee-position-low` (the Kreivo model
+has no fee float), so steps 1 to 2 and the float's top-up are read, not run. Not yet on Kreivo's own runtime.
