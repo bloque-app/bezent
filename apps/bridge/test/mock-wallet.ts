@@ -85,7 +85,8 @@ export interface MockOptions {
   /** The latest block (101 by default). */
   latest?: number;
   /** The reserve's `Transfer` log query fails (the emitter's does not), as when the reserve moved too many. */
-  reserveLogsFail?: boolean;
+  /** The reserve's Transfer query fails: always, or for the block ranges the function names. */
+  reserveLogsFail?: boolean | ((from: number, to: number) => boolean);
 }
 
 export function mockWallet(o: MockOptions = {}) {
@@ -311,7 +312,7 @@ export function mockWallet(o: MockOptions = {}) {
           const [from, to] = [Number(f.fromBlock), Number(f.toBlock)];
           const ofReserve = getAddress(f.address) === TOKEN;
           if (!ofReserve) logRequests.push({ from, to }); // The emitter's searches only.
-          if (ofReserve && o.reserveLogsFail) throw fail(-32000, 'query returned more than 10000 results');
+          if (ofReserve && (typeof o.reserveLogsFail === 'function' ? o.reserveLogsFail(from, to) : o.reserveLogsFail)) throw fail(-32000, 'query returned more than 10000 results');
           if (o.maxLogRange !== undefined && to - from + 1 > o.maxLogRange) throw fail(-32000, 'query returned more than 10000 results');
           return (ofReserve ? reserveLogs : payoutLogs).filter(
             (l) => getAddress(l.address) === getAddress(f.address) && l.topics[1] === f.topics[1] && Number(l.blockNumber) >= from && Number(l.blockNumber) <= to,

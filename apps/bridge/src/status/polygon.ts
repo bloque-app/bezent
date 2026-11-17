@@ -192,8 +192,12 @@ export async function findPayout(pc: Reads, n: ResolvedNetwork, emitter: Address
   // the reserve is the reserve's own act), and the token has no recipient hook (so a payout's recipient cannot make
   // the reserve emit a transfer in someone else's transaction). If either stops holding, a spammer could place a
   // transfer from the reserve beside a Reference log of their own, and rank 0 would no longer mean "the reserve's".
-  // A range whose reserve query failed has no ranking at all: its hits keep rank 0, examined newest first.
-  const rank = (h: { txHash: Hex }) => (fromReserve.has(h.txHash.toLowerCase()) || unranked.has(h.txHash.toLowerCase()) ? 0 : 1);
+  // Three tiers: a transaction that transfers from the reserve (0); one in a range whose reserve query failed, so
+  // nothing is known of it (1); one known not to (2). A reserve hit therefore always outranks an unranked one.
+  const rank = (h: { txHash: Hex }) => {
+    const k = h.txHash.toLowerCase();
+    return fromReserve.has(k) ? 0 : unranked.has(k) ? 1 : 2;
+  };
   const examined = hits
     .map((h, i) => ({ h, i }))
     .sort((a, b) => rank(a.h) - rank(b.h) || a.i - b.i)

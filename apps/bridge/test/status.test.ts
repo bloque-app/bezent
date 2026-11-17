@@ -143,6 +143,26 @@ describe('a payout by its reference', () => {
     expect(capped).toMatchObject({ found: undefined, unpaid: [{ blockNumber: 95n }], unexamined: 1 });
   });
 
+  it('ranks in three tiers: the reserve’s own first, then a range whose reserve query failed, then the known-not-reserve', async () => {
+    const { s } = await session({
+      payouts: [{ reference: REF, to: TO, amount: 5_000_000n, block: 60 }],
+      // 95 sits in the range whose reserve query fails (unknown); 30 in a range that answered, with no reserve transfer.
+      bogusReferences: [{ reference: REF, block: 95 }, { reference: REF, block: 30 }],
+      reserveLogsFail: (from) => from > 60,
+      finalized: 90,
+    });
+    const search = (maxHits: number) => findPayout(s.public, network, EMITTER, 10n, REF, { chunk: 40n, maxHits });
+    // One slot: the reserve's own, not the newer unknown one.
+    expect(await search(1)).toMatchObject({ found: { blockNumber: 60n }, unpaid: [], unexamined: 2 });
+    // Two: the unknown one is read before the known-not-reserve, though it is newer and older ones follow.
+    const two = await search(2);
+    expect(two).toMatchObject({ found: { blockNumber: 60n }, unexamined: 1 });
+    expect(two.unpaid.map((u) => u.blockNumber)).toEqual([95n]);
+    const three = await search(3);
+    expect(three.unpaid.map((u) => u.blockNumber)).toEqual([95n, 30n]);
+    expect(three.unexamined).toBe(0);
+  });
+
   it('searches from the newest block back, halving the range when the provider refuses it', async () => {
     const { s, w } = await session({ payouts: [{ reference: REF, to: TO, amount: 1n, block: 12 }], maxLogRange: 2_500, latest: 9_000 });
     const r = await findPayout(s.public, network, EMITTER, 10n, REF, { chunk: 8_000n });

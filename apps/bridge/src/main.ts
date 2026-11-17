@@ -61,6 +61,7 @@ function controls(): Lockable[] {
 // The redeem (section 6) and the status page (section 7), wired first: the deposit's code draws them too.
 const redeem = initRedeem({
   network: () => state.network,
+  networks: () => NETWORKS.flatMap((n) => (n.kreivo ? [{ key: n.key, label: n.label, chainId: n.chainId, kreivo: n.kreivo }] : [])),
   kreivo: () => state.kreivo,
   evmAccount: () => state.session?.account,
   busy: () => state.busy,
@@ -159,8 +160,9 @@ discoverWallets((wallets) => {
   );
 });
 setTimeout(() => {
-  if (!$('wallets').querySelector('button')) {
-    $('wallets').replaceChildren(note('No EVM wallet announced itself. Install or unlock one (MetaMask, Rabby…), then reload.'));
+  const list = document.getElementById('wallets'); // Gone when the page was torn down meanwhile (the tests do).
+  if (list && !list.querySelector('button')) {
+    list.replaceChildren(note('No EVM wallet announced itself. Install or unlock one (MetaMask, Rabby…), then reload.'));
   }
 }, 1500);
 

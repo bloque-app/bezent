@@ -34,6 +34,10 @@ const fake = vi.hoisted(() => ({
   redeems: [] as { resolve: (r: unknown) => void; reject: (e: unknown) => void }[],
   account: '0x1111111111111111111111111111111111111111',
   network: undefined as unknown,
+  /** A second origin network in the build, to select away from a record's own. */
+  other: undefined as unknown,
+  /** Runs when the contract's record is read: where a test lets another tab act mid-watch. */
+  onRedemption: undefined as (() => void) | undefined,
   /** The code at any address, as the EVM wallet reads it. */
   code: '0x' as string,
   provided: 0,
@@ -47,7 +51,9 @@ const fake = vi.hoisted(() => ({
 vi.mock('../src/config/build', async () => {
   const { network } = await import('./mock-wallet');
   fake.network = network;
-  return { DEPLOYMENT: 'test', REVISION: 'test-revision', STATUS_ROUTE: null, NETWORKS: [network], CHAIN_SPEC_SHA256: { kreivo: '', kusama: '' } };
+  const other = { ...network, key: 'other-net', label: 'Other', network: 'other-net', chainId: 80003 };
+  fake.other = other;
+  return { DEPLOYMENT: 'test', REVISION: 'test-revision', STATUS_ROUTE: null, NETWORKS: [network, other], CHAIN_SPEC_SHA256: { kreivo: '', kusama: '' } };
 });
 
 vi.mock('../src/kreivo/client', () => ({
@@ -109,7 +115,10 @@ vi.mock('../src/kreivo/redeem', async (original) => {
         approvalDeposit: 6_700_000_000n,
         at: { number: 1, hash: `0x${'00'.repeat(32)}` },
       }),
-      redemption: async () => fake.recorded,
+      redemption: async () => {
+        fake.onRedemption?.();
+        return fake.recorded;
+      },
       finalized: async () => {
         if (fake.fail) throw new Error('the light client is syncing');
         return fake.head;
@@ -159,7 +168,7 @@ const answerRead = async (i = 0) => {
 /** The page's storage, kept across `load({ keep: true })` as a browser keeps it across a reload. */
 let store = new Map<string, string>();
 
-async function load(o: { keep?: boolean; blocked?: boolean } = {}) {
+async function load(o: { keep?: boolean; blocked?: boolean; stuck?: boolean } = {}) {
   vi.resetModules();
   fake.connects.length = 0;
   fake.deposits.length = 0;
@@ -170,6 +179,7 @@ async function load(o: { keep?: boolean; blocked?: boolean } = {}) {
   fake.recorded = undefined;
   fake.head = 1;
   fake.fail = false;
+  fake.onRedemption = undefined;
   // A storage of the test's own: Node's global localStorage, where it has one, is not the page's.
   if (!o.keep) store = new Map<string, string>();
   const refused = () => {
@@ -182,7 +192,10 @@ async function load(o: { keep?: boolean; blocked?: boolean } = {}) {
       : {
           getItem: (k: string) => store.get(k) ?? null,
           setItem: (k: string, v: string) => void store.set(k, String(v)),
-          removeItem: (k: string) => void store.delete(k),
+          removeItem: (k: string) => {
+            if (o.stuck && k.startsWith('bezent.bridge.pending/')) throw new DOMException('stuck', 'QuotaExceededError');
+            store.delete(k);
+          },
           clear: () => store.clear(),
           key: (i: number) => [...store.keys()][i] ?? null,
           get length() {
@@ -210,10 +223,20 @@ async function readyToDeposit() {
   expect(depositButton().disabled).toBe(false);
 }
 
+// The page registers its listeners on `window` and never removes them; a page of an earlier test must not hear this
+// test's events (a `storage` event would wake it), so they are removed with the test.
+const registered: [string, EventListenerOrEventListenerObject][] = [];
+const addEventListener = window.addEventListener.bind(window);
 beforeEach(() => {
   vi.useRealTimers();
+  window.addEventListener = ((type: string, fn: EventListenerOrEventListenerObject, o?: boolean | AddEventListenerOptions) => {
+    registered.push([type, fn]);
+    addEventListener(type, fn, o);
+  }) as typeof window.addEventListener;
 });
 afterEach(() => {
+  window.addEventListener = addEventListener;
+  for (const [type, fn] of registered.splice(0)) window.removeEventListener(type, fn);
   document.body.innerHTML = '';
   vi.unstubAllGlobals();
 });
@@ -550,16 +573,12 @@ describe('a signature over another payload, and an unclear outcome', () => {
   });
 
   it('names the network the redemption belongs to, and says to select it again when another is selected', async () => {
-    const { encodePending, takeRedeemSnapshot } = await import('../src/redeem');
-    const snapshot = takeRedeemSnapshot({ redeemer: { account: ALICE }, asset: { id: 101, symbol: 'bUSDC', decimals: 6 }, amount: 2_000_000n, whole: false, backend: { kind: 'evm', chainId: 137n }, payout: A1, reference: `0x${'12'.repeat(32)}` }, 2)!;
+    const other = fake.other as { chainId: number };
     store = new Map();
-    store.set(
-      `bezent.bridge.pending/v1/kreivo/${ALICE}`,
-      encodePending({ redeemer: ALICE, reference: snapshot.reference, txHash: `0x${'88'.repeat(32)}`, validUntil: 5_000, network: 'polygon', networkLabel: 'Polygon', kreivo: 'kreivo', snapshot }),
-    );
+    store.set(pendingKey, record({ network: 'other-net', networkLabel: 'Other' }, { backend: { kind: 'evm', chainId: String(other.chainId) } }));
     await load({ keep: true });
-    expect(lockRow()).toMatch(/\(.*, Polygon\) may still be included/);
-    expect(lockRow()).toMatch(/belongs to Polygon, which is not selected: select it again to settle it/);
+    expect(lockRow()).toMatch(/\(.*, Other\) may still be included/);
+    expect(lockRow()).toMatch(/belongs to Other, which is not selected: select it again to settle it/);
     expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
   });
 
@@ -588,6 +607,242 @@ describe('a signature over another payload, and an unclear outcome', () => {
     expect($('redeem-reference').textContent).not.toBe(reference);
     expect($<HTMLButtonElement>('redeem-new-reference').disabled).toBe(false);
     // Settled: the stored lock is cleared.
+    expect(store.has(pendingKey)).toBe(false);
+  });
+  /** A stored record as this build writes one for the mock network, with the given fields replaced. */
+  const record = (over: Record<string, unknown> = {}, snap: Record<string, unknown> = {}) => {
+    const n = fake.network as { key: string; label: string; chainId: number };
+    return JSON.stringify({
+      v: 1,
+      network: n.key,
+      networkLabel: n.label,
+      kreivo: 'kreivo-test',
+      redeemer: ALICE,
+      reference: `0x${'12'.repeat(32)}`,
+      txHash: `0x${'88'.repeat(32)}`,
+      validUntil: 5_000,
+      snapshot: {
+        redeemer: { account: ALICE, address: ALICE_SS58 },
+        asset: { id: 101, symbol: 'bUSDC', decimals: 6 },
+        amount: '2000000',
+        whole: false,
+        backend: { kind: 'evm', chainId: String(n.chainId) },
+        payout: A1,
+        reference: `0x${'12'.repeat(32)}`,
+        ...snap,
+      },
+      ...over,
+    });
+  };
+  async function connectAccount() {
+    $<HTMLButtonElement>('redeem-connect').click();
+    await flush();
+    ($('redeem-accounts').querySelector('button') as HTMLButtonElement).click();
+    await flush();
+    type('redeem-amount', '2');
+    await flush();
+  }
+  const clearButton = () => $('redeem-unreadable').querySelector('button') as HTMLButtonElement | null;
+
+  describe('an unreadable record', () => {
+    const wrongKey = `bezent.bridge.pending/v1/kreivo-test/0x${'ee'.repeat(32)}`;
+    const bad: [string, () => string, string?][] = [
+      ['an unknown version', () => record({ v: 2 })],
+      ['malformed text', () => 'not json'],
+      ['a body that is not its key’s', () => record(), wrongKey],
+      ['a negative validUntil', () => record({ validUntil: -5 })],
+      ['a fractional validUntil', () => record({ validUntil: 1.5 })],
+      ['a validUntil that is text', () => record({ validUntil: 'soon' })],
+      ['decimals out of range', () => record({}, { asset: { id: 101, symbol: 'bUSDC', decimals: 99 } })],
+      ['decimals that are not the network’s', () => record({}, { asset: { id: 101, symbol: 'bUSDC', decimals: 18 } })],
+      ['an asset id that is not a u32', () => record({}, { asset: { id: 2 ** 32, symbol: 'bUSDC', decimals: 6 } })],
+      ['an asset id that is not the network’s', () => record({}, { asset: { id: 7, symbol: 'bUSDC', decimals: 6 } })],
+      ['an address that is not the account’s', () => record({}, { redeemer: { account: ALICE, address: 'HNZata7iMYWmk5RvZRTiAsSDhV8366zq2YGb3tLH5Upf74G' } })],
+      ['a backend on another chain', () => record({}, { backend: { kind: 'evm', chainId: '1' } })],
+      ['an attested backend', () => record({}, { backend: { kind: 'attested', id: 3 } })],
+      ['another Kreivo network', () => record({ kreivo: 'kreivo' })],
+      ['a network the build does not carry', () => record({ network: 'polygon' })],
+    ];
+
+    it.each(bad)('locks Redeem, and is read as unreadable, for %s', async (_what, body, key) => {
+      store = new Map();
+      store.set(key ?? pendingKey, body());
+      await load({ keep: true });
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+      expect(lockRow()).toMatch(/a stored redemption record can’t be read \(.*\); Redeem is off until you check it/);
+      expect($('redeem-progress').textContent).toMatch(/1 stored redemption record\(s\) can’t be read; Redeem is off until you check it/);
+      // Not locked as a pending redemption: nothing is watched, and no reference is held.
+      expect(lockRow()).not.toMatch(/locked: the redemption/);
+      await connectAccount();
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+      expect(clearButton()).not.toBeNull();
+    });
+
+    it('does not print the notice again on each connect, and clears only on confirmation, naming the network and redeemer', async () => {
+      store = new Map();
+      store.set(pendingKey, 'not json');
+      await load({ keep: true });
+      const notices = () => ($('redeem-progress').textContent ?? '').split('can’t be read').length - 1;
+      expect(notices()).toBe(1);
+      await connectAccount();
+      await connectAccount();
+      expect(notices()).toBe(1);
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+      const confirmed = vi.fn(() => false);
+      vi.stubGlobal('confirm', confirmed);
+      window.confirm = confirmed;
+      clearButton()!.click();
+      await flush();
+      expect(confirmed).toHaveBeenCalledTimes(1);
+      const asked = (confirmed.mock.calls[0] as unknown as string[])[0]!;
+      expect(asked).toContain('kreivo-test');
+      expect(asked).toContain(ALICE_SS58);
+      // Declined: the record stays, and Redeem stays off.
+      expect(store.get(pendingKey)).toBe('not json');
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+      confirmed.mockReturnValue(true);
+      clearButton()!.click();
+      await flush();
+      expect(store.has(pendingKey)).toBe(false);
+      expect(clearButton()).toBeNull();
+      expect(lockRow()).not.toMatch(/can’t be read/);
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(false);
+    });
+  });
+
+  it('says so, in the lock row, when storage cannot be read, and leaves Redeem usable', async () => {
+    await load({ blocked: true });
+    expect(lockRow()).toMatch(/storage unavailable: a lock from an earlier visit can’t be checked/);
+    await connectAccount();
+    expect($<HTMLButtonElement>('redeem').disabled).toBe(false);
+    expect(lockRow()).toMatch(/storage unavailable/);
+  });
+
+  it('says nothing about storage when it is readable', async () => {
+    await load();
+    expect(lockRow()).not.toMatch(/storage unavailable/);
+  });
+
+  describe('two tabs', () => {
+    it('removes a settled record only if it is still the settled one (compare-and-delete)', async () => {
+      const { reference, UnclearOutcome } = await redeeming();
+      fake.recorded = { redeemer: ALICE, asset: 101, amount: 2_000_000n, backend: { kind: 'evm', chainId: 80002n }, payout: { kind: 'address', address: A1 }, refunded: false };
+      // Another tab replaces the record for this redeemer between this tab's write and its removal.
+      const theirs = record({ txHash: `0x${'99'.repeat(32)}` });
+      const rec = fake.recorded;
+      let reads = 0;
+      // The first read finds the redemption recorded, and the other tab's record lands as it does; the next finds none.
+      Object.defineProperty(fake, 'recorded', {
+        configurable: true,
+        get: () => {
+          if (reads++ === 0) store.set(pendingKey, theirs);
+          return reads === 1 ? rec : undefined;
+        },
+        set: (v) => Object.defineProperty(fake, 'recorded', { value: v, writable: true, configurable: true, enumerable: true }),
+      });
+      fake.redeems[0]!.reject(new UnclearOutcome('The redemption 0x77… was broadcast, but following it failed.', `0x${'77'.repeat(32)}`, 1_064));
+      await flush();
+      expect($('redeem-progress').textContent).toMatch(/Kreivo records the redemption/);
+      expect($('redeem-reference').textContent).not.toBe(reference);
+      expect(store.get(pendingKey)).toBe(theirs); // Not this tab's to remove.
+      // And it is taken as the lock, not lost.
+      expect(lockRow()).toMatch(/locked: the redemption 0x9{64}/);
+    });
+
+    it('removes the record when it is the settled one', async () => {
+      const { UnclearOutcome } = await redeeming();
+      fake.recorded = { redeemer: ALICE, asset: 101, amount: 2_000_000n, backend: { kind: 'evm', chainId: 80002n }, payout: { kind: 'address', address: A1 }, refunded: false };
+      fake.redeems[0]!.reject(new UnclearOutcome('x', `0x${'77'.repeat(32)}`, 1_064));
+      await flush();
+      expect(store.has(pendingKey)).toBe(false);
+    });
+
+    it('does not overwrite another tab’s record: it becomes the lock, and the unstored hash is named', async () => {
+      const { UnclearOutcome } = await redeeming();
+      const theirs = record({ txHash: `0x${'99'.repeat(32)}`, reference: `0x${'34'.repeat(32)}` }, { reference: `0x${'34'.repeat(32)}` });
+      store.set(pendingKey, theirs);
+      fake.redeems[0]!.reject(new UnclearOutcome('x', `0x${'77'.repeat(32)}`, 1_064));
+      await flush();
+      expect(store.get(pendingKey)).toBe(theirs);
+      expect(lockRow()).toMatch(/locked: the redemption 0x9{64}/);
+      expect($('redeem-reference').textContent).toBe(`0x${'34'.repeat(32)}`);
+      expect($('redeem-progress').textContent).toMatch(/Another tab already holds a lock for this redeemer .*0x9{64}.*0x7{64}, is not stored/);
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+    });
+
+    it('signs nothing when another tab left a lock since this page read the storage', async () => {
+      await load();
+      await connectAccount();
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(false);
+      store.set(pendingKey, record());
+      $<HTMLButtonElement>('redeem').click();
+      await flush();
+      expect(fake.redeems).toHaveLength(0);
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+      expect(lockRow()).toMatch(/locked: the redemption 0x8{64}/);
+    });
+
+    it('takes another tab’s lock at once, on a storage event', async () => {
+      await load();
+      await connectAccount();
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(false);
+      store.set(pendingKey, record());
+      window.dispatchEvent(new StorageEvent('storage', { key: pendingKey }));
+      await flush();
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+      expect($<HTMLButtonElement>('redeem-new-reference').disabled).toBe(true);
+      expect(lockRow()).toMatch(/locked: the redemption 0x8{64}/);
+      expect($('redeem-reference').textContent).toBe(`0x${'12'.repeat(32)}`);
+    });
+
+    it('takes another tab’s unreadable record at once, and ignores the storage events of other keys', async () => {
+      await load();
+      await connectAccount();
+      window.dispatchEvent(new StorageEvent('storage', { key: 'unrelated' }));
+      await flush();
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(false);
+      store.set(pendingKey, 'not json');
+      window.dispatchEvent(new StorageEvent('storage', { key: pendingKey }));
+      await flush();
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+      expect(lockRow()).toMatch(/can’t be read/);
+    });
+  });
+
+  it('does not lock a settled redemption again when its record could not be removed', async () => {
+    const { reference, UnclearOutcome } = await redeeming({ stuck: true });
+    fake.recorded = { redeemer: ALICE, asset: 101, amount: 2_000_000n, backend: { kind: 'evm', chainId: 80002n }, payout: { kind: 'address', address: A1 }, refunded: false };
+    let reads = 0;
+    fake.onRedemption = () => void reads++;
+    fake.redeems[0]!.reject(new UnclearOutcome('x', `0x${'77'.repeat(32)}`, 1_064));
+    await flush();
+    await flush();
+    // The record is still there (its removal failed), but it settled once and was not locked again.
+    expect(store.has(pendingKey)).toBe(true);
+    expect(reads).toBe(1);
+    expect(lockRow()).not.toMatch(/locked: the redemption/);
+    expect($('redeem-reference').textContent).not.toBe(reference);
+    expect($<HTMLButtonElement>('redeem-new-reference').disabled).toBe(false);
+    expect($<HTMLButtonElement>('redeem').disabled).toBe(false);
+    // Another tab's event does not lock it again either.
+    window.dispatchEvent(new StorageEvent('storage', { key: pendingKey }));
+    await flush();
+    expect(reads).toBe(1);
+    expect($<HTMLButtonElement>('redeem').disabled).toBe(false);
+  });
+
+  it('does not leave an unhandled rejection when the settled message cannot be formed', async () => {
+    const { UnclearOutcome } = await redeeming();
+    // A record whose payout is not an address makes the message throw once the lock is cleared.
+    fake.recorded = { redeemer: ALICE, asset: 101, amount: 2_000_000n, backend: { kind: 'evm', chainId: 80002n }, payout: { kind: 'address', address: 'not an address' }, refunded: false };
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    fake.redeems[0]!.reject(new UnclearOutcome('x', `0x${'77'.repeat(32)}`, 1_064));
+    await flush();
+    process.off('unhandledRejection', unhandled);
+    expect(unhandled).not.toHaveBeenCalled();
+    expect($('redeem-progress').textContent).toMatch(/settled, but its outcome could not be shown/);
+    expect(lockRow()).not.toMatch(/locked: the redemption/);
     expect(store.has(pendingKey)).toBe(false);
   });
 });

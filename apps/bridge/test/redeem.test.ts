@@ -25,6 +25,7 @@ import {
   refusal,
   runRedeem,
   decodePending,
+  pendingProblem,
   encodePending,
   pendingKey,
   settle,
@@ -487,3 +488,61 @@ describe('the stored pending record', () => {
     }
   });
 });
+
+type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+describe('a stored record checked against reality', () => {
+  const net = { key: 'polygon', label: 'Polygon', chainId: 137, kreivo: { network: 'kreivo', ss58Prefix: 2, asset: { id: 101, symbol: 'bUSDC', decimals: 6 } } };
+  const good = (): Pending => {
+    const s = snapshot({ whole: true });
+    return {
+      redeemer: s.redeemer.account,
+      reference: s.reference,
+      txHash: `0x${'77'.repeat(32)}`,
+      validUntil: 1_064,
+      network: 'polygon',
+      networkLabel: 'Polygon',
+      kreivo: 'kreivo',
+      snapshot: Object.freeze({ ...s, backend: { kind: 'evm' as const, chainId: 137n } }),
+    };
+  };
+  const body = (edit: (j: Json) => void) => {
+    const j = JSON.parse(encodePending(good()));
+    edit(j);
+    return JSON.stringify(j);
+  };
+
+  it('accepts a record this build wrote', () => {
+    expect(pendingProblem(good(), [net])).toBeUndefined();
+  });
+
+  it('reads a validUntil of 0 or none as no expiry, and refuses a negative, fractional, text or over-u32 one', () => {
+    expect(decodePending(body((j) => (j.validUntil = 0)))?.validUntil).toBeUndefined();
+    expect(decodePending(body((j) => (j.validUntil = null)))?.validUntil).toBeUndefined();
+    expect(decodePending(body((j) => (j.validUntil = 1)))?.validUntil).toBe(1);
+    for (const v of [-1, 1.5, '1064', 2 ** 32, Number.MAX_SAFE_INTEGER, true]) expect(decodePending(body((j) => (j.validUntil = v)))).toBeUndefined();
+  });
+
+  it('refuses decimals outside 0..36 and an asset id that is not a u32', () => {
+    for (const d of [-1, 37, 1.5, '6']) expect(decodePending(body((j) => (j.snapshot.asset.decimals = d)))).toBeUndefined();
+    for (const id of [-1, 2 ** 32, 1.5, '101']) expect(decodePending(body((j) => (j.snapshot.asset.id = id)))).toBeUndefined();
+    expect(decodePending(body((j) => (j.snapshot.asset.decimals = 0)))).toBeDefined();
+    expect(decodePending(body((j) => (j.snapshot.asset.decimals = 36)))).toBeDefined();
+  });
+
+  it('finds a record the network’s configuration contradicts', () => {
+    const p = good();
+    const s = p.snapshot;
+    const withSnap = (o: object): Pending => ({ ...p, snapshot: Object.freeze({ ...s, ...o }) });
+    expect(pendingProblem({ ...p, network: 'base' }, [net])).toMatch(/not one this build carries/);
+    expect(pendingProblem(p, [])).toMatch(/not one this build carries/);
+    expect(pendingProblem({ ...p, networkLabel: 'Other' }, [net])).toMatch(/label/);
+    expect(pendingProblem({ ...p, kreivo: 'kreivo-test' }, [net])).toMatch(/kreivo-test, not kreivo/);
+    expect(pendingProblem(withSnap({ redeemer: { account: s.redeemer.account, address: 'HNZata7iMYWmk5RvZRTiAsSDhV8366zq2YGb3tLH5Upf74G' } }), [net])).toMatch(/redeemer address/);
+    expect(pendingProblem(withSnap({ asset: { ...s.asset, id: 7 } }), [net])).toMatch(/asset/);
+    expect(pendingProblem(withSnap({ asset: { ...s.asset, decimals: 18 } }), [net])).toMatch(/asset/);
+    expect(pendingProblem(withSnap({ backend: { kind: 'evm', chainId: 1n } }), [net])).toMatch(/backend/);
+    expect(pendingProblem(withSnap({ backend: { kind: 'attested', id: 2 } }), [net])).toMatch(/backend/);
+  });
+});
+

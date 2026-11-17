@@ -319,6 +319,32 @@ export function encodePending(p: Pending): string {
   });
 }
 
+const U32 = 2 ** 32 - 1;
+
+/** What a stored record is checked against: an origin network of this build, and the issuing network it mints on. */
+export interface PendingConfig {
+  key: string;
+  label: string;
+  chainId: number;
+  kreivo?: { network: string; ss58Prefix: number; asset: { id: number; symbol: string; decimals: number } };
+}
+
+/** Why a record that decodes is still not one this build could have written: it names a network the build does not
+ * carry, or an address, asset, backend or payout the network's configuration contradicts. `undefined` when it holds.
+ * A record that fails is as unreadable as a malformed one (it locks, and is cleared only on confirmation). */
+export function pendingProblem(p: Pending, networks: readonly PendingConfig[]): string | undefined {
+  const n = networks.find((x) => x.key === p.network);
+  if (!n?.kreivo) return `the network ${p.network} is not one this build carries`;
+  const k = n.kreivo;
+  const s = p.snapshot;
+  if (p.networkLabel !== n.label) return 'its network label does not match';
+  if (p.kreivo !== k.network) return `it was sent on ${p.kreivo}, not ${k.network}`;
+  if (s.redeemer.address !== encodeSs58(fromHex(p.redeemer), k.ss58Prefix)) return 'its redeemer address does not match its account';
+  if (s.asset.id !== k.asset.id || s.asset.decimals !== k.asset.decimals || s.asset.symbol !== k.asset.symbol) return 'its asset is not the network’s';
+  if (s.backend.kind !== 'evm' || s.backend.chainId !== BigInt(n.chainId)) return 'its backend is not the network’s';
+  return undefined;
+}
+
 /** Reads a stored record back; `undefined` when it is not one this version wrote, whole and well formed. */
 export function decodePending(text: string): Pending | undefined {
   try {
@@ -328,8 +354,11 @@ export function decodePending(text: string): Pending | undefined {
     const uint = (x: unknown): x is string => typeof x === 'string' && /^[0-9]{1,40}$/.test(x);
     const s = j?.snapshot;
     if (j?.v !== 1 || !str(j.network) || !str(j.networkLabel) || !str(j.kreivo) || !hex(j.redeemer, 32) || !hex(j.reference, 32) || !hex(j.txHash, 32)) return undefined;
-    if (j.validUntil !== null && !(Number.isSafeInteger(j.validUntil) && j.validUntil >= 0)) return undefined;
-    if (!s || !hex(s.redeemer?.account, 32) || !str(s.redeemer?.address) || !Number.isSafeInteger(s.asset?.id) || !str(s.asset?.symbol) || !Number.isSafeInteger(s.asset?.decimals)) return undefined;
+    // A block number is a u32. Absent or 0 means no expiry is known, and then only the contract's record settles it;
+    // anything else must be a positive integer, so a tampered value cannot be read as one.
+    if (j.validUntil !== null && !(Number.isSafeInteger(j.validUntil) && j.validUntil >= 0 && j.validUntil <= U32)) return undefined;
+    if (!s || !hex(s.redeemer?.account, 32) || !str(s.redeemer?.address) || !Number.isSafeInteger(s.asset?.id) || s.asset.id < 0 || s.asset.id > U32 || !str(s.asset?.symbol)) return undefined;
+    if (!Number.isSafeInteger(s.asset?.decimals) || s.asset.decimals < 0 || s.asset.decimals > 36) return undefined;
     if (!uint(s.amount) || typeof s.whole !== 'boolean' || !isAddress(s.payout, { strict: false }) || !hex(s.reference, 32)) return undefined;
     if (s.redeemer.account !== j.redeemer || s.reference !== j.reference) return undefined;
     let backend: Backend;
@@ -349,7 +378,7 @@ export function decodePending(text: string): Pending | undefined {
       redeemer: j.redeemer,
       reference: j.reference,
       txHash: j.txHash,
-      validUntil: j.validUntil === null ? undefined : j.validUntil,
+      validUntil: j.validUntil === null || j.validUntil === 0 ? undefined : j.validUntil,
       network: j.network,
       networkLabel: j.networkLabel,
       kreivo: j.kreivo,

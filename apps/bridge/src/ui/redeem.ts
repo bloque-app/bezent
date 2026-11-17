@@ -30,6 +30,7 @@ import {
   ownContracts,
   parsePayout,
   PENDING_PREFIX,
+  pendingProblem,
   pendingKey,
   redeemRows,
   refusal,
@@ -38,6 +39,7 @@ import {
   settle,
   takeRedeemSnapshot,
   type Pending,
+  type PendingConfig,
   type RedeemSnapshot,
   type SettleRead,
 } from '../redeem';
@@ -50,6 +52,8 @@ export const REDEEM_LOCKED_CONTAINERS = ['redeem-accounts'] as const;
 /** What the redeem needs from the rest of the page. */
 export interface RedeemHost {
   network(): ResolvedNetwork | undefined;
+  /** The networks this build carries, to check a stored record against; defaults to the selected one. */
+  networks?(): readonly PendingConfig[];
   kreivo(): Kreivo | undefined;
   /** The connected EVM account, the payout address's default. */
   evmAccount(): Address | undefined;
@@ -95,38 +99,92 @@ function forget(key: string) {
   }
 }
 
-/** Keeps the unclear redemption in this browser, so a reload does not erase its lock. `false` when storage refused. */
-function keep(p: Pending): boolean {
+/** What a stored value is: a record this build wrote and can check, or why it is not one. */
+function classify(key: string, raw: string | null, nets: readonly PendingConfig[]): { ok: true; p: Pending } | { ok: false; why: string } {
+  const p = decodePending(raw ?? '');
+  if (!p) return { ok: false, why: 'unknown version, malformed or incomplete' };
+  if (pendingKey(p.kreivo, p.redeemer) !== key) return { ok: false, why: 'its key does not match its body' };
+  const problem = pendingProblem(p, nets);
+  return problem ? { ok: false, why: problem } : { ok: true, p };
+}
+
+/** Keeps the unclear redemption in this browser, so a reload does not erase its lock. It never overwrites another
+ * record: another tab's lock for the same redeemer (`other`) is the lock instead, and a record it cannot read stays
+ * as it is (`failed`, as when storage refused). */
+function keep(p: Pending, nets: readonly PendingConfig[]): { kind: 'kept' } | { kind: 'other'; existing: Pending } | { kind: 'failed' } {
   try {
-    localStorage.setItem(pendingKey(p.kreivo, p.redeemer), encodePending(p));
-    return true;
+    const key = pendingKey(p.kreivo, p.redeemer);
+    const have = localStorage.getItem(key);
+    if (have !== null) {
+      const c = classify(key, have, nets);
+      if (c.ok && c.p.txHash === p.txHash) return { kind: 'kept' };
+      return c.ok ? { kind: 'other', existing: c.p } : { kind: 'failed' };
+    }
+    localStorage.setItem(key, encodePending(p));
+    return { kind: 'kept' };
   } catch {
-    return false;
+    return { kind: 'failed' };
   }
 }
+/** Removes the record only if it is still the settled one (compare-and-delete): another tab's newer lock for the
+ * same redeemer is not this tab's to remove. */
 function drop(p: Pending) {
   try {
-    localStorage.removeItem(pendingKey(p.kreivo, p.redeemer));
+    const key = pendingKey(p.kreivo, p.redeemer);
+    const have = localStorage.getItem(key);
+    if (have === null) return;
+    let stored: unknown;
+    try {
+      stored = JSON.parse(have)?.txHash;
+    } catch {
+      return; // Not readable: not this record, and not ours to remove.
+    }
+    if (stored === p.txHash) localStorage.removeItem(key);
   } catch {
     // Storage blocked: the record stays, and is read (and settled) again on the next load.
   }
 }
-/** The kept records, read from storage: the ones this version wrote and can read, and how many it could not. */
-function kept(): { found: Pending[]; unreadable: number } {
+interface Unreadable {
+  key: string;
+  raw: string;
+  why: string;
+}
+/** The kept records, read from storage: the ones this build wrote and can check, the ones it cannot (each locks), and
+ * whether storage could be read at all. */
+function kept(nets: readonly PendingConfig[]): { found: Pending[]; unreadable: Unreadable[]; down: boolean } {
   const found: Pending[] = [];
-  let unreadable = 0;
+  const unreadable: Unreadable[] = [];
+  let down = false;
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (!k || !k.startsWith(PENDING_PREFIX)) continue;
-      const p = decodePending(localStorage.getItem(k) ?? '');
-      if (p && pendingKey(p.kreivo, p.redeemer) === k) found.push(p);
-      else unreadable++;
+      const raw = localStorage.getItem(k) ?? '';
+      const c = classify(k, raw, nets);
+      if (c.ok) found.push(c.p);
+      else unreadable.push({ key: k, raw, why: c.why });
     }
   } catch {
-    // Storage blocked: nothing can be restored.
+    down = true;
   }
-  return { found, unreadable };
+  return { found, unreadable, down };
+}
+/** The network and redeemer a key names, for the user to recognise a record by. */
+function keyNames(key: string, nets: readonly PendingConfig[]): { kreivo: string; redeemer: string } {
+  const rest = key.slice(PENDING_PREFIX.length);
+  const cut = rest.lastIndexOf('/');
+  const kreivo = cut < 0 ? rest : rest.slice(0, cut);
+  const hex = cut < 0 ? '' : rest.slice(cut + 1);
+  const prefix = nets.find((n) => n.kreivo?.network === kreivo)?.kreivo?.ss58Prefix;
+  let redeemer = hex || '(none)';
+  if (prefix !== undefined && /^0x[0-9a-f]{64}$/.test(hex)) {
+    try {
+      redeemer = `${encodeSs58(fromHex(hex as Hex), prefix)} (${hex})`;
+    } catch {
+      // Shown as stored.
+    }
+  }
+  return { kreivo, redeemer };
 }
 
 const clock = () => `${new Date().toISOString().slice(11, 19)} UTC`;
@@ -163,12 +221,27 @@ export function initRedeem(host: RedeemHost) {
     restored?: boolean;
     /** What the watcher last read, for the lock row. */
     watch?: string;
-  } = { reading: false, gen: 0, payoutEdited: false, codeGen: 0, reference: freshReference(), wallets: [] };
+    /** Stored records this build cannot read or check: each locks Redeem until the user clears it. */
+    unreadable: Unreadable[];
+    /** The keys last announced as unreadable, so the notice is not printed again on every connect. */
+    announced: string;
+    /** Storage could not be read: a lock from an earlier visit cannot be checked. */
+    storageDown: boolean;
+  } = { unreadable: [], announced: '', storageDown: false, reading: false, gen: 0, payoutEdited: false, codeGen: 0, reference: freshReference(), wallets: [] };
 
   const amountInput = $<HTMLInputElement>('redeem-amount');
   const wholeInput = $<HTMLInputElement>('redeem-whole');
   const payoutInput = $<HTMLInputElement>('redeem-payout');
   const button = $<HTMLButtonElement>('redeem');
+
+  /** The networks a stored record is checked against. */
+  const nets = (): readonly PendingConfig[] => host.networks?.() ?? (host.network() ? [host.network()!] : []);
+  /** Transactions this page saw settle: a record of one that could not be removed is never locked again. */
+  const settled = new Set<string>();
+  // Where the unreadable records are listed, each with its own button to clear it.
+  const clearBox = document.createElement('div');
+  clearBox.id = 'redeem-unreadable';
+  $('redeem-review').after(clearBox);
 
   const backend = (n: ResolvedNetwork): Backend => ({ kind: 'evm', chainId: BigInt(n.chainId) });
 
@@ -436,8 +509,23 @@ export function initRedeem(host: RedeemHost) {
       if (n?.key !== p.network) rows.push(['Network', `this redemption belongs to ${p.networkLabel}, which is not selected: select it again to settle it. Nothing is read meanwhile.`]);
       rows.push(['Watcher', r.watch ?? 'has not read Kreivo yet']);
     }
+    for (const u of r.unreadable) {
+      const { kreivo, redeemer } = keyNames(u.key, nets());
+      rows.push(['Stored record', `a stored redemption record can’t be read (${u.why}; ${kreivo}, redeemer ${redeemer}); Redeem is off until you check it`]);
+    }
+    if (r.storageDown) rows.push(['Earlier lock', 'storage unavailable: a lock from an earlier visit can’t be checked. Redeem stays usable, but a redemption an earlier visit left unclear would not be known here.']);
     facts($('redeem-review'), rows);
-    button.disabled = host.busy() || r.reading || !!r.pending || !n || !r.facts || !live();
+    clearBox.replaceChildren(
+      ...r.unreadable.map((u) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = `Clear this record (${keyNames(u.key, nets()).kreivo})`;
+        b.disabled = host.busy();
+        b.addEventListener('click', () => clearRecord(u));
+        return b;
+      }),
+    );
+    button.disabled = host.busy() || r.reading || !!r.pending || r.unreadable.length > 0 || !n || !r.facts || !live();
     // After the page's lock (main.ts draws it first): an unclear redemption keeps its reference.
     $<HTMLButtonElement>('redeem-new-reference').disabled = host.busy() || !!r.pending;
   }
@@ -454,6 +542,12 @@ export function initRedeem(host: RedeemHost) {
   button.addEventListener('click', () => void onRedeem());
   async function onRedeem() {
     if (host.busy() || r.reading) return;
+    restore(); // Another tab may have left a lock since this page read the storage.
+    render();
+    if (r.unreadable.length > 0) {
+      progressList($('redeem-progress'))('A stored redemption record can’t be read; Redeem is off until you check it. Nothing was signed.', 'error');
+      return;
+    }
     if (r.pending) {
       // L6: a second redemption could pay out twice while the first may still be included.
       progressList($('redeem-progress'))(`The redemption ${r.pending.txHash} may still be included, so no other is sent until Kreivo records it or it can no longer be included. Nothing was signed.`, 'error');
@@ -521,12 +615,21 @@ export function initRedeem(host: RedeemHost) {
       }
       if (e instanceof UnclearOutcome) {
         const p: Pending = { redeemer: snap.redeemer.account, reference: snap.reference, txHash: e.txHash, validUntil: e.validUntil, network: t.n.key, networkLabel: t.n.label, kreivo: t.n.kreivo.network, snapshot: snap };
-        r.pending = p;
-        r.restored = false;
+        const res = keep(p, nets());
+        r.restored = res.kind === 'other';
         r.watch = undefined;
-        r.unkept = !keep(p);
-        r.reference = snap.reference;
-        if (r.unkept) step('This browser could not store the lock, so a reload or closing the page would lose it: do not reload or close this page until it settles.', 'error');
+        if (res.kind === 'other') {
+          // Another tab holds a lock for this redeemer: that one is the lock, and nothing here overwrites it.
+          r.pending = res.existing;
+          r.unkept = false;
+          r.reference = res.existing.reference;
+          step(`Another tab already holds a lock for this redeemer (the redemption ${res.existing.txHash}), so that lock is kept and this redemption, ${e.txHash}, is not stored: keep its hash, and check it on Kreivo.`, 'error');
+        } else {
+          r.pending = p;
+          r.unkept = res.kind === 'failed';
+          r.reference = snap.reference;
+          if (r.unkept) step('This browser could not store the lock, so a reload or closing the page would lose it: do not reload or close this page until it settles.', 'error');
+        }
         void watchPending(step);
       }
     } finally {
@@ -556,39 +659,54 @@ export function initRedeem(host: RedeemHost) {
     r.unkept = false;
     r.restored = false;
     r.watch = undefined;
+    settled.add(u.txHash);
     drop(u);
-    const s = u.snapshot;
-    if (out.kind === 'recorded') {
-      const red = out.redemption;
-      const same = sameRedemption(red, s);
-      step(
-        same
-          ? `Kreivo records the redemption (final by block ${out.at}): ${formatAmount(red.amount, s.asset.decimals)} ${s.asset.symbol}, paid to ${s.payout}. bezent pays it out on Polygon.`
-          : `Kreivo records a redemption with this reference that differs from what you reviewed (${formatAmount(red.amount, s.asset.decimals)} ${s.asset.symbol} of Here(${red.asset}), paid to ${red.payout.kind === 'address' ? getAddress(red.payout.address) : red.payout.commitment}). bezent acts on what Kreivo recorded. Keep the transaction hash.`,
-        same ? 'ok' : 'error',
-      );
-      const link = document.createElement('a');
-      link.href = host.statusLink(s.redeemer.address, s.reference);
-      link.textContent = 'Follow this redemption’s status';
-      $('redeem-link').replaceChildren(link);
-      r.reference = freshReference();
-    } else {
-      step(`Block ${out.at} is final, past the transaction’s mortality, and Kreivo records no redemption with this reference: nothing was redeemed. The reference is free again.`, 'ok');
+    try {
+      const s = u.snapshot;
+      if (out.kind === 'recorded') {
+        const red = out.redemption;
+        const same = sameRedemption(red, s);
+        step(
+          same
+            ? `Kreivo records the redemption (final by block ${out.at}): ${formatAmount(red.amount, s.asset.decimals)} ${s.asset.symbol}, paid to ${s.payout}. bezent pays it out on Polygon.`
+            : `Kreivo records a redemption with this reference that differs from what you reviewed (${formatAmount(red.amount, s.asset.decimals)} ${s.asset.symbol} of Here(${red.asset}), paid to ${red.payout.kind === 'address' ? getAddress(red.payout.address) : red.payout.commitment}). bezent acts on what Kreivo recorded. Keep the transaction hash.`,
+          same ? 'ok' : 'error',
+        );
+        const link = document.createElement('a');
+        link.href = host.statusLink(s.redeemer.address, s.reference);
+        link.textContent = 'Follow this redemption’s status';
+        $('redeem-link').replaceChildren(link);
+        r.reference = freshReference();
+      } else {
+        step(`Block ${out.at} is final, past the transaction’s mortality, and Kreivo records no redemption with this reference: nothing was redeemed. The reference is free again.`, 'ok');
+      }
+    } catch (e) {
+      // The lock is already cleared: a message that cannot be formed must not leave an unhandled rejection.
+      step(`The redemption ${u.txHash} settled, but its outcome could not be shown (${errorText(e)}). Check it on Kreivo.`, 'error');
     }
     restore(step);
     render();
   }
 
-  /** Reads back an unclear redemption a reload left behind (one at a time; the next is read once this settles),
-   * and follows it again. Before anything can enable Redeem: the page starts with it locked. */
+  /** Reads the stored records and takes them into account: the ones it cannot read lock Redeem (announced once per
+   * set, and listed with a button to clear each), and an unclear redemption a reload (or another tab) left behind is
+   * read back and followed again (one at a time; the next is read once this settles). Never one already seen to
+   * settle. Before anything can enable Redeem: the page starts with it locked. */
   function restore(given?: (t: string, kind?: 'muted' | 'ok' | 'error') => void) {
+    const k = kept(nets());
+    r.storageDown = k.down;
+    r.unreadable = k.unreadable;
+    const keys = k.unreadable.map((u) => u.key).sort().join('\n');
+    const say_ = (t: string, kind: 'muted' | 'ok' | 'error') => (given ?? progressList($('redeem-progress')))(t, kind);
+    if (keys !== r.announced) {
+      r.announced = keys;
+      if (keys) say_(`${k.unreadable.length} stored redemption record(s) can’t be read; Redeem is off until you check ${k.unreadable.length === 1 ? 'it' : 'them'}.`, 'error');
+    }
     if (r.pending) return;
-    const { found, unreadable } = kept();
-    const p = found[0];
-    if (!p && !unreadable) return;
-    const step = given ?? progressList($('redeem-progress'));
-    if (unreadable) step(`${unreadable} stored redemption record(s) in this browser could not be read, so their locks are lost; check the redeemer on Kreivo before redeeming again.`, 'error');
+    for (const x of k.found) if (settled.has(x.txHash)) drop(x); // Its removal failed before: try again, never lock.
+    const p = k.found.find((x) => !settled.has(x.txHash));
     if (!p) return;
+    const step = given ?? progressList($('redeem-progress'));
     r.pending = p;
     r.restored = true;
     r.unkept = false;
@@ -597,6 +715,29 @@ export function initRedeem(host: RedeemHost) {
     step(`A redemption sent before this page was reloaded may still be included (${p.txHash}, ${p.networkLabel}); its reference is locked again.`, 'error');
     void watchPending(step);
   }
+
+  /** Removes an unreadable record, after the user confirms it, naming its network and redeemer. */
+  function clearRecord(u: Unreadable) {
+    const { kreivo, redeemer } = keyNames(u.key, nets());
+    const ok = window.confirm(
+      `Clear the stored redemption record for ${redeemer} on ${kreivo}?\n\nIt can’t be read (${u.why}). Clearing it turns Redeem back on; if that redemption is still being included, this page will not watch it. Check the redeemer on Kreivo first.`,
+    );
+    if (!ok) return;
+    try {
+      if (localStorage.getItem(u.key) === u.raw) localStorage.removeItem(u.key); // Only what was shown.
+    } catch {
+      // Storage blocked: the record stays, and so does the lock.
+    }
+    restore();
+    render();
+  }
+
+  // Another tab's lock takes effect at once.
+  window.addEventListener('storage', (e) => {
+    if (e.key !== null && !e.key.startsWith(PENDING_PREFIX)) return;
+    restore();
+    render();
+  });
 
   // A pending record: leaving the page ends the watch (the lock itself is kept in storage when it can be).
   window.addEventListener('beforeunload', (e) => {
