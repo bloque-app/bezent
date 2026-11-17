@@ -46,6 +46,31 @@ why = "REQ-CV-2, REQ-RV-2, REQ-GV-5: the ingress names the output in review and 
 layers = ["service"]
 why = "REQ-CV-2, REQ-LM-1: the ingress checks the output against the route"
 
+[layer."AC-A6.1"]
+layers = ["service"]
+why = "REQ-IN-10, REQ-IN-4 (amendment 0029): the core makes the directed deposit at Source-Final with the observed destination and refund destination, and mints it; the store's guard backs it"
+
+[layer."AC-A6.2"]
+layers = ["store"]
+why = "REQ-IN-10, REQ-RQ-3, REQ-RQ-6 (amendment 0029): the store refuses a requester's deposit or refund naming a directed arrival, whoever writes; the ingress answers ERR-SourceNotFound"
+
+[layer."AC-A6.3"]
+layers = ["service"]
+why = "REQ-IN-11, REQ-LM-3 (amendment 0029): the core parks a directed deposit under a pause, a hold or the mint window, and returns nothing"
+
+[layer."AC-A6.4"]
+layers = ["store"]
+why = "REQ-IN-11, REQ-RF-2 (amendment 0029): the store binds the return once, and only to the observed refund address"
+narrowed = "The return is paid as any refund of an unassociated arrival (REQ-RQ-6); what this criterion adds, one return and to no one but the observed refund address, is the store's binding, not a chain rule"
+
+[layer."AC-A6.5"]
+layers = ["chain"]
+why = "REQ-LM-2 (amendment 0029): the directing code reverts, so nothing moves"
+
+[layer."AC-A6.6"]
+layers = ["chain", "store"]
+why = "INV-2 is chain + store and INV-10 is the store's (SPEC 9): the directing code emits one event per transfer into the reserve, and the store records the pair once, at the transfer's coordinate, never as an arrival"
+
 [layer."AC-B1.1"]
 layers = ["service"]
 why = "INV-7 is the service's (SPEC 9)"

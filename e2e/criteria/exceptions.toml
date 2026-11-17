@@ -7,9 +7,34 @@
 # that only names a criterion is never the way out: a test named for a criterion MUST verify it.
 # Reviewed by the spec owner (CODEOWNERS).
 
-# No criterion is an exception at the moment: each has a test at its layer. A criterion with a test can still be
-# partial or failing: that is listed in known_unmet.toml.
+# Amendment 0029 (SPEC v0.5.13) adds US-A6 to V0 before F-018's tests land. Each entry is removed in the pull
+# request that adds the criterion's test. A criterion with a test can still be partial or failing: that is listed in
+# known_unmet.toml.
 [exception]
+
+[exception."AC-A6.1"]
+reason = "F-018 (amendment 0029, SPEC v0.5.13): its tests are drafted in pull requests #121, #122 and #125, not yet on the base"
+blocked_by = "#118"
+
+[exception."AC-A6.2"]
+reason = "F-018 (amendment 0029, SPEC v0.5.13): its tests are drafted in pull requests #121, #122 and #125, not yet on the base"
+blocked_by = "#118"
+
+[exception."AC-A6.3"]
+reason = "F-018 (amendment 0029, SPEC v0.5.13): its tests are drafted in pull requests #121, #122 and #125, not yet on the base"
+blocked_by = "#118"
+
+[exception."AC-A6.4"]
+reason = "F-018 (amendment 0029, SPEC v0.5.13): its tests are drafted in pull requests #121, #122 and #125, not yet on the base"
+blocked_by = "#118"
+
+[exception."AC-A6.5"]
+reason = "F-018 (amendment 0029, SPEC v0.5.13): its tests are drafted in pull requests #121, #122 and #125, not yet on the base"
+blocked_by = "#118"
+
+[exception."AC-A6.6"]
+reason = "F-018 (amendment 0029, SPEC v0.5.13): its tests are drafted in pull requests #121, #122 and #125, not yet on the base"
+blocked_by = "#118"
 
 # A V0 story that SPEC section 6 gives no acceptance criterion. Listed so that a new one cannot appear silently.
 [story_without_criteria."US-H2"]
