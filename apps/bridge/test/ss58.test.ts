@@ -39,6 +39,11 @@ describe('parseRecipient', () => {
     expect(KREIVO_SS58_PREFIX).toBe(2);
   });
 
+  it('gives the canonical address, encoded again from the account, not the text typed', () => {
+    const r = parseRecipient(`\t${ALICE_KREIVO} `);
+    expect(r.ok && r.address).toBe(encodeSs58(fromHex(ALICE), 2));
+  });
+
   it('refuses another network’s prefix, naming it', () => {
     const r = parseRecipient(ALICE_GENERIC);
     expect(r.ok).toBe(false);

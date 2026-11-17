@@ -1,0 +1,13 @@
+smoldot, the light client in the bundle's worker (assets/smoldot_worker-*.js), unmodified.
+
+Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
+Copyright (C) 2023  Pierre Krieger
+
+Licensed under the GNU General Public License, version 3 or (at your option) any later version, with the
+"Classpath" exception, as its sources state:
+
+    SPDX-License-Identifier:  GPL-3.0-or-later WITH Classpath-exception-2.0
+
+Its Corresponding Source is smoldot's source at the version in this entry's heading: the package's homepage,
+https://github.com/paritytech/smoldot, and the npm package of that version, https://www.npmjs.com/package/smoldot.
+The GNU GPL version 3 and the Classpath exception are at the end of this file.

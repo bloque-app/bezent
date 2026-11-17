@@ -16,10 +16,22 @@ const facts = (over: Partial<RecipientFacts> = {}): RecipientFacts => ({
   assetSymbol: 'bUSDC',
   assetDecimals: 6,
   refused: false,
+  maxConsumers: 16,
   ...over,
 });
 
 describe('assessRecipient', () => {
+  it('refuses an account already at MaxConsumers, which cannot take the consumer reference a first mint adds', () => {
+    const at = (consumers: number) => assessRecipient(facts({ account: { providers: 1, consumers, sufficients: 0, free: 10n ** 10n } }));
+    expect(at(15).ok).toBe(true);
+    const a = at(16);
+    expect(a.ok).toBe(false);
+    expect(!a.ok && a.reason).toMatch(/16 consumer references, Kreivo's limit \(16\)/);
+    // An account that already holds the asset takes no new reference, and a sufficient asset takes none.
+    expect(assessRecipient(facts({ account: { providers: 1, consumers: 16, sufficients: 0, free: 1n }, assetAccount: { status: 'Liquid', balance: 1n } })).ok).toBe(true);
+    expect(assessRecipient(facts({ account: { providers: 1, consumers: 16, sufficients: 0, free: 1n }, asset: { status: 'Live', isSufficient: true, minBalance: 1n } })).ok).toBe(true);
+  });
+
   it('accepts an account with a provider', () => {
     expect(assessRecipient(facts()).ok).toBe(true);
   });

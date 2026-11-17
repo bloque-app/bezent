@@ -3,17 +3,17 @@
 // T-018-14: the deposit flow against a fake wallet. The permit is for exactly the amount, signed by the
 // depositor; the deposit names the recipient and the depositor as refund; a wallet that cannot sign typed data
 // approves exactly the amount, then deposits; a declined signature sends nothing; a contract that does not
-// direct the pinned token is refused; and the coordinate is the Transfer's, from which the references follow.
+// direct the pinned token, forward to the pinned reserve or carry the pinned code is refused; a wallet that
+// changes chain after the permit sends nothing; and the coordinate is the Transfer's, from which the references
+// follow.
 
 import { describe, expect, it } from 'vitest';
-import { recoverTypedDataAddress, type Hex } from 'viem';
+import { getAddress, recoverTypedDataAddress, type Hex } from 'viem';
 import { connect, deposit, readContract } from '../src/evm/deposit';
 import { permitTypedData } from '../src/evm/permit';
-import { POLYGON_AMOY, resolveNetwork } from '../src/config/networks';
 import { depositReference } from '../src/lib/refs';
-import { BLOCK_HASH, CONTRACT, mockWallet, OWNER, RESERVE, TOKEN } from './mock-wallet';
+import { BLOCK_HASH, CONTRACT, mockWallet, network, OWNER, RESERVE, TOKEN } from './mock-wallet';
 
-const network = resolveNetwork({ ...POLYGON_AMOY, directedDeposit: CONTRACT });
 const RECIPIENT: Hex = '0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d';
 const quiet = () => undefined;
 
@@ -56,6 +56,18 @@ describe('readContract', () => {
     const s = await connect(w.provider, network, 5);
     await expect(readContract(s)).rejects.toThrow(/no contract/);
   });
+
+  it('refuses a contract whose runtime code is not the pinned code', async () => {
+    const w = mockWallet({ contractCode: '0x6081' });
+    const s = await connect(w.provider, network, 5);
+    await expect(readContract(s)).rejects.toThrow(/not the DirectedDeposit this build pins/);
+  });
+
+  it('refuses a contract that forwards to another reserve', async () => {
+    const w = mockWallet({ reserveOfContract: '0x000000000000000000000000000000000000bad0' });
+    const s = await connect(w.provider, network, 5);
+    await expect(readContract(s)).rejects.toThrow(/not the pinned reserve/);
+  });
 });
 
 describe('deposit', () => {
@@ -93,10 +105,54 @@ describe('deposit', () => {
     ]);
   });
 
-  it('uses an allowance already in place rather than approving again', async () => {
+  it('uses an allowance already in place rather than approving again, and says so', async () => {
     const { w, s, facts } = await session({ typedData: 'unsupported', allowance: 3_000_000n });
-    await deposit(s, facts, { amount: 3_000_000n, recipient: RECIPIENT }, quiet);
+    const said: string[] = [];
+    const res = await deposit(s, facts, { amount: 3_000_000n, recipient: RECIPIENT }, (t) => said.push(t));
     expect(w.sent.map((t) => t.functionName)).toEqual(['deposit']);
+    expect(res.reusedAllowance).toBe(true);
+    expect(said.join('\n')).toMatch(/already holds an allowance of at least this amount/);
+  });
+
+  it('does not fall back to approve when the wallet refuses the permit’s parameters (-32602)', async () => {
+    const { w, s, facts } = await session({ typedData: 'invalid-params' });
+    await expect(deposit(s, facts, { amount: 3_000_000n, recipient: RECIPIENT }, quiet)).rejects.toThrow();
+    expect(w.sent).toHaveLength(0);
+  });
+
+  it('sends nothing when the wallet switches chain right after signing the permit', async () => {
+    const { w, s, facts } = await session({ switchChainAfterSign: 1 });
+    await expect(deposit(s, facts, { amount: 3_000_000n, recipient: RECIPIENT }, quiet)).rejects.toThrow(/on chain 1, not Polygon Amoy/);
+    expect(w.requests).toContain('eth_signTypedData_v4');
+    expect(w.requests).not.toContain('eth_sendTransaction');
+    expect(w.sent).toHaveLength(0);
+  });
+
+  it('names the network’s chain on every send, so viem checks eth_chainId itself before it', async () => {
+    const { w, s, facts } = await session({ typedData: 'unsupported' });
+    expect(s.wallet.chain?.id).toBe(80002);
+    await deposit(s, facts, { amount: 3_000_000n, recipient: RECIPIENT }, quiet);
+    const sends = w.requests.flatMap((m, i) => (m === 'eth_sendTransaction' ? [i] : []));
+    expect(sends).toHaveLength(2);
+    for (const i of sends) expect(w.requests[i - 1]).toBe('eth_chainId');
+  });
+
+  it('sends no deposit when the wallet switches chain while the approval is included', async () => {
+    const { w, s, facts } = await session({ typedData: 'unsupported' });
+    await expect(
+      deposit(s, facts, { amount: 3_000_000n, recipient: RECIPIENT }, (t) => {
+        if (/Waiting for the approval/.test(t)) w.switchTo(1);
+      }),
+    ).rejects.toThrow(/on chain 1/);
+    expect(w.sent.map((t) => t.functionName)).toEqual(['approve']);
+  });
+
+  it('pairs the arrival on the refund too: a Directed log naming another refund is not this deposit', async () => {
+    const other = getAddress('0x00000000000000000000000000000000000fee00');
+    const { s, facts } = await session({ record: { refund: other } });
+    const res = await deposit(s, facts, { amount: 2_500_000n, recipient: RECIPIENT }, quiet);
+    expect(res.arrival).toBeUndefined();
+    expect(res.arrivals.map((a) => a.refund)).toEqual([other]);
   });
 
   it('sends nothing when the user declines the permit', async () => {

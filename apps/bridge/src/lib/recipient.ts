@@ -7,7 +7,8 @@
 // it takes a consumer reference on the account, which frame_system gives only to an account that has a
 // provider (`UnavailableConsumer` otherwise; research/03): in practice, an account holding at least the
 // existential deposit of KSM. The first mint must also reach the asset's minimum balance. An account that
-// already holds the asset needs neither. A blocked asset account receives nothing, and an asset that is not
+// already holds the asset needs neither. That consumer reference also fails on an account already at
+// frame_system's `MaxConsumers` (`TooManyConsumers`). A blocked asset account receives nothing, and an asset that is not
 // live mints nothing.
 
 import { formatAmount } from './amount';
@@ -48,6 +49,8 @@ export interface RecipientFacts {
   assetSymbol: string;
   assetDecimals: number;
   refused: boolean;
+  /** frame_system's `MaxConsumers` on this network. */
+  maxConsumers: number;
 }
 
 export type Assessment = { ok: true; note: string } | { ok: false; reason: string; advice: string };
@@ -90,6 +93,13 @@ export function assessRecipient(f: RecipientFacts): Assessment {
       ok: false,
       reason: `This Kreivo account cannot receive ${f.assetSymbol} yet: it holds no ${f.nativeSymbol}. ${f.assetSymbol} is not a sufficient asset, so the account must exist on Kreivo first.`,
       advice: `Send it at least ${ed} (the existential deposit), plus a little for fees if you will redeem later, then check again.`,
+    };
+  }
+  if (f.account.consumers >= f.maxConsumers) {
+    return {
+      ok: false,
+      reason: `This Kreivo account cannot receive ${f.assetSymbol}: it already holds ${f.account.consumers} consumer references, Kreivo's limit (${f.maxConsumers}), and a first ${f.assetSymbol} needs one more.`,
+      advice: 'Name another Kreivo account, or free one of its references (for example, close an asset account it no longer uses) and check again.',
     };
   }
   return { ok: true, note: `The account exists on Kreivo, so it can receive ${f.assetSymbol}.` };

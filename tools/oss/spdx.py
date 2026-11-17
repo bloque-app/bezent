@@ -38,7 +38,7 @@ PROSE = "CC-BY-4.0"
 
 # How a file type writes a comment: a line prefix, or a block (open, close).
 LINE = {
-    ".rs": "//", ".ts": "//", ".js": "//", ".mjs": "//", ".tsx": "//",
+    ".rs": "//", ".ts": "//", ".js": "//", ".mjs": "//",
     ".sh": "#", ".py": "#", ".toml": "#", ".yml": "#", ".yaml": "#",
     ".sql": "--", ".lua": "--", ".sol": "//",
 }

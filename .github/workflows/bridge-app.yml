@@ -4,9 +4,11 @@ name: Bridge web app
 
 # F-018 (T-018-12 to T-018-14; plan DEC-22): the static web app in apps/bridge. Lint, typecheck and unit tests
 # (the reference vectors among them); SPDX headers and REUSE; and the reproducible build: each deployment's
-# bundle is built twice, on two separate runners from clean checkouts, the two bundle hashes
-# (apps/bridge/scripts/hash.mjs) must be equal, and the build with its hash is published as an artifact.
-# Nothing here deploys, and nothing needs a secret.
+# bundle is built twice, on two separate runners from clean checkouts, with the Node version pinned in
+# apps/bridge/package.json (`engines.node`), the two bundle hashes (apps/bridge/scripts/hash.mjs) must be equal,
+# every file's hash is printed in the log, and the build with its hash is published as an artifact. Dependencies
+# install without their install scripts. Nothing here deploys, and nothing needs a secret. README.md, "Reproducing
+# a published hash", says how to rebuild one outside CI.
 
 on:
   pull_request:
@@ -54,10 +56,10 @@ jobs:
         uses: fsfe/reuse-action@v5
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: apps/bridge/package.json
           cache: npm
           cache-dependency-path: apps/bridge/package-lock.json
-      - run: npm ci --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
@@ -79,11 +81,13 @@ jobs:
       # No dependency cache: each build installs from the lock file alone.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-      - run: npm ci --no-audit --no-fund
+          node-version-file: apps/bridge/package.json
+      - run: echo "BRIDGE_DEPLOYMENT=$BRIDGE_DEPLOYMENT BRIDGE_REVISION=$BRIDGE_REVISION" && node --version && npm --version
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run build
+      # Every file's SHA-256 and the bundle's, in the log, so a rebuild can be compared file by file.
       - name: Bundle hash
-        run: node scripts/hash.mjs dist "dist.SHA256SUMS" | tail -n 1
+        run: node scripts/hash.mjs dist "dist.SHA256SUMS"
       - uses: actions/upload-artifact@v4
         with:
           name: bridge-${{ matrix.deployment }}-${{ matrix.run }}
@@ -117,7 +121,7 @@ jobs:
       - name: The two builds hash the same
         run: |
           set -euo pipefail
-          tail -n 1 first/dist.SHA256SUMS
+          cat first/dist.SHA256SUMS
           tail -n 1 second/dist.SHA256SUMS
           if ! diff first/dist.SHA256SUMS second/dist.SHA256SUMS; then
             echo "::error::two builds of ${{ github.sha }} (${{ matrix.deployment }}) differ"

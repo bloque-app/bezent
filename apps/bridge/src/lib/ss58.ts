@@ -6,7 +6,7 @@
 
 import { base58 } from '@scure/base';
 import { blake2b } from '@noble/hashes/blake2';
-import { concat, equalBytes, type Hex, toHex } from './bytes';
+import { concat, equalBytes, fromHex, type Hex, toHex } from './bytes';
 
 /** Kreivo's SS58 prefix (its chain specification's `ss58Format`). */
 export const KREIVO_SS58_PREFIX = 2;
@@ -63,7 +63,8 @@ export type RecipientInput =
 
 /** Validates a pasted recipient for a network whose SS58 prefix is `prefix`. Takes SS58 only: raw hex is
  * refused, because a 32-byte string carries no checksum and no network. Returns the account and its
- * canonical address. */
+ * canonical address, encoded again from the account rather than echoed from the input, which is what the page
+ * shows. */
 export function parseRecipient(input: string, prefix: number = KREIVO_SS58_PREFIX): RecipientInput {
   const text = input.trim();
   if (text === '') return { ok: false, reason: 'Enter the Kreivo account that receives the bUSDC.' };
@@ -79,5 +80,5 @@ export function parseRecipient(input: string, prefix: number = KREIVO_SS58_PREFI
     };
   }
   if (/^0x0{64}$/.test(decoded.account)) return { ok: false, reason: 'The zero account cannot receive anything.' };
-  return { ok: true, account: decoded.account, address: text };
+  return { ok: true, account: decoded.account, address: encodeSs58(fromHex(decoded.account), prefix) };
 }
