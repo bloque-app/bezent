@@ -325,7 +325,7 @@ Tests: `services/core/tests/anomalies.rs` (`INV-8`).
 
 - **PR #31 (F-007).** The core implements the two-step delivery of its decision 1: order intent
   (`{"order": …, "amount"}`), then the signing intent over `prepared_transactions.message`
-  (`{"message", "amount", "prepared"}`); a failed dry run holds `CND-DestinationRefused` (`Kreivo(…)`),
+  (`{"message", "amount", "prepared"}`); a failed dry run holds `CND-DestinationRefused` (only `Kreivo(Assets(CannotMint))` with the asset recorded `Live`; any other `Kreivo(…)` holds nothing, F-018 PR #136),
   `CND-MintWindow` (`AboveWindow`, `AboveCeiling`) or `CND-FeeShort`, and a new order follows after
   `retry_preparation_seconds`. Proofs are read from its `non_execution_proofs` (through `signed_transactions` to
   the signing intent) by `attempt_proof()`/`attempt_gate_open()`. Since the integration (migration `0021_delivery_integration`,

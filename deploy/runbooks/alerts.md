@@ -66,6 +66,8 @@ kind exists on `develop` at this commit.
 | `statement-publish-failed` | statements | `pages/statements.md` | yes | **no** |
 | `payout-window-alert` | engine | `pages/payout.md`, `conditions/CND-PayoutWindow.md` | yes | yes, by message text |
 | `payout-refusal-alert` | engine | `pages/payout.md` | yes | **no** (and quoted before `F-014`) |
+| `deposit-window-alert` | engine: a directed deposit in `CND-DepositWindow` its route can never fit (`F-018`) | `conditions/CND-DepositWindow.md` | yes | **no**: the filter must be added |
+| `directed-binding-alert` | engine: a directed arrival bound by a transfer that is not bezent's own (`F-018`) | `conditions/CND-Unassociated.md` | yes | **no**: the filter must be added |
 | `resolution-blocked-by-inclusion` | engine | `pages/payout.md` | yes | **no** (and quoted before `F-014`) |
 | `resolution-unprepared-alert` | engine | `pages/payout.md` | yes | **no** |
 | `attested-withdrawal-unrelayed` | engine | `pages/attested.md` | **no, PR #66** | no |

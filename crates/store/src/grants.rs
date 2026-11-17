@@ -147,6 +147,13 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "bezent_writer_holds(text,oid)",
             // F-018 (migration 0144): the core's deposit for a final directed arrival.
             "directed_deposit(text,bigint,bytea,position_kind,bigint)",
+            // F-018 (migration 0145): whether the issuing network's refusal of a directed
+            // deposit's destination is recorded (the evidence of its review exit), whether the
+            // deposit may leave its review into Refunding, and whether it fits in what its route's
+            // window has left.
+            "directed_refusal_recorded(bigint,text,bigint,bytea,timestamp with time zone)",
+            "directed_review_refund_open(bigint)",
+            "directed_window_fits(bigint)",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
             "ops_observables()",

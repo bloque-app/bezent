@@ -119,7 +119,7 @@ Who may **call** what (EXECUTE; the functions that run as the owner are marked *
 
 | Role | Calls |
 |---|---|
-| core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `directed_deposit` *definer* (0144: the deposit of a final directed arrival), `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
+| core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `directed_deposit` *definer* (0144: the deposit of a final directed arrival), `directed_window_fits` and `directed_review_refund_open` (0145: whether a directed deposit fits in its route's window, and whether it may leave its review into `Refunding`), `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
 | ingress | `source_bindable`, `funding_arrival`, `bezent_writer_holds` |
 | Kreivo endpoint, EVM endpoint | `bezent_writer_holds`, `bezent_endpoint_writer`, `bezent_evm_endpoint_writer`, `bezent_row_network`, `observation_kind_on_network`, `observation_kind_for_event`, `observation_writer_covers` (the guards' helpers, which run as the inserting login) |
 | signer | `attempt_gate_open` *definer*, `pause_holds_intent` *definer* (0125: whether a pause holds a signing intent whose attempt has no signature, amendment 0022 A1b), `statement_place_refusal` *definer* |
@@ -195,6 +195,19 @@ address or the directing contract (compared without case on an `evm` network), a
 (`directed:<network>:<block>:<hash>:<kind>:<index>`), since the column is not null; the requests' readers reach a transfer through
 `intake_answers`, so none of them reads it. `transfers_source_bindable()` became `SECURITY DEFINER` (it only reads) so the core, which
 may not call the coordinate lock, binds without a wider grant.
+
+Since 0145 (F-018 T-018-07 to T-018-09, amendment 0029 A5, Open 1 to 3) a directed arrival's deposit and return can move. A
+deposit may hold `CND-DepositWindow` (Open 1: a directed deposit over what its route's window has left waits): a route's window
+(`route_usage_locked()`) counts a deposit from when it was made, or, if it waited, from when it left the condition, and every
+deposit still waiting as a claim on it, so first come first served by coordinate holds against requesters' deposits too (Open 5: no
+separate share); `directed_window_fits()` is the core's question for one deposit, under the route's lock. The core's return of a
+directed arrival is accepted `Received -> Accepted` by the core with no recorded release (Open 3: no second approver); any other
+refund of an unassociated arrival still needs one. And a directed deposit in review, entered from `Source-Final` holding
+`CND-DestinationRefused` with no signature or signed bytes on any of its intents (`directed_review_refund_open()`), may be resolved
+into `Refunding` by an approved resolution (Open 2): its first attempt, ordered and never signed, is cancelled under it (the 0051
+table now takes a first attempt of such a deposit), and its refund is a transfer with `refund_of` the deposit, its asset and
+amount, to its refund destination, with the return's `bz-u-` bridge reference and payout reference, so the arrival is returned
+once whichever way. No other transfer gains that edge.
 
 An attempt that was ordered and never signed (issue #25, 0051) stood in the way of a withdrawal's refund for
 good: it has an intent and, there being no signed transaction, no proof of non-execution to record. The core

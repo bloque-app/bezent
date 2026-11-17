@@ -52,11 +52,16 @@ async fn withdrawal(w: &World, block: i64, reference: [u8; 32]) -> i64 {
 
 /// The core orders attempt `attempt`, the endpoint prepares it and its dry run is refused with
 /// `reason` (several times over: each refusal is followed by a new order, and the core cycles).
-async fn refused(w: &World, id: i64, attempt: i32, reason: &str) {
-    for _ in 0..3 {
+/// The destination's final head `next` is seen after the first order: the attempt's time is
+/// counted from the later of its clock and that head (§5.4; review L-a of PR #136).
+async fn refused(w: &World, id: i64, attempt: i32, reason: &str, next: i64) {
+    for i in 0..3 {
         w.cycle(t0()).await;
         w.cycle(t0()).await;
         let (o, _) = order(&w.admin, id, attempt).await.expect("an order");
+        if i == 0 {
+            head(&w.admin, ORIGIN, next).await;
+        }
         prepare(&w.admin, o, Some(reason)).await;
     }
     w.cycle(t0()).await;
@@ -70,7 +75,7 @@ async fn req_rv_1_a_first_attempt_whose_preparation_never_passes_goes_to_review_
     let w = World::new(options, connect).await;
     reserve(&w.admin, 1_000_000).await;
     let id = withdrawal(&w, 20, [1; 32]).await;
-    refused(&w, id, 1, UNNAMED).await;
+    refused(&w, id, 1, UNNAMED, 23).await;
     assert_eq!(w.state(id).await, ("Source-Final".into(), None));
 
     // Before the deadline (the source leg final at block 22, plus the route's budget, on the
@@ -112,7 +117,7 @@ async fn req_rv_1_a_refusal_that_names_a_condition_waits_as_the_condition_says(
     let w = World::new(options, connect).await;
     reserve(&w.admin, 1_000_000).await;
     let fee = withdrawal(&w, 20, [2; 32]).await;
-    refused(&w, fee, 1, "InsufficientBalance").await;
+    refused(&w, fee, 1, "InsufficientBalance", 23).await;
     assert_eq!(
         w.state(fee).await,
         ("Source-Final".into(), Some("CND-FeeShort".into()))
@@ -136,6 +141,8 @@ async fn cnd_payout_window_a_spent_allowance_is_never_reviewed_and_its_clock_res
     let id = withdrawal(&w, 20, [3; 32]).await;
     head(&w.admin, ORIGIN, 30).await;
     w.cycle(t0()).await;
+    // The first final head after the attempt was ordered: the order starts to age (§5.4).
+    head(&w.admin, ORIGIN, 31).await;
     let (o, _) = order(&w.admin, id, 1).await.unwrap();
     prepare_allowance_spent(&w.admin, o, &allowance_key()).await;
     w.settle(t0()).await;
@@ -173,7 +180,7 @@ async fn second_attempt_never_prepared(w: &World, reference: [u8; 32]) -> i64 {
     let id = withdrawal(w, 20, reference).await;
     deliver(w, id, 1, t0()).await;
     prove(&w.admin, id, 1, ORIGIN, 100).await;
-    refused(w, id, 2, UNNAMED).await;
+    refused(w, id, 2, UNNAMED, 101).await;
     assert_eq!(w.state(id).await.0, "Delivering");
     id
 }

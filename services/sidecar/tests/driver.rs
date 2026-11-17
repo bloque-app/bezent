@@ -653,7 +653,7 @@ async fn dec_19_a_failed_dry_run_holds_its_condition(
     let w = World::new(options, connect).await;
     w.ok(
         "/driver/v0/dry-run-failures",
-        json!({"network": ISSUING, "reason": "Kreivo: Assets.CannotCreate"}),
+        json!({"network": ISSUING, "reason": "Kreivo(Assets(CannotMint))"}),
     )
     .await;
     let bridge = w.deposited("dep-refused", 1_000_000).await;
@@ -670,6 +670,24 @@ async fn dec_19_a_failed_dry_run_holds_its_condition(
             Some("CND-DestinationRefused".to_owned())
         )
     );
+    // The refused dry run carries the final head's block time and its outcome, as the Kreivo
+    // endpoint records them, so a sidecar run can take the directed review exit (review I2 of PR
+    // #136; 0145).
+    let refused = count(
+        &w.admin,
+        "SELECT count(*) FROM prepared_transactions WHERE NOT dry_run_passed",
+    )
+    .await;
+    assert!(refused > 0);
+    let timed = count(
+        &w.admin,
+        "SELECT count(*) FROM prepared_transactions p JOIN final_heads h \
+           ON h.network = p.network AND h.block_number = p.dry_run_block_number \
+         WHERE NOT p.dry_run_passed AND p.dry_run_block_time = h.block_time \
+           AND p.dry_run ->> 'outcome' = 'refused'",
+    )
+    .await;
+    assert_eq!(timed, refused);
     let (status, _) = w
         .call(
             "/driver/v0/dry-run-failures",

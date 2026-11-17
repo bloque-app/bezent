@@ -346,6 +346,52 @@ pub const CONTRACT_ERRORS: &[&str] = &[
     "BurnShort",
 ];
 
+/// The index of `Error::Kreivo(KreivoApiError)` in [`CONTRACT_ERRORS`]: the one error that carries
+/// a field, the assets API's own refusal.
+pub const KREIVO_ERROR: u8 = 29;
+
+/// The assets API's errors, by their SCALE index (`contracts/bezent/src/kreivo.rs`,
+/// `AssetsApiError`; Kreivo's ABI order).
+pub const ASSETS_API_ERRORS: &[&str] = &[
+    "CannotDeposit",
+    "CannotTransfer",
+    "CannotMint",
+    "CannotBurn",
+    "NotAGroupContract",
+    "NotAuthorised",
+    "NotALocalAsset",
+];
+
+/// The name of the contract's error at SCALE `index` with its field bytes `rest`, as a dry run's
+/// reason records it. `Kreivo` names its inner error too (`contracts/bezent/src/kreivo.rs`,
+/// `KreivoApiError`): `Kreivo(UnknownError)`, `Kreivo(ExtQueryError)`, `Kreivo(Assets(CannotMint))`
+/// and so on, the outer name first, so a reader of `Kreivo…` still reads it (review M1 of PR #136).
+/// Only `Kreivo(Assets(CannotMint))` is the network's refusal of the destination
+/// (`bezent_store::DESTINATION_REFUSALS`). An inner error that does not decode is recorded as its
+/// bytes, `Kreivo(0x…)`, and none at all as a bare `Kreivo`: both an unknown, never a refusal of the
+/// destination.
+pub fn contract_error(index: u8, rest: &[u8]) -> String {
+    let Some(name) = CONTRACT_ERRORS.get(usize::from(index)) else {
+        return format!("error {index}");
+    };
+    if index != KREIVO_ERROR {
+        return (*name).to_owned();
+    }
+    let inner = match rest {
+        [] => return (*name).to_owned(),
+        [0] => Some("UnknownError".to_owned()),
+        [1] => Some("ExtQueryError".to_owned()),
+        [2, e] => ASSETS_API_ERRORS
+            .get(usize::from(*e))
+            .map(|e| format!("Assets({e})")),
+        _ => None,
+    };
+    match inner {
+        Some(inner) => format!("{name}({inner})"),
+        None => format!("{name}(0x{})", hex::encode(rest)),
+    }
+}
+
 // ------------------------------------------------------------------------------ events
 
 /// An ink! 5 event's signature topic: the BLAKE2b-256 of `Name(type,type,…)`, with the field
@@ -917,11 +963,9 @@ pub fn decode_dry_run(bytes: &[u8]) -> Result<DryRun, String> {
             // Result<Result<(), Error>, LangError>.
             match (reverted, data.as_slice()) {
                 (false, [0, 0]) => DryRunOutcome::Passed,
-                (true, [0, 1, index, ..]) => DryRunOutcome::Refused(
-                    CONTRACT_ERRORS
-                        .get(usize::from(*index))
-                        .map_or_else(|| format!("error {index}"), |e| (*e).to_owned()),
-                ),
+                (true, [0, 1, index, rest @ ..]) => {
+                    DryRunOutcome::Refused(contract_error(*index, rest))
+                }
                 (_, [1, ..]) => {
                     DryRunOutcome::Failed("the contract refused to dispatch the message".into())
                 }
@@ -1433,6 +1477,136 @@ mod tests {
         let mut data = e.encode_data();
         data.push(1);
         assert!(decode_event(&e.topics(), &data).is_err());
+    }
+
+    /// `REQ-IN-9`, `REQ-RF-1` (review M1 of PR #136): a refusal by Kreivo's assets API is recorded
+    /// with its inner error, from the bytes after the variant index, for every variant the contract
+    /// returns, so that only the refusal to mint to the destination reads as one. The bytes are the
+    /// contract's own: `Result<Result<(), Error>, LangError>` with `Error::Kreivo(KreivoApiError)`,
+    /// encoded here through a mirror of the contract's enums with the same codec indices
+    /// (`contracts/bezent/src/kreivo.rs`, `contracts/bezent/src/types.rs`) and pinned as literals.
+    #[test]
+    fn req_in_9_a_kreivo_refusal_names_its_inner_error() {
+        #[derive(Encode)]
+        #[allow(dead_code)]
+        enum AssetsApiError {
+            #[codec(index = 0)]
+            CannotDeposit,
+            #[codec(index = 1)]
+            CannotTransfer,
+            #[codec(index = 2)]
+            CannotMint,
+            #[codec(index = 3)]
+            CannotBurn,
+            #[codec(index = 4)]
+            NotAGroupContract,
+            #[codec(index = 5)]
+            NotAuthorised,
+            #[codec(index = 6)]
+            NotALocalAsset,
+        }
+        #[derive(Encode)]
+        enum KreivoApiError {
+            #[codec(index = 0)]
+            UnknownError,
+            #[codec(index = 1)]
+            ExtQueryError,
+            #[codec(index = 2)]
+            Assets(AssetsApiError),
+        }
+        // `Error::Kreivo` is the contract's 30th variant (index 29).
+        #[derive(Encode)]
+        enum Error {
+            #[codec(index = 29)]
+            Kreivo(KreivoApiError),
+        }
+        use AssetsApiError::*;
+        let cases: [(KreivoApiError, &[u8], &str); 9] = [
+            (
+                KreivoApiError::UnknownError,
+                &[29, 0],
+                "Kreivo(UnknownError)",
+            ),
+            (
+                KreivoApiError::ExtQueryError,
+                &[29, 1],
+                "Kreivo(ExtQueryError)",
+            ),
+            (
+                KreivoApiError::Assets(CannotDeposit),
+                &[29, 2, 0],
+                "Kreivo(Assets(CannotDeposit))",
+            ),
+            (
+                KreivoApiError::Assets(CannotTransfer),
+                &[29, 2, 1],
+                "Kreivo(Assets(CannotTransfer))",
+            ),
+            (
+                KreivoApiError::Assets(CannotMint),
+                &[29, 2, 2],
+                "Kreivo(Assets(CannotMint))",
+            ),
+            (
+                KreivoApiError::Assets(CannotBurn),
+                &[29, 2, 3],
+                "Kreivo(Assets(CannotBurn))",
+            ),
+            (
+                KreivoApiError::Assets(NotAGroupContract),
+                &[29, 2, 4],
+                "Kreivo(Assets(NotAGroupContract))",
+            ),
+            (
+                KreivoApiError::Assets(NotAuthorised),
+                &[29, 2, 5],
+                "Kreivo(Assets(NotAuthorised))",
+            ),
+            (
+                KreivoApiError::Assets(NotALocalAsset),
+                &[29, 2, 6],
+                "Kreivo(Assets(NotALocalAsset))",
+            ),
+        ];
+        let w = Weight {
+            ref_time: 1,
+            proof_size: 1,
+        };
+        let refused =
+            |data: Vec<u8>| decode_dry_run(&encode_dry_run(w, 0, Ok((true, data)))).unwrap();
+        for (error, bytes, name) in cases {
+            let returned = Result::<Result<(), Error>, ()>::Ok(Err(Error::Kreivo(error))).encode();
+            assert_eq!(&returned[..2], &[0, 1]);
+            assert_eq!(&returned[2..], bytes, "{name}");
+            assert_eq!(
+                refused(returned).outcome,
+                DryRunOutcome::Refused(name.into())
+            );
+            assert_eq!(
+                bezent_store::DESTINATION_REFUSALS.contains(&name),
+                name == "Kreivo(Assets(CannotMint))",
+                "{name}: only the refusal to mint to the destination is one"
+            );
+        }
+        // No inner error, or one that does not decode: an unknown, recorded as such.
+        assert_eq!(
+            refused(vec![0, 1, 29]).outcome,
+            DryRunOutcome::Refused("Kreivo".into())
+        );
+        assert_eq!(
+            refused(vec![0, 1, 29, 2, 9]).outcome,
+            DryRunOutcome::Refused("Kreivo(0x0209)".into())
+        );
+        assert_eq!(
+            refused(vec![0, 1, 29, 3]).outcome,
+            DryRunOutcome::Refused("Kreivo(0x03)".into())
+        );
+        // The other errors carry no field and keep their names.
+        assert_eq!(
+            refused(vec![0, 1, 6]).outcome,
+            DryRunOutcome::Refused("AboveWindow".into())
+        );
+        assert_eq!(CONTRACT_ERRORS[usize::from(KREIVO_ERROR)], "Kreivo");
     }
 
     #[test]

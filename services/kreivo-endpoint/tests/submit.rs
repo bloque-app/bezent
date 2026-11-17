@@ -146,6 +146,146 @@ async fn dec_5_nothing_is_signed_without_a_passing_dry_run(
     assert!(f.chain.submitted().is_empty());
 }
 
+/// `REQ-IN-8`, `REQ-IN-9`, `REQ-RF-1` (review of PR #136): Kreivo's `mint` answers `CannotMint` for
+/// every error of `mint_into`, the whole asset's too. A dry run refused for it is recorded with the
+/// asset's status and supply at the same finalized head: none when the asset does not exist there,
+/// `Live`, or `Frozen`; only `Live` makes it the destination's (`bezent_store::ASSET_LIVE`). A
+/// refusal for anything else reads no asset. Each records the block time of the head it ran at, read
+/// from `Timestamp::Now`.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_9_a_refusal_to_mint_is_recorded_with_the_assets_status(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    use bezent_kreivo_endpoint::chain::AssetStatus;
+    use bezent_kreivo_endpoint::chain::fake::time_of;
+    use serde_json::{Value, json};
+
+    let f = Fixture::new(pool, connect).await;
+    let s = f.submitter();
+    // `Error::Kreivo(KreivoApiError::Assets(AssetsApiError::CannotMint))`.
+    f.chain.set_dry_run(DryRunMode::RefuseWith(vec![29, 2, 2]));
+    let mut n = 0u8;
+    let mut refused = || {
+        n += 1;
+        let (f, s) = (&f, &s);
+        async move {
+            let order = f.order_mint([0x40 + n; 32], TO, 5).await;
+            let prepared = s.prepare(order).await.unwrap();
+            let Prepared::DryRunFailed { id, reason } = &prepared else {
+                panic!("{prepared:?}");
+            };
+            let (dry_run, block, time_ms): (Value, i64, i64) = sqlx::query_as(
+                "SELECT dry_run, dry_run_block_number, \
+                   (extract(epoch FROM dry_run_block_time) * 1000)::bigint \
+                 FROM prepared_transactions WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&f.admin)
+            .await
+            .unwrap();
+            assert_eq!(time_ms as u64, time_of(block as u64), "the head's own time");
+            (reason.clone(), dry_run)
+        }
+    };
+
+    let (reason, gone) = refused().await;
+    assert_eq!(reason, "Kreivo(Assets(CannotMint))");
+    assert_eq!(
+        gone["asset"],
+        json!({"id": "Here(101)", "status": null, "supply": null})
+    );
+
+    f.chain.set_supply(101, 7, 7);
+    f.chain.advance(1);
+    let (_, live) = refused().await;
+    assert_eq!(
+        live["asset"],
+        json!({"id": "Here(101)", "status": bezent_store::ASSET_LIVE, "supply": "7"})
+    );
+
+    f.chain.set_asset_status(101, AssetStatus::Frozen);
+    f.chain.advance(1);
+    let (_, frozen) = refused().await;
+    assert_eq!(
+        frozen["asset"],
+        json!({"id": "Here(101)", "status": "Frozen", "supply": "7"})
+    );
+
+    f.chain.set_asset_status(101, AssetStatus::Destroying);
+    f.chain.advance(1);
+    let (_, destroying) = refused().await;
+    assert_eq!(destroying["asset"]["status"], "Destroying");
+
+    // Another refusal of the assets API reads no asset.
+    f.chain.set_dry_run(DryRunMode::RefuseWith(vec![29, 2, 5]));
+    let (reason, other) = refused().await;
+    assert_eq!(reason, "Kreivo(Assets(NotAuthorised))");
+    assert!(other.get("asset").is_none(), "{other}");
+    assert_eq!(f.signatures().await, 0);
+}
+
+/// `REQ-RF-1`, `REQ-IN-9` (review I1 of PR #136): a refusal to mint whose asset the chain does
+/// not answer for is not prepared at all (`Prepared::Unavailable`, no row), and is asked again; one
+/// whose answer cannot be used is recorded with the asset's status unknown and the error, which is
+/// never the destination's refusal.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_an_asset_that_cannot_be_read_is_never_the_destinations_refusal(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    use bezent_kreivo_endpoint::chain::ChainError;
+    use serde_json::Value;
+
+    let f = Fixture::new(pool, connect).await;
+    let s = f.submitter();
+    // `Error::Kreivo(KreivoApiError::Assets(AssetsApiError::CannotMint))`.
+    f.chain.set_dry_run(DryRunMode::RefuseWith(vec![29, 2, 2]));
+    f.chain.set_supply(101, 7, 7);
+    f.chain.advance(1);
+    let rows = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM prepared_transactions")
+            .fetch_one(&f.admin)
+            .await
+            .unwrap()
+    };
+
+    f.chain
+        .set_asset_error(Some(ChainError::Unavailable("no peer".into())));
+    let order = f.order_mint([0x50; 32], TO, 5).await;
+    let prepared = s.prepare(order).await.unwrap();
+    let Prepared::Unavailable(why) = &prepared else {
+        panic!("{prepared:?}");
+    };
+    assert!(why.contains("the asset's status"), "{why}");
+    assert_eq!(rows().await, 0, "nothing is recorded");
+
+    f.chain.set_asset_error(Some(ChainError::Invalid(
+        "the asset's details do not decode".into(),
+    )));
+    let prepared = s.prepare(order).await.unwrap();
+    let Prepared::DryRunFailed { id, reason } = &prepared else {
+        panic!("{prepared:?}");
+    };
+    assert_eq!(reason, "Kreivo(Assets(CannotMint))");
+    let dry_run: Value =
+        sqlx::query_scalar("SELECT dry_run FROM prepared_transactions WHERE id = $1")
+            .bind(id)
+            .fetch_one(&f.admin)
+            .await
+            .unwrap();
+    assert_eq!(dry_run["asset"]["id"], "Here(101)");
+    assert!(dry_run["asset"]["status"].is_null(), "{dry_run}");
+    assert!(
+        dry_run["asset"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("do not decode")),
+        "{dry_run}"
+    );
+    assert_eq!(rows().await, 1);
+    assert_eq!(f.signatures().await, 0);
+}
+
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn ac_d2_1_after_a_restart_the_recorded_bytes_are_sent_again_and_nothing_is_signed_again(
     pool: PgPoolOptions,

@@ -118,6 +118,23 @@ Cloudflare Workers with static assets, not Pages. Both serve a static app. Cloud
 leaves room for a rate-limiting front to the public status route (amendment 0029, Open 8, ruled yes) in the same deployment.
 `bridge.bloque.network` is the working name.
 
+## Deployment order (PR #136)
+
+Deploy migration `0145_directed_core` first, then the **Kreivo endpoint, before the core**. The endpoint records two
+things the core and the store now read from a refused dry run: the block time of the head it ran at
+(`prepared_transactions.dry_run_block_time`), and, for a refusal to mint (`Kreivo(Assets(CannotMint))`), the asset's
+status and supply at that head (`dry_run.asset`). Kreivo's `mint` answers `CannotMint` for every error of `mint_into`,
+the whole asset's too (frozen, being destroyed, gone), so only a refusal recorded with the asset `Live` is the
+destination's. A core deployed before the endpoint is safe but blind: every refusal to mint reads as one that names
+nothing, pages, and goes to review at its deadline without `CND-DestinationRefused`. A directed deposit still in
+`Source-Final` can take the review exit once the endpoint is updated and its mint is prepared again; one that already
+entered review without the condition never can, since the store reads the condition the deposit held when it entered
+review (whether such a deposit may take the exit later is the open ruling `d-f018-review-exit-later`). Supply
+overflow (`mint_into` past `u128::MAX`) is not checked: at six decimals it is about 3.4 × 10^32 tokens, not a plausible issuance. On a `Live`
+asset, `mint_into` may also refuse with `BelowMinimum` (a fresh account credited less than the asset's `min_balance`),
+which reaches the core as the same `CannotMint` and reads as a refusal of the destination. The refund it opens still
+needs two approvers (`REQ-GV-5`).
+
 ## Smaller choices
 
 - `Directed(address indexed sender, uint256 amount, bytes32 indexed recipient, address refund)`: the sender and recipient
