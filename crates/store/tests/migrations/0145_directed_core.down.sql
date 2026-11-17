@@ -460,6 +460,22 @@ BEGIN
                              AND ob.position_kind = NEW.source_position_kind
                              AND ob.position_index = NEW.source_position_index
                              AND ob.kind IN ('directed_arrival', 'unpaired_direction')) THEN
+            -- Review H1 of PR #125 (REQ-RQ-3, REQ-RQ-6): a request names the coordinate of an
+            -- arrival the store has observed (the ingress's `intake::source` reads it before it
+            -- binds, and answers ERR-SourceNotFound otherwise), so a binding to a coordinate with no
+            -- observation is no request's. Refused, so nothing observed there later (a directed
+            -- arrival) is bound by it.
+            IF NEW.source_network IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM observations ob
+                               WHERE ob.network = NEW.source_network
+                                 AND ob.block_number = NEW.source_block_number
+                                 AND ob.block_hash = NEW.source_block_hash
+                                 AND ob.position_kind = NEW.source_position_kind
+                                 AND ob.position_index = NEW.source_position_index) THEN
+                RAISE EXCEPTION 'transfer % (%) refused for %: its source names a coordinate on % with no observation; a request binds only an arrival the store has observed (REQ-RQ-3, REQ-RQ-6, ERR-SourceNotFound, INV-2)',
+                    NEW.bridge_reference, NEW.kind, writer, NEW.source_network
+                    USING ERRCODE = 'BZ001';
+            END IF;
             RETURN NEW;
         END IF;
         RAISE EXCEPTION 'transfer % (%, %) refused for %: the ingress creates only what a request makes, a deposit or the refund of an unassociated arrival, in Received, bound to an origin network, with none of the core''s keys; a withdrawal, a refund of one and anything at Source-Final or later rest on chain data and are the core''s (INV-6, INV-8, REQ-RQ-7, REQ-RF-3, REQ-RF-4)',
@@ -728,6 +744,7 @@ END
 $$;
 
 DROP FUNCTION directed_review_refund_open(BIGINT);
+DROP FUNCTION directed_refusal_recorded(BIGINT, TEXT, BIGINT, BYTEA);
 DROP FUNCTION directed_return(BIGINT);
 DROP FUNCTION directed_return_reference(TEXT, BIGINT, BYTEA, position_kind, BIGINT);
 

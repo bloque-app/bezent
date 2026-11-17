@@ -108,7 +108,7 @@ async fn give_back(owner: &PgPool, core: &PgPool, block: i64) -> i64 {
         "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
              destination_network, destination, state, source_network, source_block_number, \
              source_block_hash, source_position_kind, source_position_index) \
-         VALUES ($4, 'return-' || $1, 'refund', \
+         VALUES ($4, 'directed:return-' || $1, 'refund', \
              'asset-a', $2, 'origin-a', $3, 'Received', 'origin-a', $1, '\\xaa', 'log', 1) \
          RETURNING id",
     )
@@ -119,6 +119,51 @@ async fn give_back(owner: &PgPool, core: &PgPool, block: i64) -> i64 {
     .fetch_one(core)
     .await
     .expect("the core's return")
+}
+
+/// Attempt 1 of deposit `id` ordered on the issuing network, and its preparation, whose dry run at
+/// (`issuing`, 90, `\xcc`) the network refused with `reason` (the issuing network's refusal of a
+/// destination begins `Kreivo`).
+async fn refused_dry_run(pool: &PgPool, id: i64, reason: &str) {
+    exec(
+        pool,
+        &format!(
+            "WITH i AS (INSERT INTO intents (transfer_id, network, purpose, attempt, payload) \
+               VALUES ({id}, 'issuing', 'mint', 1, '{{\"order\": {{}}, \"amount\": \"5\"}}') \
+               RETURNING id) \
+             INSERT INTO prepared_transactions (order_intent_id, attempt, network, lane, key_id, \
+                 nonce, valid_from_block, valid_until_block, checkpoint_hash, call, \
+                 signing_payload, message, dry_run_block_number, dry_run_block_hash, \
+                 dry_run_passed, dry_run) \
+             SELECT id, 1, 'issuing', '\\x01', 'mint-key', 0, 0, 0, '\\x02', '\\x03', '\\x04', \
+                 '\\x05', 90, '\\xcc', FALSE, \
+                 jsonb_build_object('outcome', 'refused', 'reason', '{reason}'::text) FROM i"
+        ),
+    )
+    .await;
+}
+
+/// Deposit `id` enters review from `Source-Final` holding `CND-DestinationRefused`: at the
+/// condition's deadline, on the issuing network's final head 100 (`at_head`), as the core's
+/// deadline review writes it; or with no coordinate, as its review of a destination or a list it
+/// cannot read writes it.
+async fn into_review(pool: &PgPool, id: i64, at_head: bool) {
+    let point = if at_head {
+        "'issuing', 100, '\\xbb', '2026-10-13T01:00:00Z'"
+    } else {
+        "NULL, NULL, NULL, NULL"
+    };
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO final_heads (network, block_number, block_hash, block_time) \
+               VALUES ('issuing', 100, '\\xbb', '2026-10-13T01:00:00Z') ON CONFLICT DO NOTHING; \
+             INSERT INTO transitions (transfer_id, from_state, to_state, condition, network, \
+                 block_number, block_hash, block_time) \
+             VALUES ({id}, 'Source-Final', 'Needs-Review', 'CND-DestinationRefused', {point})"
+        ),
+    )
+    .await;
 }
 
 /// `REQ-IN-11`, `REQ-ID-2`: the payout reference of a directed arrival's return is derived as
@@ -271,15 +316,10 @@ async fn req_rv_2_only_a_directed_deposit_in_review_for_its_destination_is_refun
         .expect_err("a refund out of no review");
     assert_refusal(&err, "REQ-RV-2", "a refund out of no review");
 
-    // In review for its destination, with no resolution: still refused.
-    exec(
-        &pool,
-        &format!(
-            "INSERT INTO transitions (transfer_id, from_state, to_state, condition) \
-             VALUES ({id}, 'Source-Final', 'Needs-Review', 'CND-DestinationRefused')"
-        ),
-    )
-    .await;
+    // In review for its destination (the network's refusal recorded, entered at the deadline),
+    // with no resolution: still refused.
+    refused_dry_run(&pool, id, "Kreivo(CannotCreate)").await;
+    into_review(&pool, id, true).await;
     assert!(flag(&pool, &format!("SELECT directed_review_refund_open({id})")).await);
     let err = sqlx::raw_sql(&refund_sql(REFUND))
         .execute(&core)
@@ -289,12 +329,6 @@ async fn req_rv_2_only_a_directed_deposit_in_review_for_its_destination_is_refun
 
     // An approved resolution: to another address it is refused, whoever writes; to the refund
     // destination the deposit took from the arrival, the core may make it.
-    exec(
-        &pool,
-        "INSERT INTO final_heads (network, block_number, block_hash, block_time) \
-         VALUES ('issuing', 100, '\\xbb', '2026-10-13T01:00:00Z')",
-    )
-    .await;
     let ops = [
         operator_login(&pool, OPERATORS[0]).await,
         operator_login(&pool, OPERATORS[1]).await,
@@ -302,7 +336,7 @@ async fn req_rv_2_only_a_directed_deposit_in_review_for_its_destination_is_refun
     let action: i64 = sqlx::query_scalar(
         "INSERT INTO manual_actions (kind, transfer_id, to_state, network, block_number, \
              block_hash, block_time, justification) \
-         VALUES ('review-resolution', $1, 'Refunding', 'issuing', 100, '\\xbb', \
+         VALUES ('review-resolution', $1, 'Refunding', 'issuing', 90, '\\xcc', \
              '2026-10-13T01:00:00Z', 'cannot receive') RETURNING id",
     )
     .bind(id)
@@ -405,4 +439,170 @@ async fn inv_8_a_first_attempt_is_cancelled_only_for_a_directed_deposit_in_revie
         "INV-8",
     )
     .await;
+}
+
+/// `REQ-RF-1`, `REQ-IN-9`, guardrail 4 (review M1 of PR #136): the directed review exit opens only
+/// for a review of the issuing network's own recorded refusal of the destination, never for an
+/// unknown. Four directed deposits in review for `CND-DestinationRefused`:
+///
+/// - entered at the deadline, but no dry run recorded a refusal: closed;
+/// - a refusal recorded by a dry run that is the network's, but the review entered with no
+///   coordinate (the core's review of a destination or a list it cannot read): closed;
+/// - a dry run refused for another reason (a mint window bound): closed;
+/// - the network's refusal recorded and the review entered at its deadline: open, until a mint
+///   carrying the deposit's mint reference is observed on the issuing network (defence in depth).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_the_directed_review_exit_opens_only_on_the_networks_recorded_refusal(
+    pool: PgPool,
+) {
+    declarations(&pool).await;
+    for block in [7, 8, 9, 10] {
+        final_arrival(&pool, block, "directed_arrival").await;
+    }
+    exec(
+        &pool,
+        "UPDATE routes SET maximum = 100000000, window_limit = 100000000",
+    )
+    .await;
+    let core = login(&pool, "dc_core_m1_for_tests", bezent_store::CORE_ROLE).await;
+    let open = |id: i64| {
+        let pool = pool.clone();
+        async move { flag(&pool, &format!("SELECT directed_review_refund_open({id})")).await }
+    };
+
+    let no_refusal = directed_deposit(&core, 7).await;
+    into_review(&pool, no_refusal, true).await;
+    assert!(!open(no_refusal).await, "no refusal recorded");
+
+    let unknown = directed_deposit(&core, 8).await;
+    refused_dry_run(&pool, unknown, "Kreivo(CannotCreate)").await;
+    into_review(&pool, unknown, false).await;
+    assert!(!open(unknown).await, "a review of an unknown");
+
+    let window = directed_deposit(&core, 9).await;
+    refused_dry_run(&pool, window, "Kreivo(AboveWindow)").await;
+    into_review(&pool, window, true).await;
+    assert!(
+        !open(window).await,
+        "a refusal that is not the destination's"
+    );
+
+    let refused = directed_deposit(&core, 10).await;
+    refused_dry_run(&pool, refused, "Kreivo(CannotCreate)").await;
+    into_review(&pool, refused, true).await;
+    assert!(
+        open(refused).await,
+        "the network's refusal, reviewed at its deadline"
+    );
+    // Its evidence is the refused dry run's block, and nothing else on the issuing network.
+    for (block, hash, want) in [(90, "cc", true), (100, "bb", false), (90, "bb", false)] {
+        assert_eq!(
+            flag(
+                &pool,
+                &format!(
+                    "SELECT directed_refusal_recorded({refused}, 'issuing', {block}, '\\x{hash}')"
+                )
+            )
+            .await,
+            want,
+            "evidence at {block}"
+        );
+    }
+    // The core may ask both questions.
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT directed_review_refund_open($1)")
+            .bind(refused)
+            .fetch_one(&core)
+            .await
+            .unwrap()
+    );
+    // A mint of it observed, whatever its outcome, closes the exit.
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO observations (network, block_number, block_hash, block_time, \
+                 position_kind, position_index, token, amount, recipient, executed, \
+                 on_chain_reference, kind, detail) \
+             VALUES ('issuing', 101, '\\xbd', '{BLOCK_TIME}', 'log', 0, 'asset-a', {AMOUNT}, \
+                 '{RECIPIENT}', FALSE, reference_tagged('bezent/mint-reference/v0', ARRAY[ \
+                   coordinate_digest('origin-a', 10, '\\xaa', 'log', 1)]), 'mint', \
+                 jsonb_build_object('event', 'Minted'))"
+        ),
+    )
+    .await;
+    assert!(!open(refused).await, "a mint of it is observed");
+}
+
+/// `REQ-LM-1` (review L1 of PR #136): what the window has used is read through the route's
+/// `created_at` index, not by a scan of every transfer of the route. The planner is asked about the
+/// sum `route_usage_locked()` runs, as the function writes it (the test reads the function's source
+/// to be sure it still does), over a route with a long history and few transfers in the window.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_lm_1_the_window_is_read_by_its_index(pool: PgPool) {
+    declarations(&pool).await;
+    // Twenty thousand old deposits of the route and twenty in the window, written past the
+    // lifecycle's checks (only the planner's statistics matter here).
+    exec(
+        &pool,
+        "ALTER TABLE transfers DISABLE TRIGGER USER; \
+         INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+             destination_network, destination, state, source_network, source_block_number, \
+             source_block_hash, source_position_kind, source_position_index, created_at) \
+         SELECT 'bz-d-old-' || g, 'old-' || g, 'deposit', 'asset-a', 1, 'issuing', 'x', \
+             'Completed', 'origin-a', g, '\\xaa', 'log', 1, now() - interval '30 days' \
+         FROM generate_series(1, 20000) g; \
+         INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+             destination_network, destination, state, source_network, source_block_number, \
+             source_block_hash, source_position_kind, source_position_index) \
+         SELECT 'bz-d-new-' || g, 'new-' || g, 'deposit', 'asset-a', 1, 'issuing', 'x', \
+             'Source-Final', 'origin-a', 100000 + g, '\\xaa', 'log', 1 \
+         FROM generate_series(1, 20) g; \
+         ALTER TABLE transfers ENABLE TRIGGER USER; \
+         ANALYZE transfers; ANALYZE transitions",
+    )
+    .await;
+    for (function, prefilter) in [
+        (
+            "route_usage_locked",
+            "AND (t.created_at > now() - make_interval(secs => p_window_seconds)\n           \
+             OR t.id = ANY (ARRAY(SELECT w.transfer_id FROM transitions w",
+        ),
+        (
+            "directed_window_fits",
+            "AND (d.created_at > now() - make_interval(secs => r.window_seconds)\n           \
+             OR d.id = ANY (ARRAY(SELECT w.transfer_id FROM transitions w",
+        ),
+    ] {
+        let source = text(
+            &pool,
+            &format!("SELECT prosrc FROM pg_proc WHERE proname = '{function}'"),
+        )
+        .await;
+        assert!(source.contains(prefilter), "{function}: {source}");
+    }
+    let rows: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT COALESCE(sum(t.amount), 0)::text FROM transfers t \
+         WHERE t.asset = 'asset-a' AND t.kind = 'deposit' \
+           AND (CASE t.kind WHEN 'deposit' THEN t.source_network ELSE t.destination_network END) \
+               = 'origin-a' \
+           AND t.state NOT IN ('Refused', 'Expired', 'Withdrawn') \
+           AND (t.created_at > now() - make_interval(secs => 86400) \
+                OR t.id = ANY (ARRAY(SELECT w.transfer_id FROM transitions w \
+                                     WHERE w.condition = 'CND-DepositWindow')))",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let plan = rows.join("\n");
+    assert!(plan.contains("transfers_route_window"), "{plan}");
+    assert!(!plan.contains("Seq Scan on transfers"), "{plan}");
+    // And it counts what it did: the twenty in the window.
+    assert_eq!(
+        text(
+            &pool,
+            "SELECT used FROM route_usage_locked('asset-a', 'origin-a', 'deposit', 86400)"
+        )
+        .await,
+        "20"
+    );
 }
