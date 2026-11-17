@@ -14,6 +14,8 @@
 //! - [`store`]: what the core reads, and the transition it appends (`REQ-TR-6`).
 //! - [`refs`]: the references the core derives (`REQ-ID-3`, `REQ-IN-4`, `REQ-RF-3`).
 //! - [`cutoff`]: route cut-offs (`CND-CutOff`, amendment 0010 A2).
+//! - [`directed`] (`F-018`): a final directed arrival made into a deposit, or returned to its refund
+//!   address when it can never be minted (amendment 0029, A2, A5).
 //! - [`late_mint`] (issue #26): a mint of a reference after its proof of non-execution.
 //! - [`reserve`] (`F-004`): the reserve book, the one-minute reserve check and the daily signed
 //!   statement.
@@ -24,6 +26,7 @@
 
 pub mod config;
 pub mod cutoff;
+pub mod directed;
 pub mod engine;
 pub mod fees;
 pub mod health;

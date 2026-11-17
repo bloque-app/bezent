@@ -94,7 +94,8 @@ impl fmt::Display for State {
 }
 
 /// The named conditions of SPEC §10 (`CND-AwaitingInstruction` is withdrawn by amendment 0007;
-/// `CND-CutOff` is amendment 0010's; `CND-PayoutWindow` amendment 0012's).
+/// `CND-CutOff` is amendment 0010's; `CND-PayoutWindow` amendment 0012's; `CND-DepositWindow`
+/// amendment 0029's).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Condition {
     /// A final arrival not bound by a deposit request, or one that cannot become a deposit.
@@ -119,11 +120,14 @@ pub enum Condition {
     CutOff,
     /// The reserve's outflow allowance for the current window is spent; the withdrawal waits.
     PayoutWindow,
+    /// A directed deposit over what its route's window has left; it resumes by itself as the
+    /// window rolls over, in the order of arrival (amendment 0029, Open 1).
+    DepositWindow,
 }
 
 impl Condition {
     /// Every condition.
-    pub const ALL: [Condition; 11] = [
+    pub const ALL: [Condition; 12] = [
         Condition::Unassociated,
         Condition::ReserveShort,
         Condition::FeeShort,
@@ -135,6 +139,7 @@ impl Condition {
         Condition::AwaitingConversion,
         Condition::CutOff,
         Condition::PayoutWindow,
+        Condition::DepositWindow,
     ];
 
     /// The condition's id, as the spec and the store write it.
@@ -151,6 +156,7 @@ impl Condition {
             Condition::AwaitingConversion => "CND-AwaitingConversion",
             Condition::CutOff => "CND-CutOff",
             Condition::PayoutWindow => "CND-PayoutWindow",
+            Condition::DepositWindow => "CND-DepositWindow",
         }
     }
 
@@ -213,6 +219,16 @@ pub fn review_exit(before: State, to: State, new_attempt: bool) -> bool {
     edge(before, to).is_some()
 }
 
+/// The one review exit a directed deposit gains (amendment 0029, A5, Open 2): out of a review it
+/// entered from `Source-Final`, into `Refunding`, a refund to its refund destination. It is not an
+/// edge of the table ([`edge`] and [`review_exit`] still refuse it), and it holds only for a directed
+/// deposit that entered review holding `CND-DestinationRefused` with no mint attempt ever signed,
+/// which the store decides (`directed_review_refund_open()`, migration 0145). It moves value, so it
+/// needs a second approver ([`resolution_moves_value`]).
+pub fn directed_review_exit(before: State, to: State) -> bool {
+    before == State::SourceFinal && to == State::Refunding
+}
+
 /// Whether a review resolution into `to` moves value, and so needs a second approver
 /// (`REQ-GV-5`): it releases a mint, signs a delivery, or starts a refund.
 pub fn resolution_moves_value(to: State) -> bool {
@@ -263,5 +279,23 @@ mod tests {
         assert!(!review_exit(State::Accepted, State::Completed, false));
         assert!(resolution_moves_value(State::Delivering));
         assert!(!resolution_moves_value(State::Completed));
+    }
+
+    /// `REQ-RV-2`, `REQ-GV-5` (amendment 0029, Open 2): `Source-Final -> Refunding` stays no edge of
+    /// the table and no ordinary review exit; it is a directed deposit's own exit, and it moves value.
+    #[test]
+    fn req_rv_2_the_directed_review_exit_is_no_ordinary_edge() {
+        assert_eq!(edge(State::SourceFinal, State::Refunding), None);
+        assert!(!review_exit(State::SourceFinal, State::Refunding, false));
+        assert!(directed_review_exit(State::SourceFinal, State::Refunding));
+        for (before, to) in [
+            (State::Delivering, State::Refunding),
+            (State::SourceFinal, State::Delivering),
+            (State::Accepted, State::Refunding),
+        ] {
+            assert!(!directed_review_exit(before, to), "{before} -> {to}");
+        }
+        assert!(resolution_moves_value(State::Refunding));
+        assert!(!Condition::DepositWindow.blocks_delivery());
     }
 }

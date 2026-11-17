@@ -27,4 +27,6 @@ pub use amount::{Amount, AmountError};
 pub use coordinate::{BlockHash, Coordinate, Position};
 pub use ids::{AssetId, EmptyId, NetworkId};
 pub use reference::{BridgeReference, EmptyReference, OnChainReference, RequestReference};
-pub use state::{Condition, State, edge, resolution_moves_value, review_exit};
+pub use state::{
+    Condition, State, directed_review_exit, edge, resolution_moves_value, review_exit,
+};

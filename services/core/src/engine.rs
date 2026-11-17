@@ -109,6 +109,8 @@ const REFUSAL_PAGE_AFTER: usize = 10;
 pub struct Report {
     /// Withdrawals made from redemptions.
     pub withdrawals: usize,
+    /// Directed arrivals decided: made into deposits or returned (`F-018`).
+    pub directed: usize,
     /// Transfers that moved or changed condition.
     pub moved: usize,
     /// Intents recorded (orders and signing intents).
@@ -175,9 +177,12 @@ struct Mismatch {
 fn purpose(t: &Transfer) -> (&'static str, &'static str) {
     match (t.kind.as_str(), t.refund_of.is_some()) {
         ("deposit", _) => ("mint", "Minted"),
-        ("refund", true) => ("refund-mint", "RefundMinted"),
-        // A withdrawal's payout, and the refund of an unassociated arrival, are payouts on an
-        // origin network (F-009).
+        // A withdrawal's refund is a refund mint to its redeemer (REQ-RF-4).
+        ("refund", true) if t.redeemer.is_some() => ("refund-mint", "RefundMinted"),
+        // A withdrawal's payout, the refund of an unassociated arrival (a directed arrival's return
+        // among them), and the refund of a directed deposit out of review (amendment 0029, Open 2:
+        // paid as its arrival's return is; it has no redeemer) are payouts on an origin network
+        // (F-009).
         _ => ("payout", "Payout"),
     }
 }
@@ -307,6 +312,9 @@ impl Core {
             withdrawals: self.withdrawals_from_redemptions().await?,
             ..Report::default()
         };
+        // F-018 (amendment 0029, A2, A5): every final directed arrival nothing binds becomes a
+        // deposit or is returned, in coordinate order, before the open transfers are stepped.
+        report.directed = crate::directed::intake(&self.pool).await?;
         let open: Vec<i64> = sqlx::query_scalar(
             "SELECT id FROM transfers WHERE NOT is_terminal_state(state) ORDER BY id",
         )
@@ -625,9 +633,11 @@ impl Core {
             // Review M1b of PR #56: a refund of a withdrawal is accepted only once the withdrawal
             // it replaces is `Refunding`, the edge that proved every attempt not executed at
             // finality (INV-8, REQ-RF-1); the store lets only the core create it (0047).
+            // F-018 (amendment 0029, Open 2): so is the refund of a directed deposit, once the
+            // deposit is Refunding out of its review.
             let refunding: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM transfers WHERE id = $1 AND kind = 'withdrawal' \
-                   AND state = 'Refunding')",
+                "SELECT EXISTS (SELECT 1 FROM transfers WHERE id = $1 \
+                   AND kind IN ('withdrawal', 'deposit') AND state = 'Refunding')",
             )
             .bind(original)
             .fetch_one(&mut *conn)
@@ -636,6 +646,11 @@ impl Core {
                 tracing::error!(transfer = %t.bridge_reference, original, "INV-8: a refund whose withdrawal is not Refunding; not accepted");
                 return Ok(Did::default());
             }
+            None
+        } else if self.directed_return(conn, t).await? {
+            // F-018 (amendment 0029, A5, Open 3): the return of a directed arrival is bezent's own,
+            // to the refund address the arrival recorded, and needs no second approver. The core
+            // accepts it when it makes it; this is for one that was made and not accepted.
             None
         } else {
             let release: Option<i64> = sqlx::query_scalar(
@@ -1006,6 +1021,23 @@ impl Core {
         if let Some(did) = self.conversion(conn, t, now).await? {
             return Ok(did);
         }
+        // F-018 (amendment 0029, Open 1): a directed deposit over what its route's window had left
+        // waits in CND-DepositWindow, and leaves it by itself once it fits, behind every one waiting
+        // ahead of it by coordinate (the store's `directed_window_fits()`, under the route's lock,
+        // held until this step commits). Leaving it goes straight to the gates' condition, if one
+        // holds it; it is never returned for the window, and never reviewed for it.
+        if t.condition() == Some(Condition::DepositWindow) {
+            let fits: bool = sqlx::query_scalar("SELECT directed_window_fits($1)")
+                .bind(t.id)
+                .fetch_one(&mut *conn)
+                .await?;
+            if !fits {
+                return Ok(Did::default());
+            }
+            tracing::info!(transfer = %t.bridge_reference, "CND-DepositWindow: the window has room; the directed deposit resumes");
+            let next = self.gate(conn, t, 1, now).await?;
+            return self.hold(conn, t, next).await;
+        }
         if let Some(c) = t.condition().filter(|c| c.blocks_delivery()) {
             let start = t.source_final_block_time.unwrap_or(now);
             let deadline = self.deadline(conn, t, start).await?;
@@ -1161,6 +1193,38 @@ impl Core {
         )
         .await?;
         Ok(Did::moved())
+    }
+
+    /// Whether `t` is the return of a directed arrival: the refund of an unassociated arrival bound
+    /// to one (`REQ-IN-11`; the store fixes its destination to the recorded refund address, 0144).
+    async fn directed_return(&self, conn: &mut PgConnection, t: &Transfer) -> sqlx::Result<bool> {
+        if t.kind != "refund" || t.refund_of.is_some() {
+            return Ok(false);
+        }
+        let Some(source) = t.source() else {
+            return Ok(false);
+        };
+        Ok(store::observation_at(conn, &source)
+            .await?
+            .is_some_and(|o| o.kind == "directed_arrival"))
+    }
+
+    /// Whether directed deposit `t` may leave its review into `Refunding` (amendment 0029, Open 2):
+    /// it entered review from `Source-Final` holding `CND-DestinationRefused`, and no mint attempt
+    /// of it was ever signed. The store's own answer (`directed_review_refund_open()`, 0145), which
+    /// it asks again of every row the resolution writes.
+    async fn directed_review_refund_open(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+    ) -> sqlx::Result<bool> {
+        if t.kind != "deposit" {
+            return Ok(false);
+        }
+        sqlx::query_scalar("SELECT directed_review_refund_open($1)")
+            .bind(t.id)
+            .fetch_one(conn)
+            .await
     }
 
     /// The conditions that hold new work before a delivery (`REQ-GV-1`, `REQ-LM-1`, `REQ-OT-5`).
@@ -2730,6 +2794,89 @@ impl Core {
         Ok(Did::moved())
     }
 
+    /// Runs the approved resolution of directed deposit `t`'s review into `Refunding` (amendment
+    /// 0029, A5, Open 2; `REQ-RV-2`, `REQ-GV-5`). The deposit is closed to minting first: its
+    /// attempt 1, ordered and never signed, is cancelled under the resolution, so the store records
+    /// nothing for it again (amendment 0014's reading; `INV-8`). Then its refund, a transfer of its
+    /// own (`REQ-RF-3`), paid as its arrival's return is (`REQ-IN-11`): its asset and amount, on the
+    /// arrival's network, to the refund destination the deposit took from the arrival (`REQ-RF-2`),
+    /// with the return's bridge reference (`bz-u-…`, so the arrival is returned once whichever way)
+    /// and payout reference. The store checks every one of these again.
+    async fn directed_refund(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        point: &Point,
+        action: i64,
+    ) -> sqlx::Result<Did> {
+        let unsigned: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM intents WHERE transfer_id = $1 AND attempt = 1) \
+                AND NOT EXISTS (SELECT 1 FROM unsigned_attempt_cancellations \
+                                WHERE transfer_id = $1 AND attempt = 1)",
+        )
+        .bind(t.id)
+        .fetch_one(&mut *conn)
+        .await?;
+        if unsigned {
+            store::cancel_unsigned_attempt(conn, t.id, 1, action).await?;
+            tracing::info!(transfer = %t.bridge_reference, action, "INV-8, REQ-RF-1: the directed deposit's mint, ordered and never signed, is cancelled under the approved resolution");
+        }
+        let unproven = store::attempts_unproven(conn, t.id).await?;
+        if !unproven.is_empty() {
+            tracing::error!(transfer = %t.bridge_reference, attempts = ?unproven, "INV-8: an attempt of the directed deposit is not closed; no refund");
+            return Ok(Did::default());
+        }
+        let refund_to: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT refund_destination_network, refund_destination FROM transfers WHERE id = $1",
+        )
+        .bind(t.id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let (Some((Some(network), Some(destination))), Some(source)) = (refund_to, t.source())
+        else {
+            tracing::error!(transfer = %t.bridge_reference, "REQ-RF-2: the directed deposit has no refund destination; no refund");
+            return Ok(Did::default());
+        };
+        sqlx::query(
+            "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+                 destination_network, destination, refund_of, source_network, source_block_number, \
+                 source_block_hash, source_position_kind, source_position_index, \
+                 on_chain_reference, state) \
+             VALUES ($1, $2, 'refund', $3, $4::numeric, $5, $6, $7, $8, $9, $10, $11::position_kind, \
+                 $12, $13, 'Received') \
+             ON CONFLICT (bridge_reference) DO NOTHING",
+        )
+        .bind(refs::unassociated_refund(&source))
+        .bind(format!("{}:refund", t.request_reference))
+        .bind(&t.asset)
+        .bind(&t.amount)
+        .bind(&network)
+        .bind(&destination)
+        .bind(t.id)
+        .bind(&source.network)
+        .bind(source.block_number)
+        .bind(&source.block_hash)
+        .bind(&source.position_kind)
+        .bind(source.position_index)
+        .bind(refs::unassociated_refund_reference(&source).to_vec())
+        .execute(&mut *conn)
+        .await?;
+        store::append(
+            conn,
+            t.id,
+            &Move {
+                from: State::NeedsReview,
+                to: State::Refunding,
+                condition: None,
+                point: Some(point),
+                attempt: None,
+                manual_action: Some(action),
+            },
+        )
+        .await?;
+        Ok(Did::moved())
+    }
+
     /// `Delivered`: final and executed in full, withdrawn, proven not executed, or unknown past
     /// its deadline.
     async fn delivered(
@@ -3003,7 +3150,12 @@ impl Core {
         };
         let attempt = store::current_attempt(conn, t.id).await?;
         let new_attempt = to == State::Delivering && before != State::SourceFinal;
-        if !review_exit(before, to, new_attempt) {
+        // F-018 (amendment 0029, A5, Open 2): the one exit a directed deposit gains, and no other
+        // transfer: out of a review entered from Source-Final for CND-DestinationRefused, with no
+        // mint attempt ever signed, into Refunding, to its refund destination.
+        let directed = bezent_core::directed_review_exit(before, to)
+            && self.directed_review_refund_open(conn, t).await?;
+        if !directed && !review_exit(before, to, new_attempt) {
             return self
                 .refuse_evidence(
                     conn,
@@ -3107,6 +3259,7 @@ impl Core {
                 )
                 .await
             }
+            State::Refunding if directed => self.directed_refund(conn, t, &point, action).await,
             State::Refunding => {
                 self.refund(conn, t, State::NeedsReview, &point, Some(action))
                     .await
@@ -3223,6 +3376,13 @@ impl Core {
                     _ => false,
                 };
                 evidence.network == t.destination_network && !on_arrival
+            }
+            // F-018 (amendment 0029, Open 2): the directed exit rests, as a resolution's mint does,
+            // on a final point of the deposit's destination, the issuing network whose refusal of
+            // the destination the review is about; nothing was signed, so there is no proof to name.
+            (State::SourceFinal, State::Refunding) => {
+                evidence.network == t.destination_network
+                    && self.directed_review_refund_open(conn, t).await?
             }
             (State::Delivering | State::Delivered, State::Delivering | State::Refunding) => {
                 let proven = matches!(store::proof_of(conn, t.id, attempt).await?,
