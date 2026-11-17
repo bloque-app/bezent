@@ -226,6 +226,14 @@ impl Anvil {
                 "1000",
                 "--timeout",
                 "60000",
+                // Every state in memory, none on disk. anvil 1.7.1 moves older states to disk after
+                // some hundreds of blocks, and once it has, an `anvil_setStorageAt` on a contract
+                // (`fund_usdc` on the token) makes a later read at a past block fail with "missing
+                // bytecode for code hash": the reserve check reads the token at the final head, 64
+                // blocks back. A scenario mines a few thousand blocks at most. We found it here and
+                // know of no public foundry issue for it.
+                "--prune-history",
+                "10000",
             ])
             .stdout(Stdio::from(out.try_clone().unwrap()))
             .stderr(Stdio::from(out))
@@ -470,6 +478,55 @@ fn deploy(anvil: &Anvil, lane: Address) -> Vault {
     }
 }
 
+/// The route's per-transfer maximum on the Kreivo contract, as `DeployDirected` takes it
+/// (`KREIVO_PER_TRANSFER_MAX`): the value T-018-04 read from Kreivo mainnet (F-018 tasks), which
+/// `config/polygon.json` records too. The in-memory model has no contract to read it from.
+pub const KREIVO_PER_TRANSFER_MAX: u128 = 50_000_000_000;
+/// `DirectedDeposit`'s limits, from `contracts/evm/config/polygon.json` (`directed`).
+pub const DIRECTED_MINIMUM: u128 = 1_000_000;
+pub const DIRECTED_MAXIMUM: u128 = 50_000_000_000;
+
+/// Deploys `DirectedDeposit` in front of `vault` with `contracts/evm/script/DeployDirected.s.sol`,
+/// as F-018's deployment does (plain `CREATE` from a one-time key; token and limits from
+/// `config/polygon.json`; the script's refusals apply). Returns its address.
+fn deploy_directed(anvil: &Anvil, vault: &Vault) -> Address {
+    let contracts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contracts/evm");
+    let out = Command::new("forge")
+        .current_dir(contracts)
+        .args([
+            "script",
+            "script/DeployDirected.s.sol",
+            "--rpc-url",
+            &anvil.url("127.0.0.1"),
+            "--broadcast",
+            "--private-key",
+            DEPLOYER_KEY,
+            "--json",
+        ])
+        .env("NETWORK", POLYGON)
+        .env("VAULT_SAFE", vault.safe.to_string())
+        .env("KREIVO_PER_TRANSFER_MAX", KREIVO_PER_TRANSFER_MAX.to_string())
+        .output()
+        .expect("forge is not on the PATH: the full-chain suite needs Foundry (anvil and forge) and does not skip");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "DeployDirected failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find_map(|v| {
+            v["returns"]["directed"]["value"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .expect("the directing contract's address")
+        .parse()
+        .unwrap()
+}
+
 // ---------------------------------------------------------------------------------------------
 // The signer: one process-shaped signer with both lanes and two callers.
 
@@ -651,10 +708,29 @@ pub struct Bed {
     ingress: std::net::SocketAddr,
     /// The Kreivo endpoint's start, and the follower's anchor.
     kreivo_start: u64,
+    /// F-018: the EVM endpoint's `[[directing]]` (address, first block); empty unless the bed was
+    /// made with [`Bed::directed`].
+    directing: Vec<(Address, u64)>,
+    /// The directing contract, when there is one.
+    pub directed: Option<Address>,
 }
 
 impl Bed {
+    /// The bed with no directing code: the endpoint's `[[directing]]` is empty and nothing is
+    /// declared in `directing_code` (today's behaviour exactly, F-018 plan part 2).
     pub async fn new(pool: PgPoolOptions, connect: PgConnectOptions) -> Bed {
+        Bed::build(pool, connect, false).await
+    }
+
+    /// The bed with directing code (F-018): `DirectedDeposit` deployed on the fork in front of the
+    /// vault by its deployment script, declared in the store's `directing_code` for the reserve
+    /// (`REQ-AS-11`), and named in the EVM endpoint's `[[directing]]`, each from the block it was
+    /// deployed in.
+    pub async fn directed(pool: PgPoolOptions, connect: PgConnectOptions) -> Bed {
+        Bed::build(pool, connect, true).await
+    }
+
+    async fn build(pool: PgPoolOptions, connect: PgConnectOptions, directed: bool) -> Bed {
         let admin = bezent_store::login::guard(pool)
             .connect_with(connect)
             .await
@@ -670,6 +746,13 @@ impl Bed {
             .rpc("anvil_setCode", json!([lane_address, "0x"]))
             .await;
         let vault = deploy(&anvil, lane_address);
+        let directing = if directed {
+            let contract = deploy_directed(&anvil, &vault);
+            // The script's transaction is mined (anvil automines), so the head is its block.
+            vec![(contract, anvil.number().await)]
+        } else {
+            Vec::new()
+        };
 
         let chain = FakeChain::new(GENESIS, CONTRACT);
         let signing = start_signer(&admin, keys_path, &backend, &vault, &chain).await;
@@ -725,6 +808,26 @@ impl Bed {
         .execute(&admin)
         .await
         .unwrap();
+        // F-018: the directing code's declaration, as the migration owner writes it (REQ-AS-11):
+        // the reserve it feeds, the token it moves, its limits and its first block, which is the
+        // endpoint's `from_block` too (`deploy/runbooks/conditions/CND-Unassociated.md`).
+        for (contract, from_block) in &directing {
+            sqlx::query(
+                "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                     from_block, reference) \
+                 VALUES ($1, $2, $3, $4, $5::numeric, $6::numeric, $7, 'full-chain bed')",
+            )
+            .bind(ASSET)
+            .bind(POLYGON)
+            .bind(format!("{contract:#x}"))
+            .bind(USDC)
+            .bind(DIRECTED_MINIMUM.to_string())
+            .bind(DIRECTED_MAXIMUM.to_string())
+            .bind(i64::try_from(*from_block).unwrap())
+            .execute(&admin)
+            .await
+            .unwrap();
+        }
         let (id, secret) = REQUESTER.split_once('.').unwrap();
         sqlx::query(
             "INSERT INTO requester_credentials (credential_id, requester, secret_sha256) \
@@ -855,6 +958,8 @@ impl Bed {
             check,
             ingress,
             kreivo_start: 1,
+            directed: directing.first().map(|(a, _)| *a),
+            directing,
         };
         // The Kreivo endpoint's start-up: the anchor of its start block (kreivo-endpoint main.rs).
         bed.kreivo_follower()
@@ -880,7 +985,7 @@ impl Bed {
                 convertibles: &[],
                 // The account the endpoint signs from (main.rs: `delivery: checked.lane_address`).
                 delivery: self.signing.evm_lane.address,
-                directing: &[],
+                directing: &self.directing,
             },
             start_block: PINNED_BLOCK + 1,
             max_range: 500,

@@ -8,8 +8,8 @@ kind: pages
 covers: [REQ-IC-2, REQ-ST-6]
 pages: [directed-mints-alert]
 observables: [fee_position_amount, fee_position_age_seconds, nonfinal_transfers]
-tests: [services/core/tests/directed_alerts.rs::req_ic_2_directed_mints_above_the_threshold_page_once_and_clear_and_nothing_is_capped]
-exercised: no
+tests: [services/core/tests/directed_alerts.rs::req_ic_2_directed_mints_above_the_threshold_page_once_and_clear_and_nothing_is_capped, services/full-chain/tests/full_chain/directed.rs::s9_ac_a6_6_spam_at_the_minimum_only_pages_and_an_unpaired_direction_pages_once]
+exercised: yes
 ---
 # Directed mints above their threshold
 
@@ -59,7 +59,8 @@ WHERE kind = 'deposit' AND request_reference LIKE 'directed:%' GROUP BY state;
 ## Do
 
 1. Decide whether it is use or abuse: many small deposits from few senders at the minimum is the spam the amendment names
-   ("New exposures", "Spam at the minimum"); deposits of ordinary sizes from many senders is use. Read the senders and
+   ("New exposures", "Spam at the minimum"; follow `../procedures/directed-spam.md`); deposits of ordinary sizes from many
+   senders is use. Read the senders and
    amounts from the origin network's public data at the arrivals' coordinates.
 2. Watch the float: if `fee_position_amount` on the issuing network is falling toward its floor, top it up
    (`float-top-up.md`) before `fee-position-low` pages and deliveries wait in `CND-FeeShort`.
@@ -78,7 +79,10 @@ WHERE kind = 'deposit' AND request_reference LIKE 'directed:%' GROUP BY state;
 
 ## Exercise
 
-On the test bed: set `mints_per_day` to 1, make two directed deposits through the directing code, see one page and then
-none while it stands, raise the threshold and see `directed-alert-cleared`.
+On the test bed (`s9` of the full-chain suite does each step): set `mints_per_day` to 3, make five directed deposits at
+the contract's minimum through the directing code, see one page and then none while it stands, raise the threshold and
+see `directed-alert-cleared`.
 
-Status: not exercised (NFR-9). Behaviour proven by the tests listed above, not by a run of this runbook.
+Status: exercised on the full-chain bed on 2026-11-17 (`EXERCISES.md`; NFR-9), by an automated scenario, with the Kreivo half a
+model. The page is raised by calling `directed_alerts::check` with the thresholds, as the core's `Watch` loop does; the bed
+does not run that loop or read `[directed_alerts]` from a configuration file. Not yet on Kreivo's own runtime.
