@@ -63,6 +63,32 @@ each under its own licence (MIT or LGPL-3.0 for Safe's contracts). They are used
 `array-bytes` (GPL-3.0). The compiled contract (`.wasm`, `.contract`) is therefore a combined work: its source is
 GPL-3.0-or-later, the combination is distributed under GPL-3.0-only, the narrower of the terms involved. `contracts/bezent/deny.toml` names the exceptions. 
 
+### 4.4 smoldot and Kreivo's chain specification in the bridge web app
+
+Checked on 2026-11-16 for `T-018-12` (amendment 0029, Open 12), against the build of `apps/bridge` at that date.
+
+- **What ships.** The npm package `smoldot` 3.3.2, which `polkadot-api` 2.1.8 pulls in through
+  `@polkadot-api/smoldot`, licensed `GPL-3.0-or-later WITH Classpath-exception-2.0`. It is upstream smoldot, not
+  `bloque-app/smoldot` (§4.1): the fork's fix is for dry runs of contract calls that write child storage, and the app
+  only reads storage. It is bundled, as WebAssembly inside JavaScript, into the light client's worker
+  (`assets/smoldot_worker-*.js`), a file of its own that the page starts and talks to by messages through smoldot's
+  public API. Unmodified.
+- **The exception.** Classpath-exception-2.0 lets the copyright holders' library be linked with independent modules
+  to produce an executable, and that executable be distributed under terms of the distributor's choice, provided
+  each independent module's own licence is met. The app's code is such a module: it uses smoldot through its API and
+  is not derived from it. So `apps/bridge/**` stays `Apache-2.0 OR MIT`, and the combination is compatible.
+- **What stays GPL.** smoldot itself. Whoever distributes the bundle distributes smoldot's object code and owes, for
+  that part only, what GPL-3.0 section 6 asks: its licence text and its Corresponding Source. The build writes
+  `THIRD-PARTY-NOTICES.txt` beside the page, with every bundled package's licence and, for smoldot, the GPL's text
+  and where its source is (`paritytech/smoldot`, the release of the bundled version). **Before the first release**,
+  the release notes link smoldot's source at that version (section 6(d) allows a third party's server if the
+  directions stay clear), so the obligation does not rest on GitHub's availability alone.
+- **Kreivo's chain specification** (`services/kreivo-endpoint/chain-specs/kreivo.json`, GPL-3.0-only, Kreivo's) is
+  copied verbatim into the build as `chain-specs/kreivo.json`, a separate file the page fetches: data, aggregated
+  beside the app (GPL-3.0 section 5, "aggregate"), which does not extend the GPL to the app. The page refuses a file
+  whose SHA-256 differs from the one the build recorded.
+- The other bundled packages are MIT, Apache-2.0 or 0BSD (`THIRD-PARTY-NOTICES.txt`).
+
 ## 5. Obligations of whoever distributes the services
 
 Whoever distributes the GPL programs (or an image of them) offers the corresponding source (GPL section 6). The public repository

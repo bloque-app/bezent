@@ -133,3 +133,8 @@ mod tests {
         assert!(!same_digest(&commitment(b"x"), &commitment(b"y")));
     }
 }
+
+/// The bridge web app's vectors (F-018, T-018-13): see the module.
+#[cfg(test)]
+#[path = "refs_bridge_vectors.rs"]
+mod bridge_vectors;

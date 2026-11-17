@@ -1,0 +1,140 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+name: Bridge web app
+
+# F-018 (T-018-12 to T-018-14; plan DEC-22): the static web app in apps/bridge. Lint, typecheck and unit tests
+# (the reference vectors among them); SPDX headers and REUSE; and the reproducible build: each deployment's
+# bundle is built twice, on two separate runners from clean checkouts, the two bundle hashes
+# (apps/bridge/scripts/hash.mjs) must be equal, and the build with its hash is published as an artifact.
+# Nothing here deploys, and nothing needs a secret.
+
+on:
+  pull_request:
+    paths:
+      - "apps/bridge/**"
+      - "services/kreivo-endpoint/chain-specs/kreivo.json"
+      - "LICENSES/**"
+      - "REUSE.toml"
+      - "tools/oss/spdx.py"
+      - ".github/workflows/bridge-app.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/bridge/**"
+      - "services/kreivo-endpoint/chain-specs/kreivo.json"
+      - "LICENSES/**"
+      - "REUSE.toml"
+      - "tools/oss/spdx.py"
+      - ".github/workflows/bridge-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-app-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+defaults:
+  run:
+    working-directory: apps/bridge
+
+jobs:
+  check:
+    name: lint, typecheck, test, licences
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # Before npm ci, so the licence checks see the repository and not node_modules/.
+      - name: SPDX headers
+        working-directory: .
+        run: python3 tools/oss/spdx.py --check
+      - name: REUSE compliance
+        uses: fsfe/reuse-action@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/bridge/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  build:
+    name: build ${{ matrix.deployment }} (${{ matrix.run }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        deployment: [test, production]
+        run: [first, second]
+    env:
+      BRIDGE_DEPLOYMENT: ${{ matrix.deployment }}
+      BRIDGE_REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      # No dependency cache: each build installs from the lock file alone.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - name: Bundle hash
+        run: node scripts/hash.mjs dist "dist.SHA256SUMS" | tail -n 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-${{ matrix.deployment }}-${{ matrix.run }}
+          path: |
+            apps/bridge/dist/
+            apps/bridge/dist.SHA256SUMS
+          include-hidden-files: true
+          if-no-files-found: error
+
+  reproducible:
+    name: reproducible build (${{ matrix.deployment }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        deployment: [test, production]
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-${{ matrix.deployment }}-first
+          path: first
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-${{ matrix.deployment }}-second
+          path: second
+      - name: The two builds hash the same
+        run: |
+          set -euo pipefail
+          tail -n 1 first/dist.SHA256SUMS
+          tail -n 1 second/dist.SHA256SUMS
+          if ! diff first/dist.SHA256SUMS second/dist.SHA256SUMS; then
+            echo "::error::two builds of ${{ github.sha }} (${{ matrix.deployment }}) differ"
+            exit 1
+          fi
+          {
+            echo "### bridge web app, ${{ matrix.deployment }} build"
+            echo
+            echo "Revision \`${{ github.sha }}\`, built twice, identical:"
+            echo
+            echo '```'
+            tail -n 1 first/dist.SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-${{ matrix.deployment }}
+          path: first/
+          include-hidden-files: true
+          if-no-files-found: error

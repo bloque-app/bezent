@@ -1,0 +1,52 @@
+/* Copyright (c) 2026 Pagos Cube LLC */
+/* SPDX-License-Identifier: Apache-2.0 OR MIT */
+/* bezent's tokens (brand/README.md): ink #0d0c17, paper #fbfaff. The brand faces are named first; the app
+   ships no font file, so a system face stands in where they are not installed. */
+:root {
+  --ink: #0d0c17;
+  --paper: #fbfaff;
+  --muted: #5d5b6e;
+  --line: #d9d6e6;
+  --error: #a3192b;
+  --ok: #1b6b3a;
+  --sans: 'Geist', 'Familjen Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #fbfaff;
+    --paper: #0d0c17;
+    --muted: #a3a1b5;
+    --line: #2c2a3d;
+    --error: #ff8a96;
+    --ok: #7fd6a0;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.5 var(--sans); }
+header, main, footer { max-width: 44rem; margin: 0 auto; padding: 0 16px; }
+header { padding-top: 2rem; }
+h1 { font-size: 1.75rem; margin: 0; letter-spacing: -0.01em; }
+h1 span { font-weight: 400; }
+h2 { font-size: 1.1rem; margin: 0 0 0.75rem; }
+section { border-top: 1px solid var(--line); padding: 1.25rem 0; }
+label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
+input, select, button { font: inherit; color: inherit; }
+input, select { width: 100%; padding: 0.55rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; background: transparent; }
+input { font-family: var(--mono); }
+button { padding: 0.55rem 1rem; border: 1px solid var(--ink); border-radius: 6px; background: var(--ink); color: var(--paper); cursor: pointer; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.secondary { background: transparent; color: var(--ink); }
+button.link { border: 0; background: none; color: var(--ink); text-decoration: underline; padding: 0; }
+.wallets { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.wallets button { display: inline-flex; align-items: center; gap: 0.5rem; background: transparent; color: var(--ink); }
+.wallets img { width: 20px; height: 20px; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; margin: 0.75rem 0; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; font-family: var(--mono); font-size: 0.9rem; overflow-wrap: anywhere; }
+.muted { color: var(--muted); }
+.error { color: var(--error); }
+.ok { color: var(--ok); }
+.progress { padding-left: 1.25rem; }
+@media (max-width: 520px) { .facts { grid-template-columns: 1fr; } .facts dd { margin-bottom: 0.4rem; } }
