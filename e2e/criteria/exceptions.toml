@@ -28,10 +28,6 @@ blocked_by = "#118"
 reason = "F-018 (amendment 0029, SPEC v0.5.13): its tests are drafted in pull requests #121, #122 and #125, not yet on the base"
 blocked_by = "#118"
 
-[exception."AC-A6.6"]
-reason = "F-018 (amendment 0029, SPEC v0.5.13): its tests are drafted in pull requests #121, #122 and #125, not yet on the base"
-blocked_by = "#118"
-
 # A V0 story that SPEC section 6 gives no acceptance criterion. Listed so that a new one cannot appear silently.
 [story_without_criteria."US-H2"]
 reason = "SPEC gives the story no AC-*, only REQ-ST-1 (find a transfer's transactions on each network without bezent's database); this map does not measure REQ-ST-1's tests"

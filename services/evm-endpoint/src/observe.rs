@@ -208,6 +208,9 @@ impl Watch<'_> {
                 && before.tx_hash == l.tx_hash
                 && self.declarations.tokens.contains_key(&before.address)
                 && from == sender
+                // The vault's own transfer to itself adds nothing to the reserve: its `Directed`
+                // is unpaired, recorded and paged, never skipped as a `SelfTransfer`'s pair.
+                && from != self.vault
                 && to == self.vault
                 && value == amount
                 && !amount.is_zero()
@@ -285,10 +288,13 @@ impl Watch<'_> {
                         }
                         o.detail["recipient"] = json!(hex0x(recipient.as_slice()));
                         o.detail["refund"] = json!(refund.to_checksum(None));
-                        o.detail["reason"] = json!(
+                        o.detail["reason"] = json!(if sender == self.vault {
+                            "the sender is the vault: a transfer from the vault to itself adds \
+                             nothing to the reserve"
+                        } else {
                             "no admitted-token transfer from the sender to the vault of this \
                              amount immediately before it, or a refund the contract refuses"
-                        );
+                        });
                     }
                     None => {
                         o.detail["reason"] = json!("not a Directed event in its shape");

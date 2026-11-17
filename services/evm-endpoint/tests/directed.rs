@@ -482,6 +482,60 @@ async fn ac_a6_6_a_directed_log_with_no_valid_pair_is_unpaired_and_never_an_arri
     );
 }
 
+/// The vault as the directing contract's caller (review of #122, issue #124 item 1): its
+/// `Transfer(vault, vault, amount)` right before a `Directed(vault, amount, ...)` adds nothing to
+/// the reserve. The transfer stays a `SelfTransfer` and the `Directed` log is recorded as
+/// `UnpairedDirection`, which pages, never skipped as if it had paired and never an arrival.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn ac_a6_6_inv_10_a_directed_log_after_the_vaults_self_transfer_is_unpaired_not_skipped(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let (f, block) = declared(pool, connect).await;
+    let amount = U256::from(700);
+    transfer_log(&f.chain, block, 0, tx(1), usdc(), vault(), vault(), amount);
+    directed_log(
+        &f.chain,
+        block,
+        1,
+        tx(1),
+        directing(),
+        vault(),
+        amount,
+        account(),
+    );
+    f.advance(2);
+    caught_up(&f).await;
+    let rows = rows(&f).await;
+    let got: Vec<_> = rows
+        .iter()
+        .map(|r| (r.1, r.2.clone(), r.3.clone()))
+        .collect();
+    let want = [
+        (0, "self_transfer", "SelfTransfer"),
+        (1, "unpaired_direction", "UnpairedDirection"),
+    ];
+    let want: Vec<_> = want
+        .into_iter()
+        .map(|(i, k, e)| (i, k.to_owned(), e.to_owned()))
+        .collect();
+    assert_eq!(got, want);
+    let reason = rows[1].7["reason"].as_str().unwrap();
+    assert!(reason.contains("the sender is the vault"), "{reason}");
+    // The anomaly names the vault as its sender, spelled as the self transfer's.
+    assert!(rows[1].6.is_some());
+    assert_eq!(rows[1].6, rows[0].6);
+    // Nothing of it is an arrival, directed or plain.
+    assert_eq!(
+        f.count(
+            "SELECT count(*) FROM observations \
+               WHERE kind IN ('directed_arrival', 'arrival')"
+        )
+        .await,
+        0
+    );
+}
+
 /// `d-refund-dest-swaps`: the pair is an arrival only with a refund the contract could have emitted. A
 /// zero refund, the vault and the directing contract are the addresses it refuses, so a `Directed` log
 /// naming one is an anomaly (`UnpairedDirection`), never an arrival and never bindable. A refund that is
