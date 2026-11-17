@@ -22,6 +22,8 @@ use std::time::Duration;
 /// The recipient the directing code recorded: a 32-byte account on the issuing network, in hex.
 const RECIPIENT: &str = "0x8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48";
 const DIRECTING: &str = "0xD1Ec7ed00000000000000000000000000000d1ec";
+/// The funder: the account the value moved out of, the directing code's caller.
+const FUNDER: &str = "0xf00d00000000000000000000000000000000f00d";
 
 fn assert_refused(body: &Value, error: &str) {
     assert_eq!(body["state"], "Refused", "{body}");
