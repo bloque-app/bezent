@@ -1125,7 +1125,19 @@ impl Core {
         if let Some(why) = self.destination_unbindable(conn, t).await? {
             return self.destination_review(conn, t, why).await;
         }
-        if let Some(c) = self.gate(conn, t, 1, now).await? {
+        let next = self.gate(conn, t, 1, now).await?;
+        // F-018 (amendment 0031; review M2 of PR #142): a directed deposit held by an upgrade of
+        // its token carries nothing, so it was not in flight; leaving the hold, it takes its place
+        // in flight only if the route has room, and otherwise waits for it in CND-DepositCapacity,
+        // behind every one waiting ahead of it (the store's `directed_capacity_fits()`).
+        if t.condition() == Some(Condition::TokenUpgraded)
+            && next != Some(Condition::TokenUpgraded)
+            && !self.capacity_fits(conn, t).await?
+        {
+            tracing::info!(transfer = %t.bridge_reference, "CND-DepositCapacity: the hold on the token is lifted, and the route is at its capacity; the directed deposit waits for room");
+            return self.hold(conn, t, Some(Condition::DepositCapacity)).await;
+        }
+        if let Some(c) = next {
             return self.hold(conn, t, Some(c)).await;
         }
         // The gate opened: its condition clears by itself (§10), then the delivery starts.
@@ -3464,10 +3476,14 @@ impl Core {
                 self.withheld(conn, t, Some(action), &to, now).await?;
             }
         }
-        if before == State::SourceFinal && self.directed_review_refund_open(conn, t).await? {
-            self.supersede_for_directed_refund(conn, t, entered_at)
-                .await?;
-        }
+        // F-018 (amendment 0031, `d-f018-review-exit-later`): while the directed exit is open, an
+        // approved resolution into Refunding is reached past the earlier resolutions into Delivering
+        // that have not run (each waits on a refused preparation), so that it is judged next. They
+        // are superseded only once it passes its own checks, the edge's and the evidence's
+        // ([`Core::supersede_for_directed_refund`], in the Refunding arm below; review L1 of
+        // PR #142); a refund refused for its evidence leaves them as they were.
+        let directed_open =
+            before == State::SourceFinal && self.directed_review_refund_open(conn, t).await?;
         let action: Option<Action> = sqlx::query_as(
             "SELECT a.id, a.to_state::text, a.network, a.block_number, a.block_hash, a.block_time, \
                     EXISTS (SELECT 1 FROM manual_approvals p WHERE p.action_id = a.id) \
@@ -3477,12 +3493,22 @@ impl Core {
                AND NOT EXISTS (SELECT 1 FROM transitions x WHERE x.manual_action_id = a.id) \
                AND NOT EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'review-evidence-refused' \
                                AND e.payload ->> 'manual_action_id' = a.id::text) \
+               AND NOT ($5 AND a.to_state = 'Delivering' AND EXISTS ( \
+                   SELECT 1 FROM manual_actions r \
+                   WHERE r.transfer_id = a.transfer_id AND r.kind = 'review-resolution' \
+                     AND r.recorded_at >= $2 AND r.to_state = 'Refunding' AND r.id > a.id \
+                     AND EXISTS (SELECT 1 FROM manual_approvals p WHERE p.action_id = r.id) \
+                     AND NOT EXISTS (SELECT 1 FROM transitions x WHERE x.manual_action_id = r.id) \
+                     AND NOT EXISTS (SELECT 1 FROM event_log e \
+                                     WHERE e.kind = 'review-evidence-refused' \
+                                       AND e.payload ->> 'manual_action_id' = r.id::text))) \
              ORDER BY a.id LIMIT 1",
         )
         .bind(t.id)
         .bind(entered_at)
         .bind(blocked)
         .bind(&withheld)
+        .bind(directed_open)
         .fetch_optional(&mut *conn)
         .await?;
         let Some((action, to, network, number, hash, time, approved)) = action else {
@@ -3610,7 +3636,11 @@ impl Core {
                 )
                 .await
             }
-            State::Refunding if directed => self.directed_refund(conn, t, &point, action).await,
+            State::Refunding if directed => {
+                self.supersede_for_directed_refund(conn, t, entered_at, action)
+                    .await?;
+                self.directed_refund(conn, t, &point, action).await
+            }
             State::Refunding => {
                 self.refund(conn, t, State::NeedsReview, &point, Some(action))
                     .await
@@ -3643,35 +3673,20 @@ impl Core {
         }
     }
 
-    /// Amendment 0031 (`d-f018-review-exit-later`): once the directed review exit is open and a
-    /// resolution into `Refunding` of this review is approved, an earlier resolution into
-    /// `Delivering` that has not run (its delivery waits on a refused preparation) is superseded: it
-    /// is recorded as refused, with that reason, so that the review's resolutions, run oldest first,
-    /// reach the approved refund. Its order was never signed (the exit is open only so), and the
-    /// refund cancels it (`unsigned_attempt_cancellations`, amendment 0014's reading).
+    /// Amendment 0031 (`d-f018-review-exit-later`): once the directed review exit is open and the
+    /// approved resolution `refund` into `Refunding` of this review has passed the edge's and the
+    /// evidence's checks, each earlier resolution into `Delivering` that has not run (its delivery
+    /// waits on a refused preparation) is superseded: it is recorded as refused, with that reason,
+    /// in the transaction of the refund (review L1 of PR #142). Its order was never signed (the exit
+    /// is open only so), and the refund cancels it (`unsigned_attempt_cancellations`, amendment
+    /// 0014's reading).
     async fn supersede_for_directed_refund(
         &self,
         conn: &mut PgConnection,
         t: &Transfer,
         entered_at: DateTime<Utc>,
+        refund: i64,
     ) -> sqlx::Result<()> {
-        let refund: Option<i64> = sqlx::query_scalar(
-            "SELECT a.id FROM manual_actions a \
-             WHERE a.transfer_id = $1 AND a.kind = 'review-resolution' AND a.recorded_at >= $2 \
-               AND a.to_state = 'Refunding' \
-               AND EXISTS (SELECT 1 FROM manual_approvals p WHERE p.action_id = a.id) \
-               AND NOT EXISTS (SELECT 1 FROM transitions x WHERE x.manual_action_id = a.id) \
-               AND NOT EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'review-evidence-refused' \
-                               AND e.payload ->> 'manual_action_id' = a.id::text) \
-             ORDER BY a.id LIMIT 1",
-        )
-        .bind(t.id)
-        .bind(entered_at)
-        .fetch_optional(&mut *conn)
-        .await?;
-        let Some(refund) = refund else {
-            return Ok(());
-        };
         let earlier: Vec<i64> = sqlx::query_scalar(
             "SELECT a.id FROM manual_actions a \
              WHERE a.transfer_id = $1 AND a.kind = 'review-resolution' AND a.recorded_at >= $2 \

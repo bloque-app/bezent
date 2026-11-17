@@ -6,9 +6,9 @@ SPDX-License-Identifier: CC-BY-4.0
 id: CND-DepositCapacity
 kind: condition
 covers: [REQ-IN-11, REQ-LM-4, AC-A6.3]
-pages: [deposit-capacity-alert]
+pages: [deposit-capacity-alert, directed-wait-alert]
 observables: [nonfinal_transfers, oldest_nonfinal_transfer_age_seconds]
-tests: [services/core/tests/directed.rs::ac_a6_3_cnd_deposit_capacity_waits_in_order_resumes_and_is_never_returned, services/core/tests/directed.rs::req_in_11_a_deposit_that_waited_for_capacity_gets_its_whole_refusal_deadline]
+tests: [services/core/tests/directed.rs::ac_a6_3_cnd_deposit_capacity_waits_in_order_resumes_and_is_never_returned, services/core/tests/directed.rs::req_in_11_a_deposit_that_waited_for_capacity_gets_its_whole_refusal_deadline, services/core/tests/directed.rs::req_lm_4_deposits_waiting_for_the_window_are_not_in_flight, services/core/tests/directed_alerts.rs::req_ic_2_directed_deposits_held_or_waiting_past_a_window_page_daily]
 exercised: no
 ---
 # CND-DepositCapacity
@@ -21,7 +21,9 @@ request: its value has already moved, so it waits at `Source-Final`, mints nothi
 has room, in the order of arrival (amendment 0031, `d-f018-capacity`, ruled: "Wait for capacity"; SPEC §10,
 `REQ-IN-11`). It is never returned for capacity. While it waits it counts as in flight, so requests that come after it
 are refused `ERR-Overloaded`, first come first served. The window comes first: a deposit that waited in
-`CND-DepositWindow` and leaves it while the route is full waits on here. A deposit that waited gets the whole of the
+`CND-DepositWindow` and leaves it while the route is full waits on here. A deposit waiting for the window, or held by
+an upgrade of its token (`CND-TokenUpgraded`), carries nothing and is not in flight; it takes its place, or waits here,
+when it leaves that wait. A deposit that waited gets the whole of the
 route's deadline for a later `CND-DestinationRefused`, counted from when it left the condition.
 
 ## Pages
@@ -32,6 +34,11 @@ and the metrics `nonfinal_transfers` and `oldest_nonfinal_transfer_age_seconds` 
 `deposit-capacity-alert` pages when a waiting deposit can never have room as its route is declared now: the route was
 removed (`route-not-declared`) or its capacity declared zero (`capacity-zero`). Once per reason, then once a day while
 it lasts; also in the event log. The deposit keeps waiting: nothing is returned or reviewed for it.
+
+`directed-wait-alert` pages, per deposit route, once any directed deposit has waited here (or held `CND-TokenUpgraded`)
+for longer than one of the route's windows (`window_seconds`): transfers in flight are not completing, or the capacity is
+too small for the route's use. Once on crossing, then once a day while it stands; `directed-alert-cleared` once none
+waits that long (`pages/directed-wait.md`).
 
 ## Confirm
 

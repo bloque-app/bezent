@@ -406,3 +406,145 @@ async fn req_as_12_an_origin_tokens_upgrade_pages_once_and_holds_directed_intake
     );
     assert!(order(&w.admin, d, 1).await.is_none(), "nothing ordered");
 }
+
+/// The outcomes of `directed-wait-alert` among a check's.
+fn waits(outcomes: Vec<Outcome>) -> Vec<Outcome> {
+    outcomes
+        .into_iter()
+        .filter(|o| {
+            matches!(o, Outcome::Paged { kind, .. } | Outcome::Standing { kind, .. }
+                | Outcome::Cleared { kind, .. } if *kind == directed_alerts::WAITS)
+        })
+        .collect()
+}
+
+/// `REQ-IC-2`, `REQ-AS-12`, `REQ-LM-4` (amendment 0031; review L2 of PR #142): directed deposits that
+/// have held `CND-TokenUpgraded` or `CND-DepositCapacity` for longer than one of the route's windows
+/// page `directed-wait-alert`, once, then not again while it stands (daily); none before a window has
+/// passed. It changes nothing: they keep waiting. Once the hold is lifted by two operators and the
+/// route has room, none waits, and it clears.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_ic_2_directed_deposits_held_or_waiting_past_a_window_page_daily(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let pool = w.core.pool();
+    let log = PageLog::start();
+    // An upgrade of the token holds a directed deposit after it.
+    let upgrade = observe(
+        &w.admin,
+        ORIGIN,
+        30,
+        0,
+        TOKEN,
+        0,
+        None,
+        None,
+        None,
+        true,
+        json!({"event": "TokenUpgraded", "token": TOKEN,
+               "implementation": "0x0000000000000000000000000000000000000abc"}),
+    )
+    .await;
+    decide(&w.admin, upgrade, "final", 32).await;
+    final_directed(&w.admin, 40, 5_000_000, DESTINATION_ACCOUNT).await;
+    w.settle(t0()).await;
+    let (held, _) = bound(&w, 40).await;
+    assert_eq!(
+        w.state(held).await,
+        ("Source-Final".into(), Some("CND-TokenUpgraded".into()))
+    );
+    // Capacity 1: a deposit from before the upgrade moves; the next waits for room.
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET capacity = 1 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    final_directed(&w.admin, 10, 5_000_000, DESTINATION_ACCOUNT).await;
+    final_directed(&w.admin, 11, 5_000_000, DESTINATION_ACCOUNT).await;
+    w.cycle(t0()).await;
+    let (waiting, _) = bound(&w, 11).await;
+    assert_eq!(
+        w.state(waiting).await,
+        ("Source-Final".into(), Some("CND-DepositCapacity".into()))
+    );
+    assert_eq!(
+        waits(directed_alerts::check(pool, &QUIET).await.unwrap()),
+        vec![],
+        "within the window: no page"
+    );
+
+    // One window on (the route's window made one second long): both have waited longer.
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET window_seconds = 1 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(
+        waits(directed_alerts::check(pool, &QUIET).await.unwrap()),
+        vec![Outcome::Paged {
+            kind: directed_alerts::WAITS,
+            asset: ASSET.into(),
+            network: ORIGIN.into(),
+            value: 2,
+            repeat: false
+        }]
+    );
+    assert_page(&log, "directed-wait-alert", 1);
+    assert_eq!(
+        waits(directed_alerts::check(pool, &QUIET).await.unwrap()),
+        vec![Outcome::Standing {
+            kind: directed_alerts::WAITS,
+            asset: ASSET.into(),
+            network: ORIGIN.into(),
+        }],
+        "once a day, not every minute"
+    );
+    assert_eq!(entries(&w.admin, "directed-wait-alert").await, 1);
+    assert_eq!(
+        w.state(waiting).await.1.as_deref(),
+        Some("CND-DepositCapacity"),
+        "alerts only: it waits"
+    );
+
+    // The hold lifted by two operators, and room for all three: none waits, and it clears.
+    let request: i64 = sqlx::query_scalar(
+        "SELECT operator_request_token_hold_lift($1, 'fork suite run against the new implementation')",
+    )
+    .bind(upgrade)
+    .fetch_one(&w.ops[0])
+    .await
+    .unwrap();
+    sqlx::query_scalar::<_, i64>("SELECT operator_approve_token_hold_lift($1, 'checked')")
+        .bind(request)
+        .fetch_one(&w.ops[1])
+        .await
+        .unwrap();
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET capacity = 3 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(held).await.1, None);
+    assert_eq!(w.state(waiting).await.1, None);
+    assert_eq!(
+        waits(directed_alerts::check(pool, &QUIET).await.unwrap()),
+        vec![Outcome::Cleared {
+            kind: directed_alerts::WAITS,
+            asset: ASSET.into(),
+            network: ORIGIN.into(),
+        }]
+    );
+}

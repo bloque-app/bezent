@@ -70,6 +70,11 @@ async fn final_arrival(pool: &PgPool, block: i64, kind: &str) {
 
 /// [`final_arrival`], the directing contract `directing` recorded in its detail.
 async fn final_arrival_by(pool: &PgPool, block: i64, kind: &str, directing: &str) {
+    final_arrival_of(pool, block, kind, directing, AMOUNT).await;
+}
+
+/// [`final_arrival_by`], of `amount`.
+async fn final_arrival_of(pool: &PgPool, block: i64, kind: &str, directing: &str, amount: i64) {
     let event = if kind == "directed_arrival" {
         "DirectedArrival"
     } else {
@@ -81,7 +86,7 @@ async fn final_arrival_by(pool: &PgPool, block: i64, kind: &str, directing: &str
             "WITH o AS (INSERT INTO observations (network, block_number, block_hash, block_time, \
                  position_kind, position_index, token, amount, sender, recipient, executed, kind, \
                  detail) \
-               VALUES ('origin-a', {block}, '\\xaa', '{BLOCK_TIME}', 'log', 1, 'token-a', {AMOUNT}, \
+               VALUES ('origin-a', {block}, '\\xaa', '{BLOCK_TIME}', 'log', 1, 'token-a', {amount}, \
                  '0xfunder', '{RESERVE}', TRUE, '{kind}', \
                  jsonb_build_object('event', '{event}', 'directing', '{directing}', \
                    'direction_log', 2, 'recipient', '{RECIPIENT}', 'refund', '{REFUND}')) \
@@ -343,6 +348,113 @@ async fn req_lm_1_a_waiting_deposit_is_a_claim_on_the_window(pool: PgPool) {
         "a's share and the claims of b and c"
     );
     let _ = a;
+}
+
+/// The core's transition of `id` into `CND-DepositWindow`, as the core writes it when the deposit
+/// does not fit.
+async fn waits_for_the_window(core: &PgPool, id: i64) {
+    exec(
+        core,
+        &format!(
+            "INSERT INTO transitions (transfer_id, from_state, to_state, condition) \
+             VALUES ({id}, 'Source-Final', 'Source-Final', 'CND-DepositWindow')"
+        ),
+    )
+    .await;
+}
+
+/// The core's question for one deposit: whether it fits in what the window has left.
+async fn window_fits(core: &PgPool, id: i64) -> bool {
+    sqlx::query_scalar("SELECT directed_window_fits($1)")
+        .bind(id)
+        .fetch_one(core)
+        .await
+        .unwrap()
+}
+
+/// `REQ-IN-11`, `REQ-LM-1`, `AC-A6.7` (amendment 0031, `d-f018-window-queue`, as proposed for
+/// `d-f018-window-reserve`; review M3 of PR #142): a directed deposit that began to wait more than one
+/// window ago, and every one waiting behind it however recently, fits only within (1 -
+/// `routes.request_reserve`) of the window's limit, the rest left to requests; a request sees the
+/// shares and the claims of the deposits that began to wait within the window only. 0 turns the
+/// reserve off, and a queue younger than a window is unaffected.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_11_a_queue_older_than_a_window_leaves_the_requests_reserve(pool: PgPool) {
+    declarations(&pool).await;
+    let core = login(&pool, "dc_core_r_for_tests", bezent_store::CORE_ROLE).await;
+    // x, 4, waits; one window on (the route's window made one second long, and a second and a half
+    // later) it has waited longer than a window.
+    final_arrival_of(&pool, 7, "directed_arrival", DIRECTING, 4_000_000).await;
+    let x = directed_deposit(&core, 7).await;
+    waits_for_the_window(&core, x).await;
+    exec(&pool, "UPDATE routes SET window_seconds = 1").await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    // y, 2, is taken now; z, 3, begins to wait now, behind x by coordinate.
+    final_arrival_of(&pool, 8, "directed_arrival", DIRECTING, 2_000_000).await;
+    let _y = directed_deposit(&core, 8).await;
+    final_arrival_of(&pool, 9, "directed_arrival", DIRECTING, 3_000_000).await;
+    let z = directed_deposit(&core, 9).await;
+    waits_for_the_window(&core, z).await;
+    assert!(
+        !window_fits(&core, x).await,
+        "2 + 4 is within the window, but over its unreserved half"
+    );
+    assert!(
+        !window_fits(&core, z).await,
+        "z waited less than a window, but behind x: 2 + 4 + 3 would fit the limit, not the half"
+    );
+    assert_eq!(
+        text(
+            &pool,
+            "SELECT used FROM route_usage_locked('asset-a', 'origin-a', 'deposit', 1)"
+        )
+        .await,
+        "5000000",
+        "a request sees y's share and z's claim, not x's"
+    );
+    // The reserve off: the queue may take the whole window again, in order.
+    exec(&pool, "UPDATE routes SET request_reserve = 0").await;
+    assert!(window_fits(&core, x).await);
+    assert!(window_fits(&core, z).await);
+    // The reserve back, and the window back to a day: no one has waited a window, so it is unaffected.
+    exec(
+        &pool,
+        "UPDATE routes SET request_reserve = 0.5, window_seconds = 86400",
+    )
+    .await;
+    assert!(window_fits(&core, x).await, "2 + 4 within the limit");
+    assert!(window_fits(&core, z).await, "2 + 4 + 3 within the limit");
+    // Never more than the whole of it, nor less than none.
+    for share in ["-0.1", "1.1"] {
+        sqlx::raw_sql(&format!("UPDATE routes SET request_reserve = {share}"))
+            .execute(&pool)
+            .await
+            .expect_err("a share is between 0 and 1");
+    }
+}
+
+/// `REQ-IN-11` (amendment 0031, as proposed for `d-f018-window-reserve`; review M3 of PR #142): the
+/// head of a queue older than a window whose amount alone is over the unreserved share is never stuck:
+/// it fits when the window holds nothing else, and only then.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_11_a_head_over_the_unreserved_share_takes_only_an_empty_window(pool: PgPool) {
+    declarations(&pool).await;
+    let core = login(&pool, "dc_core_h_for_tests", bezent_store::CORE_ROLE).await;
+    final_arrival_of(&pool, 7, "directed_arrival", DIRECTING, 6_000_000).await;
+    let v = directed_deposit(&core, 7).await;
+    waits_for_the_window(&core, v).await;
+    exec(&pool, "UPDATE routes SET window_seconds = 1").await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert!(
+        window_fits(&core, v).await,
+        "6, over the half, in an empty window"
+    );
+    final_arrival_of(&pool, 8, "directed_arrival", DIRECTING, 1_000_000).await;
+    directed_deposit(&core, 8).await;
+    assert!(
+        !window_fits(&core, v).await,
+        "1 + 6 is within the window, but the window is not empty"
+    );
 }
 
 /// `REQ-RV-2`, `REQ-GV-5`, `INV-8` (Open 2): the refund of a directed deposit is refused while the

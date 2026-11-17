@@ -27,7 +27,12 @@ requesters' room in the window only for one window (the route's window length) f
 waiting deposits together for no more than the window's limit (`route_window_used()`, which the ingress's checks and its
 route table read). A deposit that has waited longer still waits, and still goes before every later directed deposit,
 but requesters' deposits no longer see it: once room frees, a request may take it, and the queue waits for the room
-after. When it leaves the window, a deposit whose route is at its capacity waits on in `CND-DepositCapacity`.
+after. And such a queue takes no more than (1 - `request_reserve`) of each later window, a route-level setting, half by
+default, so that the core, which cycles every few seconds, does not take each freed room before a request can come; a
+deposit whose amount alone is over that share leaves only into an empty window (`directed_window_fits()`; the proposed
+implementation of the ruling, pending the owner's confirmation as `d-f018-window-reserve`; 0 turns it off). While it
+waits for the window a deposit carries nothing and is not in flight for the route's capacity. When it leaves the window,
+a deposit whose route is at its capacity waits on in `CND-DepositCapacity`.
 
 ## Pages
 

@@ -59,7 +59,9 @@ ORDER BY bridge_reference;
 
 - Never return or refuse a waiting directed deposit to free the window: it waits by rule (amendment 0029, Open 1), and no
   path exists to move it.
-- Never reserve part of the window for anyone: there is no separate share (Open 5).
+- Never reserve part of the window for anyone by hand: there is no separate share (Open 5). The one reserve is the
+  route's `request_reserve`, which bounds only a queue older than one window (amendment 0031, `d-f018-window-queue`,
+  pending confirmation as `d-f018-window-reserve`); it is a route declaration, changed as the route's bounds are.
 - No administrative path moves value or edits a status (`REQ-GV-5`).
 
 ## Exercise

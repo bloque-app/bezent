@@ -325,3 +325,80 @@ async fn req_st_5_the_dispatcher_fans_a_directed_deposits_entries_out_to_nobody(
         0
     );
 }
+
+/// `REQ-LM-4`, `REQ-IN-11`, `REQ-AS-12` (amendment 0031; reviews M1 and M2 of PR #142): a directed
+/// deposit waiting for its route's window, or held by an upgrade of its token, carries nothing, so
+/// the ingress does not count it in flight: with capacity 2 and one of each, a requester's deposit is
+/// accepted and the route table shows one transfer in flight. A directed deposit waiting for
+/// capacity does count, first come first served: once the held one waits for capacity instead, the
+/// route is full, and the next request is `ERR-Overloaded`.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_lm_4_waiting_and_held_directed_deposits_leave_capacity_to_requests(pool: PgPool) {
+    let ingress = Ingress::new(&pool).await;
+    let core = core_pool(&pool).await;
+    exec(&pool, "UPDATE routes SET capacity = 2").await;
+    let mut ids = Vec::new();
+    for (block, condition) in [(1, "CND-DepositWindow"), (2, "CND-TokenUpgraded")] {
+        directed(&pool, block, 5_000).await;
+        let bridge = core_deposit(&core, block).await;
+        let id: i64 = sqlx::query_scalar("SELECT id FROM transfers WHERE bridge_reference = $1")
+            .bind(&bridge)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        exec(
+            &core,
+            &format!(
+                "INSERT INTO transitions (transfer_id, from_state, to_state, condition) \
+                 VALUES ({id}, 'Source-Final', 'Source-Final', '{condition}')"
+            ),
+        )
+        .await;
+        ids.push(id);
+    }
+    let in_flight = |table: &Value| {
+        table["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["direction"] == "deposit")
+            .expect("the deposit route")["capacity"]["in_flight"]
+            .clone()
+    };
+    let (_, table) = ingress.get("/v0/routes", ALPHA).await;
+    assert_eq!(in_flight(&table), 0, "{table}");
+
+    let (status, answer) = ingress
+        .post(
+            "/v0/deposits",
+            ALPHA,
+            &deposit_body("ref-1", arrival(&pool, 3, 1_000).await),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["state"], "Accepted", "{answer}");
+    let (_, table) = ingress.get("/v0/routes", ALPHA).await;
+    assert_eq!(in_flight(&table), 1, "{table}");
+
+    // The held deposit's hold is lifted and the route is full for it: it waits for capacity, in
+    // flight, ahead of the next request.
+    exec(
+        &core,
+        &format!(
+            "INSERT INTO transitions (transfer_id, from_state, to_state, condition) \
+             VALUES ({}, 'Source-Final', 'Source-Final', 'CND-DepositCapacity')",
+            ids[1]
+        ),
+    )
+    .await;
+    let (status, answer) = ingress
+        .call(
+            "POST",
+            "/v0/deposits",
+            Some(ALPHA),
+            Some(&deposit_body("ref-2", arrival(&pool, 4, 1_000).await)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+    assert_eq!(answer["error"], "ERR-Overloaded");
+}

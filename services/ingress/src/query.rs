@@ -373,7 +373,10 @@ struct RouteRow {
 /// deposit, the destination network of a withdrawal. What the window has used is the store's
 /// `route_window_used()` (migration 0150), the same count a request is checked against: the shares
 /// taken in it, plus the claims of directed deposits that began to wait for it within the window,
-/// together at most one window's limit (amendment 0031, `d-f018-window-queue`).
+/// together at most one window's limit (amendment 0031, `d-f018-window-queue`). What it carries is
+/// counted as `route_usage_locked()` counts it for a request: every transfer not terminal, but a
+/// directed deposit waiting for the window or held by an upgrade of its token, which carries nothing
+/// yet (review M1 and M2 of PR #142).
 const ROUTES: &str = "\
     SELECT r.asset, r.network, r.direction, r.minimum::text AS minimum, r.maximum::text AS maximum, \
            r.venue_minimum::text AS venue_minimum, r.window_limit::text AS window_limit, \
@@ -386,7 +389,9 @@ const ROUTES: &str = "\
     FROM routes r \
     CROSS JOIN LATERAL ( \
         SELECT route_window_used(r.asset, r.network, r.direction, r.window_seconds) AS used, \
-               count(*) FILTER (WHERE NOT is_terminal_state(t.state)) AS in_flight \
+               count(*) FILTER (WHERE NOT is_terminal_state(t.state) \
+                                  AND (t.condition IS NULL OR t.condition NOT IN \
+                                       ('CND-DepositWindow', 'CND-TokenUpgraded'))) AS in_flight \
         FROM transfers t \
         WHERE t.asset = r.asset AND t.kind = r.direction \
           AND CASE r.direction WHEN 'deposit' THEN t.source_network \

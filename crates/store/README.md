@@ -213,9 +213,11 @@ once whichever way. No other transfer gains that edge.
 
 Since 0150 (F-018 T-018-22 to T-018-25, amendment 0031) a directed deposit over its route's capacity holds
 `CND-DepositCapacity` and leaves it in coordinate order (`directed_capacity_fits()`, under the route's lock; while it waits it is
-in flight for `route_usage_locked()`); what a request sees of the window is `route_window_used()`, which counts a waiting directed
-deposit only for one window from when it began to wait, and the waiting ones together for at most the window's limit
-(`directed_window_fits()` still counts every one waiting ahead, so the queue drains in order); an upgrade of an admitted origin
+in flight for `route_usage_locked()`, but a deposit waiting in `CND-DepositWindow` or held in `CND-TokenUpgraded` is in flight for
+neither count); what a request sees of the window is `route_window_used()`, which counts a waiting directed deposit only for one
+window from when it began to wait, and the waiting ones together for at most the window's limit (`directed_window_fits()` still
+counts every one waiting ahead, so the queue drains in order, and bounds a deposit that is, or waits behind, one that began to wait
+more than a window ago to (1 - `routes.request_reserve`) of the limit, 0.5 by default, the rest left to requests); an upgrade of an admitted origin
 token (`token_upgrade`, 0147), not withdrawn, holds every directed deposit of it at or after its block in `CND-TokenUpgraded`
 (`directed_token_held()`; `intents_guard_token_hold()` refuses a mint order for one) until one operator requests the lift and
 another approves it (`admin_actions` kinds `token-hold-lift-request` and `token-hold-lift`); and `directed_review_refund_open()` is

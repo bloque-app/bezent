@@ -97,6 +97,71 @@ $$;
 
 DROP FUNCTION route_window_used(TEXT, TEXT, TEXT, BIGINT);
 
+CREATE OR REPLACE FUNCTION directed_window_fits(p_transfer BIGINT) RETURNS BOOLEAN
+    LANGUAGE plpgsql
+    VOLATILE
+    SET search_path = public, pg_temp
+    AS $$
+DECLARE
+    t      transfers%ROWTYPE;
+    r      routes%ROWTYPE;
+    taken  NUMERIC;
+    ahead  NUMERIC;
+BEGIN
+    SELECT * INTO t FROM transfers WHERE id = p_transfer;
+    IF NOT FOUND OR t.kind <> 'deposit' OR t.source_network IS NULL THEN
+        RETURN FALSE;
+    END IF;
+    SELECT * INTO r FROM routes
+    WHERE asset = t.asset AND network = t.source_network AND direction = 'deposit';
+    IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
+    PERFORM route_usage_locked(t.asset, t.source_network, 'deposit', r.window_seconds);
+    SELECT COALESCE(sum(d.amount), 0) INTO taken
+    FROM transfers d
+    WHERE d.asset = t.asset AND d.kind = 'deposit'
+      AND (CASE d.kind WHEN 'deposit' THEN d.source_network ELSE d.destination_network END)
+          = t.source_network
+      AND d.id <> t.id
+      AND d.state NOT IN ('Refused', 'Expired', 'Withdrawn')
+      AND d.condition IS DISTINCT FROM 'CND-DepositWindow'
+      AND (d.created_at > now() - make_interval(secs => r.window_seconds)
+           OR d.id = ANY (ARRAY(SELECT w.transfer_id FROM transitions w
+                                WHERE w.condition = 'CND-DepositWindow')))
+      AND CASE
+          WHEN d.id IN (SELECT w.transfer_id FROM transitions w
+                        WHERE w.condition = 'CND-DepositWindow') THEN
+              (SELECT min(x.seen_at) FROM transitions x
+               WHERE x.transfer_id = d.id
+                 AND x.condition IS DISTINCT FROM 'CND-DepositWindow'
+                 AND x.id > (SELECT min(w.id) FROM transitions w
+                             WHERE w.transfer_id = d.id AND w.condition = 'CND-DepositWindow'))
+              > now() - make_interval(secs => r.window_seconds)
+          ELSE d.created_at > now() - make_interval(secs => r.window_seconds)
+      END;
+    SELECT COALESCE(sum(d.amount), 0) INTO ahead
+    FROM transfers d
+    WHERE d.asset = t.asset AND d.kind = 'deposit'
+      AND (CASE d.kind WHEN 'deposit' THEN d.source_network ELSE d.destination_network END)
+          = t.source_network
+      AND d.id <> t.id
+      AND d.condition = 'CND-DepositWindow'
+      AND d.id = ANY (ARRAY(SELECT w.transfer_id FROM transitions w
+                            WHERE w.condition = 'CND-DepositWindow'))
+      AND ROW(d.source_block_number, d.source_position_index, d.id)
+          < ROW(t.source_block_number, t.source_position_index, t.id);
+    RETURN taken + ahead + t.amount <= r.window_limit;
+END
+$$;
+
+COMMENT ON FUNCTION directed_window_fits(BIGINT) IS
+    'REQ-LM-1, REQ-IN-11 (amendment 0029, Open 1): whether a directed deposit fits in what its '
+    'route''s window has left, behind every deposit waiting ahead of it by coordinate; takes the '
+    'route''s lock until the transaction ends. The core holds CND-DepositWindow while it does not.';
+
+ALTER TABLE routes DROP COLUMN request_reserve;
+
 CREATE OR REPLACE FUNCTION admin_actions_by_session() RETURNS trigger
     LANGUAGE plpgsql
     SECURITY DEFINER

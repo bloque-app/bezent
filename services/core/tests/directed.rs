@@ -455,7 +455,10 @@ async fn ac_a6_3_cnd_deposit_window_waits_first_come_first_served_and_resumes_as
     assert_eq!(returns(&w).await, 0);
 
     // The window rolls over: the route's window is made one second long, so a's share leaves it
-    // a second on, and b, then c, take theirs.
+    // a second on, and b, then c, take theirs. They have waited more than a window by then, so they
+    // leave half the window to requests (amendment 0031, `request_reserve`, review M3 of PR #142):
+    // b, more than that half alone, takes the empty window; c, 1 more on b's 6, waits for b's share
+    // to leave it, a window on, still in coordinate order.
     exec(
         &w.admin,
         &format!(
@@ -466,9 +469,15 @@ async fn ac_a6_3_cnd_deposit_window_waits_first_come_first_served_and_resumes_as
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     w.cycle(t0()).await;
-    for id in [b, c] {
-        assert_eq!(w.state(id).await, ("Source-Final".into(), None));
-    }
+    assert_eq!(w.state(b).await, ("Source-Final".into(), None));
+    assert_eq!(
+        w.state(c).await,
+        ("Source-Final".into(), Some("CND-DepositWindow".into())),
+        "c waits behind b's share, under the requests' reserve"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(c).await, ("Source-Final".into(), None));
     w.cycle(t0()).await;
     assert!(order(&w.admin, b, 1).await.is_some());
     assert!(order(&w.admin, c, 1).await.is_some());
@@ -2151,85 +2160,113 @@ async fn req_in_11_a_deposit_that_waited_for_capacity_gets_its_whole_refusal_dea
     assert_eq!(returns(&w).await, 0);
 }
 
+/// Sets the deposit route's window: its limit and maximum to `limit`, its length to `seconds`.
+async fn window(w: &World, limit: u128, seconds: i64) {
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET maximum = {limit}, window_limit = {limit}, window_seconds = {seconds} \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+}
+
+/// The deposit route's window made `seconds` long, its limit unchanged.
+async fn window_seconds(w: &World, seconds: i64) {
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET window_seconds = {seconds} \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+}
+
+/// A second and a half: past a window made one second long.
+async fn past_a_window() {
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+}
+
 /// `AC-A6.7`, `REQ-IN-11`, `REQ-LM-1` (amendment 0031, `d-f018-window-queue`, ruled: cap what waits
-/// to one window): a queue of directed deposits three windows deep claims, against requests, one
-/// window's limit at most, and only for one window from when it began to wait. After that window a
-/// request sees room and its deposit is taken, and the queue still drains in coordinate order,
-/// behind it, never past the window's limit.
+/// to one window; the requests' reserve, proposed as `d-f018-window-reserve`, review M3 of PR #142):
+/// a queue of directed deposits deeper than the window claims, against requests, one window's limit
+/// at most, and only for one window from when it began to wait. Right after that window rolls over
+/// the core cycles first, as it does in production, and the queue's head takes its share; but a
+/// queue older than a window takes no more than half the window (`routes.request_reserve`, 0.5), so
+/// a request still finds room. The rest of the queue waits behind it and drains window by window,
+/// in coordinate order, never past the window's limit.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn ac_a6_7_a_queue_of_several_windows_leaves_requesters_room_after_one_window(
     options: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
     let w = World::new(options, connect).await;
-    exec(
-        &w.admin,
-        &format!(
-            "UPDATE routes SET maximum = 10000000, window_limit = 10000000, \
-                 window_seconds = 86400 \
-             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
-        ),
-    )
-    .await;
-    for block in [10, 11, 12, 13] {
-        final_directed(&w.admin, block, 0, 10_000_000).await;
+    window(&w, 10_000_000, 86400).await;
+    for block in [10, 11, 12, 13, 14] {
+        final_directed(&w.admin, block, 0, 4_000_000).await;
     }
     w.cycle(t0()).await;
     let mut ids = Vec::new();
-    for block in [10, 11, 12, 13] {
+    for block in [10, 11, 12, 13, 14] {
         ids.push(bound(&w, block, 0).await.expect("a deposit").0);
     }
-    let (a, queue) = (ids[0], ids[1..].to_vec());
-    assert_eq!(w.state(a).await, ("Source-Final".into(), None));
+    let queue = ids[2..].to_vec();
+    for id in &ids[..2] {
+        assert_eq!(w.state(*id).await, ("Source-Final".into(), None));
+    }
     for id in &queue {
         assert_eq!(
             w.state(*id).await,
             ("Source-Final".into(), Some("CND-DepositWindow".into()))
         );
     }
-    // Within the window: a's share and the queue's claim, capped at one window (30 waiting, 10
-    // counted): a request is refused, as before.
-    assert_eq!(window_used(&w, 86400).await, "20000000");
+    // Within the window: the shares of the first two and the queue's claim, capped at one window
+    // (12 waiting, 10 counted): a request is refused, as before.
+    assert_eq!(window_used(&w, 86400).await, "18000000");
 
-    // One window on (the route's window made one second long): a's share has left it, and so has
-    // every claim of the queue, which began to wait more than a window ago. A request sees room.
-    exec(
-        &w.admin,
-        &format!(
-            "UPDATE routes SET window_seconds = 1 \
-             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
-        ),
-    )
-    .await;
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    assert_eq!(
-        window_used(&w, 1).await,
-        "0",
-        "the queue no longer locks requests out"
-    );
-    // A requester's deposit is taken in that room (as the ingress does, under the route's lock).
+    // One window on (the route's window made one second long): the shares have left it, and so has
+    // every claim of the queue, which began to wait more than a window ago. The core cycles first:
+    // the queue's head takes its 4, within half the window; the next, 4 more, would pass the half.
+    window_seconds(&w, 1).await;
+    past_a_window().await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(queue[0]).await, ("Source-Final".into(), None));
+    for id in &queue[1..] {
+        assert_eq!(
+            w.state(*id).await.1.as_deref(),
+            Some("CND-DepositWindow"),
+            "deposit {id} waits behind the head, under the requests' reserve"
+        );
+    }
+    let used: u128 = window_used(&w, 1).await.parse().unwrap();
+    assert_eq!(used, 4_000_000, "only the head's share");
+    // A request still finds room: a requester's deposit of 6 is within what is left, and is taken
+    // (as the ingress does, under the route's lock).
+    assert!(used + 6_000_000 <= 10_000_000, "a request finds room");
     let r_arrival = arrival(&w.admin, 30, 6_000_000).await;
     decide(&w.admin, r_arrival, "final", 32).await;
     let requested = deposit(&w.admin, 30, 6_000_000).await;
-    assert_eq!(window_used(&w, 1).await, "6000000");
-    // The queue's head waits behind it: 6 taken plus its 10 is over the window.
+    assert_eq!(window_used(&w, 1).await, "10000000");
     w.cycle(t0()).await;
-    for id in &queue {
+    assert_ne!(
+        w.state(requested).await.0,
+        "Refused",
+        "the request was taken"
+    );
+    for id in &queue[1..] {
         assert_eq!(
             w.state(*id).await.1.as_deref(),
             Some("CND-DepositWindow"),
             "deposit {id} waits behind the request"
         );
     }
-    assert_ne!(
-        w.state(requested).await.0,
-        "Refused",
-        "the request was taken"
-    );
 
-    // Window by window the queue drains in coordinate order, one at a time.
-    for (n, id) in queue.iter().enumerate() {
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    // Window by window the rest of the queue drains in coordinate order, one at a time, each
+    // leaving the requests their half.
+    for (n, id) in queue.iter().enumerate().skip(1) {
+        past_a_window().await;
         w.cycle(t0()).await;
         assert_eq!(
             w.state(*id).await,
@@ -2243,7 +2280,65 @@ async fn ac_a6_7_a_queue_of_several_windows_leaves_requesters_room_after_one_win
                 "{n}: {later} still waits"
             );
         }
+        let used: u128 = window_used(&w, 1).await.parse().unwrap();
+        assert!(
+            used <= 5_000_000,
+            "{n}: the queue took {used}, past its half"
+        );
     }
+    assert_eq!(returns(&w).await, 0);
+}
+
+/// `REQ-LM-4`, `REQ-IN-11`, `AC-A6.3` (amendment 0031, `d-f018-capacity`; review M1 of PR #142): a
+/// directed deposit waiting for the window carries nothing, so it is not in flight, and neither a
+/// request nor a deposit that leaves the window waits behind it for capacity. Capacity 2, five
+/// deposits of a whole window each: the first moves, the other four wait for the window, and the
+/// route has one transfer in flight. When the window rolls over, the second leaves the window and
+/// finds room beside the first, though the last three still wait for the window behind it.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_lm_4_deposits_waiting_for_the_window_are_not_in_flight(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    capacity(&w, 2).await;
+    window(&w, 10_000_000, 86400).await;
+    for block in [10, 11, 12, 13, 14] {
+        final_directed(&w.admin, block, 0, 10_000_000).await;
+    }
+    w.cycle(t0()).await;
+    let mut ids = Vec::new();
+    for block in [10, 11, 12, 13, 14] {
+        ids.push(bound(&w, block, 0).await.expect("a deposit").0);
+    }
+    assert_eq!(w.state(ids[0]).await, ("Source-Final".into(), None));
+    for id in &ids[1..] {
+        assert_eq!(
+            w.state(*id).await,
+            ("Source-Final".into(), Some("CND-DepositWindow".into()))
+        );
+    }
+    assert_eq!(
+        in_flight(&w).await,
+        1,
+        "the window's waiters are not in flight: a request finds room"
+    );
+
+    window_seconds(&w, 1).await;
+    past_a_window().await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(ids[1]).await,
+        ("Source-Final".into(), None),
+        "b moves: only a is in flight"
+    );
+    for id in &ids[2..] {
+        assert_eq!(
+            w.state(*id).await,
+            ("Source-Final".into(), Some("CND-DepositWindow".into()))
+        );
+    }
+    assert_eq!(in_flight(&w).await, 2);
     assert_eq!(returns(&w).await, 0);
 }
 
@@ -2369,6 +2464,67 @@ async fn ac_a6_8_an_upgrade_holds_directed_intake_until_two_operators_lift_it(
     let (returned, kind) = bound(&w, 41, 0).await.expect("the return, now");
     assert_eq!(kind, "refund");
     assert!(returned > 0);
+}
+
+/// `REQ-AS-12`, `REQ-LM-4` (amendment 0031; review M2 of PR #142): directed deposits held by an
+/// upgrade of their token carry nothing, so they are not in flight: with capacity 2 and two held, a
+/// requester's deposit of the token still finds room (the ingress answers `ERR-Overloaded` only at
+/// `in_flight >= capacity`). Once two operators lift the hold, the held deposits take their places
+/// in flight only as the route has room: the first beside the requester's, the second waiting in
+/// `CND-DepositCapacity`.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_as_12_deposits_held_by_an_upgrade_are_not_in_flight(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    capacity(&w, 2).await;
+    let upgrade = upgraded(&w, 30).await;
+    final_directed(&w.admin, 40, 0, 5_000_000).await;
+    final_directed(&w.admin, 41, 0, 5_000_000).await;
+    w.settle(t0()).await;
+    let mut held = Vec::new();
+    for block in [40, 41] {
+        let (id, _) = bound(&w, block, 0).await.expect("a deposit");
+        assert_eq!(
+            w.state(id).await,
+            ("Source-Final".into(), Some("CND-TokenUpgraded".into()))
+        );
+        held.push(id);
+    }
+    assert_eq!(in_flight(&w).await, 0, "the held carry nothing");
+    // A requester's deposit of the token is taken in that room.
+    let r = arrival(&w.admin, 42, 5_000_000).await;
+    decide(&w.admin, r, "final", 44).await;
+    let requested = deposit(&w.admin, 42, 5_000_000).await;
+    assert_eq!(in_flight(&w).await, 1, "the request is accepted: 1 of 2");
+
+    let request: i64 = sqlx::query_scalar(
+        "SELECT operator_request_token_hold_lift($1, 'fork suite run against the new implementation')",
+    )
+    .bind(upgrade)
+    .fetch_one(&w.ops[0])
+    .await
+    .unwrap();
+    sqlx::query_scalar::<_, i64>("SELECT operator_approve_token_hold_lift($1, 'checked')")
+        .bind(request)
+        .fetch_one(&w.ops[1])
+        .await
+        .unwrap();
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(held[0]).await,
+        ("Source-Final".into(), None),
+        "room beside the request"
+    );
+    assert_eq!(
+        w.state(held[1]).await,
+        ("Source-Final".into(), Some("CND-DepositCapacity".into())),
+        "no room left: it waits for capacity, not past it"
+    );
+    assert_eq!(in_flight(&w).await, 3, "two moving, one waiting in turn");
+    assert_ne!(w.state(requested).await.0, "Refused");
+    assert_eq!(returns(&w).await, 0);
 }
 
 /// A directed deposit whose first order was never prepared, past the route's deadline: in review
@@ -2577,4 +2733,54 @@ async fn ac_a6_9_a_stale_refusal_followed_by_an_unknown_keeps_the_exit_closed(
             .await,
         0
     );
+}
+
+/// `REQ-RV-2`, `REQ-RF-1` (amendment 0031, `d-f018-review-exit-later`; review L1 of PR #142): a
+/// resolution into `Refunding` that fails its own evidence check (it names another block time than
+/// the recorded refusal's) is refused and supersedes nothing: the earlier resolution into
+/// `Delivering`, waiting on the refusal, stands, and the deposit stays in review. One naming the
+/// recorded time then supersedes it and runs.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rv_2_a_refund_refused_for_its_evidence_supersedes_nothing(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let (id, past) = directed_in_review_for_an_unknown(&w).await;
+    let (delivering, o) = resolved_into_delivering(&w, id, past).await;
+    prepare(&w.admin, o, Some("Kreivo(Assets(CannotMint))")).await;
+    w.cycle(t0()).await;
+    let open: bool = scalar(
+        &w.admin,
+        &format!("SELECT directed_review_refund_open({id})"),
+    )
+    .await;
+    assert!(open);
+
+    let typed = resolution_on_refusal_at(&w, id, 0, Some(t0() + Duration::hours(1))).await;
+    approve_as(&w, 1, typed).await.unwrap();
+    w.cycle(t0()).await;
+    assert_eq!(evidence_refused(&w, typed).await, 1, "its evidence fails");
+    assert_eq!(
+        evidence_refused(&w, delivering).await,
+        0,
+        "the earlier resolution is untouched"
+    );
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(evidence_refused(&w, delivering).await, 0);
+    assert_eq!(returns(&w).await, 0);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM transfers WHERE refund_of = {id}"
+        ))
+        .await,
+        0
+    );
+
+    let action = resolution_on_refusal(&w, id, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    w.cycle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Refunding");
+    assert_eq!(evidence_refused(&w, delivering).await, 1, "superseded now");
 }

@@ -11,6 +11,7 @@
 //! | `directed-mints-alert` | the directed deposits minted (`Delivered`) in the trailing 24 hours: each new mint reference takes storage deposit from the issuing network's delivery account | [`Thresholds::mints_per_day`] |
 //! | `directed-returns-alert` | the returns of directed arrivals, and refunds of directed deposits, made in the trailing 24 hours: each is a payout from the reserve's delivery allowance, which withdrawals share | [`Thresholds::returns_per_day`] |
 //! | `directed-window-alert` | the share of the route's window that directed deposits hold: those it counts now (made, or out of `CND-DepositWindow`, within the window, as `route_usage_locked()` counts them) and those waiting in `CND-DepositWindow`, which claim it ahead of anything later (migration 0145) | [`Thresholds::window_share_percent`] |
+//! | `directed-wait-alert` | the directed deposits that have held `CND-TokenUpgraded` or `CND-DepositCapacity` for longer than one of the route's windows (amendment 0031; review L2 of PR #142): a hold no operator has lifted, or a route that stays full | more than none |
 //!
 //! A count or share **above** its threshold pages, once on crossing and then once a day while it
 //! stays above; back at or below, `directed-alert-cleared` is logged, so a second crossing pages at
@@ -52,6 +53,9 @@ pub const MINTS: &str = "directed-mints-alert";
 pub const RETURNS: &str = "directed-returns-alert";
 /// Directed deposits' share of a route's window above the threshold.
 pub const WINDOW: &str = "directed-window-alert";
+/// Directed deposits held by an upgrade of their token, or waiting for capacity, for longer than one
+/// of the route's windows.
+pub const WAITS: &str = "directed-wait-alert";
 /// A `Directed` log that paired with no transfer (`AC-A6.6`).
 pub const UNPAIRED: &str = "unpaired-direction";
 /// An admitted origin token's implementation changed.
@@ -153,8 +157,8 @@ type PendingRow = (
     serde_json::Value,
 );
 
-/// Per deposit route: (asset, network, window limit, mints, returns, held).
-type RouteRow = (String, String, String, i64, i64, String);
+/// Per deposit route: (asset, network, window limit, mints, returns, held, long waits).
+type RouteRow = (String, String, String, i64, i64, String, i64);
 
 async fn routes(pool: &PgPool) -> sqlx::Result<Vec<RouteRow>> {
     let directed_p = DIRECTED.replace("d.", "p.");
@@ -192,7 +196,17 @@ async fn routes(pool: &PgPool) -> sqlx::Result<Vec<RouteRow>> {
                                           AND w.condition = 'CND-DepositWindow')) \
                        > now() - make_interval(secs => r.window_seconds) \
                    ELSE d.created_at > now() - make_interval(secs => r.window_seconds) \
-               END) AS held \
+               END) AS held, \
+           (SELECT count(*) FROM transfers d \
+             WHERE d.asset = r.asset AND d.kind = 'deposit' AND d.refund_of IS NULL \
+               AND d.source_network = r.network AND NOT is_terminal_state(d.state) \
+               AND d.condition IN ('CND-TokenUpgraded', 'CND-DepositCapacity') \
+               AND (SELECT min(x.seen_at) FROM transitions x \
+                     WHERE x.transfer_id = d.id AND x.condition = d.condition \
+                       AND x.id > COALESCE((SELECT max(y.id) FROM transitions y \
+                                             WHERE y.transfer_id = d.id \
+                                               AND y.condition IS DISTINCT FROM d.condition), 0)) \
+                   <= now() - make_interval(secs => r.window_seconds)) AS waits \
          FROM routes r WHERE r.direction = 'deposit' ORDER BY r.asset, r.network"
     ))
     .fetch_all(pool)
@@ -208,7 +222,7 @@ fn key(kind: &str, asset: &str, network: &str) -> String {
 /// yet. See the module documentation.
 pub async fn check(pool: &PgPool, thresholds: &Thresholds) -> sqlx::Result<Vec<Outcome>> {
     let mut outcomes = Vec::new();
-    for (asset, network, limit, mints, returns, held) in routes(pool).await? {
+    for (asset, network, limit, mints, returns, held, waits) in routes(pool).await? {
         let limit: u128 = limit.parse().unwrap_or(0);
         let held: u128 = held.parse().unwrap_or(0);
         // The share in basis points, for the page; the comparison is exact, in integers.
@@ -235,6 +249,7 @@ pub async fn check(pool: &PgPool, thresholds: &Thresholds) -> sqlx::Result<Vec<O
                 over_window,
                 u128::from(thresholds.window_share_percent) * 100,
             ),
+            (WAITS, u128::try_from(waits).unwrap_or(0), waits > 0, 0),
         ] {
             if let Some(o) =
                 threshold_alert(pool, kind, &asset, &network, value, threshold, above).await?
@@ -328,9 +343,13 @@ async fn threshold_alert(
             kind = %"directed-returns-alert", asset = %asset, network = %network, returns = %value, threshold = %threshold, repeat,
             "page: more directed arrivals were returned on this route in the last 24 hours than the threshold; each is a payout from the reserve's delivery allowance, which withdrawals share (deploy/runbooks/pages/directed-returns.md)"
         ),
-        _ => tracing::error!(
+        WINDOW => tracing::error!(
             kind = %"directed-window-alert", asset = %asset, network = %network, share_bps = %value, threshold_bps = %threshold, repeat,
             "page: directed deposits hold more of this route's window than the threshold; requesters' deposits are refused ERR-WindowExceeded when it is full (deploy/runbooks/pages/directed-window.md)"
+        ),
+        _ => tracing::error!(
+            kind = %"directed-wait-alert", asset = %asset, network = %network, deposits = %value, repeat,
+            "page: directed deposits on this route have been held by an upgrade of their token (CND-TokenUpgraded) or waited for its capacity (CND-DepositCapacity) for longer than one window; is a lift of the hold pending, or the route full? (deploy/runbooks/conditions/CND-TokenUpgraded.md, deploy/runbooks/conditions/CND-DepositCapacity.md)"
         ),
     }
     store::event(
