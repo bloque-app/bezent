@@ -13,7 +13,8 @@
 //
 // One tab of this origin redeems at a time: the redemption runs inside the Web Lock `bezent.bridge.redeem`, from the
 // re-read of the stored locks to the end of the signing (or the storing of an unclear outcome), so two tabs cannot both
-// sign while the first is still signing. A browser without Web Locks is refused before anything is signed.
+// sign while the first is still signing. After an unclear outcome the lock is held on, while the stored record does not
+// cover it (the write failed, or only this tab holds it), until the watch settles it. A browser without Web Locks is refused before anything is signed.
 
 import { getAddress, type Address, type Hex as EvmHex } from 'viem';
 import type { ResolvedNetwork } from '../config/networks';
@@ -516,6 +517,7 @@ export function initRedeem(host: RedeemHost) {
   });
 
   function render() {
+    releaseLockIfRecorded();
     const n = host.network();
     $('redeem-reference').textContent = r.reference;
     const rows: [string, string][] = [];
@@ -583,12 +585,22 @@ export function initRedeem(host: RedeemHost) {
     try {
       await locks.request(REDEEM_LOCK, { ifAvailable: true }, async (lock) => {
         r.starting = false;
+        if (!lock && unrecorded()) {
+          // This tab itself holds the lock, for an unclear redemption no stored record covers.
+          progressList($('redeem-progress'))(`The redemption ${r.unstored[0]?.txHash ?? r.pending?.txHash} may still be included, so no other is sent until Kreivo records it or it can no longer be included. Nothing was signed.`, 'error');
+          render();
+          return;
+        }
         if (!lock) {
           progressList($('redeem-progress'))('Another tab of this page is redeeming right now. Wait for it to finish, then redeem here. Nothing was signed.', 'error');
           render();
           return;
         }
         await redeemLocked();
+        // An unclear redemption that no stored record covers (the write failed, or only this tab holds it) is
+        // known to this tab alone: another tab reads no lock, so the Web Lock stays held until it settles (or the
+        // page unloads, which releases it).
+        await heldWhileUnrecorded();
       });
     } catch (e) {
       // The lock could not be taken (nothing was signed then), or the redemption failed outside its own handling.
@@ -597,6 +609,17 @@ export function initRedeem(host: RedeemHost) {
       r.starting = false;
       render();
     }
+  }
+
+  /** True while an unclear redemption exists that the stored records do not show to another tab. */
+  const unrecorded = () => (!!r.pending && !!r.unkept) || r.unstored.length > 0;
+  const heldWaiters: (() => void)[] = [];
+  /** Resolves once nothing unclear is left unrecorded; the Web Lock callback awaits it. */
+  function heldWhileUnrecorded(): Promise<void> {
+    return unrecorded() ? new Promise<void>((resolve) => heldWaiters.push(resolve)) : Promise.resolve();
+  }
+  function releaseLockIfRecorded() {
+    if (!unrecorded()) for (const w of heldWaiters.splice(0)) w();
   }
 
   /** The redemption itself, inside the Web Lock: no other tab of this origin signs a redemption meanwhile. */

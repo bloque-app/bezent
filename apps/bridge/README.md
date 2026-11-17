@@ -76,8 +76,10 @@ A network whose `DirectedDeposit` address, reserve or code hash is unset is refu
 issuing network: today that is Polygon Amoy (T-018-04 deployed it; no test Kreivo is named for it yet, and a test
 network never pairs with live Kreivo). Polygon is pinned (T-018-18, `contracts/evm/deployments/polygon.json`): the
 contract, the vault, the code hash, the vault's reference emitter, and Kreivo's refused recipients (the bezent
-contract's account and aledgent's settlement contracts, the accounts the production store declares in
-`ledger_accounts`); a production Kreivo with none pinned is refused. Nothing falls back to another value.
+contract's account and aledgent's settlement contracts: complete for the known ledgers). The app refuses them; the
+production store must also declare them in `ledger_accounts` (the deploy repository's `ledger-accounts-kreivo.sql`)
+before directed deposits open, because the core refuses only `ledger_accounts_listed` today. A production Kreivo with
+none pinned is refused. Nothing falls back to another value.
 
 ## Reproducing a published hash
 
@@ -161,7 +163,10 @@ BEZENT_WRITE_VECTORS=1 cargo test -p bezent-core-service --test bridge_app_vecto
   stored lock for the same redeemer keeps that lock, and holds its own transaction in memory as a second one, watched
   until it settles. A stored lock is checked on its stable fields only (the network, the Kreivo network, the chain
   id, the asset's id and decimals, the redeemer's address), and one whose read throws locks Redeem as an unreadable
-  record does.
+  record does. When the outcome is unclear and no stored record covers it (the write failed, or only this tab holds
+  it), the tab keeps the Web Lock until the watch settles, so another tab cannot sign meanwhile; closing the page
+  releases it. Web Locks and `localStorage` are per browser profile: a private window or another browser shares
+  neither, and is not covered.
 - **The status page** reads Polygon through the wallet and Kreivo through the light client: a deposit's
   `Transfer`/`Directed` pair at its coordinate and its finality, `mint_reference_used` on Kreivo, and a return by its
   payout reference; a withdrawal's redemption record on Kreivo and its payout by the reference the vault's emitter

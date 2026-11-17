@@ -92,10 +92,12 @@ export const KREIVO: KreivoNetwork = {
   ss58Prefix: 2,
   asset: { id: 101, symbol: 'bUSDC', decimals: 6 },
   connection: { kind: 'light-client', relay: 'kusama' },
-  // T-018-18: the accounts the core refuses as a directed deposit's recipient, which the production store declares
-  // in `ledger_accounts` (PLAN DEC-15, REQ-IN-5): the bezent contract's own account, and aledgent's settlement
-  // contracts on Kreivo mainnet, Bloque's and Bloque Test's (`PROD` and `TEST` of aledgent's
-  // `contracts/settlement/scripts/fork/common.mjs`, bloque-app/aledgent). Value minted to any of them credits no one.
+  // T-018-18: the accounts this app refuses as a directed deposit's recipient (PLAN DEC-15, REQ-IN-5): the bezent
+  // contract's own account, and aledgent's settlement contracts on Kreivo mainnet, Bloque's and Bloque Test's (`PROD`
+  // and `TEST` of aledgent's `contracts/settlement/scripts/fork/common.mjs`, bloque-app/aledgent). Value minted to any
+  // of them credits no one. The list is complete for the known ledgers. The production store must declare the same
+  // accounts in `ledger_accounts` (the deploy repository's `ledger-accounts-kreivo.sql`) before directed deposits open:
+  // today the core refuses only `ledger_accounts_listed`, so until then the app is the only guard.
   refusedRecipients: [
     // bezent (DoGtfGRPMBd4LHghKAjXAuKB7LY7m8gM1QZsu6mXrwfVdq4).
     '0x361d9535ca78edf68a88c7abd44cdec7086f8e85bcb8aedb724462eb3f2e5821',
