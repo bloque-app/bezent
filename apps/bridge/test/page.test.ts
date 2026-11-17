@@ -12,7 +12,10 @@
 // - while anything is in flight every control that changes what is sent is locked, the network among them;
 // - when the chain recorded something else than the snapshot (the sender-mismatch branch), the page says so loudly,
 //   shows what was recorded, and offers no status link;
-// - a status link fills the status form.
+// - a status link fills the status form;
+// - from #138's review: a payout to one of bezent's own contracts is refused, and one to a contract is flagged; a
+//   default payout that follows a new EVM account says so; a signature over another payload forgets the wallet's
+//   metadata and the page offers it again; an unclear outcome keeps its reference locked until it settles.
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -31,6 +34,12 @@ const fake = vi.hoisted(() => ({
   redeems: [] as { resolve: (r: unknown) => void; reject: (e: unknown) => void }[],
   account: '0x1111111111111111111111111111111111111111',
   network: undefined as unknown,
+  /** The code at any address, as the EVM wallet reads it. */
+  code: '0x' as string,
+  provided: 0,
+  /** What the contract records for the reference, and the finalized head, for an unclear outcome. */
+  recorded: undefined as unknown,
+  head: 1,
 }));
 
 vi.mock('../src/config/build', async () => {
@@ -53,7 +62,8 @@ vi.mock('../src/evm/deposit', async (original) => {
     // Each connect waits for the test; it answers with the account the wallet had when it was asked.
     connect: (_p: unknown, network: unknown) => {
       const account = fake.account;
-      return new Promise((resolve) => fake.connects.push({ account, resolve: () => resolve({ network, account, chain: {}, wallet: {}, public: {} }) }));
+      const pub = { getChainId: async () => (network as { chainId: number }).chainId, getCode: async () => fake.code };
+      return new Promise((resolve) => fake.connects.push({ account, resolve: () => resolve({ network, account, chain: {}, wallet: {}, public: pub }) }));
     },
     readContract: async () => ({
       token: '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582',
@@ -75,7 +85,7 @@ vi.mock('../src/kreivo/wallets', () => ({
   enableKreivoWallet: async () => ({
     name: 'polkadot-js',
     takesMetadata: true,
-    provideMetadata: async () => 'provided',
+    provideMetadata: async () => (fake.provided++, 'provided'),
     accounts: [{ wallet: 'polkadot-js', name: 'Alice', account: ALICE, address: ALICE_SS58, signer: { publicKey: new Uint8Array(32) } }],
   }),
 }));
@@ -93,8 +103,12 @@ vi.mock('../src/kreivo/redeem', async (original) => {
         balance: 10_000_000n,
         assetStatus: 'Liquid',
         ksm: 10n ** 12n,
+        approval: undefined,
+        approvalDeposit: 6_700_000_000n,
         at: { number: 1, hash: `0x${'00'.repeat(32)}` },
       }),
+      redemption: async () => fake.recorded,
+      finalized: async () => fake.head,
     }),
   };
 });
@@ -143,6 +157,18 @@ async function load() {
   fake.deposits.length = 0;
   fake.redeems.length = 0;
   fake.account = A1;
+  fake.code = '0x';
+  fake.provided = 0;
+  fake.recorded = undefined;
+  fake.head = 1;
+  // A storage of the test's own: Node's global localStorage, where it has one, is not the page's.
+  const store = new Map<string, string>();
+  vi.stubGlobal('localStorage', {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => void store.set(k, String(v)),
+    removeItem: (k: string) => void store.delete(k),
+    clear: () => store.clear(),
+  });
   document.body.innerHTML = html.slice(html.indexOf('<body>') + 6, html.indexOf('<script'));
   await import('../src/main');
   await flush();
@@ -168,6 +194,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   document.body.innerHTML = '';
+  vi.unstubAllGlobals();
 });
 
 describe('the page’s wallet reads', () => {
@@ -313,6 +340,122 @@ describe('a redemption in flight', () => {
     await flush();
     await answerRead();
     expect($<HTMLInputElement>('redeem-payout').value).toBe(A2);
+  });
+});
+
+describe('the payout address', () => {
+  async function connected() {
+    await load();
+    $<HTMLButtonElement>('redeem-connect').click();
+    await flush();
+    ($('redeem-accounts').querySelector('button') as HTMLButtonElement).click();
+    await flush();
+    type('redeem-amount', '2');
+    await flush();
+  }
+  const network = () => fake.network as { reserve: Address; token: Address; directedDeposit: Address; emitter: Address };
+
+  it('refuses bezent’s own contracts, in any case', async () => {
+    await connected();
+    for (const a of [network().reserve, network().token.toLowerCase(), network().directedDeposit, network().emitter.toLowerCase()]) {
+      type('redeem-payout', a);
+      await flush();
+      expect($('redeem-payout-status').textContent).toMatch(/not yours: USDC paid to it would not reach you/);
+      expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+    }
+    type('redeem-payout', A2);
+    await flush();
+    expect($<HTMLButtonElement>('redeem').disabled).toBe(false);
+  });
+
+  it('warns, without refusing, when the address is a contract', async () => {
+    await connected();
+    fake.code = '0x6080';
+    type('redeem-payout', A2);
+    await flush();
+    expect($('redeem-payout-warning').textContent).toMatch(/is a contract on .*not a plain account/);
+    expect($<HTMLButtonElement>('redeem').disabled).toBe(false);
+    fake.code = '0x';
+    type('redeem-payout', A1);
+    await flush();
+    expect($('redeem-payout-warning').textContent).toBe('');
+  });
+
+  it('says so when the default follows a new EVM account', async () => {
+    await connected();
+    expect($<HTMLInputElement>('redeem-payout').value).toBe(A1);
+    walletChanged(A2);
+    await flush();
+    await answerRead();
+    expect($<HTMLInputElement>('redeem-payout').value).toBe(A2);
+    expect($('redeem-payout-status').textContent).toBe(`The payout address changed to ${A2}: it follows the connected EVM account, which changed (it was ${A1}). Check it before you redeem.`);
+    expect($('redeem-payout-status').className).toBe('warn');
+  });
+});
+
+describe('a signature over another payload, and an unclear outcome', () => {
+  const metadataKey = `bezent.bridge.metadata/polkadot-js/0x${'c7'.repeat(32)}/136/PassAuthenticate,DynamicMaxBlockWeight`;
+  async function redeeming() {
+    await load();
+    $<HTMLButtonElement>('redeem-connect').click();
+    await flush();
+    ($('redeem-accounts').querySelector('button') as HTMLButtonElement).click();
+    await flush();
+    type('redeem-amount', '2');
+    await flush();
+    const reference = $('redeem-reference').textContent!;
+    $<HTMLButtonElement>('redeem').click();
+    await flush();
+    expect(fake.redeems).toHaveLength(1);
+    // main.ts's modules, as this load imported them.
+    return { reference, ...(await import('../src/kreivo/redeem')), ...(await import('../src/kreivo/extensions')) };
+  }
+
+  it('forgets that the wallet took the metadata, and offers it again on request', async () => {
+    const { WalletSignatureMismatch } = await redeeming();
+    expect(localStorage.getItem(metadataKey)).toBe('1');
+    expect(fake.provided).toBe(1);
+    fake.redeems[0]!.reject(new WalletSignatureMismatch('The wallet’s signature does not verify. Nothing was sent.'));
+    await flush();
+    expect(localStorage.getItem(metadataKey)).toBeNull();
+    expect($('redeem-progress').textContent).toContain('Offer Kreivo’s metadata to the wallets again');
+    $<HTMLButtonElement>('redeem-offer-metadata').click();
+    await flush();
+    expect(fake.provided).toBe(2);
+    expect(localStorage.getItem(metadataKey)).toBe('1');
+    expect($('redeem-wallet-status').textContent).toBe('polkadot-js took Kreivo’s metadata.');
+  });
+
+  it('keeps the reference locked while the redemption may still be included, with no “pick another”', async () => {
+    const { reference, UnclearOutcome } = await redeeming();
+    fake.head = 1_000;
+    fake.redeems[0]!.reject(new UnclearOutcome('The redemption 0x77… was broadcast, but following it failed.', `0x${'77'.repeat(32)}`, 1_064));
+    await flush();
+    expect($('redeem-reference').textContent).toBe(reference);
+    expect($<HTMLButtonElement>('redeem-new-reference').disabled).toBe(true);
+    $<HTMLButtonElement>('redeem-new-reference').click();
+    await flush();
+    expect($('redeem-reference').textContent).toBe(reference);
+    expect($('redeem-review').textContent).toMatch(/locked: the redemption 0x7{64} may still be included/);
+    expect($('redeem-progress').textContent).toMatch(/until block 1064 is final; the reference stays locked meanwhile/);
+  });
+
+  it('frees the reference once Kreivo records the redemption, and links to its status', async () => {
+    const { reference, UnclearOutcome } = await redeeming();
+    fake.recorded = {
+      redeemer: ALICE,
+      asset: 101,
+      amount: 2_000_000n,
+      backend: { kind: 'evm', chainId: 80002n },
+      payout: { kind: 'address', address: A1 },
+      refunded: false,
+    };
+    fake.redeems[0]!.reject(new UnclearOutcome('The redemption 0x77… was broadcast, but following it failed.', `0x${'77'.repeat(32)}`, 1_064));
+    await flush();
+    expect($('redeem-progress').textContent).toMatch(/Kreivo records the redemption \(final by block 1\): 2 bUSDC, paid to 0x1{40}/);
+    expect($('redeem-link').querySelector('a')?.getAttribute('href')).toBe(`#status=withdrawal&redeemer=${ALICE_SS58}&reference=${reference}`);
+    expect($('redeem-reference').textContent).not.toBe(reference);
+    expect($<HTMLButtonElement>('redeem-new-reference').disabled).toBe(false);
   });
 });
 

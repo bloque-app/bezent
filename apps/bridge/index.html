@@ -72,7 +72,10 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
           Anyone holding bUSDC on Kreivo redeems it here for USDC on Polygon. You sign on Kreivo with a browser-extension
           wallet (Talisman, SubWallet or Polkadot.js) and pay Kreivo’s fee in KSM, so the account needs a little KSM.
         </p>
-        <p><button id="redeem-connect" type="button" class="secondary">Connect a Kreivo wallet</button></p>
+        <p>
+          <button id="redeem-connect" type="button" class="secondary">Connect a Kreivo wallet</button>
+          <button id="redeem-offer-metadata" type="button" class="link">Offer Kreivo’s metadata to the wallets again</button>
+        </p>
         <div id="redeem-accounts" class="wallets"></div>
         <p id="redeem-wallet-status" class="muted"></p>
         <dl id="redeem-facts" class="facts"></dl>
@@ -83,6 +86,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
         <label for="redeem-payout">Paid to, on Polygon</label>
         <input id="redeem-payout" autocomplete="off" spellcheck="false" placeholder="0x…" />
         <p id="redeem-payout-status" class="muted"></p>
+        <p id="redeem-payout-warning" class="warn"></p>
         <p class="muted">
           Reference, picked at random: <code id="redeem-reference"></code>
           <button id="redeem-new-reference" type="button" class="link">Pick another</button>

@@ -4,24 +4,41 @@
 // signed extensions registered, show the redeemer's bUSDC and the contract's minimum and pauses, take the amount (or
 // the whole balance) and the payout address, pick a fresh random reference, and run the locked redeem (src/redeem.ts).
 // The result names the redemption's on-chain reference (the redeemer and the reference) and links to its status.
+//
+// The payout address is refused when it is one of bezent's own contracts, and flagged (not refused) when Polygon
+// holds code at it. A redemption whose outcome is unclear (broadcast, but following it failed) keeps its reference
+// locked until the contract records it or its mortality runs out. A signature the wallet made over another payload
+// (refused in the page, or BadProof from Kreivo) forgets that the wallet took Kreivo's metadata, and the page offers
+// it again.
 
-import { getAddress, type Address } from 'viem';
+import { getAddress, type Address, type Hex as EvmHex } from 'viem';
 import type { ResolvedNetwork } from '../config/networks';
 import { bezentContract } from '../config/networks';
 import type { Kreivo } from '../kreivo/client';
-import { backendText, type Backend } from '../kreivo/bezent';
-import { KREIVO_USER_EXTENSIONS, type MetadataDef } from '../kreivo/extensions';
-import { kreivoRuntime, redeemChain, type RedeemChain, type RedeemFacts } from '../kreivo/redeem';
+import { backendText, sameBackend, type Backend } from '../kreivo/bezent';
+import { KREIVO_USER_EXTENSIONS, WalletSignatureMismatch, type MetadataDef } from '../kreivo/extensions';
+import { kreivoRuntime, redeemChain, UnclearOutcome, type RedeemChain, type RedeemFacts } from '../kreivo/redeem';
 import { enableKreivoWallet, kreivoWalletNames, type KreivoAccount, type KreivoWallet } from '../kreivo/wallets';
 import { formatAmount, parseAmount } from '../lib/amount';
 import { encodeSs58 } from '../lib/ss58';
 import { fromHex, type Hex } from '../lib/bytes';
 import { payoutReference, withdrawalReference } from '../lib/refs';
-import { freshReference, parsePayout, redeemRows, refusal, runRedeem, takeRedeemSnapshot, type RedeemSnapshot } from '../redeem';
+import {
+  freshReference,
+  ownContracts,
+  parsePayout,
+  redeemRows,
+  refusal,
+  runRedeem,
+  settle,
+  takeRedeemSnapshot,
+  type RedeemSnapshot,
+  type Unsettled,
+} from '../redeem';
 import { $, errorText, facts, note, progressList, say } from './dom';
 
 /** The redeem's controls the lock disables, by id, and the containers whose buttons it disables. */
-export const REDEEM_LOCKED_IDS = ['redeem-connect', 'redeem-amount', 'redeem-whole', 'redeem-payout', 'redeem-new-reference'] as const;
+export const REDEEM_LOCKED_IDS = ['redeem-connect', 'redeem-offer-metadata', 'redeem-amount', 'redeem-whole', 'redeem-payout', 'redeem-new-reference'] as const;
 export const REDEEM_LOCKED_CONTAINERS = ['redeem-accounts'] as const;
 
 /** What the redeem needs from the rest of the page. */
@@ -35,6 +52,11 @@ export interface RedeemHost {
   setBusy(busy: boolean): void;
   /** Where a redemption's status is shown. */
   statusLink(redeemer: string, reference: Hex): string;
+  /** The code at an address on the network's EVM chain, through the connected wallet; `undefined` when it cannot
+   * be read (no wallet, or one on another chain). Only warns: it never refuses a payout. */
+  payoutCode?(address: Address): Promise<EvmHex | undefined>;
+  /** Waits between reads of an unclear redemption; overridable for tests. */
+  sleep?: (ms: number) => Promise<void>;
   /** Overridable for tests. */
   chain?: (k: Kreivo, n: ResolvedNetwork, contract: Hex) => RedeemChain;
   enable?: typeof enableKreivoWallet;
@@ -59,12 +81,20 @@ function remember(key: string) {
     // Storage blocked: the wallet is asked again next time.
   }
 }
+function forget(key: string) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Storage blocked: nothing was remembered.
+  }
+}
 
 export function initRedeem(host: RedeemHost) {
   const chainOf = host.chain ?? ((k, n, c) => redeemChain(k, n.kreivo, c));
   const enable = host.enable ?? enableKreivoWallet;
   const names = host.walletNames ?? kreivoWalletNames;
   const runtimeOf = host.runtime ?? kreivoRuntime;
+  const sleep = host.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
   const r: {
     account?: KreivoAccount;
@@ -74,9 +104,18 @@ export function initRedeem(host: RedeemHost) {
     amount?: bigint;
     payout?: Address;
     payoutEdited: boolean;
+    /** The default payout address last shown (the connected EVM account), to notice when it changes. */
+    payoutDefault?: Address;
+    /** Drops a code read for a payout address the form moved on from. */
+    codeGen: number;
     reference: Hex;
     locked?: RedeemSnapshot;
-  } = { reading: false, gen: 0, payoutEdited: false, reference: freshReference() };
+    /** The wallets connected, and the metadata they were offered. */
+    wallets: KreivoWallet[];
+    def?: MetadataDef;
+    /** A redemption whose outcome is unclear: its reference stays locked until it settles. */
+    pending?: Unsettled & { network: string; snapshot: RedeemSnapshot };
+  } = { reading: false, gen: 0, payoutEdited: false, codeGen: 0, reference: freshReference(), wallets: [] };
 
   const amountInput = $<HTMLInputElement>('redeem-amount');
   const wholeInput = $<HTMLInputElement>('redeem-whole');
@@ -122,6 +161,8 @@ export function initRedeem(host: RedeemHost) {
     const custom = Object.keys(KREIVO_USER_EXTENSIONS).join(' and ');
     const notes: string[] = [`Kreivo signs ${rt.extensions.join(', ')}; ${custom} are registered with each wallet before it signs.`];
     const buttons: HTMLElement[] = [];
+    r.wallets = [];
+    r.def = rt.def;
     for (const name of found) {
       let w: KreivoWallet;
       try {
@@ -129,6 +170,7 @@ export function initRedeem(host: RedeemHost) {
       } catch {
         continue; // The user declined this extension; the others may still answer.
       }
+      r.wallets.push(w);
       const key = remembered(name, rt.def);
       if (!w.takesMetadata) {
         notes.push(`${name} takes no metadata from pages: it signs only if it knows Kreivo’s ${custom} itself.`);
@@ -149,6 +191,26 @@ export function initRedeem(host: RedeemHost) {
     }
     say(status, notes.join(' '));
     box.replaceChildren(...(buttons.length ? buttons : [note('No Kreivo account was shared.')]));
+  }
+
+  // Offering the metadata again: after a signature over another payload, or whenever the user asks.
+  $('redeem-offer-metadata').addEventListener('click', () => void offerMetadata());
+  async function offerMetadata() {
+    if (host.busy()) return;
+    const status = $('redeem-wallet-status');
+    const def = r.def;
+    if (!def || r.wallets.length === 0) return say(status, 'Connect a Kreivo wallet first.', 'error');
+    const notes: string[] = [];
+    for (const w of r.wallets) {
+      if (!w.takesMetadata) {
+        notes.push(`${w.name} takes no metadata from pages.`);
+        continue;
+      }
+      const res = await w.provideMetadata(def).catch(() => 'declined' as const);
+      if (res === 'provided') remember(remembered(w.name, def));
+      notes.push(res === 'provided' ? `${w.name} took Kreivo’s metadata.` : `${w.name} did not take Kreivo’s metadata; its signatures may be refused.`);
+    }
+    say(status, notes.join(' '));
   }
 
   async function useAccount(a: KreivoAccount) {
@@ -183,7 +245,13 @@ export function initRedeem(host: RedeemHost) {
         ['Redeemer', encodeSs58(fromHex(a.account), t.n.kreivo.ss58Prefix)],
         ['Contract', encodeSs58(fromHex(t.c), t.n.kreivo.ss58Prefix)],
         ['Balance', `${fmt(f.balance)} (Here(${t.n.kreivo.asset.id}))${f.assetStatus && f.assetStatus !== 'Liquid' ? `, ${f.assetStatus}` : ''}`],
-        ['KSM', `${formatAmount(f.ksm, 12)} KSM, for the fee and the storage deposit`],
+        ['KSM', `${formatAmount(f.ksm, 12)} KSM, for the fee, the storage deposit and the approval’s deposit`],
+        [
+          'Existing approval',
+          f.approval
+            ? `${fmt(f.approval.amount)} already approved to the contract (its deposit, ${formatAmount(f.approval.deposit, 12)} KSM, is held). The batch’s approve_transfer adds the amount to it, and the redemption pulls only the amount, so ${fmt(f.approval.amount)} stays approved after it.`
+            : 'none: the batch approves the amount, and the redemption uses it up',
+        ],
         ['Redemption minimum', f.bounds ? `${fmt(f.bounds.redeemMinimum)}, from the contract` : 'the contract does not know this asset'],
         ['Paused', paused.length ? paused.join(', ') : 'no'],
         ['Backend', `${backendText(backend(t.n))}${f.backends.length ? `; the contract declares ${f.backends.map(backendText).join(', ')}` : ''}`],
@@ -242,26 +310,59 @@ export function initRedeem(host: RedeemHost) {
   });
   function onPayout() {
     const out = $('redeem-payout-status');
+    const warning = $('redeem-payout-warning');
+    let changed: { from: Address; to: Address } | undefined;
     if (!r.payoutEdited) {
       const evm = host.evmAccount();
+      if (r.payoutDefault && evm && evm !== r.payoutDefault) changed = { from: r.payoutDefault, to: evm };
+      r.payoutDefault = evm;
       payoutInput.value = evm ?? '';
     }
     r.payout = undefined;
+    const gen = ++r.codeGen;
+    say(warning, '', 'warn');
     if (!payoutInput.value.trim()) {
       say(out, 'The connected EVM account is used when there is one.');
       return render();
     }
-    const p = parsePayout(payoutInput.value);
+    const n = host.network();
+    const p = parsePayout(payoutInput.value, n ? ownContracts(n) : []);
     if (p.ok) {
       r.payout = p.address;
-      say(out, `Paid to ${p.address}${host.evmAccount() === p.address ? ' (the connected EVM account)' : ''}.`, 'ok');
+      if (changed) {
+        say(out, `The payout address changed to ${p.address}: it follows the connected EVM account, which changed (it was ${changed.from}). Check it before you redeem.`, 'warn');
+      } else {
+        say(out, `Paid to ${p.address}${host.evmAccount() === p.address ? ' (the connected EVM account)' : ''}.`, 'ok');
+      }
+      void checkCode(p.address, gen);
     } else say(out, p.reason, 'error');
     render();
   }
 
+  /** Warns, without refusing, when Polygon holds code at the payout address: a contract that cannot move USDC on
+   * would keep it. */
+  async function checkCode(address: Address, gen: number) {
+    if (!host.payoutCode) return;
+    let code: EvmHex | undefined;
+    try {
+      code = await host.payoutCode(address);
+    } catch {
+      return; // Unreadable: nothing to warn about, and nothing is refused.
+    }
+    if (gen !== r.codeGen || r.payout !== address || !code || code === '0x') return;
+    // An EIP-7702 delegation (0xef0100 and an address) is an account its key controls, not a contract's own.
+    if (/^0xef0100[0-9a-f]{40}$/i.test(code)) return;
+    const n = host.network();
+    say(
+      $('redeem-payout-warning'),
+      `${address} is a contract on ${n?.label ?? 'this network'}, not a plain account. The USDC is paid to it as to any address; if that contract cannot move USDC on, it stays there. Make sure it is a wallet you control there (a smart account), not an exchange’s or a token’s contract.`,
+      'warn',
+    );
+  }
+
   // The reference.
   $('redeem-new-reference').addEventListener('click', () => {
-    if (host.busy()) return;
+    if (host.busy() || r.pending) return;
     r.reference = freshReference();
     render();
   });
@@ -275,8 +376,11 @@ export function initRedeem(host: RedeemHost) {
       const snap = live();
       if (snap) rows.push(...redeemRows(snap));
     }
+    if (r.pending) rows.push(['Reference', `locked: the redemption ${r.pending.txHash} may still be included, so this reference is kept until Kreivo records it or it can no longer be included`]);
     facts($('redeem-review'), rows);
     button.disabled = host.busy() || r.reading || !n || !r.facts || !live();
+    // After the page's lock (main.ts draws it first): an unclear redemption keeps its reference.
+    $<HTMLButtonElement>('redeem-new-reference').disabled = host.busy() || !!r.pending;
   }
 
   function live(): RedeemSnapshot | undefined {
@@ -297,6 +401,8 @@ export function initRedeem(host: RedeemHost) {
     const snap = live();
     if (typeof t === 'string' || !a || !snap) return;
     const step = progressList($('redeem-progress'));
+    const again = parsePayout(snap.payout, ownContracts(t.n));
+    if (!again.ok) return step(`${again.reason} Nothing was signed.`, 'error');
     $('redeem-result').replaceChildren();
     $('redeem-link').replaceChildren();
     r.locked = snap;
@@ -341,14 +447,59 @@ export function initRedeem(host: RedeemHost) {
       link.href = host.statusLink(snap.redeemer.address, snap.reference);
       link.textContent = 'Follow this redemption’s status';
       $('redeem-link').replaceChildren(link);
+      // The contract now records this reference: an earlier unclear redemption with it is settled too.
+      if (r.pending?.reference === snap.reference) r.pending = undefined;
       r.reference = freshReference();
     } catch (e) {
       step(errorText(e), 'error');
+      if (e instanceof WalletSignatureMismatch && r.def) {
+        // The wallet's record of Kreivo's metadata is not one it signs with: offer it again.
+        forget(remembered(a.wallet, r.def));
+        step('Use “Offer Kreivo’s metadata to the wallets again” above, accept it in the wallet, then redeem again.', 'muted');
+      }
+      if (e instanceof UnclearOutcome) {
+        r.pending = { redeemer: snap.redeemer.account, reference: snap.reference, txHash: e.txHash, validUntil: e.validUntil, network: t.n.key, snapshot: snap };
+        r.reference = snap.reference;
+        void watchPending(step);
+      }
     } finally {
       r.locked = undefined;
       host.setBusy(false);
       void readFacts();
     }
+  }
+
+  /** Follows an unclear redemption until it settles, then frees its reference. */
+  async function watchPending(step: (t: string, kind?: 'muted' | 'ok' | 'error') => void) {
+    const u = r.pending;
+    if (!u) return;
+    step(`Reading Kreivo for the redemption with this reference${u.validUntil === undefined ? '' : `, until block ${u.validUntil} is final`}; the reference stays locked meanwhile.`);
+    const chain = () => {
+      const t = contract();
+      return typeof t === 'string' || t.n.key !== u.network ? undefined : chainOf(t.k, t.n, t.c);
+    };
+    const out = await settle(u, chain, { sleep, stopped: () => r.pending !== u });
+    if (!out || r.pending !== u) return;
+    r.pending = undefined;
+    const s = u.snapshot;
+    if (out.kind === 'recorded') {
+      const red = out.redemption;
+      const same = red.amount === s.amount && red.asset === s.asset.id && sameBackend(red.backend, s.backend) && red.payout.kind === 'address' && red.payout.address === s.payout.toLowerCase();
+      step(
+        same
+          ? `Kreivo records the redemption (final by block ${out.at}): ${formatAmount(red.amount, s.asset.decimals)} ${s.asset.symbol}, paid to ${s.payout}. bezent pays it out on Polygon.`
+          : `Kreivo records a redemption with this reference that differs from what you reviewed (${formatAmount(red.amount, s.asset.decimals)} ${s.asset.symbol} of Here(${red.asset}), paid to ${red.payout.kind === 'address' ? getAddress(red.payout.address) : red.payout.commitment}). bezent acts on what Kreivo recorded. Keep the transaction hash.`,
+        same ? 'ok' : 'error',
+      );
+      const link = document.createElement('a');
+      link.href = host.statusLink(s.redeemer.address, s.reference);
+      link.textContent = 'Follow this redemption’s status';
+      $('redeem-link').replaceChildren(link);
+      r.reference = freshReference();
+    } else {
+      step(`Block ${out.at} is final, past the transaction’s mortality, and Kreivo records no redemption with this reference: nothing was redeemed. The reference is free again.`, 'ok');
+    }
+    render();
   }
 
   return {

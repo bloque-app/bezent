@@ -5,6 +5,9 @@
 // reserve is found by the reference its emitter log carries, and checked against the address and amount it owes,
 // with no fee taken; the search backs off when a provider refuses the range and says what it did not search. The
 // public status route is unset by default; when set, its answer is parsed to what REQ-ST-8 lets it say.
+//
+// Anyone can emit a Reference log through the emitter (#138's review, M2): every one in the range is collected, and
+// only one whose transaction moves exactly one transfer from the reserve is a payout.
 
 import { describe, expect, it, vi } from 'vitest';
 import { getAddress, type Hex } from 'viem';
@@ -62,6 +65,38 @@ describe('a payout by its reference', () => {
     expect(r.found).toMatchObject({ referenceLog: 8, transfers: [{ to: TO, amount: 5_000_000n, logIndex: 7 }] });
     expect(r.found?.finality).toMatchObject({ blockNumber: 60n, final: true, canonical: true });
     expect(checkPayout(r.found!, TO, 5_000_000n)).toEqual({ ok: true });
+    expect(r).toMatchObject({ others: [], unpaid: [], unexamined: 0 });
+  });
+
+  it('collects every Reference log carrying the reference, and takes as the payout only one with one transfer from the reserve', async () => {
+    const { s } = await session({
+      payouts: [{ reference: REF, to: TO, amount: 5_000_000n, block: 60 }],
+      // Someone else's, newer and older than the payout: none moves exactly one transfer from the reserve.
+      bogusReferences: [{ reference: REF, block: 95 }, { reference: REF, block: 20, reserveTransfers: 2 }],
+      finalized: 90,
+    });
+    const r = await findPayout(s.public, network, EMITTER, 10n, REF);
+    expect(r.complete).toBe(true);
+    expect(r.found).toMatchObject({ blockNumber: 60n, transfers: [{ to: TO, amount: 5_000_000n }] });
+    expect(r.others).toEqual([]);
+    expect(r.unpaid.map((u) => [u.blockNumber, u.transfers.length])).toEqual([[95n, 0], [20n, 2]]);
+    expect(checkPayout(r.found!, TO, 5_000_000n)).toEqual({ ok: true });
+  });
+
+  it('finds no payout when only someone else’s Reference log carries the reference', async () => {
+    const { s } = await session({ bogusReferences: [{ reference: REF, block: 60 }] });
+    const r = await findPayout(s.public, network, EMITTER, 10n, REF);
+    expect(r.found).toBeUndefined();
+    expect(r.unpaid).toMatchObject([{ blockNumber: 60n, referenceLog: 9, transfers: [] }]);
+  });
+
+  it('names a second payout of the same reference, and stops reading transactions past maxHits', async () => {
+    const { s } = await session({ payouts: [{ reference: REF, to: TO, amount: 1n, block: 60 }, { reference: REF, to: TO, amount: 1n, block: 30 }] });
+    const r = await findPayout(s.public, network, EMITTER, 10n, REF);
+    expect(r.found?.blockNumber).toBe(60n);
+    expect(r.others.map((o) => o.blockNumber)).toEqual([30n]);
+    const capped = await findPayout(s.public, network, EMITTER, 10n, REF, { maxHits: 1 });
+    expect(capped).toMatchObject({ others: [], unexamined: 1 });
   });
 
   it('flags a payout to another address, or of another amount: no fee comes out of a delivery', async () => {
@@ -90,9 +125,10 @@ describe('a payout by its reference', () => {
   it('says what it did not search when it runs out of requests, and when there is nothing to find', async () => {
     const { s } = await session();
     const partial = await findPayout(s.public, network, EMITTER, 0n, REF, { chunk: 10n, maxRequests: 3 });
-    expect(partial).toEqual({ found: undefined, searched: { from: 72n, to: 101n }, complete: false });
+    const nothing = { found: undefined, others: [], unpaid: [], unexamined: 0 };
+    expect(partial).toEqual({ ...nothing, searched: { from: 72n, to: 101n }, complete: false });
     const none = await findPayout(s.public, network, EMITTER, 50n, REF);
-    expect(none).toEqual({ found: undefined, searched: { from: 50n, to: 101n }, complete: true });
+    expect(none).toEqual({ ...nothing, searched: { from: 50n, to: 101n }, complete: true });
   });
 });
 

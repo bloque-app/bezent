@@ -6,8 +6,9 @@
 //
 // - Reads, at the finalized block: the contract's `bounds`, `backends` and the four pause scopes covering a
 //   redemption of the asset, through `ContractsApi.call` (the contract's own answer, `contracts/bezent`); the
-//   redeemer's bUSDC (`Assets.Account`) and KSM (`System.Account`); whether the redeemer used a reference before
-//   (`redemption(redeemer, reference)`).
+//   redeemer's bUSDC (`Assets.Account`), KSM (`System.Account`) and any approval it already gave the contract
+//   (`Assets.Approvals`), with the approval deposit (`Assets.ApprovalDeposit`); whether the redeemer used a
+//   reference before (`redemption(redeemer, reference)`).
 // - The call: `Utility.batch_all([Assets.approve_transfer(Here(101), bezent, amount), Contracts.call(bezent, 0,
 //   gas, storage limit, redeem(asset, amount, backend, payout, reference))])`, as Swaps' signer builds it. The
 //   approval lets the contract pull the whole balance (`transfer_approved`); its deposit is returned when the pull
@@ -16,7 +17,10 @@
 //   the gas it needs; then `DryRunApi.dry_run_call` of the exact batch, as the redeemer, for the dispatch's result
 //   and the `Redeemed` event it would emit.
 // - The submission: signed by the extension wallet through kreivo/extensions.ts, with Kreivo's custom signed
-//   extensions given explicitly, mortal (64 blocks), and followed to finality.
+//   extensions given explicitly, mortal (64 blocks), and followed to finality. polkadot-api says `signed` before it
+//   validates the transaction, and `broadcasted` only once it sends it: a failure before that sent nothing (a
+//   BadProof among them, `InvalidTxError`), and only a failure after it leaves the outcome unclear (`UnclearOutcome`,
+//   with the last block that may still include it).
 
 import type { Kreivo } from './client';
 import type { KreivoNetwork } from '../config/networks';
@@ -38,7 +42,7 @@ import {
   type DryRun,
   type Redemption,
 } from './bezent';
-import { KREIVO_CUSTOM_VALUES, checkExtensions, kreivoMetadataDef, metadataExtensions, type MetadataDef } from './extensions';
+import { KREIVO_CUSTOM_VALUES, WalletSignatureMismatch, checkExtensions, kreivoMetadataDef, metadataExtensions, type MetadataDef } from './extensions';
 import { encodeSs58, decodeSs58 } from '../lib/ss58';
 import { fromHex, toHex, type Hex } from '../lib/bytes';
 import { withTimeout } from '../lib/timeout';
@@ -49,6 +53,9 @@ export const READ_TIMEOUT_MS = 45_000;
 /** Upper bounds proven on Kreivo mainnet for `Contracts.call(redeem)` (Swaps' signer, 2026-11-08): a gas limit is a
  * ceiling, the unused part is refunded. The app uses twice the dry run's figure when that is higher. */
 export const REDEEM_GAS_FLOOR = { refTime: 10_000_000_000n, proofSize: 500_000n } as const;
+/** The transaction's mortality, in blocks: it can be included only in the 64 blocks from the one it was built at. */
+export const MORTALITY = 64;
+
 /** 0.01 KSM: the storage deposit a redemption may take at most, unless the dry run asks more (2026-11-13's
  * mainnet redeem charged 0.006695 KSM). */
 export const REDEEM_STORAGE_FLOOR = 10_000_000_000n;
@@ -63,6 +70,11 @@ export interface RedeemFacts {
   assetStatus: string | undefined;
   /** The redeemer's free KSM. */
   ksm: bigint;
+  /** An approval the redeemer already gave the contract for the asset (`Assets.Approvals`): the batch's
+   * `approve_transfer` adds to it, and its deposit is already held. */
+  approval: { amount: bigint; deposit: bigint } | undefined;
+  /** What a new approval holds as its deposit, in KSM's planck (`Assets.ApprovalDeposit`). */
+  approvalDeposit: bigint;
   /** The block the facts were read at. */
   at: { number: number; hash: Hex };
 }
@@ -108,6 +120,8 @@ export interface RedeemChain {
   contract: Hex;
   facts(redeemer: Hex): Promise<RedeemFacts>;
   redemption(redeemer: Hex, reference: Hex): Promise<Redemption | undefined>;
+  /** The finalized head's number. */
+  finalized(): Promise<number>;
   dryRunMessage(redeemer: Hex, data: Uint8Array): Promise<DryRun>;
   prepare(plan: Plan, gas: { refTime: bigint; proofSize: bigint }, storageLimit: bigint): Promise<Prepared>;
 }
@@ -154,9 +168,12 @@ interface Api {
   };
   query: {
     System: { Account: { getValue(...a: unknown[]): Promise<{ data: { free: bigint } }> } };
-    Assets: { Account: { getValue(...a: unknown[]): Promise<{ balance: bigint; status: { type: string } } | undefined> } };
+    Assets: {
+      Account: { getValue(...a: unknown[]): Promise<{ balance: bigint; status: { type: string } } | undefined> };
+      Approvals: { getValue(...a: unknown[]): Promise<{ amount: bigint; deposit: bigint } | undefined> };
+    };
   };
-  constants: { System: { Version(): Promise<{ spec_version: number }> } };
+  constants: { System: { Version(): Promise<{ spec_version: number }> }; Assets: { ApprovalDeposit(): Promise<bigint> } };
   tx: {
     Utility: { batch_all(a: unknown): Tx };
     Assets: { approve_transfer(a: unknown): Tx };
@@ -221,12 +238,14 @@ export function redeemChain(k: Kreivo, n: KreivoNetwork, contract: Hex, timeoutM
       return read(async () => {
         const at = await k.client.getFinalizedBlock();
         const scopes = redeemScopes(n.asset.id);
-        const [bounds, backends, pauses, account, system] = await Promise.all([
+        const [bounds, backends, pauses, account, system, approval, approvalDeposit] = await Promise.all([
           call(redeemer, boundsData(n.asset.id)).then(decodeBounds),
           call(redeemer, backendsData(n.asset.id)).then(decodeBackends),
           Promise.all(scopes.map(async ([scope, s]) => ({ scope, paused: decodeBool(await call(redeemer, pausedData(s)), 'paused') }))),
           api.query.Assets.Account.getValue(asset, ss58(redeemer)),
           api.query.System.Account.getValue(ss58(redeemer)),
+          api.query.Assets.Approvals.getValue(asset, ss58(redeemer), dest),
+          api.constants.Assets.ApprovalDeposit(),
         ]);
         return {
           bounds,
@@ -235,11 +254,14 @@ export function redeemChain(k: Kreivo, n: KreivoNetwork, contract: Hex, timeoutM
           balance: account?.balance ?? 0n,
           assetStatus: account?.status.type,
           ksm: system.data.free,
+          approval: approval ? { amount: approval.amount, deposit: approval.deposit } : undefined,
+          approvalDeposit,
           at: { number: at.number, hash: at.hash as Hex },
         };
       });
     },
     redemption: (redeemer, reference) => read(async () => decodeRedemption(await call(redeemer, redemptionData(redeemer, reference)))),
+    finalized: () => read(async () => (await k.client.getFinalizedBlock()).number),
     dryRunMessage: (redeemer, data) => read(() => call(redeemer, data)),
     async prepare(plan, gas, storageLimit) {
       const approve = api.tx.Assets.approve_transfer({ id: { type: 'Here', value: plan.asset }, delegate: { type: 'Id', value: dest }, amount: plan.amount });
@@ -282,13 +304,24 @@ export function redeemChain(k: Kreivo, n: KreivoNetwork, contract: Hex, timeoutM
         submit: (signer, progress) =>
           new Promise<Finalized>((resolve, reject) => {
             let hash: string | undefined;
+            let broadcast = false;
+            let birth: number | undefined;
+            // The block the transaction is built at, which its mortality counts from.
+            const watched: PolkadotSigner = {
+              ...signer,
+              signTx: (...a: Parameters<PolkadotSigner['signTx']>) => {
+                birth = a[3];
+                return signer.signTx(...a);
+              },
+            };
             // The observable completes once the transaction is final.
-            batch.signSubmitAndWatch(signer, options).subscribe({
+            batch.signSubmitAndWatch(watched, options).subscribe({
               next(e) {
                 if (e.type === 'signed') {
                   hash = e.txHash;
-                  progress(`Signed: ${e.txHash}. Broadcasting it to Kreivo.`);
+                  progress(`Signed: ${e.txHash}. Kreivo checks it before it is broadcast.`);
                 } else if (e.type === 'broadcasted') {
+                  broadcast = true;
                   progress('Broadcast; waiting for a block to include it.');
                 } else if (e.type === 'txBestBlocksState' && e.found) {
                   progress(`Included in block ${e.block?.number ?? '?'}, not final yet; waiting for finality.`);
@@ -303,8 +336,7 @@ export function redeemChain(k: Kreivo, n: KreivoNetwork, contract: Hex, timeoutM
                 }
               },
               error(err) {
-                const m = err instanceof Error ? err.message : String(err);
-                reject(new Error(hash ? `The redemption ${hash} was signed, but following it failed: ${m}. Look it up before trying again.` : explainSigningError(m)));
+                reject(submitError(err, { hash, broadcast, birth }));
               },
             });
           }),
@@ -313,10 +345,42 @@ export function redeemChain(k: Kreivo, n: KreivoNetwork, contract: Hex, timeoutM
   };
 }
 
+/** A redemption broadcast to Kreivo whose outcome the page could not follow: it may still be included until
+ * `validUntil`, so its reference stays locked. */
+export class UnclearOutcome extends Error {
+  constructor(
+    message: string,
+    readonly txHash: Hex,
+    readonly validUntil: number | undefined,
+  ) {
+    super(message);
+    this.name = 'UnclearOutcome';
+  }
+}
+
+/** What a failed submission means. polkadot-api's `InvalidTxError` (a BadProof among them) is Kreivo's refusal to
+ * take the transaction at all, and anything before `broadcasted` sent nothing: only a failure after the broadcast
+ * leaves the transaction possibly on chain. */
+export function submitError(err: unknown, at: { hash: string | undefined; broadcast: boolean; birth: number | undefined }): Error {
+  if (err instanceof WalletSignatureMismatch) return err;
+  const m = err instanceof Error ? err.message : String(err);
+  const invalid = (err as { name?: unknown } | null)?.name === 'InvalidTxError';
+  if (invalid || !at.broadcast || !at.hash) {
+    const text = explainSigningError(m.replace(/\s+/g, ' ').trim());
+    return /BadProof|bad signature|Invalid signature/i.test(m) ? new WalletSignatureMismatch(text) : new Error(text);
+  }
+  const until = at.birth === undefined ? undefined : at.birth + MORTALITY;
+  return new UnclearOutcome(
+    `The redemption ${at.hash} was broadcast, but following it failed: ${m}. It may still be included${until === undefined ? '' : ` until block ${until}`}; its reference stays locked until Kreivo records it or it can no longer be included.`,
+    at.hash as Hex,
+    until,
+  );
+}
+
 /** Says what a failed signature or submission most likely means. */
 export function explainSigningError(message: string): string {
   if (/BadProof|bad signature|Invalid signature/i.test(message)) {
-    return `Kreivo rejected the signature (${message}): the wallet signed another payload than the one built, most likely because it does not know Kreivo's PassAuthenticate signed extension. Accept the metadata update the page offered the wallet, then try again. Nothing was executed.`;
+    return `Kreivo rejected the signature (${message}): the wallet signed another payload than the one built, most likely because it does not know Kreivo's PassAuthenticate signed extension. Offer the wallet Kreivo's metadata again (the button above), accept it, then try again. Nothing was executed.`;
   }
   if (/Cancelled|Rejected|denied/i.test(message)) return `The wallet did not sign (${message}). Nothing was sent.`;
   return `${message}. Nothing was sent.`;

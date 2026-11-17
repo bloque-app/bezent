@@ -6,7 +6,8 @@
 // (or, to test the post-receipt check, logs that say something else). It can also switch chain on its own
 // right after signing or while the page waits for a receipt, as a user or a hostile wallet might, fail the receipt
 // wait, and serve the vault's payouts (a token Transfer from the reserve and the emitter's Reference log, in one
-// transaction) and blocks, for the status page.
+// transaction) and blocks, for the status page, beside Reference logs anyone could emit through the emitter (its
+// `emitReference` is open), in transactions that move nothing, or more than one transfer, from the reserve.
 
 import {
   decodeFunctionData,
@@ -74,6 +75,9 @@ export interface MockOptions {
   receiptFails?: boolean;
   /** Payouts from the reserve already on chain: each one transaction with the Transfer and the Reference log. */
   payouts?: { reference: Hex; to: Address; amount: bigint; block: number }[];
+  /** Reference logs someone else emitted, each in its own transaction: with a token transfer that is not from the
+   * reserve, and `reserveTransfers` transfers from the reserve (none by default). */
+  bogusReferences?: { reference: Hex; block: number; reserveTransfers?: number }[];
   /** The finalized head (the latest block is 101). */
   finalized?: number;
   /** The largest block range `eth_getLogs` takes. */
@@ -158,6 +162,16 @@ export function mockWallet(o: MockOptions = {}) {
     const reference = log(EMITTER, encodeEventTopics({ abi: referenceEmitterAbi, eventName: 'Reference', args: { ref: p.reference } }) as Hex[], '0x', 8, hash, p.block);
     payoutLogs.push(reference);
     receipts.set(hash, receipt(hash, RESERVE, RESERVE, [transfer, reference], p.block));
+  });
+  (o.bogusReferences ?? []).forEach((b, i) => {
+    const hash = keccak256(numberToHex(20_000 + i));
+    const transfer = (from: Address, index: number) =>
+      log(TOKEN, encodeEventTopics({ abi: tokenAbi, eventName: 'Transfer', args: { from, to: OWNER.address } }) as Hex[],
+        encodeAbiParameters([{ type: 'uint256' }], [1_000_000n]), index, hash, b.block);
+    const logs = [transfer(OWNER.address, 3), ...Array.from({ length: b.reserveTransfers ?? 0 }, (_, k) => transfer(RESERVE, 4 + k))];
+    const reference = log(EMITTER, encodeEventTopics({ abi: referenceEmitterAbi, eventName: 'Reference', args: { ref: b.reference } }) as Hex[], '0x', 9, hash, b.block);
+    payoutLogs.push(reference);
+    receipts.set(hash, receipt(hash, OWNER.address, EMITTER, [...logs, reference], b.block));
   });
   const block = (n: number) => ({
     number: numberToHex(n),

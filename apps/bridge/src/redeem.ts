@@ -20,6 +20,7 @@ import {
   sameBackend,
   type Backend,
   type Redeemed,
+  type Redemption,
 } from './kreivo/bezent';
 import { REDEEM_GAS_FLOOR, REDEEM_STORAGE_FLOOR, type Finalized, type Prepared, type RedeemChain, type RedeemFacts } from './kreivo/redeem';
 import type { PolkadotSigner } from 'polkadot-api/signer';
@@ -49,8 +50,33 @@ export function freshReference(random: (b: Uint8Array) => Uint8Array = (b) => cr
   return toHex(b);
 }
 
-/** Parses a payout address on an EVM backend: 20 bytes, not zero, any case; returned checksummed. */
-export function parsePayout(input: string): { ok: true; address: Address } | { ok: false; reason: string } {
+/** One of bezent's own contracts on the payout's network, pinned in the build. */
+export interface OwnContract {
+  what: string;
+  address: Address;
+}
+
+/** bezent's own contracts on `n` that the build pins: the token, the reserve, the DirectedDeposit contract and the
+ * vault's reference emitter. USDC paid to one of them never reaches the redeemer, so a payout address equal to one
+ * is refused. An unset value is left out. */
+export function ownContracts(n: {
+  token: Address | null | undefined;
+  reserve: Address | null | undefined;
+  directedDeposit: Address | null | undefined;
+  emitter: Address | null | undefined;
+}): OwnContract[] {
+  const named: [string, Address | null | undefined][] = [
+    ['the USDC token contract', n.token],
+    ['bezent’s reserve', n.reserve],
+    ['bezent’s DirectedDeposit contract', n.directedDeposit],
+    ['bezent’s reference emitter', n.emitter],
+  ];
+  return named.flatMap(([what, a]) => (a && isAddress(a, { strict: false }) ? [{ what, address: getAddress(a) }] : []));
+}
+
+/** Parses a payout address on an EVM backend: 20 bytes, not zero, any case, and none of bezent's own contracts
+ * (`own`, compared case-insensitively); returned checksummed. */
+export function parsePayout(input: string, own: readonly OwnContract[] = []): { ok: true; address: Address } | { ok: false; reason: string } {
   const t = input.trim();
   if (t === '') return { ok: false, reason: 'Enter the Polygon address the USDC is paid to.' };
   if (!/^0x[0-9a-fA-F]{40}$/.test(t)) return { ok: false, reason: 'A Polygon address is 0x and 40 hex digits.' };
@@ -60,6 +86,13 @@ export function parsePayout(input: string): { ok: true; address: Address } | { o
     return { ok: false, reason: 'This address’s mixed-case checksum is wrong; paste it again.' };
   }
   if (/^0x0{40}$/i.test(t)) return { ok: false, reason: 'The zero address cannot be paid.' };
+  const mine = own.find((o) => o.address.toLowerCase() === t.toLowerCase());
+  if (mine) {
+    return {
+      ok: false,
+      reason: `${getAddress(t)} is ${mine.what}, not yours: USDC paid to it would not reach you. Enter an address you control.`,
+    };
+  }
   return { ok: true, address: getAddress(t) };
 }
 
@@ -165,6 +198,68 @@ export function limits(d: { gasRequired: { refTime: bigint; proofSize: bigint };
   };
 }
 
+/** The KSM a redemption may need before it is signed: the estimated fee, the storage deposit limit, and the
+ * approval's deposit when the batch's `approve_transfer` opens a new approval (an existing one already holds its
+ * deposit, and the batch adds to it). */
+export function ksmNeeded(f: Pick<RedeemFacts, 'approval' | 'approvalDeposit'>, p: Pick<Prepared, 'fee' | 'storageLimit'>) {
+  const fee = p.fee ?? 0n;
+  const approval = f.approval ? 0n : f.approvalDeposit;
+  return { fee, storage: p.storageLimit, approval, total: fee + p.storageLimit + approval, feeKnown: p.fee !== undefined };
+}
+
+/** Why the redeemer's free KSM is short of what the redemption may need, or `undefined`. */
+export function ksmShortfall(f: Pick<RedeemFacts, 'ksm' | 'approval' | 'approvalDeposit'>, p: Pick<Prepared, 'fee' | 'storageLimit'>): string | undefined {
+  const n = ksmNeeded(f, p);
+  if (f.ksm >= n.total) return undefined;
+  const ksm = (u: bigint) => `${formatAmount(u, 12)} KSM`;
+  const parts = [
+    n.feeKnown ? `the fee (about ${ksm(n.fee)})` : 'the fee (which could not be estimated, so it is not counted)',
+    `the storage deposit limit (${ksm(n.storage)})`,
+    ...(n.approval > 0n ? [`the approval’s deposit (${ksm(n.approval)}, returned when the redemption uses the approval up)`] : []),
+  ];
+  return `This account holds ${ksm(f.ksm)} free; the redemption may need up to ${ksm(n.total)}: ${parts.join(', ')}. Add KSM to it, then try again.`;
+}
+
+/** A redemption whose outcome is unclear: it was broadcast, but following it failed, so it may still be included
+ * until its mortality runs out. Its reference stays locked until the contract records the redemption or the
+ * transaction can no longer be included. */
+export interface Unsettled {
+  redeemer: Hex;
+  reference: Hex;
+  txHash: Hex;
+  /** The last block that may include the transaction (its birth plus its 64-block mortality); `undefined` when
+   * unknown, and then only the contract's record settles it. */
+  validUntil: number | undefined;
+}
+
+export type Settled = { kind: 'recorded'; redemption: Redemption; at: number } | { kind: 'expired'; at: number };
+
+/** Waits until an unclear redemption settles: the contract records it (read at the finalized block), or the
+ * finalized head is past its mortality and no record exists. A failed read is tried again. `chain` may answer
+ * `undefined` (the page moved to another network), which skips a turn; `stopped` ends the wait unsettled. */
+export async function settle(
+  u: Unsettled,
+  chain: () => RedeemChain | undefined,
+  o: { sleep: (ms: number) => Promise<void>; intervalMs?: number; stopped?: () => boolean },
+): Promise<Settled | undefined> {
+  for (;;) {
+    if (o.stopped?.()) return undefined;
+    const c = chain();
+    if (c) {
+      try {
+        // The head first: a redemption final at or before it shows in the read that follows.
+        const head = await c.finalized();
+        const red = await c.redemption(u.redeemer, u.reference);
+        if (red) return { kind: 'recorded', redemption: red, at: head };
+        if (u.validUntil !== undefined && head > u.validUntil) return { kind: 'expired', at: head };
+      } catch {
+        // Read again next turn.
+      }
+    }
+    await o.sleep(o.intervalMs ?? 12_000);
+  }
+}
+
 /** Runs the redemption of a snapshot. Throws, before anything is signed, when the contract or the dry runs refuse
  * it; after signing, the comparison says whether what Kreivo recorded is what was reviewed. */
 export async function runRedeem(
@@ -190,6 +285,9 @@ export async function runRedeem(
   progress('Dry-running the whole batch (approve_transfer, then redeem) through Kreivo.');
   const { gas, storageLimit } = limits(dry);
   const prepared = await chain.prepare({ redeemer: s.redeemer.account, asset: s.asset.id, amount: s.amount, data }, gas, storageLimit);
+  // The clearer reason first: a batch short of KSM also fails its dry run.
+  const short = ksmShortfall(facts, prepared);
+  if (short) throw new Error(`${short} Nothing was signed.`);
   if (!prepared.dryRun.ok) {
     const hint = /InsufficientBalance|Payment|Funds/i.test(prepared.dryRun.error)
       ? ' The account needs a little KSM for the fee and the storage deposit.'

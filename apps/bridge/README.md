@@ -136,19 +136,32 @@ BEZENT_WRITE_VECTORS=1 cargo test -p bezent-core-service --test bridge_app_vecto
   reads the runtime's extension list from its metadata at every signature, and refuses one it does not know. It signs
   through its own polkadot.js bridge (polkadot-api's refuses `PassAuthenticate`), never takes a signed transaction from
   the wallet, and puts the extrinsic together itself, so a wallet that signed something else yields an extrinsic
-  Kreivo rejects. `test/extensions.test.ts` shows the extrinsic is byte for byte polkadot-api's own, and that without
-  the registration the signature is over another payload.
+  Kreivo rejects. Before broadcasting, it verifies the wallet's signature over the exact signing payload against the
+  account's key (Ed25519 and Ecdsa through `@noble/curves`, Sr25519 through `@scure/sr25519`), and refuses a mismatch
+  with nothing sent. A mismatch, or a BadProof from Kreivo, forgets that the wallet took the metadata, and the page
+  offers it again. `test/extensions.test.ts` shows the extrinsic is byte for byte polkadot-api's own, and that without
+  the registration the signature is over another payload, which the page refuses.
 - **A locked redeem**: at the Redeem click the page freezes the redeemer, the amount (or the whole balance), the
-  backend (`Evm { chain_id }` of the network), the payout address (the connected EVM account by default, checksummed)
-  and a fresh random 32-byte reference. It reads the contract again on that snapshot (bounds and the redemption
+  backend (`Evm { chain_id }` of the network), the payout address (the connected EVM account by default, checksummed;
+  never one of bezent's own pinned contracts, the token, the reserve, DirectedDeposit or the emitter; flagged, not
+  refused, when Polygon holds code at it; and said aloud when it follows a new EVM account) and a fresh random 32-byte
+  reference. It reads the contract again on that snapshot (bounds and the redemption
   minimum, backends, the four pause scopes, the balance, whether the reference was used), dry-runs `redeem` through
   `ContractsApi.call` for the contract's own refusal, then dry-runs the exact `batch_all` through `DryRunApi`, whose
-  `Redeemed` must match the snapshot. After finality it decodes `Redeemed` and fails loudly on any difference. The
-  result names the on-chain reference (redeemer + reference), the bridge reference `bz-w-…` and the payout reference.
+  `Redeemed` must match the snapshot, and refuses when the account's free KSM is short of the fee, the storage deposit
+  limit and a new approval's deposit (an existing approval, shown with the facts, is added to). After finality it
+  decodes `Redeemed` and fails loudly on any difference. The result names the on-chain reference (redeemer +
+  reference), the bridge reference `bz-w-…` and the payout reference. A failure before polkadot-api's `broadcasted`
+  sent nothing; one after it leaves the outcome unclear, and the reference stays locked (no "pick another") until the
+  contract records the redemption or the finalized head passes the transaction's 64-block mortality.
 - **The status page** reads Polygon through the wallet and Kreivo through the light client: a deposit's
   `Transfer`/`Directed` pair at its coordinate and its finality, `mint_reference_used` on Kreivo, and a return by its
   payout reference; a withdrawal's redemption record on Kreivo and its payout by the reference the vault's emitter
-  logs, checked against the redemption's address and amount.
+  logs, checked against the redemption's address and amount. The emitter's `emitReference` is open to anyone, so
+  every `Reference` log with the reference is collected, only one whose transaction moves exactly one transfer from
+  the reserve is a payout, and the others are listed apart and never change the state. A payout or a return is
+  "paid" or "returned" only once its block is final and canonical; minted and returned, or refunded and paid, is
+  flagged as an incident.
 
 ## Not yet shown
 

@@ -11,6 +11,11 @@
 //   refunded); its bridge reference and payout reference; and the payout on Polygon carrying that reference, checked
 //   against the redemption's address and amount.
 //
+// The emitter's `Reference` log is open to anyone: only a payout (a `Reference` whose transaction moves exactly one
+// transfer from the reserve) decides a state, and the others are listed apart. A payout or a return is said to be
+// paid or returned only once its block is final and still on the chain; before that it is included, not final. Two
+// outcomes that exclude each other (minted and returned, refunded and paid) are flagged as an incident.
+//
 // The public status route (T-018-10), when the build names one, is shown beside them as bezent's own report, never as
 // an outcome. Reads go through the connected EVM wallet and Kreivo's light client.
 
@@ -76,18 +81,37 @@ function routeRows(r: RouteResult): [string, string][] {
   }
 }
 
-function searchRows(label: string, s: PayoutSearch, check?: { to: Address; amount: bigint }): { rows: [string, string][]; paid: 'yes' | 'no' | 'bad' } {
-  if (!s.found) {
-    const where = `blocks ${s.searched.from} to ${s.searched.to}`;
-    return { rows: [[label, s.complete ? `none found in ${where}` : `none found in ${where}; older blocks were not searched`]], paid: 'no' };
-  }
+/** What a payout search says, for the headline: `no` and `reorged` leave it as it was. */
+type Paid = 'yes' | 'pending' | 'reorged' | 'no' | 'bad' | 'twice';
+
+export const UNPAID_LABEL = 'Reference logs without a payout (anyone can emit these)';
+
+function searchRows(label: string, s: PayoutSearch, check: { to: Address; amount: bigint }): { rows: [string, string][]; paid: Paid } {
+  const where = `blocks ${s.searched.from} to ${s.searched.to}${s.complete ? '' : '; older blocks were not searched'}`;
+  const rows: [string, string][] = [];
+  let paid: Paid = 'no';
   const p = s.found;
-  const rows: [string, string][] = [[label, `${p.txHash}, Reference log ${p.referenceLog}; ${finalText(p.finality)}`]];
-  for (const t of p.transfers) rows.push(['Paid', `${t.amount} (minor units) to ${t.to}, Transfer log ${t.logIndex}`]);
-  if (!check) return { rows, paid: 'yes' };
-  const c = checkPayout(p, check.to, check.amount);
-  if (!c.ok) rows.push(['Check', c.reason]);
-  return { rows, paid: c.ok ? 'yes' : 'bad' };
+  if (!p) rows.push([label, `none found in ${where}`]);
+  else {
+    rows.push([label, `${p.txHash}, Reference log ${p.referenceLog}; ${finalText(p.finality)}`]);
+    const settled = p.finality.canonical && p.finality.final;
+    const as = settled ? 'Paid' : p.finality.canonical ? 'Transfer (included, not final)' : 'Transfer (reorganised away)';
+    for (const t of p.transfers) rows.push([as, `${t.amount} (minor units) to ${t.to}, Transfer log ${t.logIndex}`]);
+    const c = checkPayout(p, check.to, check.amount);
+    if (!c.ok) rows.push(['Check', c.reason]);
+    paid = !c.ok ? 'bad' : !p.finality.canonical ? 'reorged' : p.finality.final ? 'yes' : 'pending';
+    if (!s.complete) rows.push(['Searched', where]);
+  }
+  for (const o of s.others) {
+    rows.push([`Another ${label.toLowerCase()} with the same reference`, `${o.txHash}, Reference log ${o.referenceLog}; ${finalText(o.finality)}`]);
+    paid = 'twice';
+  }
+  for (const u of s.unpaid) {
+    const why = u.transfers.length === 0 ? 'its transaction moves nothing from the reserve' : `its transaction moves ${u.transfers.length} transfers from the reserve, not one`;
+    rows.push([UNPAID_LABEL, `${u.txHash}, Reference log ${u.referenceLog}, block ${u.blockNumber}: ${why}`]);
+  }
+  if (s.unexamined) rows.push([UNPAID_LABEL, `${s.unexamined} more not examined`]);
+  return { rows, paid };
 }
 
 export function initStatus(host: StatusHost) {
@@ -138,13 +162,14 @@ export function initStatus(host: StatusHost) {
       if (d.others) rows.push(['Note', `the transaction holds ${d.others} other directed arrival(s); each has its own coordinate`]);
       show();
       let state = d.finality.canonical ? (d.finality.final ? 'final on Polygon, not minted yet' : 'on Polygon, not final yet') : 'reorganised away on Polygon';
+      let minted = false;
       // Kreivo: did the contract record the mint reference?
       const k = host.kreivo();
       const contract = n.kreivo.bezent;
       if (!k || contract === UNSET) rows.push(['Kreivo', !k ? `${n.kreivo.label} is not connected` : 'the bezent contract is not set in this build']);
       else {
         try {
-          const minted = await mintReferenceUsed(k, n.kreivo, contract as Hex, mintReference(c));
+          minted = await mintReferenceUsed(k, n.kreivo, contract as Hex, mintReference(c));
           rows.push(['Kreivo', minted ? 'minted: the contract recorded this mint reference (its Minted event carries it)' : 'not minted: the contract has not recorded this mint reference']);
           if (minted) state = 'minted on Kreivo';
         } catch (e) {
@@ -159,9 +184,19 @@ export function initStatus(host: StatusHost) {
         rows.push(['Return reference', `${unassociatedRefundReference(c)}, payout reference ${ref}`]);
         try {
           const from = c.blockNumber > (n.payoutsFrom as bigint) ? c.blockNumber : (n.payoutsFrom as bigint);
-          const sr = searchRows('Returned', await findPayout(s.public, n, n.emitter as Address, from, ref), { to: a.refund, amount: a.amount });
+          const sr = searchRows('Return', await findPayout(s.public, n, n.emitter as Address, from, ref), { to: a.refund, amount: a.amount });
           rows.push(...sr.rows);
-          if (sr.paid !== 'no') state = sr.paid === 'yes' ? 'returned to the refund address' : 'a return carries its reference but differs (see the check)';
+          if (sr.paid !== 'no' && sr.paid !== 'reorged') {
+            // A return follows only a deposit that can never be minted: both at once is an incident, not a state.
+            state = minted
+              ? 'minted on Kreivo, and a return carries its reference: both should never happen; report it'
+              : {
+                  yes: 'returned to the refund address',
+                  pending: 'a return to the refund address is included on Polygon, not final',
+                  bad: 'a return carries its reference but differs (see the check)',
+                  twice: 'more than one return carries its reference: this should never happen; report it',
+                }[sr.paid];
+          }
         } catch (e) {
           rows.push(['Returned', `could not be searched: ${errorText(e)}`]);
         }
@@ -226,11 +261,17 @@ export function initStatus(host: StatusHost) {
             await assertChain(p.s);
             const sr = searchRows('Payout', await findPayout(p.s.public, n, n.emitter as Address, n.payoutsFrom as bigint, payoutRef), { to, amount: red.amount });
             rows.push(...sr.rows);
-            if (sr.paid === 'yes') {
+            if (sr.paid !== 'no' && sr.paid !== 'reorged') {
               // A refund mint follows only a payout proven not executed: both at once is an incident, not a state.
-              state = red.refunded ? 'refunded on Kreivo, and a payout carries its reference: both should never happen; report it' : 'paid out on Polygon';
+              state = red.refunded
+                ? 'refunded on Kreivo, and a payout carries its reference: both should never happen; report it'
+                : {
+                    yes: 'paid out on Polygon',
+                    pending: 'a payout is included on Polygon, not final',
+                    bad: 'a payout carries its reference but differs (see the check)',
+                    twice: 'more than one payout carries its reference: this should never happen; report it',
+                  }[sr.paid];
             }
-            if (sr.paid === 'bad') state = 'a payout carries its reference but differs (see the check)';
           } catch (e) {
             rows.push(['Payout', `could not be searched: ${errorText(e)}`]);
           }

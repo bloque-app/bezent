@@ -26,9 +26,15 @@
 //
 // The app never asks the wallet for a signed transaction: it puts the extrinsic together itself from the wallet's
 // signature and the bytes it built, so a wallet that signed something else produces an extrinsic Kreivo rejects,
-// never one that does something else.
+// never one that does something else. And before that, it checks the wallet's signature over the exact signing
+// payload against the account's key (Ed25519, Sr25519 or Ecdsa), so a wallet that signed another payload is
+// refused in the page, and nothing is broadcast.
 
 import { decAnyMetadata, unifyMetadata } from '@polkadot-api/substrate-bindings';
+import { blake2b } from '@noble/hashes/blake2b';
+import { ed25519 } from '@noble/curves/ed25519';
+import { secp256k1 } from '@noble/curves/secp256k1';
+import { verify as sr25519Verify } from '@scure/sr25519';
 import type { PolkadotSigner } from 'polkadot-api/signer';
 import { concat, fromHex, toHex, type Hex } from '../lib/bytes';
 import { compact, Reader } from '../lib/scale';
@@ -142,25 +148,28 @@ export interface SignerPayloadJSON {
   [field: string]: unknown;
 }
 
-/** The polkadot.js JSON payload for these signed extensions, which the wallet signs, and the explicit data (the
- * extrinsic's `extra`) in the runtime's order. Refuses an extension it cannot describe, a custom one whose bytes
- * are not the ones registered, and a runtime without extrinsic version 4. */
+/** The polkadot.js JSON payload for these signed extensions, which the wallet signs, the explicit data (the
+ * extrinsic's `extra`) and the implicit data (`additional`), each in the runtime's order. Refuses an extension it
+ * cannot describe, a custom one whose bytes are not the ones registered, and a runtime without extrinsic
+ * version 4. */
 export function pjsPayload(
   address: string,
   callData: Uint8Array,
   signed: Record<string, { value: Uint8Array; additionalSigned: Uint8Array }>,
   metadata: Uint8Array,
   atBlockNumber: number,
-): { payload: SignerPayloadJSON; extra: Uint8Array[] } {
+): { payload: SignerPayloadJSON; extra: Uint8Array[]; additional: Uint8Array[] } {
   const { identifiers, versions } = metadataExtensions(metadata);
   if (!versions.includes(4)) throw new Error('Kreivo’s runtime does not take extrinsic version 4; the wallets sign only that.');
   checkExtensions(identifiers);
   const fields: Record<string, unknown> = {};
   const extra: Uint8Array[] = [];
+  const additional: Uint8Array[] = [];
   for (const id of identifiers) {
     const e = signed[id];
     if (!e) throw new Error(`The transaction carries no ${id}; nothing is signed.`);
     extra.push(e.value);
+    additional.push(e.additionalSigned);
     const custom = CUSTOM[id];
     if (custom) {
       if (!equal(e.value, custom.value) || !equal(e.additionalSigned, custom.additionalSigned)) {
@@ -181,7 +190,52 @@ export function pjsPayload(
     signedExtensions: identifiers,
     version: 4,
   } as SignerPayloadJSON;
-  return { payload, extra };
+  return { payload, extra, additional };
+}
+
+const blake2_256 = (b: Uint8Array) => blake2b(b, { dkLen: 32 });
+
+/** The bytes Kreivo verifies a v4 signature over: the call, every extension's explicit data, then every one's
+ * implicit data, in the runtime's order; over 256 bytes, their BLAKE2b-256. */
+export function signingPayload(callData: Uint8Array, extra: readonly Uint8Array[], additional: readonly Uint8Array[]): Uint8Array {
+  const bytes = concat([callData, ...extra, ...additional]);
+  return bytes.length > 256 ? blake2_256(bytes) : bytes;
+}
+
+/** Whether a `MultiSignature` (its kind byte, then the signature) signs `message` for the 32-byte account
+ * `account`, as Kreivo checks it: Ed25519 and Sr25519 over the message, by the account's public key; Ecdsa over the
+ * message's BLAKE2b-256, by the key it recovers, whose compressed form hashes (BLAKE2b-256) to the account. */
+export function verifyMultiSignature(signature: Uint8Array, message: Uint8Array, account: Uint8Array): boolean {
+  const body = signature.subarray(1);
+  try {
+    switch (signature[0]) {
+      case 0:
+        return body.length === 64 && ed25519.verify(body, message, account);
+      case 1:
+        return body.length === 64 && sr25519Verify(message, body, account);
+      case 2: {
+        if (body.length !== 65) return false;
+        const v = body[64]!;
+        const recovery = v >= 27 ? v - 27 : v;
+        if (recovery > 3) return false;
+        const key = secp256k1.Signature.fromCompact(body.subarray(0, 64)).addRecoveryBit(recovery).recoverPublicKey(blake2_256(message));
+        return equal(blake2_256(key.toRawBytes(true)), account);
+      }
+      default:
+        return false;
+    }
+  } catch {
+    return false;
+  }
+}
+
+/** The wallet signed another payload than the one the page built, or Kreivo said so (BadProof): most likely the
+ * wallet does not know Kreivo's custom signed extensions. Nothing was broadcast. */
+export class WalletSignatureMismatch extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WalletSignatureMismatch';
+  }
 }
 
 /** A signed v4 extrinsic: `compact(len) ‖ 0x84 ‖ MultiAddress::Id(account) ‖ MultiSignature ‖ extra ‖ call`. */
@@ -200,15 +254,24 @@ export function signedExtrinsic(publicKey: Uint8Array, signature: Uint8Array, ex
 export type SignPayload = (payload: SignerPayloadJSON) => Promise<{ signature: string }>;
 
 /** A polkadot-api signer for one account of an extension wallet: it hands the wallet polkadot.js's JSON payload,
- * with Kreivo's custom extensions mapped, and puts the extrinsic together from the signature it returns.
- * `signBytes` is not offered: the app signs nothing but transactions. */
+ * with Kreivo's custom extensions mapped, checks the signature it returns over the exact signing payload against
+ * the account's key, and puts the extrinsic together from it. A signature that does not verify is refused
+ * (`WalletSignatureMismatch`) and nothing is broadcast. `signBytes` is not offered: the app signs nothing but
+ * transactions. */
 export function pjsSigner(address: string, publicKey: Uint8Array, signPayload: SignPayload): PolkadotSigner {
   return {
     publicKey,
     signTx: async (callData, signed, metadata, atBlockNumber) => {
-      const { payload, extra } = pjsPayload(address, callData, signed, metadata, atBlockNumber);
+      const { payload, extra, additional } = pjsPayload(address, callData, signed, metadata, atBlockNumber);
       const { signature } = await signPayload(payload);
-      return signedExtrinsic(publicKey, fromHex(signature as Hex), extra, callData);
+      const sig = fromHex(signature as Hex);
+      const extrinsic = signedExtrinsic(publicKey, sig, extra, callData);
+      if (!verifyMultiSignature(sig, signingPayload(callData, extra, additional), publicKey)) {
+        throw new WalletSignatureMismatch(
+          'The wallet’s signature does not verify against your account’s key over the transaction the page built: the wallet signed another payload, most likely because it does not know Kreivo’s PassAuthenticate signed extension. Offer the wallet Kreivo’s metadata again (the button above), accept it, then try again. Nothing was sent.',
+        );
+      }
+      return extrinsic;
     },
     signBytes: () => Promise.reject(new Error('The bridge signs nothing but transactions.')),
   };

@@ -5,6 +5,10 @@
 // contract's reads on Kreivo. Each state of a directed deposit (on Polygon and not final, final and not minted,
 // minted, returned) and of a withdrawal (no such redemption, redeemed and not paid, paid out, refunded) is shown with
 // its coordinates, and a payout that differs from what the redemption owes is flagged.
+//
+// From #138's review: a Reference log anyone emitted (no transfer from the reserve in its transaction) is listed
+// apart and never changes the headline; a payout or a return is "paid" or "returned" only once final and canonical;
+// minted and returned, like refunded and paid, is flagged as an incident.
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -14,7 +18,7 @@ import { connect, deposit, readContract, type Session } from '../src/evm/deposit
 import { depositReference, mintReference, payoutReference, unassociatedRefundPayoutReference, withdrawalReference } from '../src/lib/refs';
 import type { Hex } from '../src/lib/bytes';
 import type { Redemption } from '../src/kreivo/bezent';
-import { initStatus } from '../src/ui/status';
+import { initStatus, UNPAID_LABEL } from '../src/ui/status';
 import { mockWallet, network, OWNER } from './mock-wallet';
 
 const kreivo = vi.hoisted(() => ({ minted: false, redemption: undefined as unknown }));
@@ -73,7 +77,7 @@ describe('a deposit’s status', () => {
     expect(r['Bridge reference']).toBe(depositReference(c));
     expect(r['Mint reference']).toBe(mintReference(c));
     expect(r['Kreivo']).toMatch(/^not minted/);
-    expect(r['Returned']).toMatch(/^none found in blocks 100 to 101$/);
+    expect(r['Return']).toMatch(/^none found in blocks 100 to 101$/);
     expect(r['bezent’s status route']).toMatch(/not set in this build/);
   });
 
@@ -95,8 +99,40 @@ describe('a deposit’s status', () => {
     const res = await deposited(s);
     await status.deposit(res.hash, '41');
     expect(rows()['State (from chain data)']).toBe('returned to the refund address');
-    expect(rows()['Returned']).toMatch(/Reference log 8; final \(block 101 ≤ finalized head 101\)$/);
+    expect(rows()['Return']).toMatch(/Reference log 8; final \(block 101 ≤ finalized head 101\)$/);
     expect(rows()['Paid']).toBe(`2500000 (minor units) to ${OWNER.address}, Transfer log 7`);
+  });
+
+  // The fake wallet's first deposit is at block 100, log 41.
+  const first = { network: 'polygon-amoy', blockNumber: 100n, blockHash: `0x${'ab'.repeat(32)}` as Hex, positionKind: 'log' as const, positionIndex: 41 };
+
+  it('a return included but not final yet is not "returned"', async () => {
+    const { s, status } = await page({ finalized: 100, latest: 102, payouts: [{ reference: unassociatedRefundPayoutReference(first), to: OWNER.address, amount: 2_500_000n, block: 101 }] });
+    const res = await deposited(s);
+    await status.deposit(res.hash, '41');
+    expect(rows()['State (from chain data)']).toBe('a return to the refund address is included on Polygon, not final');
+    expect(rows()['Transfer (included, not final)']).toBe(`2500000 (minor units) to ${OWNER.address}, Transfer log 7`);
+    expect(rows()['Paid']).toBeUndefined();
+  });
+
+  it('minted and returned is an incident, never a state', async () => {
+    kreivo.minted = true;
+    const { s, status } = await page({ finalized: 101, payouts: [{ reference: unassociatedRefundPayoutReference(first), to: OWNER.address, amount: 2_500_000n, block: 101 }] });
+    const res = await deposited(s);
+    await status.deposit(res.hash, '41');
+    expect(rows()['State (from chain data)']).toBe('minted on Kreivo, and a return carries its reference: both should never happen; report it');
+  });
+
+  it('a Reference log someone else emitted with the return’s reference does not replace “minted”', async () => {
+    kreivo.minted = true;
+    const { s, status } = await page({ finalized: 101, bogusReferences: [{ reference: unassociatedRefundPayoutReference(first), block: 101 }] });
+    const res = await deposited(s);
+    await status.deposit(res.hash, '41');
+    const r = rows();
+    expect(r['State (from chain data)']).toBe('minted on Kreivo');
+    expect(r['Return']).toMatch(/^none found/);
+    expect(r[UNPAID_LABEL]).toMatch(/^0x[0-9a-f]{64}, Reference log 9, block 101: its transaction moves nothing from the reserve$/);
+    expect(r['Check']).toBeUndefined();
   });
 
   it('a transaction or a log that is not a directed deposit', async () => {
@@ -149,6 +185,44 @@ describe('a withdrawal’s status', () => {
     await status.withdrawal(ALICE_SS58, REF);
     expect(rows()['State (from chain data)']).toMatch(/differs/);
     expect(rows()['Check']).toBe('The payout differs: 4000000, not 5000000 (minor units).');
+  });
+
+  it('a Reference log someone else emitted beside the real payout is listed apart, and the payout decides', async () => {
+    kreivo.redemption = record();
+    const { status } = await page({ payouts: [{ reference: ref, to: TO, amount: 5_000_000n, block: 80 }], bogusReferences: [{ reference: ref, block: 85 }] });
+    await status.withdrawal(ALICE_SS58, REF);
+    const r = rows();
+    expect(r['State (from chain data)']).toBe('paid out on Polygon');
+    expect(r['Payout']).toMatch(/Reference log 8; final/);
+    expect(r[UNPAID_LABEL]).toMatch(/block 85: its transaction moves nothing from the reserve$/);
+    expect(r['Check']).toBeUndefined();
+  });
+
+  it('a Reference log someone else emitted alone is no payout, and does not say “differs”', async () => {
+    kreivo.redemption = record();
+    const { status } = await page({ bogusReferences: [{ reference: ref, block: 85 }] });
+    await status.withdrawal(ALICE_SS58, REF);
+    const r = rows();
+    expect(r['State (from chain data)']).toBe('redeemed on Kreivo; payout not found yet');
+    expect(r['State (from chain data)']).not.toMatch(/differs/);
+    expect(r['Payout']).toMatch(/^none found/);
+    expect(r[UNPAID_LABEL]).toMatch(/block 85/);
+  });
+
+  it('a payout included but not final yet is not “paid”', async () => {
+    kreivo.redemption = record();
+    const { status } = await page({ finalized: 79, payouts: [{ reference: ref, to: TO, amount: 5_000_000n, block: 80 }] });
+    await status.withdrawal(ALICE_SS58, REF);
+    expect(rows()['State (from chain data)']).toBe('a payout is included on Polygon, not final');
+    expect(rows()['Transfer (included, not final)']).toBe(`5000000 (minor units) to ${TO}, Transfer log 7`);
+    expect(rows()['Paid']).toBeUndefined();
+  });
+
+  it('refunded and paid is an incident', async () => {
+    kreivo.redemption = record({ refunded: true });
+    const { status } = await page({ payouts: [{ reference: ref, to: TO, amount: 5_000_000n, block: 80 }] });
+    await status.withdrawal(ALICE_SS58, REF);
+    expect(rows()['State (from chain data)']).toBe('refunded on Kreivo, and a payout carries its reference: both should never happen; report it');
   });
 
   it('refunded on Kreivo', async () => {

@@ -18,7 +18,8 @@ export function facts(dl: HTMLElement, rows: [string, string][]) {
   );
 }
 
-export type Kind = 'muted' | 'error' | 'ok';
+/** `warn`: a notice the user must see, that blocks nothing. */
+export type Kind = 'muted' | 'error' | 'ok' | 'warn';
 
 export function say(el: HTMLElement, text: string, kind: Kind = 'muted') {
   el.textContent = text;

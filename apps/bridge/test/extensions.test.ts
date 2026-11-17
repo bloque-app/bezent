@@ -7,12 +7,15 @@
 // how a polkadot.js wallet builds the payload it signs (its registry: the extensions it knows, plus the page's
 // `userExtensions`, anything else "no effect") signs the JSON the bridge hands it. With Kreivo's extensions
 // registered, the extrinsic is byte for byte the one polkadot-api's own signer builds with the same key; without
-// them, the wallet signs a payload one byte short (no `PassAuthenticate`), whose signature Kreivo would reject. And
-// polkadot-api's own polkadot.js bridge refuses to sign at all.
+// them, the wallet signs a payload one byte short (no `PassAuthenticate`), whose signature Kreivo would reject, and
+// the page refuses it before anything is broadcast: it checks every signature over the exact signing payload against
+// the account's key (Ed25519, Sr25519, Ecdsa). And polkadot-api's own polkadot.js bridge refuses to sign at all.
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519';
+import { secp256k1 } from '@noble/curves/secp256k1';
+import * as sr25519 from '@scure/sr25519';
 import { getPolkadotSigner } from 'polkadot-api/signer';
 import { getPolkadotSignerFromPjs } from 'polkadot-api/pjs-signer';
 import {
@@ -24,6 +27,9 @@ import {
   pjsPayload,
   pjsSigner,
   signedExtrinsic,
+  signingPayload,
+  verifyMultiSignature,
+  WalletSignatureMismatch,
   type ExtDef,
   type SignerPayloadJSON,
 } from '../src/kreivo/extensions';
@@ -77,7 +83,7 @@ const CALL = fromHex(`0x2b0208${'00'.repeat(300)}`);
 /** How a polkadot.js wallet builds the payload it signs from the page's JSON (`ExtrinsicPayload`): the method, then
  * every extension's explicit fields, then every extension's implicit ones, in the payload's order; an extension
  * neither it nor the page's `userExtensions` defines adds nothing ("no effect"). Over 256 bytes, its BLAKE2b-256. */
-function pjsWallet(userExtensions: ExtDef) {
+function pjsWallet(userExtensions: ExtDef, sign: (message: Uint8Array) => Uint8Array = (m) => concat([Uint8Array.of(0), ed25519.sign(m, SECRET)])) {
   const known: Record<string, { extrinsic: (p: SignerPayloadJSON) => Uint8Array[]; payload: (p: SignerPayloadJSON) => Uint8Array[] }> = {
     CheckNonZeroSender: { extrinsic: () => [], payload: () => [] },
     CheckWeight: { extrinsic: () => [], payload: () => [] },
@@ -99,7 +105,7 @@ function pjsWallet(userExtensions: ExtDef) {
     const implicit = p.signedExtensions.flatMap((id) => rules(id)?.payload(p) ?? []);
     const bytes = concat([fromHex(p.method), ...explicit, ...implicit]);
     const message = bytes.length > 256 ? blake2_256(bytes) : bytes;
-    return { signature: toHex(concat([Uint8Array.of(0), ed25519.sign(message, SECRET)])) };
+    return { signature: toHex(sign(message)) };
   };
 }
 
@@ -174,12 +180,34 @@ describe('signing through a polkadot.js wallet', () => {
     expect(r.u8()).toBe(0); // PassAuthenticate: None.
   });
 
-  it('without them, the wallet signs another payload, and Kreivo would reject the signature', async () => {
-    const unregistered = await pjsSigner(ADDRESS, PUBLIC, pjsWallet({})).signTx(CALL, signed(), METADATA, 41_026_407);
-    const r = new Reader(unregistered);
+  it('without them, the wallet signs another payload, which Kreivo would reject, and the page refuses it before broadcasting', async () => {
+    const { payload } = pjsPayload(ADDRESS, CALL, signed(), METADATA, 41_026_407);
+    const { signature } = await pjsWallet({})(payload);
+    expect(ed25519.verify(fromHex(signature as Hex).slice(1), kreivoPayload(signed()), PUBLIC)).toBe(false);
+    const refused = pjsSigner(ADDRESS, PUBLIC, pjsWallet({})).signTx(CALL, signed(), METADATA, 41_026_407);
+    await expect(refused).rejects.toBeInstanceOf(WalletSignatureMismatch);
+    await expect(refused).rejects.toThrow(/does not verify against your account’s key[^]*Offer the wallet Kreivo’s metadata again[^]*Nothing was sent\.$/);
+  });
+
+  it('refuses a signature by another key over the right payload', async () => {
+    const other = ed25519.utils.randomPrivateKey();
+    const wallet = pjsWallet(KREIVO_USER_EXTENSIONS, (m) => concat([Uint8Array.of(0), ed25519.sign(m, other)]));
+    await expect(pjsSigner(ADDRESS, PUBLIC, wallet).signTx(CALL, signed(), METADATA, 41_026_407)).rejects.toBeInstanceOf(WalletSignatureMismatch);
+  });
+
+  it('takes an Sr25519 account’s signature over the right payload, as Kreivo verifies it', async () => {
+    const secret = sr25519.secretFromSeed(fromHex(`0x${'42'.repeat(32)}`));
+    const pub = sr25519.getPublicKey(secret);
+    const wallet = pjsWallet(KREIVO_USER_EXTENSIONS, (m) => concat([Uint8Array.of(1), sr25519.sign(secret, m)]));
+    const xt = await pjsSigner(encodeSs58(pub, 2), pub, wallet).signTx(CALL, signed(), METADATA, 41_026_407);
+    const r = new Reader(xt);
     r.compact();
-    r.take(2 + 32 + 1);
-    expect(ed25519.verify(r.take(64), kreivoPayload(signed()), PUBLIC)).toBe(false);
+    r.take(2 + 32);
+    expect(r.u8()).toBe(1);
+    expect(sr25519.verify(kreivoPayload(signed()), r.take(64), pub)).toBe(true);
+    await expect(pjsSigner(encodeSs58(pub, 2), pub, pjsWallet({}, (m) => concat([Uint8Array.of(1), sr25519.sign(secret, m)]))).signTx(CALL, signed(), METADATA, 41_026_407)).rejects.toBeInstanceOf(
+      WalletSignatureMismatch,
+    );
   });
 
   it('refuses, before the wallet is asked, a PassAuthenticate other than None and a fee paid in an asset', async () => {
@@ -195,6 +223,35 @@ describe('signing through a polkadot.js wallet', () => {
     delete missing.DynamicMaxBlockWeight;
     await expect(signer.signTx(CALL, missing, METADATA, 1)).rejects.toThrow(/carries no DynamicMaxBlockWeight/);
     expect(asked).toBe(false);
+  });
+
+  it('verifies each MultiSignature kind over the signing payload, as Kreivo does', () => {
+    const payload = signingPayload(CALL, KREIVO_EXTENSIONS.map((id) => signed()[id]!.value), KREIVO_EXTENSIONS.map((id) => signed()[id]!.additionalSigned));
+    expect(toHex(payload)).toBe(toHex(kreivoPayload(signed())));
+    const short = signingPayload(fromHex('0x0000'), [], []);
+    expect(toHex(short)).toBe('0x0000'); // At most 256 bytes: signed as it is, not hashed.
+    const tampered = Uint8Array.from(payload, (b, i) => (i === 0 ? b ^ 1 : b));
+
+    expect(verifyMultiSignature(concat([Uint8Array.of(0), ed25519.sign(payload, SECRET)]), payload, PUBLIC)).toBe(true);
+    expect(verifyMultiSignature(concat([Uint8Array.of(0), ed25519.sign(payload, SECRET)]), tampered, PUBLIC)).toBe(false);
+
+    const secret = sr25519.secretFromSeed(fromHex(`0x${'42'.repeat(32)}`));
+    const srPub = sr25519.getPublicKey(secret);
+    expect(verifyMultiSignature(concat([Uint8Array.of(1), sr25519.sign(secret, payload)]), payload, srPub)).toBe(true);
+    expect(verifyMultiSignature(concat([Uint8Array.of(1), sr25519.sign(secret, payload)]), payload, PUBLIC)).toBe(false);
+
+    // Ecdsa: over the payload's BLAKE2b-256; the account is the BLAKE2b-256 of the compressed public key.
+    const priv = fromHex(`0x${'11'.repeat(32)}`);
+    const account = blake2_256(secp256k1.getPublicKey(priv, true));
+    const sig = secp256k1.sign(blake2_256(payload), priv);
+    const ecdsa = concat([Uint8Array.of(2), sig.toCompactRawBytes(), Uint8Array.of(sig.recovery)]);
+    expect(verifyMultiSignature(ecdsa, payload, account)).toBe(true);
+    expect(verifyMultiSignature(concat([ecdsa.slice(0, 65), Uint8Array.of(sig.recovery + 27)]), payload, account)).toBe(true);
+    expect(verifyMultiSignature(ecdsa, tampered, account)).toBe(false);
+    expect(verifyMultiSignature(ecdsa, payload, PUBLIC)).toBe(false);
+
+    expect(verifyMultiSignature(fromHex(`0x03${'00'.repeat(64)}`), payload, PUBLIC)).toBe(false);
+    expect(verifyMultiSignature(fromHex(`0x00${'00'.repeat(63)}`), payload, PUBLIC)).toBe(false);
   });
 
   it('puts the extrinsic together itself, and refuses a wallet’s answer that is not a MultiSignature', () => {

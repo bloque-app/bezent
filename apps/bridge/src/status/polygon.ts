@@ -8,8 +8,11 @@
 //   derives (lib/refs.ts).
 // - A payout from the reserve, by the on-chain reference it carries: the vault's delivery is one transaction holding
 //   the token's `Transfer` from the reserve and the emitter's `Reference(bytes32 indexed)` (F-008, DEC-10), so the
-//   page looks for that log, then reads its transaction and takes the transfer from it. A `Reference` with no
-//   transfer from the reserve in its transaction is not a payout (F-008 NOTES), and is shown as such.
+//   page looks for that log, then reads its transaction and takes the transfer from it. The emitter's
+//   `emitReference` is open to anyone, so a `Reference` log proves nothing by itself: the page collects every one
+//   carrying the reference in the range searched, and only one whose transaction moves exactly one transfer from
+//   the reserve is a payout. The others (no transfer from the reserve, or several) are not payouts (F-008 NOTES),
+//   are listed as such, and never decide a state.
 
 import { decodeEventLog, getAddress, type Address, type Hex, type PublicClient } from 'viem';
 import { directedArrivals, type DirectedArrival } from '../evm/coordinate';
@@ -80,16 +83,33 @@ export async function depositOnPolygon(pc: Reads, n: ResolvedNetwork, txHash: He
   };
 }
 
-export interface Payout {
+/** A `Reference` log carrying the reference, and its transaction's transfers from the reserve. */
+export interface ReferenceLog {
   txHash: Hex;
   referenceLog: number;
-  finality: Finality;
+  blockNumber: bigint;
+  blockHash: Hex;
   /** The token's transfers from the reserve in the same transaction. */
   transfers: { to: Address; amount: bigint; logIndex: number }[];
 }
 
+/** A payout: a `Reference` log whose transaction moves exactly one transfer from the reserve, with its finality. */
+export interface Payout extends ReferenceLog {
+  finality: Finality;
+}
+
 export interface PayoutSearch {
+  /** The payout carrying the reference: the newest `Reference` log whose transaction moves exactly one transfer
+   * from the reserve. */
   found: Payout | undefined;
+  /** Other payouts carrying the same reference, older than `found`: one reference is paid once, so any is an
+   * incident. */
+  others: Payout[];
+  /** `Reference` logs carrying the reference whose transaction moves nothing, or more than one transfer, from the
+   * reserve. Anyone can emit these: they are no payout, and decide nothing. */
+  unpaid: ReferenceLog[];
+  /** `Reference` logs found but not examined, past `maxHits`. */
+  unexamined: number;
   /** The blocks searched, newest first; `complete` when they reach `from`. */
   searched: { from: bigint; to: bigint };
   complete: boolean;
@@ -100,15 +120,24 @@ export interface SearchOptions {
   chunk?: bigint;
   /** At most this many `eth_getLogs` calls. */
   maxRequests?: number;
+  /** At most this many `Reference` logs' transactions are read (anyone can emit them). */
+  maxHits?: number;
 }
 
-/** Looks for the payout from the reserve carrying `reference` on `n`, from its newest block back to `from`. */
+/** Looks for the payout from the reserve carrying `reference` on `n`, from its newest block back to `from`. Every
+ * `Reference` log carrying it in the range is collected, and each one's transaction is read: only one that moves
+ * exactly one transfer from the reserve is a payout. */
 export async function findPayout(pc: Reads, n: ResolvedNetwork, emitter: Address, from: bigint, reference: Hex, o: SearchOptions = {}): Promise<PayoutSearch> {
   let chunk = o.chunk ?? 50_000n;
   const maxRequests = o.maxRequests ?? 60;
+  const maxHits = o.maxHits ?? 100;
   const latest = await pc.getBlockNumber();
   let to = latest;
   let requests = 0;
+  let complete = false;
+  // Newest first; one per transaction.
+  const hits: { txHash: Hex; logIndex: number; blockNumber: bigint; blockHash: Hex }[] = [];
+  const seen = new Set<string>();
   while (to >= from && requests < maxRequests) {
     const lo = to - chunk + 1n > from ? to - chunk + 1n : from;
     requests++;
@@ -122,21 +151,41 @@ export async function findPayout(pc: Reads, n: ResolvedNetwork, emitter: Address
       }
       throw new Error(`${n.label} refused the log search (${(e as Error).message.split('\n')[0]}).`);
     }
-    const hit = logs.find((l) => l.args.ref?.toLowerCase() === reference.toLowerCase());
-    if (hit && hit.transactionHash && hit.blockHash && hit.logIndex !== null) {
-      return { found: await payoutAt(pc, n, hit.transactionHash, hit.logIndex, hit.blockNumber, hit.blockHash), searched: { from: lo, to: latest }, complete: true };
+    const inChunk = logs
+      .filter((l) => l.args.ref?.toLowerCase() === reference.toLowerCase() && l.transactionHash && l.blockHash && l.logIndex !== null && l.blockNumber !== null)
+      .sort((a, b) => (a.blockNumber === b.blockNumber ? b.logIndex! - a.logIndex! : a.blockNumber! > b.blockNumber! ? -1 : 1));
+    for (const l of inChunk) {
+      const key = l.transactionHash!.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hits.push({ txHash: l.transactionHash!, logIndex: l.logIndex!, blockNumber: l.blockNumber!, blockHash: l.blockHash! });
     }
-    if (lo === from) return { found: undefined, searched: { from, to: latest }, complete: true };
+    if (lo === from) {
+      complete = true;
+      to = from - 1n;
+      break;
+    }
     to = lo - 1n;
   }
-  return { found: undefined, searched: { from: to + 1n, to: latest }, complete: false };
+  const examined = hits.slice(0, maxHits);
+  const logs = await Promise.all(examined.map((h) => referenceAt(pc, n, h.txHash, h.logIndex, h.blockNumber, h.blockHash)));
+  const payouts = await Promise.all(
+    logs.filter((l) => l.transfers.length === 1).map(async (l) => ({ ...l, finality: await finality(pc, l.blockNumber, l.blockHash) })),
+  );
+  return {
+    found: payouts[0],
+    others: payouts.slice(1),
+    unpaid: logs.filter((l) => l.transfers.length !== 1),
+    unexamined: hits.length - examined.length,
+    searched: { from: to + 1n, to: latest },
+    complete,
+  };
 }
 
-/** The payout whose `Reference` log is at (`txHash`, `referenceLog`): its transaction's transfers from the
- * reserve, and its finality. */
-export async function payoutAt(pc: Reads, n: ResolvedNetwork, txHash: Hex, referenceLog: number, blockNumber: bigint, blockHash: Hex): Promise<Payout> {
+/** The `Reference` log at (`txHash`, `referenceLog`) and its transaction's transfers from the reserve. */
+export async function referenceAt(pc: Reads, n: ResolvedNetwork, txHash: Hex, referenceLog: number, blockNumber: bigint, blockHash: Hex): Promise<ReferenceLog> {
   const receipt = await pc.getTransactionReceipt({ hash: txHash });
-  const transfers: Payout['transfers'] = [];
+  const transfers: ReferenceLog['transfers'] = [];
   for (const l of receipt.logs) {
     if (getAddress(l.address) !== n.token || l.logIndex === null) continue;
     try {
@@ -147,12 +196,19 @@ export async function payoutAt(pc: Reads, n: ResolvedNetwork, txHash: Hex, refer
       // Not a Transfer.
     }
   }
-  return { txHash, referenceLog, finality: await finality(pc, blockNumber, blockHash), transfers };
+  return { txHash, referenceLog, blockNumber, blockHash, transfers };
+}
+
+/** The payout whose `Reference` log is at (`txHash`, `referenceLog`): its transaction's transfers from the
+ * reserve, and its finality. */
+export async function payoutAt(pc: Reads, n: ResolvedNetwork, txHash: Hex, referenceLog: number, blockNumber: bigint, blockHash: Hex): Promise<Payout> {
+  const l = await referenceAt(pc, n, txHash, referenceLog, blockNumber, blockHash);
+  return { ...l, finality: await finality(pc, blockNumber, blockHash) };
 }
 
 /** Whether a payout pays exactly `amount` to `to`, in one transfer from the reserve (no fee comes out of a
  * delivery, REQ-TR-5). Names the difference otherwise. */
-export function checkPayout(p: Payout, to: Address, amount: bigint): { ok: true } | { ok: false; reason: string } {
+export function checkPayout(p: ReferenceLog, to: Address, amount: bigint): { ok: true } | { ok: false; reason: string } {
   if (p.transfers.length === 0) return { ok: false, reason: 'Its transaction moves nothing from the reserve: a reference with no transfer is not a payout.' };
   if (p.transfers.length > 1) return { ok: false, reason: `Its transaction holds ${p.transfers.length} transfers from the reserve, not one.` };
   const t = p.transfers[0]!;

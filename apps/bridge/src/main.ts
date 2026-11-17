@@ -12,7 +12,7 @@
 import { DEPLOYMENT, NETWORKS, REVISION, STATUS_ROUTE } from './config/build';
 import { resolveNetwork, type ResolvedNetwork } from './config/networks';
 import { discoverWallets, type Wallet } from './evm/eip6963';
-import { balanceOf, connect, deposit, readContract, type ContractFacts, type Session } from './evm/deposit';
+import { assertChain, balanceOf, connect, deposit, readContract, type ContractFacts, type Session } from './evm/deposit';
 import { checkAmount, formatAmount, parseAmount } from './lib/amount';
 import { assessRecipient, type Assessment } from './lib/recipient';
 import { depositReference, mintReference } from './lib/refs';
@@ -66,6 +66,13 @@ const redeem = initRedeem({
   busy: () => state.busy,
   setBusy: (b) => setBusy(b),
   statusLink: withdrawalLink,
+  // Through the connected wallet, on the network's own chain only: elsewhere the code is not checked.
+  payoutCode: async (address) => {
+    const s = state.session;
+    if (!s || s.network !== state.network) return undefined;
+    await assertChain(s);
+    return s.public.getCode({ address });
+  },
 });
 const status = initStatus({ network: () => state.network, kreivo: () => state.kreivo, session: () => state.session, route: STATUS_ROUTE });
 window.addEventListener('hashchange', () => status.follow(location.hash));

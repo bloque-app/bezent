@@ -5,13 +5,34 @@
 // on it (bounds, backends, pauses, the balance, the reference) and refuses before signing; `redeem` is dry-run
 // through the contract and the whole batch through Kreivo, and a refusal of either is shown and nothing is signed;
 // after finality the `Redeemed` event is compared with the snapshot, failing loudly on any difference.
+//
+// From the security review of #138: the payout address is never one of bezent's own contracts; the account's free
+// KSM covers the fee, the storage deposit limit and a new approval's deposit before anything is signed; a BadProof
+// from Kreivo is a refused signature with the metadata hint, never "signed, but following it failed"; and an
+// unclear outcome keeps its reference until the contract records it or its mortality runs out.
 
 import { describe, expect, it, vi } from 'vitest';
 import type { PolkadotSigner } from 'polkadot-api/signer';
-import { compareRedeemed, freshReference, limits, parsePayout, redeemRows, refusal, runRedeem, takeRedeemSnapshot, type RedeemSnapshot } from '../src/redeem';
-import { CONTRACT_ERRORS, REDEEMED_TOPIC, type DryRun } from '../src/kreivo/bezent';
+import { InvalidTxError } from 'polkadot-api';
+import {
+  compareRedeemed,
+  freshReference,
+  ksmNeeded,
+  limits,
+  ownContracts,
+  parsePayout,
+  redeemRows,
+  refusal,
+  runRedeem,
+  settle,
+  takeRedeemSnapshot,
+  type RedeemSnapshot,
+} from '../src/redeem';
+import { CONTRACT_ERRORS, REDEEMED_TOPIC, type DryRun, type Redemption } from '../src/kreivo/bezent';
 import type { Finalized, Plan, Prepared, RedeemChain, RedeemFacts } from '../src/kreivo/redeem';
-import { REDEEM_GAS_FLOOR, REDEEM_STORAGE_FLOOR } from '../src/kreivo/redeem';
+import { MORTALITY, REDEEM_GAS_FLOOR, REDEEM_STORAGE_FLOOR, redeemChain, submitError, UnclearOutcome } from '../src/kreivo/redeem';
+import { WalletSignatureMismatch } from '../src/kreivo/extensions';
+import { KREIVO_TESTBED, POLYGON_AMOY } from '../src/config/networks';
 import { Reader, u128, u64 } from '../src/lib/scale';
 import { concat, fromHex, toHex, type Hex } from '../src/lib/bytes';
 import { encodeSs58 } from '../src/lib/ss58';
@@ -42,6 +63,8 @@ const facts = (o: Partial<RedeemFacts> = {}): RedeemFacts => ({
   balance: 10_000_000n,
   assetStatus: 'Liquid',
   ksm: 1_000_000_000_000n,
+  approval: undefined,
+  approvalDeposit: 6_700_000_000n,
   at: { number: 41_026_407, hash: `0x${'5b'.repeat(32)}` },
   ...o,
 });
@@ -82,6 +105,7 @@ function model(o: ModelOptions = {}) {
     contract: CONTRACT,
     facts: async () => o.facts ?? facts(),
     redemption: async () => (o.used ? { redeemer: ALICE, asset: 101, amount: 1n, backend: evm137, payout: { kind: 'address', address: PAYOUT.toLowerCase() as Hex }, refunded: false } : undefined),
+    finalized: async () => 41_026_407,
     dryRunMessage: async () => o.message ?? ok('0x0000'),
     prepare: async (plan, gas, storageLimit): Promise<Prepared> => {
       plans.push(plan);
@@ -129,6 +153,21 @@ describe('the redeem form', () => {
     expect(parsePayout('0x5b38Da6a701c568545dCfcB03FcB875f56beddC4').ok).toBe(false);
     expect(parsePayout('0x1234').ok).toBe(false);
     expect(parsePayout('').ok).toBe(false);
+  });
+
+  it('refuses a payout to one of bezent’s own contracts, in any case, and leaves an unset one out', () => {
+    const own = ownContracts(POLYGON_AMOY);
+    expect(own.map((o) => o.address)).toEqual([POLYGON_AMOY.token, POLYGON_AMOY.reserve, POLYGON_AMOY.directedDeposit, POLYGON_AMOY.emitter]);
+    for (const o of own) {
+      for (const form of [o.address, o.address.toLowerCase(), `0x${o.address.slice(2).toUpperCase()}`]) {
+        const p = parsePayout(form, own);
+        expect(p.ok).toBe(false);
+        expect(!p.ok && p.reason).toContain(`${o.address} is ${o.what}, not yours`);
+      }
+    }
+    expect(parsePayout(PAYOUT, own)).toEqual({ ok: true, address: PAYOUT });
+    // Polygon pins no DirectedDeposit, reserve or emitter yet: only its token is refused.
+    expect(ownContracts({ token: POLYGON_AMOY.token, reserve: null, directedDeposit: null, emitter: null })).toEqual([{ what: 'the USDC token contract', address: POLYGON_AMOY.token }]);
   });
 
   it('freezes the snapshot, with the canonical SS58 and the payout checksummed', () => {
@@ -244,6 +283,23 @@ describe('the locked redeem', () => {
     expect(!none.comparison.ok && none.comparison.reason).toMatch(/no Redeemed event/);
   });
 
+  it('signs nothing when the account’s free KSM is short of the fee, the storage deposit limit and a new approval’s deposit', async () => {
+    // The model's dry run charges 0.006695 KSM of storage: the limit is twice that.
+    const storageLimit = 13_390_000_000n;
+    const need = ksmNeeded(facts(), { fee: 1_000_000_000n, storageLimit });
+    expect(need.total).toBe(1_000_000_000n + storageLimit + 6_700_000_000n);
+    const short = model({ facts: facts({ ksm: need.total - 1n }) });
+    await expect(runRedeem(snapshot(), short.chain, signer(), quiet)).rejects.toThrow(
+      'This account holds 0.021089999999 KSM free; the redemption may need up to 0.02109 KSM: the fee (about 0.001 KSM), the storage deposit limit (0.01339 KSM), the approval’s deposit (0.0067 KSM, returned when the redemption uses the approval up). Add KSM to it, then try again. Nothing was signed.',
+    );
+    expect(short.submitted).toHaveLength(0);
+    expect((await runRedeem(snapshot(), model({ facts: facts({ ksm: need.total }) }).chain, signer(), quiet)).comparison.ok).toBe(true);
+    // An existing approval already holds its deposit: the batch adds to it, so no new deposit is needed.
+    const approved = facts({ ksm: need.total - 6_700_000_000n, approval: { amount: 2_000_000n, deposit: 6_700_000_000n } });
+    expect(ksmNeeded(approved, { fee: 1_000_000_000n, storageLimit }).approval).toBe(0n);
+    expect((await runRedeem(snapshot(), model({ facts: approved }).chain, signer(), quiet)).comparison.ok).toBe(true);
+  });
+
   it('says a final transaction that failed redeemed nothing, naming it', async () => {
     await expect(runRedeem(snapshot(), model({ final: { failed: 'Module.Contracts.ContractReverted' } }).chain, signer(), quiet)).rejects.toThrow(
       /0x7777[0-9a-f]+ is final in block 41026420 but failed \(Module.Contracts.ContractReverted\); nothing was redeemed/,
@@ -265,5 +321,115 @@ describe('compareRedeemed', () => {
   it('names a different reference', () => {
     const c = compareRedeemed([ev({ reference: `0x${'cd'.repeat(32)}` })], s);
     expect(!c.ok && c.reason).toContain(`reference 0x${'cd'.repeat(32)}, not ${REF}`);
+  });
+});
+
+describe('following the submission', () => {
+  const TX: Hex = `0x${'77'.repeat(32)}`;
+
+  /** A Kreivo whose batch signs, then answers each of polkadot-api's watch events, then fails with `fail`. */
+  function kreivo(events: { type: string; txHash?: string }[], fail: unknown) {
+    const tx = { decodedCall: {}, getEncodedData: async () => '0x2b02', getEstimatedFees: async () => 1n };
+    const api = {
+      apis: {
+        DryRunApi: { dry_run_call: async () => ({ success: true, value: { execution_result: { success: true, value: {} }, emitted_events: [] } }) },
+      },
+      tx: {
+        Assets: { approve_transfer: () => tx },
+        Contracts: { call: () => tx },
+        Utility: {
+          batch_all: () => ({
+            ...tx,
+            signSubmitAndWatch: (s: PolkadotSigner) => ({
+              subscribe(o: { next(e: unknown): void; error(e: unknown): void }) {
+                void (async () => {
+                  // polkadot-api signs first, with the block the transaction is built at.
+                  await s.signTx(new Uint8Array(0), {}, new Uint8Array(0), 41_026_400);
+                  for (const e of events) o.next({ txHash: TX, ...e });
+                  o.error(fail);
+                })();
+                return { unsubscribe: () => undefined };
+              },
+            }),
+          }),
+        },
+      },
+    };
+    const n = { ...KREIVO_TESTBED, bezent: CONTRACT };
+    return redeemChain({ client: {}, api, close: () => undefined } as never, n, CONTRACT, 1_000);
+  }
+  const plan = { redeemer: ALICE, asset: 101, amount: 1n, data: new Uint8Array(0) };
+  const sign: PolkadotSigner = { publicKey: fromHex(ALICE), signTx: async () => new Uint8Array(0), signBytes: vi.fn() };
+  const badProof = new InvalidTxError({ type: 'Invalid', value: { type: 'BadProof' } });
+
+  it('reports a BadProof after `signed` as a refused signature, with the metadata hint, never as an unclear outcome', async () => {
+    const p = await kreivo([{ type: 'signed' }], badProof).prepare(plan, REDEEM_GAS_FLOOR, REDEEM_STORAGE_FLOOR);
+    const steps: string[] = [];
+    const e = await p.submit(sign, (t) => steps.push(t)).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(WalletSignatureMismatch);
+    expect((e as Error).message).toMatch(/^Kreivo rejected the signature \(.*BadProof.*\): the wallet signed another payload[^]*Offer the wallet Kreivo's metadata again[^]*Nothing was executed\.$/);
+    expect((e as Error).message).not.toMatch(/following it failed|Look it up/);
+    expect(steps.join(' ')).toContain(`Signed: ${TX}`);
+  });
+
+  it('says a failure before the broadcast sent nothing', async () => {
+    const p = await kreivo([{ type: 'signed' }], new Error('the connection dropped')).prepare(plan, REDEEM_GAS_FLOOR, REDEEM_STORAGE_FLOOR);
+    const e = await p.submit(sign, quiet).catch((x: unknown) => x);
+    expect(e).not.toBeInstanceOf(UnclearOutcome);
+    expect((e as Error).message).toBe('the connection dropped. Nothing was sent.');
+  });
+
+  it('says a failure after the broadcast leaves the outcome unclear, with the last block that may include it', async () => {
+    const p = await kreivo([{ type: 'signed' }, { type: 'broadcasted' }], new Error('the connection dropped')).prepare(plan, REDEEM_GAS_FLOOR, REDEEM_STORAGE_FLOOR);
+    const e = await p.submit(sign, quiet).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(UnclearOutcome);
+    expect(e).toMatchObject({ txHash: TX, validUntil: 41_026_400 + MORTALITY });
+    expect((e as Error).message).toMatch(/was broadcast, but following it failed: the connection dropped\. It may still be included until block 41026464; its reference stays locked/);
+    // An InvalidTxError after the broadcast is Kreivo refusing it at the finalized block: nothing is on chain.
+    expect(submitError(badProof, { hash: TX, broadcast: true, birth: 1 })).toBeInstanceOf(WalletSignatureMismatch);
+    expect(submitError(new InvalidTxError({ type: 'Invalid', value: { type: 'Stale' } }), { hash: TX, broadcast: true, birth: 1 })).not.toBeInstanceOf(UnclearOutcome);
+  });
+});
+
+describe('an unclear outcome', () => {
+  const u = { redeemer: ALICE, reference: REF, txHash: `0x${'77'.repeat(32)}` as Hex, validUntil: 1_064 };
+  const record: Redemption = { redeemer: ALICE, asset: 101, amount: 5_000_000n, backend: evm137, payout: { kind: 'address', address: PAYOUT.toLowerCase() as Hex }, refunded: false };
+  /** A chain whose finalized head and record follow `script`, one entry per read; a `throw` entry fails that read. */
+  function chain(script: ({ head: number; recorded?: boolean } | 'throw')[]) {
+    let i = 0;
+    let turn: (typeof script)[number] = script[0]!;
+    const c = {
+      finalized: async () => {
+        turn = script[Math.min(i++, script.length - 1)]!;
+        if (turn === 'throw') throw new Error('the light client is syncing');
+        return turn.head;
+      },
+      redemption: async () => (turn !== 'throw' && turn.recorded ? record : undefined),
+    } as unknown as RedeemChain;
+    return { c, reads: () => i };
+  }
+  const sleeps: number[] = [];
+  const sleep = async (ms: number) => void sleeps.push(ms);
+
+  it('keeps waiting while the transaction may still be included, and settles when the contract records it', async () => {
+    const { c, reads } = chain([{ head: 1_000 }, 'throw', { head: 1_064 }, { head: 1_065, recorded: true }]);
+    expect(await settle(u, () => c, { sleep })).toEqual({ kind: 'recorded', redemption: record, at: 1_065 });
+    expect(reads()).toBe(4);
+  });
+
+  it('frees the reference only once the finalized head is past the mortality and nothing is recorded', async () => {
+    const { c } = chain([{ head: 1_063 }, { head: 1_064 }, { head: 1_065 }]);
+    expect(await settle(u, () => c, { sleep })).toEqual({ kind: 'expired', at: 1_065 });
+    // Without a known mortality, only the record settles it.
+    const never = chain([{ head: 5_000 }, { head: 5_001 }, { head: 5_002, recorded: true }]);
+    expect(await settle({ ...u, validUntil: undefined }, () => never.c, { sleep })).toMatchObject({ kind: 'recorded', at: 5_002 });
+  });
+
+  it('skips a turn while the page is on another network, and stops when asked', async () => {
+    const { c } = chain([{ head: 1_000, recorded: true }]);
+    let turns = 0;
+    expect(await settle(u, () => (turns++ < 2 ? undefined : c), { sleep })).toMatchObject({ kind: 'recorded' });
+    expect(turns).toBe(3);
+    expect(await settle(u, () => c, { sleep, stopped: () => true })).toBeUndefined();
   });
 });
