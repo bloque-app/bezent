@@ -12,8 +12,9 @@ SPDX-License-Identifier: CC-BY-4.0
 **Target:** `SPEC.md` v0.5.13 and `PLAN.md` v0.6.12 on `develop` (amendment 0029 applied). Applied, they become
 `SPEC.md` v0.5.14 and `PLAN.md` v0.6.13. Nothing here changes a milestone: it is `F-018`'s, inside `M-4`.
 **Date:** 2026-11-17
-**Needs:** the owner's confirmation of the requests' reserve (`d-f018-window-reserve`), which part 5 proposes as the
-implementation of `d-f018-window-queue`; every other item is ruled. Numbered 0031 because 0030 was the number of a
+**Needs:** the owner's ruling on `d-f018-window-reserve` (part 5): a requests' reserve was proposed to keep a window
+queue's head from taking each window's freed room before requests, and it is **not in force** (built, set to 0 on every
+route) because review found it starves old deposits. Every other item is ruled and applied. Numbered 0031 because 0030 was the number of a
 proposal (#120, registered senders) that was closed on a ruling of 2026-11-08 and whose branch still carries the file;
 reusing it would make two different amendments 0030 in the record.
 **Rationale in one line:** amendment 0029 left five edges of directed deposits open (how they meet the route's capacity,
@@ -45,9 +46,11 @@ does for the window. It is never returned for capacity.
   does. That is first come first served: a request that comes after it is refused `ERR-Overloaded`, as it would be behind
   an earlier request. It does not starve requesters beyond what the window's ruling already allows (amendment 0029,
   Open 1 and Open 5): capacity is freed as transfers complete, in minutes, not as a day's window rolls over.
-- A directed deposit waiting for the window (`CND-DepositWindow`), or held by a change of its token's code
-  (`CND-TokenUpgraded`, part 3), carries nothing yet, so it does **not** count toward the in-flight count, neither a
-  request's nor another directed deposit's (review M1 and M2 of #142). Counting it would make a deposit that leaves the
+- A directed deposit waiting at `Source-Final` for the window (`CND-DepositWindow`), or held there by a change of its
+  token's code (`CND-TokenUpgraded`, part 3), carries nothing yet, so it does **not** count toward the in-flight count,
+  neither a request's nor another directed deposit's (review M1 and M2 of #142). One held by a change of its token's code
+  later, in `Delivering` (a new attempt) or in `Needs-Review` (a resolution's delivery), was in flight already and stays
+  in flight while held, so its lift needs no check of capacity and never puts the route past it (review L-a of #142). Counting it would make a deposit that leaves the
   window wait for capacity behind later deposits still waiting for the window, and would refuse requests `ERR-Overloaded`
   for as long as a window queue or a hold lasts. It takes its place in flight when it leaves that wait, and only if the
   route has room; otherwise it waits in `CND-DepositCapacity`, in coordinate order, and from then on it counts.
@@ -109,9 +112,16 @@ approver (`REQ-GV-5`). Requesters' deposits are not held by it. Nothing is retur
 - Which arrivals: every directed arrival of that token, on that network, at a block at or after the change's, while the
   change is not lifted. A change that is observed and not yet final already holds (holding is the safe side); one the
   network withdrew does not. An arrival made before the change was moved by the old code and is not held.
-- A held deposit is not in flight (part 1): it carries nothing, so it never fills the route's capacity against
-  requesters' deposits of the token, which the hold does not touch. When the hold is lifted, it takes its place in flight
-  only if the route has room, and otherwise waits in `CND-DepositCapacity`.
+- A deposit held at `Source-Final` is not in flight (part 1): it carries nothing, so it never fills the route's capacity
+  against requesters' deposits of the token, which the hold does not touch. When the hold is lifted, it takes its place
+  in flight only if the route has room, and otherwise waits in `CND-DepositCapacity`. One held later, in `Delivering` or
+  `Needs-Review`, was in flight already and stays so (part 1).
+- After a hold, the window bounds intake, not mints. A held deposit takes its share of the route's window when it is
+  made, as any directed deposit does (part 1), and keeps it while held; held deposits leave the window as their shares
+  age out of it, not as they are minted. On the lift they mint together, as deposits held by a pause do (as far as the
+  route's capacity lets them into flight, the rest waiting in `CND-DepositCapacity`), so the mints of one lift may
+  exceed what one window would allow; what the window bounds is what was taken in, not when it is minted (review L-b
+  of #142).
 - What the hold does at intake: a mintable arrival becomes its deposit, holding `CND-TokenUpgraded`; one that could
   never be minted is **not returned while the hold stands** (a return is a payout of the same token, ordered by bezent
   with no second approver, and the hold exists because nobody has yet checked how the new code moves value). It stays
@@ -159,28 +169,37 @@ more than one window. First come first served among directed deposits holds.
 - **Among directed deposits nothing changes.** A waiting deposit resumes only when the shares taken in the window, plus
   every directed deposit waiting ahead of it by coordinate (however long they have waited), plus its own amount, fit.
   So the queue still drains in coordinate order, and the window's limit is never exceeded by what is actually minted.
-- **The requests' reserve (the proposed implementation of the ruling, pending the owner's confirmation as
-  `d-f018-window-reserve`).** The two points above do not meet the ruling by themselves: the core cycles every few
-  seconds, so as each window's room frees, the queue's head takes it within seconds, before a request can come, and the
-  queue still locks requesters out for as long as it is deep (review M3 of #142). So a directed deposit that has waited
-  longer than one window, or waits behind one that has, may take room only up to (1 − `request_reserve`) of the
-  window's limit: what the window has taken, by anyone, plus every directed deposit waiting ahead of it, plus its own
-  amount, must be within that share. `request_reserve` is a route-level setting, 0.5 by default; the rest of the window
-  stays available to requests. A deposit whose amount alone is over that share takes room only when the window holds
-  nothing else, so that it is never stuck (it can still wait while requests keep the window in use, as the ruling
-  accepts). Directed deposits that have waited less than one window are unaffected. First come first served among
-  directed deposits holds (a deposit behind one so bounded is bounded too, so none leaves before one ahead of it), and
-  the window's limit is never exceeded. Setting `request_reserve` to 0 turns the reserve off and restores the two points
-  above alone; 1 lets a queue older than a window move only into an empty window. If the owner rules otherwise, the
-  setting, not the code, is what changes.
+- **The queue's head may still take a window's freed room before requests (pending `d-f018-window-reserve`).** The two
+  points above are what is built, and they do not meet the ruling by themselves: the core cycles every few seconds, so
+  as each window's room frees, the queue's head takes it within seconds, before a request can come, and a queue several
+  windows deep can still keep requesters out for as long as it is deep (review M3 of #142). That gap is open.
+- **The requests' reserve: built, not in force, awaiting `d-f018-window-reserve`.** Review M3 of #142 proposed a
+  route-level setting, `routes.request_reserve`: a directed deposit that has waited longer than one window, or waits
+  behind one that has, would take room only up to (1 − `request_reserve`) of the window's limit, the rest left to
+  requests, and one whose amount alone is over that share would take room only in an empty window. It is built, and set
+  to **0 on every route**, which turns it off and leaves exactly the two points above. It stays at 0 until the owner
+  rules, because the next review found it starves old deposits under ordinary traffic:
+  - **H1.** An old deposit larger than (1 − `request_reserve`) of the limit may leave only into a completely empty
+    window, so under any trickle of requests it waits indefinitely, and every directed deposit behind it waits with it.
+  - **M1.** A smaller old deposit starves too: requests are not bounded by old waiters, so a steady flow of them can
+    keep the window's use above what the deposit may join, window after window.
+
+  Neither is acceptable as it stands, and fixing them is a design choice (bounding requests against old waiters, a
+  share for the queue's head, or another rule), so it is the owner's (`d-f018-window-reserve`). No claim is made that a
+  deposit under the reserve is never stuck.
 - **What this means for requesters.** For one window after a queue forms, its claims refuse requests as before. After
   that, a request is checked against the shares actually taken in the window and the claims of deposits that began to
   wait within the last window; a request that fits is accepted, and the queue's next deposit waits for the room after
-  it. The queue takes at most (1 − `request_reserve`) of each later window, so a request still finds room right after
-  the window rolls over. Beyond that, directed deposits and requests share the window as amendment 0029's Open 5 ruled:
-  a directed deposit that leaves the queue takes its share like any deposit.
+  it. But the core usually gets there first: right after a window rolls over, the queue's head takes the freed room
+  within seconds, and a request finds room only in what the head leaves or between the head's turns. Beyond that,
+  directed deposits and requests share the window as amendment 0029's Open 5 ruled: a directed deposit that leaves the
+  queue takes its share like any deposit.
 - The ingress's route table (`GET /v0/routes`) shows the window's `used` and `remaining` by the same rule, as a request
   sees them.
+- **A queue that does not drain pages.** A directed deposit still waiting in `CND-DepositWindow` more than two of the
+  route's windows after it began to wait pages `directed-wait-alert` (once, then daily while any does; review M2 of
+  #142): its claim stopped counting against requests after one window, so by then it is being outrun. The page changes
+  nothing; the deposit keeps waiting.
 
 `REQ-IN-11`, `§10`'s `CND-DepositWindow` and the new `AC-A6.7` follow.
 

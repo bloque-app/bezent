@@ -548,3 +548,88 @@ async fn req_ic_2_directed_deposits_held_or_waiting_past_a_window_page_daily(
         }]
     );
 }
+
+/// `REQ-IC-2`, `REQ-IN-11`, `REQ-LM-1` (amendment 0031, `d-f018-window-queue`; review M2 of PR #142):
+/// a directed deposit that has waited in `CND-DepositWindow` for longer than two of the route's
+/// windows pages `directed-wait-alert`, once, then daily. Its claim stops counting against requests
+/// after one window, so one still waiting a window later is being outrun, by requests or by the
+/// queue's head; none pages before. It changes nothing: it keeps waiting. Once it leaves the
+/// window, it clears.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_ic_2_a_directed_deposit_waiting_for_the_window_past_two_windows_pages(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let pool = w.core.pool();
+    let log = PageLog::start();
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET maximum = 10000000, window_limit = 10000000, window_seconds = 86400 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    final_directed(&w.admin, 10, 10_000_000, DESTINATION_ACCOUNT).await;
+    final_directed(&w.admin, 11, 10_000_000, DESTINATION_ACCOUNT).await;
+    w.cycle(t0()).await;
+    let (waiting, _) = bound(&w, 11).await;
+    assert_eq!(
+        w.state(waiting).await,
+        ("Source-Final".into(), Some("CND-DepositWindow".into()))
+    );
+    // The route's window made one second long, and the core not cycling meanwhile, so the deposit
+    // stays in the queue: past one window, no page yet.
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET window_seconds = 1 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+    assert_eq!(
+        waits(directed_alerts::check(pool, &QUIET).await.unwrap()),
+        vec![],
+        "past one window, within two: no page"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert_eq!(
+        waits(directed_alerts::check(pool, &QUIET).await.unwrap()),
+        vec![Outcome::Paged {
+            kind: directed_alerts::WAITS,
+            asset: ASSET.into(),
+            network: ORIGIN.into(),
+            value: 1,
+            repeat: false
+        }]
+    );
+    assert_page(&log, "directed-wait-alert", 1);
+    assert_eq!(
+        waits(directed_alerts::check(pool, &QUIET).await.unwrap()),
+        vec![Outcome::Standing {
+            kind: directed_alerts::WAITS,
+            asset: ASSET.into(),
+            network: ORIGIN.into(),
+        }],
+        "once a day, not every minute"
+    );
+    assert_eq!(
+        w.state(waiting).await.1.as_deref(),
+        Some("CND-DepositWindow"),
+        "alerts only: it waits"
+    );
+    // The core cycles: the window has room, the deposit leaves it, and the page clears.
+    w.cycle(t0()).await;
+    assert_eq!(w.state(waiting).await, ("Source-Final".into(), None));
+    assert_eq!(
+        waits(directed_alerts::check(pool, &QUIET).await.unwrap()),
+        vec![Outcome::Cleared {
+            kind: directed_alerts::WAITS,
+            asset: ASSET.into(),
+            network: ORIGIN.into(),
+        }]
+    );
+}

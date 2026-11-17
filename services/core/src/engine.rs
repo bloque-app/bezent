@@ -3179,10 +3179,17 @@ impl Core {
             store::cancel_unsigned_attempt(conn, t.id, 1, action).await?;
             tracing::info!(transfer = %t.bridge_reference, action, "INV-8, REQ-RF-1: the directed deposit's mint, ordered and never signed, is cancelled under the approved resolution");
         }
+        // The supersede of earlier resolutions ([`Core::supersede_for_directed_refund`]) and the
+        // cancellation above are in this step's transaction: when the refund cannot be made, the
+        // step fails, so the transaction rolls back and none of them is committed without the
+        // refund (review L1 of PR #142). The step is tried again next cycle.
         let unproven = store::attempts_unproven(conn, t.id).await?;
         if !unproven.is_empty() {
-            tracing::error!(transfer = %t.bridge_reference, attempts = ?unproven, "INV-8: an attempt of the directed deposit is not closed; no refund");
-            return Ok(Did::default());
+            tracing::error!(transfer = %t.bridge_reference, attempts = ?unproven, "INV-8: an attempt of the directed deposit is not closed; no refund, and nothing of the resolution is committed");
+            return Err(sqlx::Error::InvalidArgument(format!(
+                "INV-8: directed deposit {}: attempts {unproven:?} are not closed; no refund",
+                t.bridge_reference
+            )));
         }
         let refund_to: Option<(Option<String>, Option<String>)> = sqlx::query_as(
             "SELECT refund_destination_network, refund_destination FROM transfers WHERE id = $1",
@@ -3192,8 +3199,11 @@ impl Core {
         .await?;
         let (Some((Some(network), Some(destination))), Some(source)) = (refund_to, t.source())
         else {
-            tracing::error!(transfer = %t.bridge_reference, "REQ-RF-2: the directed deposit has no refund destination; no refund");
-            return Ok(Did::default());
+            tracing::error!(transfer = %t.bridge_reference, "REQ-RF-2: the directed deposit has no refund destination; no refund, and nothing of the resolution is committed");
+            return Err(sqlx::Error::InvalidArgument(format!(
+                "REQ-RF-2: directed deposit {}: no refund destination; no refund",
+                t.bridge_reference
+            )));
         };
         sqlx::query(
             "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \

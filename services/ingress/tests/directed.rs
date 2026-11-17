@@ -402,3 +402,56 @@ async fn req_lm_4_waiting_and_held_directed_deposits_leave_capacity_to_requests(
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
     assert_eq!(answer["error"], "ERR-Overloaded");
 }
+
+/// `REQ-LM-4`, `REQ-AS-12` (amendment 0031; review L-a of PR #142): a directed deposit held by an
+/// upgrade of its token after it left `Source-Final` (here in `Needs-Review`, on a resolution's
+/// delivery) was in flight already, and the ingress keeps counting it, as `route_usage_locked()`
+/// does: with capacity 1 the route table shows it in flight, and a request is `ERR-Overloaded`.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_lm_4_a_deposit_held_by_an_upgrade_in_review_stays_in_flight(pool: PgPool) {
+    let ingress = Ingress::new(&pool).await;
+    let core = core_pool(&pool).await;
+    exec(&pool, "UPDATE routes SET capacity = 1").await;
+    directed(&pool, 1, 5_000).await;
+    let bridge = core_deposit(&core, 1).await;
+    let id: i64 = sqlx::query_scalar("SELECT id FROM transfers WHERE bridge_reference = $1")
+        .bind(&bridge)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    exec(
+        &core,
+        &format!(
+            "INSERT INTO transitions (transfer_id, from_state, to_state) \
+             VALUES ({id}, 'Source-Final', 'Needs-Review')"
+        ),
+    )
+    .await;
+    exec(
+        &core,
+        &format!(
+            "INSERT INTO transitions (transfer_id, from_state, to_state, condition) \
+             VALUES ({id}, 'Needs-Review', 'Needs-Review', 'CND-TokenUpgraded')"
+        ),
+    )
+    .await;
+    let (_, table) = ingress.get("/v0/routes", ALPHA).await;
+    let in_flight = table["routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["direction"] == "deposit")
+        .expect("the deposit route")["capacity"]["in_flight"]
+        .clone();
+    assert_eq!(in_flight, 1, "{table}");
+    let (status, answer) = ingress
+        .call(
+            "POST",
+            "/v0/deposits",
+            Some(ALPHA),
+            Some(&deposit_body("ref-1", arrival(&pool, 3, 1_000).await)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+    assert_eq!(answer["error"], "ERR-Overloaded");
+}

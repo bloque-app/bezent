@@ -8,7 +8,7 @@ kind: condition
 covers: [REQ-AS-12, REQ-GV-5, REQ-IN-11, AC-A6.8]
 pages: [origin-token-upgraded, directed-wait-alert]
 observables: [nonfinal_transfers, oldest_nonfinal_transfer_age_seconds, unassociated_arrivals]
-tests: [services/core/tests/directed.rs::ac_a6_8_an_upgrade_holds_directed_intake_until_two_operators_lift_it, services/core/tests/directed_alerts.rs::req_as_12_an_origin_tokens_upgrade_pages_once_and_holds_directed_intake, services/core/tests/directed.rs::req_as_12_deposits_held_by_an_upgrade_are_not_in_flight, services/core/tests/directed_alerts.rs::req_ic_2_directed_deposits_held_or_waiting_past_a_window_page_daily]
+tests: [services/core/tests/directed.rs::ac_a6_8_an_upgrade_holds_directed_intake_until_two_operators_lift_it, services/core/tests/directed_alerts.rs::req_as_12_an_origin_tokens_upgrade_pages_once_and_holds_directed_intake, services/core/tests/directed.rs::req_as_12_deposits_held_by_an_upgrade_are_not_in_flight, services/core/tests/directed.rs::req_lm_4_a_deposit_held_by_an_upgrade_after_source_final_stays_in_flight, services/core/tests/directed_alerts.rs::req_ic_2_directed_deposits_held_or_waiting_past_a_window_page_daily]
 exercised: no
 ---
 # CND-TokenUpgraded
@@ -21,9 +21,17 @@ A directed deposit of an admitted origin token whose code changed (its proxy emi
 its mint is ordered; a mint already signed is in flight and goes on (`INV-15`). The store refuses a mint order for a held
 deposit. While the hold stands, a directed arrival of that token that could never be minted is **not returned** either:
 it stays final and unbound (`unassociated_arrivals`), and is returned once the hold is lifted. A requester's deposit of the
-token is never held. An upgrade the network withdrew holds nothing; one observed and not yet final already holds. A held
-deposit is not in flight: it never fills the route's capacity against requesters' deposits; when the hold is lifted it
-takes its place in flight only if the route has room, and otherwise waits in `CND-DepositCapacity`.
+token is never held. An upgrade the network withdrew holds nothing; one observed and not yet final already holds. A
+deposit held at `Source-Final` is not in flight: it never fills the route's capacity against requesters' deposits; when
+the hold is lifted it takes its place in flight only if the route has room, and otherwise waits in
+`CND-DepositCapacity`. One held later, on a new attempt in `Delivering` or a resolution's delivery in `Needs-Review` (an
+upgrade observed late), was in flight already and stays in flight while held.
+
+After a hold, the window bounds intake, not mints. A held deposit took its share of the route's window when it was made,
+and keeps it while held; the shares leave the window as they age out of it, not as the deposits are minted. On the lift
+the held deposits mint together, as deposits held by a pause do (as far as the route's capacity lets them into flight),
+so the mints of one lift may be more than one window would allow. That is expected (amendment 0031, part 3), not a
+breach of the window.
 
 The time held does not count toward the route's deadline: the first mint attempt's clock starts when the deposit leaves
 the condition.

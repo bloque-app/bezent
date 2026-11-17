@@ -21,9 +21,10 @@ request: its value has already moved, so it waits at `Source-Final`, mints nothi
 has room, in the order of arrival (amendment 0031, `d-f018-capacity`, ruled: "Wait for capacity"; SPEC §10,
 `REQ-IN-11`). It is never returned for capacity. While it waits it counts as in flight, so requests that come after it
 are refused `ERR-Overloaded`, first come first served. The window comes first: a deposit that waited in
-`CND-DepositWindow` and leaves it while the route is full waits on here. A deposit waiting for the window, or held by
-an upgrade of its token (`CND-TokenUpgraded`), carries nothing and is not in flight; it takes its place, or waits here,
-when it leaves that wait. A deposit that waited gets the whole of the
+`CND-DepositWindow` and leaves it while the route is full waits on here. A deposit waiting at `Source-Final` for the
+window, or held there by an upgrade of its token (`CND-TokenUpgraded`), carries nothing and is not in flight; it takes its
+place, or waits here, when it leaves that wait. One held by an upgrade later, in `Delivering` or `Needs-Review`, was in
+flight already and stays in flight while held. A deposit that waited gets the whole of the
 route's deadline for a later `CND-DestinationRefused`, counted from when it left the condition.
 
 ## Pages

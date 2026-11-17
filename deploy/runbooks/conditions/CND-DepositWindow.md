@@ -6,9 +6,9 @@ SPDX-License-Identifier: CC-BY-4.0
 id: CND-DepositWindow
 kind: condition
 covers: [REQ-IN-11, REQ-LM-1, REQ-LM-3, AC-A6.7]
-pages: [deposit-window-alert]
+pages: [deposit-window-alert, directed-wait-alert]
 observables: [nonfinal_transfers, oldest_nonfinal_transfer_age_seconds]
-tests: [services/core/tests/directed.rs::ac_a6_3_cnd_deposit_window_waits_first_come_first_served_and_resumes_as_it_rolls_over, services/core/tests/directed.rs::cnd_deposit_window_a_window_that_can_never_fit_pages, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_signed_mint_after_the_window_gets_its_whole_delivering_deadline, services/core/tests/directed.rs::ac_a6_7_a_queue_of_several_windows_leaves_requesters_room_after_one_window]
+tests: [services/core/tests/directed.rs::ac_a6_3_cnd_deposit_window_waits_first_come_first_served_and_resumes_as_it_rolls_over, services/core/tests/directed.rs::cnd_deposit_window_a_window_that_can_never_fit_pages, services/core/tests/directed.rs::req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline, services/core/tests/directed.rs::req_in_9_a_signed_mint_after_the_window_gets_its_whole_delivering_deadline, services/core/tests/directed.rs::ac_a6_7_a_queue_of_several_windows_leaves_requesters_room_after_one_window, services/core/tests/directed.rs::req_in_11_with_the_reserve_off_the_queue_head_takes_the_freed_room_first, services/core/tests/directed_alerts.rs::req_ic_2_a_directed_deposit_waiting_for_the_window_past_two_windows_pages]
 exercised: no
 ---
 # CND-DepositWindow
@@ -27,11 +27,11 @@ requesters' room in the window only for one window (the route's window length) f
 waiting deposits together for no more than the window's limit (`route_window_used()`, which the ingress's checks and its
 route table read). A deposit that has waited longer still waits, and still goes before every later directed deposit,
 but requesters' deposits no longer see it: once room frees, a request may take it, and the queue waits for the room
-after. And such a queue takes no more than (1 - `request_reserve`) of each later window, a route-level setting, half by
-default, so that the core, which cycles every few seconds, does not take each freed room before a request can come; a
-deposit whose amount alone is over that share leaves only into an empty window (`directed_window_fits()`; the proposed
-implementation of the ruling, pending the owner's confirmation as `d-f018-window-reserve`; 0 turns it off). While it
-waits for the window a deposit carries nothing and is not in flight for the route's capacity. When it leaves the window,
+after. In practice the core, which cycles every few seconds, usually gets there first: right after the window rolls
+over, the queue's head takes the freed room before a request can come. That gap is open, pending the owner's ruling
+`d-f018-window-reserve` (amendment 0031, part 5); the route's `request_reserve`, which would keep part of the window for
+requests, is 0 on every route and is not in force. While it waits for the window a deposit carries nothing and is not in
+flight for the route's capacity. When it leaves the window,
 a deposit whose route is at its capacity waits on in `CND-DepositCapacity`.
 
 ## Pages
@@ -43,6 +43,11 @@ and the metrics `nonfinal_transfers` and `oldest_nonfinal_transfer_age_seconds` 
 (`route-not-declared`) or its window's limit lowered below the deposit's amount (`above-window-limit`). Once per reason,
 then once a day while it lasts; also in the event log. The deposit keeps waiting: nothing is returned or reviewed for
 it. Whether such a deposit should instead be returned is a question for the spec, not for the operator.
+
+`directed-wait-alert` pages, per deposit route, once any directed deposit has waited in the condition for longer than two
+of the route's windows (`window_seconds`): its claim stopped counting against requests after one, so by then it is being
+outrun, by requests or by the queue's head. Once on crossing, then once a day while it stands; `directed-alert-cleared`
+once none waits that long (`pages/directed-wait.md`).
 
 ## Confirm
 

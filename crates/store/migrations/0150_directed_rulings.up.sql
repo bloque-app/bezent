@@ -7,10 +7,11 @@
 --     flight that do not wait for capacity, plus the directed deposits waiting for it ahead by
 --     coordinate, leave room (directed_capacity_fits(), under the route's lock). While it waits it is
 --     a transfer in flight, so route_usage_locked()'s count, the ingress's, counts it: first come
---     first served. It is never returned for capacity. A deposit waiting for the window or held by
---     an upgrade of its token carries nothing yet, so neither count holds it in flight (review M1 and
---     M2 of PR #142): it takes its place in flight when it leaves that wait, through
---     directed_capacity_fits() again.
+--     first served. It is never returned for capacity. A deposit waiting in Source-Final for the
+--     window or held there by an upgrade of its token carries nothing yet, so neither count holds it
+--     in flight (review M1 and M2 of PR #142): it takes its place in flight when it leaves that wait,
+--     through directed_capacity_fits() again. One held by an upgrade later, in Delivering or in
+--     Needs-Review, was in flight already and stays so (review L-a of PR #142).
 --   * The window's queue claims one window at most (`d-f018-window-queue`; REQ-IN-11, AC-A6.7):
 --     route_window_used() is what a request sees of the window. A directed deposit waiting in
 --     CND-DepositWindow counts against it only for one window (the route's `window_seconds`) from
@@ -18,17 +19,18 @@
 --     limit. directed_window_fits(), the core's question for one directed deposit, still counts every
 --     deposit waiting ahead of it by coordinate, however long, so the queue drains in order and what
 --     is minted never exceeds the window.
---   * The requests' reserve (the proposed implementation of `d-f018-window-queue`, pending the
---     owner's confirmation as `d-f018-window-reserve`; review M3 of PR #142): once the queue is older
---     than one window it no longer counts against requests, but its head would still take every
---     window's room as it frees, within seconds, before any request came. So a directed deposit that
---     waits behind, or is itself, a deposit that began to wait more than one window ago may leave the
---     window's wait only while what the window has taken, plus every deposit waiting ahead of it,
---     plus its own amount, is within (1 - `routes.request_reserve`) of the window's limit (0.5 by
---     default; 0 restores amendment 0029's rule). One whose amount alone is over that share leaves
---     only when the window holds nothing else, so that it is never stuck. Directed deposits that
---     have waited less than one window are unaffected; the order by coordinate and the window's
---     limit hold as before (directed_window_fits()).
+--   * The requests' reserve: NOT IN FORCE. `routes.request_reserve` is 0 on every route and stays 0
+--     until the owner rules on `d-f018-window-reserve` (review M3 of PR #142 proposed it; the second
+--     review of #142 found it starves old deposits). At 0, directed_window_fits() is amendment
+--     0029's rule: once the queue is older than one window it no longer counts against requests,
+--     but its head may still take a window's freed room, within seconds, before a request comes.
+--     Set above 0, a directed deposit that waits behind, or is itself, a deposit that began to wait
+--     more than one window ago may leave the window's wait only while what the window has taken,
+--     plus every deposit waiting ahead of it, plus its own amount, is within (1 - request_reserve)
+--     of the window's limit; one whose amount alone is over that share leaves only into an empty
+--     window. Known faults that keep it off: such a deposit waits for as long as any trickle of
+--     requests keeps the window from being empty (H1), and a smaller old deposit waits too, since
+--     requests are not bounded by old waiters and can keep the window's use above its share (M1).
 --   * The review edge judged at resolution (`d-f018-review-exit-later`; REQ-RV-2, REQ-RF-1,
 --     AC-A6.9): directed_review_refund_open() no longer asks that the review was entered holding
 --     CND-DestinationRefused. The newest dry run of attempt 1 (across its orders, a resolution's
@@ -62,17 +64,19 @@ ALTER DOMAIN transfer_condition ADD CONSTRAINT transfer_condition_check
         'CND-DepositWindow', 'CND-DepositCapacity', 'CND-TokenUpgraded'
     ));
 
--- The share of a route's window kept for requests from a queue of directed deposits older than one
--- window (directed_window_fits(); `d-f018-window-reserve`, proposed). Route-level, as the window is:
--- 0 gives the queue the whole window again, 1 keeps all of it for requests until the queue is
--- younger than a window.
-ALTER TABLE routes ADD COLUMN request_reserve NUMERIC NOT NULL DEFAULT 0.5
+-- The share of a route's window that would be kept for requests from a queue of directed deposits
+-- older than one window (directed_window_fits()). Not in force: 0, which gives the queue the whole
+-- window as amendment 0029 ruled, until the owner rules on `d-f018-window-reserve`; the faults found
+-- above 0 are in the header (H1, M1). Never set it above 0 before that ruling.
+ALTER TABLE routes ADD COLUMN request_reserve NUMERIC NOT NULL DEFAULT 0
     CONSTRAINT routes_request_reserve_share CHECK (request_reserve >= 0 AND request_reserve <= 1);
 
 COMMENT ON COLUMN routes.request_reserve IS
-    'REQ-IN-11, REQ-LM-1 (amendment 0031, d-f018-window-queue; proposed as d-f018-window-reserve): '
-    'the share of the window''s limit a directed deposit waiting behind a queue older than one window '
-    'leaves to requests. 0.5 by default; 0 turns the reserve off.';
+    'REQ-IN-11, REQ-LM-1 (amendment 0031): NOT IN FORCE, awaiting the ruling d-f018-window-reserve. '
+    'The share of the window''s limit a directed deposit waiting behind a queue older than one window '
+    'would leave to requests. 0, the reserve off, until that ruling; above 0 an old deposit over '
+    '(1 - request_reserve) of the limit waits while the window is not empty, and a smaller one while '
+    'requests keep the window''s use above that share (review of PR #142, H1 and M1).';
 
 -- ---------------------------------------------------------------------------------------------
 -- The window, as a request sees it (`d-f018-window-queue`).
@@ -151,30 +155,37 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         'bezent/route/' || p_asset || '/' || p_network || '/' || p_direction, 0));
     used := route_window_used(p_asset, p_network, p_direction, p_window_seconds);
-    -- A deposit waiting for the window, or held by an upgrade of its token, carries nothing yet: it
-    -- is not in flight (review M1 and M2 of PR #142). One waiting for capacity is, first come first
-    -- served.
+    -- A deposit waiting in Source-Final for the window, or held there by an upgrade of its token,
+    -- carries nothing yet: it is not in flight (review M1 and M2 of PR #142), and it takes its place
+    -- through directed_capacity_fits() when it leaves the wait. One held later (in Delivering, or in
+    -- Needs-Review, on a resolution's delivery) was in flight already and stays so: nothing checks
+    -- the capacity again when its hold lifts (review L-a of PR #142). One waiting for capacity is in
+    -- flight, first come first served.
     SELECT count(*) INTO in_flight
     FROM transfers t
     WHERE t.asset = p_asset AND t.kind = p_direction
       AND (CASE t.kind WHEN 'deposit' THEN t.source_network ELSE t.destination_network END) = p_network
       AND NOT is_terminal_state(t.state)
-      AND (t.condition IS NULL OR t.condition NOT IN ('CND-DepositWindow', 'CND-TokenUpgraded'));
+      AND NOT (t.state = 'Source-Final'
+               AND t.condition IS NOT NULL
+               AND t.condition IN ('CND-DepositWindow', 'CND-TokenUpgraded'));
 END
 $$;
 
 -- ---------------------------------------------------------------------------------------------
--- The requests' reserve (`d-f018-window-queue`, as proposed for `d-f018-window-reserve`).
+-- The window's queue (`d-f018-window-queue`), and the requests' reserve, not in force (0) until the
+-- owner rules on `d-f018-window-reserve`.
 
 -- Whether deposit `p_transfer` fits in what its route's window has left (REQ-LM-1, amendment 0029
 -- Open 1): what the other deposits of the route took within the window, plus what every deposit
 -- waiting ahead of it by coordinate claims (first come first served: block, then position), plus its
--- own amount, is within the room it may take. That room is the window's limit, unless it, or a
--- deposit waiting ahead of it, began to wait in CND-DepositWindow more than one window ago: then it
--- is (1 - the route's `request_reserve`) of the limit, the rest left to requests (amendment 0031,
--- `d-f018-window-queue`; review M3 of PR #142), or its own amount if that alone is more, which it
--- takes only when the window holds nothing else; never more than the limit. A deposit behind one so
--- bounded is bounded too, so none leaves before one ahead of it. FALSE for a transfer that is not a
+-- own amount, is within the room it may take. That room is the window's limit. With the route's
+-- `request_reserve` above 0 (not in force: 0 until `d-f018-window-reserve` is ruled; review M3 of
+-- PR #142, and H1 and M1 of its second review), it is less when it, or a deposit waiting ahead of
+-- it, began to wait in CND-DepositWindow more than one window ago: (1 - request_reserve) of the
+-- limit, or its own amount if that alone is more, which it takes only when the window holds
+-- nothing else; never more than the limit. A deposit behind one so bounded is bounded too, so none
+-- leaves before one ahead of it. FALSE for a transfer that is not a
 -- deposit with a declared route. Takes the route's lock (route_usage_locked), held until the
 -- transaction ends, so that the decision and the transition it leads to are serial with every other
 -- reading of the window, the ingress's included. Runs with the caller's privileges; the core calls
@@ -260,7 +271,8 @@ $$;
 COMMENT ON FUNCTION directed_window_fits(BIGINT) IS
     'REQ-LM-1, REQ-IN-11 (amendments 0029, Open 1, and 0031, d-f018-window-queue): whether a directed '
     'deposit fits in what its route''s window has left, behind every deposit waiting ahead of it by '
-    'coordinate; behind a queue older than one window, only in (1 - request_reserve) of the limit. '
+    'coordinate; behind a queue older than one window, only in (1 - request_reserve) of the limit '
+    '(0, the reserve off, until d-f018-window-reserve is ruled). '
     'Takes the route''s lock until the transaction ends. The core holds CND-DepositWindow while it '
     'does not.';
 
@@ -268,8 +280,9 @@ COMMENT ON FUNCTION directed_window_fits(BIGINT) IS
 -- Capacity (`d-f018-capacity`).
 
 -- Whether deposit `p_transfer` fits in its route's capacity (REQ-LM-4, REQ-IN-11): the route's
--- other transfers in flight that do not wait (for capacity, for the window, or under the hold of an
--- upgrade of their token: those carry nothing yet), plus the deposits waiting for capacity ahead by
+-- other transfers in flight that do not wait (for capacity; or, in Source-Final, for the window or
+-- under the hold of an upgrade of their token: those carry nothing yet, as route_usage_locked()
+-- counts them), plus the deposits waiting for capacity ahead by
 -- coordinate (block, then position, then id), plus itself, are within the declared capacity. FALSE
 -- for a transfer that is not a deposit with a declared route. Takes the route's lock
 -- (route_usage_locked), held until the transaction ends, so that the decision and the transition it
@@ -303,8 +316,10 @@ BEGIN
           = t.source_network
       AND d.id <> t.id
       AND NOT is_terminal_state(d.state)
-      AND (d.condition IS NULL
-           OR d.condition NOT IN ('CND-DepositCapacity', 'CND-DepositWindow', 'CND-TokenUpgraded'));
+      AND (d.condition IS NULL OR d.condition <> 'CND-DepositCapacity')
+      AND NOT (d.state = 'Source-Final'
+               AND d.condition IS NOT NULL
+               AND d.condition IN ('CND-DepositWindow', 'CND-TokenUpgraded'));
     SELECT count(*) INTO ahead
     FROM transfers d
     WHERE d.asset = t.asset AND d.kind = 'deposit'

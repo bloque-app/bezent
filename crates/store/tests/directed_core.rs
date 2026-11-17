@@ -372,9 +372,10 @@ async fn window_fits(core: &PgPool, id: i64) -> bool {
         .unwrap()
 }
 
-/// `REQ-IN-11`, `REQ-LM-1`, `AC-A6.7` (amendment 0031, `d-f018-window-queue`, as proposed for
-/// `d-f018-window-reserve`; review M3 of PR #142): a directed deposit that began to wait more than one
-/// window ago, and every one waiting behind it however recently, fits only within (1 -
+/// `REQ-IN-11`, `REQ-LM-1` (amendment 0031): the requests' reserve is NOT IN FORCE, 0 on every route
+/// until the owner rules on `d-f018-window-reserve`; this test sets it to 0.5 explicitly to verify
+/// the reserve's own behaviour (review M3 of PR #142). A directed deposit that began to wait more
+/// than one window ago, and every one waiting behind it however recently, fits only within (1 -
 /// `routes.request_reserve`) of the window's limit, the rest left to requests; a request sees the
 /// shares and the claims of the deposits that began to wait within the window only. 0 turns the
 /// reserve off, and a queue younger than a window is unaffected.
@@ -382,6 +383,7 @@ async fn window_fits(core: &PgPool, id: i64) -> bool {
 async fn req_in_11_a_queue_older_than_a_window_leaves_the_requests_reserve(pool: PgPool) {
     declarations(&pool).await;
     let core = login(&pool, "dc_core_r_for_tests", bezent_store::CORE_ROLE).await;
+    exec(&pool, "UPDATE routes SET request_reserve = 0.5").await;
     // x, 4, waits; one window on (the route's window made one second long, and a second and a half
     // later) it has waited longer than a window.
     final_arrival_of(&pool, 7, "directed_arrival", DIRECTING, 4_000_000).await;
@@ -433,13 +435,17 @@ async fn req_in_11_a_queue_older_than_a_window_leaves_the_requests_reserve(pool:
     }
 }
 
-/// `REQ-IN-11` (amendment 0031, as proposed for `d-f018-window-reserve`; review M3 of PR #142): the
-/// head of a queue older than a window whose amount alone is over the unreserved share is never stuck:
-/// it fits when the window holds nothing else, and only then.
+/// `REQ-IN-11` (amendment 0031; the requests' reserve, NOT IN FORCE until `d-f018-window-reserve` is
+/// ruled, set to 0.5 here explicitly): the head of a queue older than a window whose amount alone is
+/// over the unreserved share fits when the window holds nothing else, and only then. That is the
+/// known fault H1 of the second review of PR #142: under any trickle of requests the window is never
+/// empty, and it waits for as long as they come (the core's ignored test
+/// `req_in_11_reserve_h1_an_old_deposit_over_the_share_starves` shows it under traffic).
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_in_11_a_head_over_the_unreserved_share_takes_only_an_empty_window(pool: PgPool) {
     declarations(&pool).await;
     let core = login(&pool, "dc_core_h_for_tests", bezent_store::CORE_ROLE).await;
+    exec(&pool, "UPDATE routes SET request_reserve = 0.5").await;
     final_arrival_of(&pool, 7, "directed_arrival", DIRECTING, 6_000_000).await;
     let v = directed_deposit(&core, 7).await;
     waits_for_the_window(&core, v).await;
@@ -454,6 +460,35 @@ async fn req_in_11_a_head_over_the_unreserved_share_takes_only_an_empty_window(p
     assert!(
         !window_fits(&core, v).await,
         "1 + 6 is within the window, but the window is not empty"
+    );
+}
+
+/// `REQ-IN-11`, `REQ-LM-1` (amendment 0031): the requests' reserve is not in force. Every route takes
+/// `request_reserve` 0 (never applied before the owner rules on `d-f018-window-reserve`), and at 0 a
+/// queue older than a window may take the whole window, in coordinate order, as amendment 0029 ruled:
+/// a head of 6, more than half the window, joins a window that holds 1 already.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_11_the_requests_reserve_is_off_by_default(pool: PgPool) {
+    declarations(&pool).await;
+    let core = login(&pool, "dc_core_o_for_tests", bezent_store::CORE_ROLE).await;
+    assert_eq!(
+        text(
+            &pool,
+            "SELECT string_agg(DISTINCT request_reserve::text, ',') FROM routes"
+        )
+        .await,
+        "0"
+    );
+    final_arrival_of(&pool, 7, "directed_arrival", DIRECTING, 6_000_000).await;
+    let v = directed_deposit(&core, 7).await;
+    waits_for_the_window(&core, v).await;
+    exec(&pool, "UPDATE routes SET window_seconds = 1").await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    final_arrival_of(&pool, 8, "directed_arrival", DIRECTING, 1_000_000).await;
+    directed_deposit(&core, 8).await;
+    assert!(
+        window_fits(&core, v).await,
+        "1 + 6 within the limit: the old head takes it"
     );
 }
 
