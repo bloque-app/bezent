@@ -31,19 +31,21 @@ const TEST_KREIVO: KreivoNetwork = { ...KREIVO_TESTBED, network: 'kreivo-test', 
 const AMOY: OriginNetwork = { ...POLYGON_AMOY, ...PINS, kreivo: TEST_KREIVO };
 
 describe('resolveNetwork', () => {
-  it('refuses Amoy and Polygon while their DirectedDeposit is not deployed', () => {
-    expect(POLYGON_AMOY.directedDeposit).toBe(UNSET);
+  it('refuses Polygon while its DirectedDeposit is not deployed, and Amoy while it names no test Kreivo', () => {
     expect(POLYGON.directedDeposit).toBe(UNSET);
-    expect(() => resolveNetwork(POLYGON_AMOY)).toThrow(UnsetConfiguration);
-    expect(() => resolveNetwork(POLYGON_AMOY)).toThrow(/DirectedDeposit address is not set/);
     expect(() => resolveNetwork(POLYGON)).toThrow(UnsetConfiguration);
+    expect(() => resolveNetwork({ ...AMOY, directedDeposit: UNSET })).toThrow(/DirectedDeposit address is not set/);
+    // T-018-04 pinned Amoy's contract; no test Kreivo is named yet, so Amoy is still refused.
+    expect(POLYGON_AMOY.directedDeposit).toBe('0xB8F75BeAE2723637313072fC89C69B7C15EdAec7');
+    expect(POLYGON_AMOY.kreivo).toBe(UNSET);
+    expect(() => resolveNetwork(POLYGON_AMOY)).toThrow(UnsetConfiguration);
   });
 
-  it('leaves the reserve and the code hash unset for Amoy and Polygon, so they are refused', () => {
-    for (const n of [POLYGON, POLYGON_AMOY]) {
-      expect(n.reserve).toBe(UNSET);
-      expect(n.codeHash).toBe(UNSET);
-    }
+  it('leaves the reserve and the code hash unset for Polygon, pins them for Amoy, and refuses either unset', () => {
+    expect(POLYGON.reserve).toBe(UNSET);
+    expect(POLYGON.codeHash).toBe(UNSET);
+    expect(POLYGON_AMOY.reserve).toBe('0x3530dBB6986Dc584bf3D83a0ed4cbE027238204a');
+    expect(POLYGON_AMOY.codeHash).toBe('0x6c32ce3fe773ad4f2bb35e6f83948766d3058c0dbc016ffed003b891489307f0');
     expect(() => resolveNetwork({ ...AMOY, reserve: UNSET })).toThrow(/reserve address is not set/);
     expect(() => resolveNetwork({ ...AMOY, codeHash: UNSET })).toThrow(/code hash is not set/);
     expect(() => resolveNetwork({ ...AMOY, codeHash: '0x1234' })).toThrow(/not 32 bytes/);
