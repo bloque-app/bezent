@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # F-018 — tasks
 
-**Accepted.** Amendment 0029 is applied (`SPEC.md` v0.5.13). T-018-01 to T-018-03, T-018-05 and T-018-06 are drafted, in pull requests #121, #122 and #125; T-018-04 is done (Polygon Amoy); T-018-10 and T-018-11 are built (`NOTES.md`, "The public status route, the statement and the alerts"). Its Open questions are ruled (2026-11-09);
+**Accepted.** Amendment 0029 is applied (`SPEC.md` v0.5.13), and amendment 0031 (`SPEC.md` v0.5.14) adds T-018-22 to T-018-25. T-018-01 to T-018-03, T-018-05 and T-018-06 are drafted, in pull requests #121, #122 and #125; T-018-04 is done (Polygon Amoy); T-018-10 and T-018-11 are built (`NOTES.md`, "The public status route, the statement and the alerts"). Its Open questions are ruled (2026-11-09);
 where a ruling removed a task, its identifier is retired and not reused. Sizes are rough, for one engineer with agents, review included. *S* is up to a week,
 *M* one to two weeks, *L* two to three.
 
@@ -55,6 +55,10 @@ network constants in `contracts/evm/config/polygon-amoy.json`; the endpoint's Am
 | T-018-09 | The review edge for a directed deposit that can never receive (Open 2, ruled yes) | `REQ-RV-2`, `REQ-GV-5`, `INV-8` | A resolution into `Refunding` runs only with a second approver and no signed mint attempt |
 | T-018-10 | Public status route, its own listener, no credential (Open 8, ruled yes) | `REQ-ST-8`, `REQ-ID-4` | Answers only directed deposits and withdrawals, by coordinate or redemption reference; never a requester's field; a requester-bound transfer's coordinate answers "not found" |
 | T-018-11 | Statement and published addresses list the directing contract; alerts for directed mints and returns against thresholds, directed use of the window, and `UnpairedDirection` | `REQ-AS-11`, `REQ-BK-5`, `REQ-ST-6` | Statement fixture shows it; alerts fire in tests |
+| T-018-22 | Capacity (amendment 0031, `d-f018-capacity`, ruled: wait): a directed deposit over the route's capacity holds `CND-DepositCapacity` and resumes in coordinate order; the deadlines start when it leaves the wait | `REQ-LM-4`, `REQ-IN-11`, `AC-A6.3` | Engine tests: it waits, resumes in order, is never returned, and gets its whole deadline after the wait |
+| T-018-23 | The review edge judged at resolution (amendment 0031, `d-f018-review-exit-later`) | `REQ-RV-2`, `REQ-RF-1`, `AC-A6.9` | A review entered for an unknown, then a later live refusal, is refundable with two approvers; a later passing preparation closes it; a stale refusal followed by an unknown keeps it closed |
+| T-018-24 | The hold on an origin token's upgrade and its two-person lift (amendment 0031, `d-f018-usdc-upgrade`) | `REQ-AS-12`, `REQ-GV-5`, `AC-A6.8` | A directed arrival after an upgrade holds `CND-TokenUpgraded`, nothing minted or returned; a requester's deposit is not held; it resumes after a lift approved by a second login |
+| T-018-25 | The waiting queue claims one window at most (amendment 0031, `d-f018-window-queue`), in the store and the ingress's route table | `REQ-IN-11`, `REQ-LM-1`, `AC-A6.7` | A queue of several windows leaves requesters able to deposit after one window; the queue drains in coordinate order |
 
 ## Milestone 3 — the web app (M to L, two to three weeks)
 

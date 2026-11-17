@@ -1,9 +1,9 @@
 ---
 name: bezent
-plan_version: 0.6.12
-status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first); v0.6.5 binds SPEC.md v0.5.6 (amendment 0020: an attempt never prepared goes to review at the route's deadline); v0.6.6 binds SPEC.md v0.5.7 (amendments 0022, A1b, and 0019, A1d: a pause holds an unsigned attempt, and its time is left out of the deadline); v0.6.7 binds SPEC.md v0.5.8 (amendments 0021 and 0024: "sustained" is 24 hours, and the full release gate applies only to a release that moves value) and records the fee position ruling (amendment 0025); v0.6.8 binds SPEC.md v0.5.9 (amendment 0026: a deposit binds only an arrival from its requester's declared senders); v0.6.9 binds SPEC.md v0.5.10 (amendment 0018, Open 3 in part and Open 6: a conversion output may be named in review, and the output is checked against the route's limits); v0.6.10 binds SPEC.md v0.5.11 (amendment 0026 is withdrawn, `d-0026-holdout`: a deposit binds an arrival by its coordinate again); v0.6.11 binds SPEC.md v0.5.12 (amendment 0028: the reserve check holds an asset it cannot see and lifts the hold itself; a difference of value is a pause, as before); v0.6.12 binds SPEC.md v0.5.13 (amendment 0029: a directed arrival names its own destination and becomes a deposit with no requester, through the `DirectedDeposit` contract and the bridge web app)
+plan_version: 0.6.13
+status: approved by @pandres95 (v0.2.0, 2026-10-13); v0.3.0 adds what the sign-off asked for; v0.6.0 records his rulings of 2026-10-15 to 2026-10-20; v0.6.1 binds SPEC.md v0.5.3 and records his rulings of 2026-10-22; v0.6.2 binds SPEC.md v0.5.4 and moves the delivery keys off AWS KMS (`d-delivery-keys`); v0.6.3 has the central signer sign Polygon through the Vault plugin, with no sidecar (`d-polygon-central-signer`); v0.6.4 binds SPEC.md v0.5.5 (amendment 0018, A1b: a convertible deposit is requested first); v0.6.5 binds SPEC.md v0.5.6 (amendment 0020: an attempt never prepared goes to review at the route's deadline); v0.6.6 binds SPEC.md v0.5.7 (amendments 0022, A1b, and 0019, A1d: a pause holds an unsigned attempt, and its time is left out of the deadline); v0.6.7 binds SPEC.md v0.5.8 (amendments 0021 and 0024: "sustained" is 24 hours, and the full release gate applies only to a release that moves value) and records the fee position ruling (amendment 0025); v0.6.8 binds SPEC.md v0.5.9 (amendment 0026: a deposit binds only an arrival from its requester's declared senders); v0.6.9 binds SPEC.md v0.5.10 (amendment 0018, Open 3 in part and Open 6: a conversion output may be named in review, and the output is checked against the route's limits); v0.6.10 binds SPEC.md v0.5.11 (amendment 0026 is withdrawn, `d-0026-holdout`: a deposit binds an arrival by its coordinate again); v0.6.11 binds SPEC.md v0.5.12 (amendment 0028: the reserve check holds an asset it cannot see and lifts the hold itself; a difference of value is a pause, as before); v0.6.12 binds SPEC.md v0.5.13 (amendment 0029: a directed arrival names its own destination and becomes a deposit with no requester, through the `DirectedDeposit` contract and the bridge web app); v0.6.13 binds SPEC.md v0.5.14 (amendment 0031: directed deposits wait for capacity, an upgrade of the origin token holds them, the queue claims one window, and the review edge is judged at resolution)
 date: 2026-11-17
-binds: SPEC.md v0.5.13
+binds: SPEC.md v0.5.14
 ---
 
 # bezent — Implementation Plan
@@ -21,7 +21,7 @@ that serves nothing in the spec is not in this plan.
 | `M-*` | A milestone: a set of features that together make a stated claim true, with exit criteria |
 | `RISK-*` | A risk to the plan, with its mitigation |
 
-1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.13. If a technical fact makes a requirement
+1. **The plan never contradicts the spec.** It binds `SPEC.md` v0.5.14. If a technical fact makes a requirement
    impossible to meet, that becomes a spec amendment first (`amendments/`), and the plan follows it. A gap in the spec
    is handled the same way: we stop, propose an amendment, and do not fill the gap in code.
 2. **Facts come from the notes.** Numbers and properties of Kreivo, the EVM networks, CCTP, evmhot and Swaps come from
@@ -39,6 +39,7 @@ that serves nothing in the spec is not in this plan.
 | 0.6.10 | 2026-11-09 | The plan binds `SPEC.md` v0.5.11. Amendment 0026 is withdrawn (`d-0026-holdout`, ruled by @pandres95 on the decision form, 2026-11-09: "Revert #100"): a deposit binds an arrival by the coordinate its request names, as before v0.6.8, and no requester declares senders (`ERR-SenderNotDeclared`, `REQ-PN-3` withdrawn). The swap service keeps binding evmhot sweeps by coordinate; amendment 0029 (directed deposits, #119) replaces that path. The paragraphs v0.6.8 added to the deposit flow and to the one-instance note are removed (`DEC-9`, `DEC-15`, `F-002`; migration 0135 removed, never released). The 0.6.8 row stays as history |
 | 0.6.11 | 2026-11-09 | The plan binds `SPEC.md` v0.5.12. Amendment 0028 (@pandres95's ruling in chat, 2026-11-07: "Yes, write the amendment and build it."): when the reserve check cannot see an asset it holds the asset's routes (a row of `pauses` of cause `blind`, kind `hold`, so every reader that refuses work under a pause refuses it under the hold), lifts the hold itself at the first evaluation that holds, and pages `reserve-blind` once the hold outlasts `networks.reserve_blind_page_seconds` (default 600) or at once on a finality stall; a lag or a stale head is no longer a divergence; a difference of value pauses under `REQ-BK-1`, as before, and is lifted only by two operators. The core runs the reserve check before its cycle (`DEC-16`, `F-004`, migration 0142). |
 | 0.6.12 | 2026-11-17 | The plan binds `SPEC.md` v0.5.13. Amendment 0029 (accepted by @pandres95 in chat, 2026-11-17: "We need to revise this and make it happen"; its Open 1 to 13 ruled on the decision form, 2026-11-09, `d-0029-window` to `d-0029-gas`, Open 15 `d-mixed-sweeps-2`, and the refund destination `d-refund-dest-swaps`): a `DirectedDeposit` contract on Polygon pulls USDC from its caller into the vault and emits the Kreivo recipient and the refund address in the same call; immutable limits equal to the route's, no owner, no upgrade, no pause (`DEC-21`). The EVM endpoint records a vault `Transfer` paired with that event as a directed arrival, not an arrival, and it becomes a deposit without Swaps (`DEC-8`, `DEC-9`); the refused list of ledger contract accounts applies to directed recipients, as a return (`DEC-15`). A static bridge web app, `apps/bridge/`, on Cloudflare Workers static assets, deposits with an EVM wallet and redeems with a Kreivo extension wallet (`DEC-22`), under Apache-2.0 OR MIT (Open 12; `DEC-20`, `docs/oss/LICENSING.md`). New feature `F-018`, folded into `M-4` with its criteria (Open 10: no `M-6`); the release that opens directed deposits on mainnet is value-moving and runs inside the 48-hour soak (Open 11). |
+| 0.6.13 | 2026-11-17 | The plan binds `SPEC.md` v0.5.14. Amendment 0031 (@pandres95's rulings on the decision form, 2026-11-17: `d-f018-capacity`, `d-f018-review-exit-later`, `d-f018-usdc-upgrade`, `d-f018-return-routing`, `d-f018-window-queue`): in the store (migration 0150) a directed deposit over its route's capacity holds `CND-DepositCapacity` (`directed_capacity_fits()`); the window's count (`route_window_used()`, read by `route_usage_locked()` and by the ingress's route table) counts a waiting deposit's claim against requests only for one window from when it began to wait, and the claims together up to one window's limit; the directed review edge (`directed_review_refund_open()`) is judged on the newest preparation at resolution; an `Upgraded` event of an admitted token holds the directed deposits of that token at or after its block (`CND-TokenUpgraded`, `directed_token_held()`) until two operators lift it (`operator_request_token_hold_lift`, `operator_approve_token_hold_lift`) after the fork suite has been run against the new implementation. `DEC-21` records it, and its cost the accepted routing of returns to a third party (`d-f018-return-routing`). |
 | 0.6.9 | 2026-11-06 | The plan binds `SPEC.md` v0.5.10. @pandres95's ruling on the decision form, 2026-11-06. `d-cv-open-choices` ("As recommended"; amendment 0018, Open 3 in part and Open 6): a conversion output may be named for a deposit in `Needs-Review` for the conversion's deadline while no refund of it is recorded, and the output's amount is checked against the route's minimum, maximum and window with the route's own errors. The deposit stays in review and leaves by the resolution the review model already has, into `Delivering`, with a second approver; no edge is added (`F-010`, migration 0140). Per @pandres95's chat ruling of 2026-11-06, the approval records the exact output it approved and the mint runs only if that is still the deposit's output (migration 0141). |
 | 0.6.8 | 2026-11-06 | The plan binds `SPEC.md` v0.5.9. Amendment 0026 (`d-requester-arrivals`, ruled by @pandres95 on the decision form, 2026-11-06: "Bind by sender"): each requester's senders are declared by the operator per origin network, and a deposit binds only an arrival whose sender is one of them (`REQ-PN-3`, `REQ-IN-3`, `ERR-SenderNotDeclared`). On an EVM network the sender is the `from` of the ERC-20 `Transfer` log at the arrival's coordinate. Bloque Test's and Bloque's senders are declared apart, so Test's deposit grant no longer reaches Bloque's ordinary arrivals; a conversion output can still be named for any awaiting convertible deposit (amendment 0026, Open 1) (`DEC-9`, `DEC-15`, `F-002`; migration 0135). Nothing else changes |
 | 0.6.7 | 2026-11-06 | The plan binds `SPEC.md` v0.5.8. @pandres95's rulings on the decision form, 2026-11-06. `d-gate-sustained` ("24 hours"; amendment 0021): the test bed's "sustained" is 24 consecutive hours of zero divergence (§15; `DEC-19`, `F-013`). `d-gate-scope` ("As recommended"; amendment 0024): the full gate applies only to a release that moves value, which is the first release of bUSDC and each new asset or network; every other release needs its checks green and one spec owner's sign-off; a release's class is a field of its evidence and a missing one is refused (`DEC-19`, `F-013`). `d-fee-position-scope` ("As recommended", with his note that usage subscriptions will soon override it; amendment 0025): on Kreivo the fee position is the delivery account's free balance less its frozen balance, the alert floor is in bezent's own configuration, and the core pages when a position is below it (`DEC-18`, `F-014`). |
@@ -679,7 +680,32 @@ USDC from `msg.sender` to the vault with `transferFrom` in the same call as its 
 *Serves:* a reference carried atomically with the value (`REQ-RN-5`), declared directing code (`REQ-AS-11`), deposits
 without a request (`REQ-IN-10`), refusal before value moves (`REQ-LM-2`), and the governance of code that holds reserve
 (`REQ-GV-3`). *Cost:* one more contract of ours in the path of value, which needs review before mainnet, and a new
-address per change of limits.
+address per change of limits. Anyone can route USDC through the vault to a third party's `refund` address, at bezent's
+gas cost, by sending what can never mint (amendment 0031, `d-f018-return-routing`): accepted, and watched by
+`directed-returns-alert`.
+
+The store's side, amendment 0031 (migration 0150):
+
+- A directed deposit over its route's capacity holds `CND-DepositCapacity` (`directed_capacity_fits()`) under the route's
+  lock, and counts toward `route_usage_locked()`'s in-flight count like any transfer that is not terminal, so requests
+  behind it are refused `ERR-Overloaded` first come first served. The window comes first: a deposit leaves
+  `CND-DepositWindow` into `CND-DepositCapacity` when the route has no room.
+- The window's count (`route_window_used()`, read by `route_usage_locked()` and by the ingress's route table) counts a
+  waiting deposit's claim against requests only for one window from when it began to wait, and the claims together up
+  to one window's limit (`d-f018-window-queue`); `directed_window_fits()` still counts every deposit waiting ahead, so the
+  queue drains in coordinate order.
+- The clock of the first mint attempt starts when the deposit left its last wait (`CND-DepositWindow`,
+  `CND-DepositCapacity`, `CND-TokenUpgraded`), as for the window before.
+- `directed_review_refund_open()` judges the newest preparation of the first mint when the review is resolved: the
+  issuing network's `Kreivo(Assets(CannotMint))` with the asset `Live` and its block time, made after the review began or
+  the one whose deadline began it (`d-f018-review-exit-later`). A resolution into `Refunding` that may run supersedes an
+  earlier resolution into `Delivering` of the same review that waits on a refused preparation.
+- An `Upgraded` event of an admitted token (`token_upgrade`, migration 0147) holds every directed deposit of that token
+  whose arrival is at or after its block, before its mint is ordered (`directed_token_held()`, `CND-TokenUpgraded`; the
+  store refuses a mint order for one), and the intake returns nothing of that token meanwhile (`d-f018-usdc-upgrade`).
+  Two operators lift it (`operator_request_token_hold_lift`, `operator_approve_token_hold_lift`, recorded in
+  `admin_actions`) after the fork suite (`services/evm-endpoint/tests/fork.rs`) has been run against the new
+  implementation. `origin-token-upgraded` still pages.
 
 ### DEC-22 The bridge web app
 
@@ -819,8 +845,8 @@ public repository, and the private repository's deployment from the pinned diges
 
 **`F-018` Directed deposits and the bridge web app.** The `DirectedDeposit` contract (`DEC-21`), its observation by the
 EVM endpoint, directed deposits and their returns in the store and the core, the public status route, and the web app
-(`DEC-22`); `features/F-018-directed-deposits/plan.md` has the design (amendment 0029). Done when `AC-A6.1`–`AC-A6.6`
-pass and the `M-4` criterion for directed deposits holds.
+(`DEC-22`); `features/F-018-directed-deposits/plan.md` has the design (amendments 0029 and 0031). Done when
+`AC-A6.1`–`AC-A6.9` pass and the `M-4` criterion for directed deposits holds.
 
 ## 5. Milestones
 
