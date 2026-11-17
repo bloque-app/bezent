@@ -54,8 +54,8 @@ use super::archive::{Archive, Fail, Source, StartCheck};
 use super::runtime::{self, History, Runtimes};
 use super::watch::Watches;
 use super::{
-    Balances, BlockEvents, BlockRef, Chain, ChainError, ChainResult, Emitted, ExtrinsicResult,
-    Header, RuntimeVersion,
+    AssetDetails, AssetStatus, Balances, BlockEvents, BlockRef, Chain, ChainError, ChainResult,
+    Emitted, ExtrinsicResult, Header, RuntimeVersion,
 };
 use crate::kreivo::{AccountId32, blake2_256};
 
@@ -609,6 +609,21 @@ fn number(v: &Value<u32>) -> Option<u128> {
         }
         _ => None,
     }
+}
+
+/// A local asset's details (`AssetDetails { owner, issuer, admin, freezer, supply, deposit,
+/// min_balance, is_sufficient, accounts, sufficients, approvals, status }`), read by field name: a
+/// layout without a supply or a status it names is refused, not guessed at (`REQ-NX-3`).
+fn asset_details(v: &Value<u32>) -> ChainResult<AssetDetails> {
+    let supply = field(v, "supply")
+        .and_then(number)
+        .ok_or_else(|| invalid("an asset without a supply"))?;
+    let status = match field(v, "status").map(|s| &s.value) {
+        Some(ValueDef::Variant(s)) => AssetStatus::from_name(&s.name)
+            .ok_or_else(|| invalid(format!("an asset of status {}", s.name)))?,
+        _ => return Err(invalid("an asset without a status")),
+    };
+    Ok(AssetDetails { supply, status })
 }
 
 /// The bytes a value holds, however its newtypes nest: a hash decodes as a composite of numbers,
@@ -1219,6 +1234,24 @@ impl Chain for LightChain {
             .and_then(number)
             .map(Some)
             .ok_or_else(|| invalid("an asset without a supply"))
+    }
+
+    async fn asset_details(&self, at: &BlockRef, asset: u32) -> ChainResult<Option<AssetDetails>> {
+        let key = Value::unnamed_variant("Here", [Value::u128(u128::from(asset))]);
+        self.fetch(at, "Assets", "Asset", vec![key])
+            .await?
+            .map(|v| asset_details(&v))
+            .transpose()
+    }
+
+    async fn block_time(&self, at: &BlockRef) -> ChainResult<u64> {
+        // `Timestamp::Now` alone, not the block's events (review of PR #136).
+        self.fetch(at, "Timestamp", "Now", Vec::new())
+            .await?
+            .as_ref()
+            .and_then(number)
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or_else(|| invalid(format!("block {} has no Timestamp::Now", at.number)))
     }
 
     async fn contract_code_hash(
@@ -2366,5 +2399,68 @@ mod runtime_tests {
                 );
             }
         }
+    }
+
+    /// Review of PR #136: a local asset's details decode, by field name, with both runtimes'
+    /// metadata, its status among them: the bytes of `pallet-assets`' `AssetDetails` as the
+    /// runtime stores them (four accounts, supply, deposit, min balance, `is_sufficient`, three
+    /// counts, the status's variant index). A status the endpoint does not name, or none, is
+    /// refused, never guessed at.
+    #[test]
+    fn an_assets_details_are_read_with_its_status() {
+        for m in [metadata(META_134), metadata(META_136)] {
+            let address = subxt::dynamic::storage(
+                "Assets",
+                "Asset",
+                vec![Value::unnamed_variant("Here", [Value::u128(7)])],
+            );
+            for (index, status) in [
+                (0u8, AssetStatus::Live),
+                (1, AssetStatus::Frozen),
+                (2, AssetStatus::Destroying),
+            ] {
+                let mut b = [[1u8; 32], [2; 32], [3; 32], [4; 32]].concat();
+                b.extend(1_234_567_u128.encode());
+                b.extend(10_u128.encode());
+                b.extend(1_u128.encode());
+                b.extend(true.encode());
+                for count in [5_u32, 0, 0] {
+                    b.extend(count.encode());
+                }
+                b.push(index);
+                let v = subxt::ext::subxt_core::storage::decode_value(&mut &b[..], &address, &m)
+                    .unwrap()
+                    .to_value()
+                    .unwrap();
+                assert_eq!(
+                    asset_details(&v).unwrap(),
+                    AssetDetails {
+                        supply: 1_234_567,
+                        status,
+                    }
+                );
+            }
+        }
+        let with = |status: Option<Value<()>>| {
+            let mut fields = vec![("supply".to_owned(), Value::u128(1))];
+            if let Some(s) = status {
+                fields.push(("status".to_owned(), s));
+            }
+            asset_details(&Value::named_composite(fields).map_context(|()| 0u32))
+        };
+        let variant = |name: &str| Value::unnamed_variant(name, []);
+        assert_eq!(
+            with(Some(variant("Live"))).unwrap().status,
+            AssetStatus::Live
+        );
+        assert!(matches!(
+            with(Some(variant("Thawing"))),
+            Err(ChainError::Invalid(_))
+        ));
+        assert!(matches!(
+            with(Some(Value::u128(0))),
+            Err(ChainError::Invalid(_))
+        ));
+        assert!(matches!(with(None), Err(ChainError::Invalid(_))));
     }
 }

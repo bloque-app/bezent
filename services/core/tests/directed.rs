@@ -974,11 +974,28 @@ async fn req_rf_1_a_refusal_then_an_unknown_review_is_not_refunded(
 /// `Refunding` resting on that dry run: it is never refunded (review M1 of PR #136; `REQ-RF-1`,
 /// guardrail 4).
 async fn an_unknown_refusal_never_opens_the_exit(w: &World, reason: &str) {
+    an_unknown_refusal_with_asset_never_opens_the_exit(w, reason, None).await;
+}
+
+/// As [`an_unknown_refusal_never_opens_the_exit`], the dry run recorded with the asset of `status`
+/// at its head, if given (`common::prepare_refused_with_asset`).
+async fn an_unknown_refusal_with_asset_never_opens_the_exit(
+    w: &World,
+    reason: &str,
+    status: Option<serde_json::Value>,
+) {
     final_directed(&w.admin, 10, 0, 5_000_000).await;
     w.cycle(t0()).await;
     let (id, _) = bound(w, 10, 0).await.expect("the deposit");
     let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
-    prepare(&w.admin, o, Some(reason)).await;
+    match status {
+        Some(status) => {
+            prepare_refused_with_asset(&w.admin, o, reason, status).await;
+        }
+        None => {
+            prepare(&w.admin, o, Some(reason)).await;
+        }
+    }
     w.cycle(t0()).await;
     let (state, condition) = w.state(id).await;
     assert_eq!(state, "Source-Final", "{reason}");
@@ -1030,6 +1047,94 @@ async fn req_rf_1_a_kreivo_unknown_error_never_opens_the_exit(
 ) {
     let w = World::new(options, connect).await;
     an_unknown_refusal_never_opens_the_exit(&w, "Kreivo(UnknownError)").await;
+}
+
+/// `REQ-RF-1`, `REQ-IN-8`, `REQ-IN-9` (review of PR #136): Kreivo answers `CannotMint` for the whole
+/// asset's errors too. A refusal to mint while the asset is frozen, as the endpoint read it at the
+/// dry run's head, is no refusal of the destination: no `CND-DestinationRefused`, the refusal that
+/// names nothing at its deadline, and no exit. (A `Live` asset's refusal is the exit's evidence:
+/// `req_rv_2_a_directed_deposit_that_cannot_receive_is_refunded_with_a_second_approver`.)
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_a_refusal_to_mint_a_frozen_asset_never_opens_the_exit(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    an_unknown_refusal_with_asset_never_opens_the_exit(
+        &w,
+        "Kreivo(Assets(CannotMint))",
+        Some(json!("Frozen")),
+    )
+    .await;
+}
+
+/// `REQ-RF-1` (review of PR #136): a refusal to mint whose asset status the endpoint could not read
+/// is an unknown, and never opens the exit.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_a_refusal_to_mint_an_asset_of_unknown_status_never_opens_the_exit(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    an_unknown_refusal_with_asset_never_opens_the_exit(
+        &w,
+        "Kreivo(Assets(CannotMint))",
+        Some(serde_json::Value::Null),
+    )
+    .await;
+}
+
+/// `REQ-RF-1`, `REQ-IN-9` (review of PR #136): a refusal of the destination, then the asset frozen
+/// and the next order's mint refused for it. The frozen asset's refusal does not keep the
+/// destination's hold, so the deposit's review at its deadline is not the destination's, and an
+/// approved resolution resting on the first refusal is refused.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_a_refusal_then_a_frozen_asset_drops_the_destination_hold(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    final_directed(&w.admin, 10, 0, 5_000_000).await;
+    w.cycle(t0()).await;
+    let (id, _) = bound(&w, 10, 0).await.expect("the deposit");
+    let (first, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, first, Some("Kreivo(Assets(CannotMint))")).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-DestinationRefused".into()))
+    );
+    let (second, _) = order(&w.admin, id, 1).await.expect("a new order");
+    assert_ne!(first, second);
+    prepare_refused_with_asset(
+        &w.admin,
+        second,
+        "Kreivo(Assets(CannotMint))",
+        json!("Frozen"),
+    )
+    .await;
+    w.cycle(t0()).await;
+    let (state, condition) = w.state(id).await;
+    assert_eq!(state, "Source-Final");
+    assert_ne!(condition.as_deref(), Some("CND-DestinationRefused"));
+    let past = 12 + BUDGET + 1;
+    head(&w.admin, ISSUING, past).await;
+    w.cycle(t0()).await;
+    let (state, condition) = w.state(id).await;
+    assert_eq!(state, "Needs-Review");
+    assert_ne!(condition.as_deref(), Some("CND-DestinationRefused"));
+    let open: bool = scalar(
+        &w.admin,
+        &format!("SELECT directed_review_refund_open({id})"),
+    )
+    .await;
+    assert!(!open);
+    let action = resolution_on_refusal(&w, id, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(evidence_refused(&w, action).await, 1);
+    assert_eq!(returns(&w).await, 0);
 }
 
 /// `REQ-RF-1`, `REQ-IN-9` (review L-a of PR #136): a refusal of the destination, then a dry run that

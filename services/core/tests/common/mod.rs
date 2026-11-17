@@ -552,13 +552,45 @@ pub async fn order(pool: &PgPool, id: i64, attempt: i32) -> Option<(i64, Value)>
 }
 
 /// The endpoint prepares order `order` (F-007): its exact bytes, and a dry run that passed or was
-/// refused with `reason`.
+/// refused with `reason`. A refusal to mint is recorded, as the Kreivo endpoint records it, with the
+/// asset's status at the dry run's head: `Live` here ([`prepare_refused_with_asset`] for another).
 pub async fn prepare(pool: &PgPool, order: i64, refused: Option<&str>) -> i64 {
-    let dry_run = match refused {
-        None => json!({"outcome": "passed", "reason": null}),
-        Some(r) => json!({"outcome": "refused", "reason": r}),
-    };
-    prepare_dry_run(pool, order, refused.is_none(), dry_run).await
+    match refused {
+        Some(r) if bezent_store::DESTINATION_REFUSALS.contains(&r) => {
+            prepare_refused_with_asset(pool, order, r, json!(bezent_store::ASSET_LIVE)).await
+        }
+        None => {
+            prepare_dry_run(
+                pool,
+                order,
+                true,
+                json!({"outcome": "passed", "reason": null}),
+            )
+            .await
+        }
+        Some(r) => {
+            prepare_dry_run(
+                pool,
+                order,
+                false,
+                json!({"outcome": "refused", "reason": r}),
+            )
+            .await
+        }
+    }
+}
+
+/// The endpoint prepares order `order` with a dry run refused for `reason`, the asset of status
+/// `status` (`null` when the endpoint could not read it) at the dry run's head.
+pub async fn prepare_refused_with_asset(
+    pool: &PgPool,
+    order: i64,
+    reason: &str,
+    status: Value,
+) -> i64 {
+    let dry_run = json!({"outcome": "refused", "reason": reason,
+                         "asset": {"id": "Here(1)", "status": status, "supply": "0"}});
+    prepare_dry_run(pool, order, false, dry_run).await
 }
 
 /// The endpoint prepares order `order` with the dry run `dry_run`, which passed or not, at block 1

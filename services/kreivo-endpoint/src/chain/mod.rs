@@ -133,6 +133,48 @@ pub struct Balances {
 /// Values of storage keys, in the order asked for: `None` is proven absent.
 pub type Values = Vec<Option<Vec<u8>>>;
 
+/// A local asset's status (`pallet-assets`' `AssetStatus`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssetStatus {
+    /// `Live`: it may be minted, moved and burned.
+    Live,
+    /// `Frozen`: the whole asset is frozen; nothing of it moves, and nothing is minted.
+    Frozen,
+    /// `Destroying`: it is being destroyed.
+    Destroying,
+}
+
+impl AssetStatus {
+    /// Its name, as the runtime spells the variant and the dry run's record holds it.
+    pub fn name(self) -> &'static str {
+        match self {
+            AssetStatus::Live => "Live",
+            AssetStatus::Frozen => "Frozen",
+            AssetStatus::Destroying => "Destroying",
+        }
+    }
+
+    /// The status the runtime's variant `name` is; `None` for any other.
+    pub fn from_name(name: &str) -> Option<AssetStatus> {
+        [
+            AssetStatus::Live,
+            AssetStatus::Frozen,
+            AssetStatus::Destroying,
+        ]
+        .into_iter()
+        .find(|s| s.name() == name)
+    }
+}
+
+/// What the endpoint reads of a local asset's details (`pallet-assets`' `Asset`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AssetDetails {
+    /// `supply`: its issuance.
+    pub supply: u128,
+    /// `status`.
+    pub status: AssetStatus,
+}
+
 /// Kreivo. See the module documentation.
 pub trait Chain: Send + Sync {
     /// What [`Chain::read_events`] reads of a block: its proven values, not yet decoded.
@@ -216,6 +258,22 @@ pub trait Chain: Send + Sync {
         at: &BlockRef,
         asset: u32,
     ) -> impl Future<Output = ChainResult<Option<u128>>> + Send;
+
+    /// The details (`pallet-assets`' `Asset`: its supply and status) of local asset `Here(asset)`
+    /// at `at`; `None` when no such asset exists there. Read when a dry run is refused for a mint
+    /// the assets API would not make (review of PR #136): only a `Live` asset's refusal is the
+    /// destination's.
+    fn asset_details(
+        &self,
+        at: &BlockRef,
+        asset: u32,
+    ) -> impl Future<Output = ChainResult<Option<AssetDetails>>> + Send;
+
+    /// Block `at`'s time (`Timestamp::Now`), in milliseconds since the Unix epoch. By default from
+    /// [`Chain::events`]; an implementation that can read `Timestamp::Now` alone does.
+    fn block_time(&self, at: &BlockRef) -> impl Future<Output = ChainResult<u64>> + Send {
+        async move { Ok(self.events(at, &[0; 32]).await?.time_ms) }
+    }
 
     /// The code hash of the contract instantiated at `contract` (`Contracts::ContractInfoOf`), at
     /// `at`; `None` when no contract is instantiated there (issue #24).

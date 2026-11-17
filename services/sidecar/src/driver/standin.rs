@@ -236,12 +236,25 @@ impl Driver {
             }
         };
         let passed = failure.is_none();
-        let dry_run = json!({
+        let mut dry_run = json!({
             "passed": passed,
             "reason": failure,
             "driver": DRIVER,
             "block": head.number,
         });
+        // The Kreivo endpoint records the asset's status with a refusal to mint (review of PR
+        // #136); the stand-in's asset is always Live, so the refusal named is the destination's.
+        if network != ORIGIN
+            && failure
+                .as_deref()
+                .is_some_and(|f| bezent_store::DESTINATION_REFUSALS.contains(&f))
+        {
+            dry_run["asset"] = json!({
+                "id": payload["order"]["asset"],
+                "status": bezent_store::ASSET_LIVE,
+                "supply": null,
+            });
+        }
         sqlx::query(
             "INSERT INTO prepared_transactions (order_intent_id, attempt, network, lane, key_id, \
                nonce, valid_from_block, valid_until_block, checkpoint_hash, call, signing_payload, \

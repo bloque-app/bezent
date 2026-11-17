@@ -94,6 +94,18 @@ Cloudflare Workers with static assets, not Pages. Both serve a static app. Cloud
 leaves room for a rate-limiting front to the public status route (amendment 0029, Open 8, ruled yes) in the same deployment.
 `bridge.bloque.network` is the working name.
 
+## Deployment order (PR #136)
+
+Deploy migration `0145_directed_core` first, then the **Kreivo endpoint, before the core**. The endpoint records two
+things the core and the store now read from a refused dry run: the block time of the head it ran at
+(`prepared_transactions.dry_run_block_time`), and, for a refusal to mint (`Kreivo(Assets(CannotMint))`), the asset's
+status and supply at that head (`dry_run.asset`). Kreivo's `mint` answers `CannotMint` for every error of `mint_into`,
+the whole asset's too (frozen, being destroyed, gone), so only a refusal recorded with the asset `Live` is the
+destination's. A core deployed before the endpoint is safe but blind: every refusal to mint reads as one that names
+nothing, pages, and goes to review at its deadline without `CND-DestinationRefused`, so no directed deposit can take
+the review exit until the endpoint is updated and the deposit's mint is prepared again. Supply overflow (`mint_into`
+past `u128::MAX`) is not checked: at six decimals it is about 3.4 × 10^32 tokens, not a plausible issuance.
+
 ## Smaller choices
 
 - `Directed(address indexed sender, uint256 amount, bytes32 indexed recipient, address refund)`: the sender and recipient

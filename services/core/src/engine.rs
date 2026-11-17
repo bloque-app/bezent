@@ -262,16 +262,24 @@ fn dry_run_condition(dry_run: &Value, allowance: Option<&[u8; 32]>) -> Option<Co
         None
     } else if reason.contains("AboveWindow") || reason.contains("AboveCeiling") {
         Some(Condition::MintWindow)
-    } else if bezent_store::DESTINATION_REFUSALS.contains(&reason) {
-        // Kreivo's assets API refused to mint to the destination: it cannot receive the asset
-        // (REQ-IN-8, REQ-IN-9). bezent never checks the destination itself.
+    } else if bezent_store::DESTINATION_REFUSALS.contains(&reason)
+        && dry_run.pointer("/asset/status").and_then(Value::as_str)
+            == Some(bezent_store::ASSET_LIVE)
+    {
+        // Kreivo's assets API refused to mint to the destination, the asset Live at the dry run's
+        // head as the endpoint read it: the destination cannot receive the asset (REQ-IN-8,
+        // REQ-IN-9). bezent never checks the destination itself; the asset's status is not the
+        // destination.
         Some(Condition::DestinationRefused)
     } else if reason == "Kreivo" || reason.starts_with("Kreivo(") {
         // Any other refusal of the assets API (an unknown error, a context the runtime could not
         // read, the contract's community not authorised, an asset that is not local), or one whose
         // inner error the endpoint could not read, is no refusal of the destination (review M1 of
-        // PR #136; REQ-RF-1, guardrail 4): no condition, so it is the refusal that names nothing,
-        // which pages and goes to review at its deadline, and never the fee rule below.
+        // PR #136; REQ-RF-1, guardrail 4); and so is the refusal to mint while the asset is not
+        // Live (frozen, being destroyed, gone) or its status is unknown, since Kreivo answers
+        // CannotMint for the whole asset's errors too (review of PR #136). No condition, so it is
+        // the refusal that names nothing, which pages and goes to review at its deadline, and
+        // never the fee rule below.
         None
     } else if reason.to_ascii_lowercase().contains("fee")
         || reason.contains("Payment")
@@ -1881,10 +1889,13 @@ impl Core {
                 .await;
         }
         if !passed {
-            // A refusal that is not the allowance's does not keep a payout window hold (S-2).
+            // A refusal that is not the allowance's does not keep a payout window hold (S-2), nor
+            // one that is not the destination's a destination hold: a refusal to mint while the
+            // asset is not Live is no evidence against the destination (review of PR #136).
             let allowance = self.delivery_allowance(conn, t).await?;
-            let held = dry_run_condition(&dry_run, allowance.as_ref())
-                .or(t.condition().filter(|c| *c != Condition::PayoutWindow));
+            let held = dry_run_condition(&dry_run, allowance.as_ref()).or(t
+                .condition()
+                .filter(|c| !matches!(c, Condition::PayoutWindow | Condition::DestinationRefused)));
             if prepared_order != order_id {
                 // A new order waits for its preparation; a refusal that keeps coming back still
                 // has its deadline (issue #25).
@@ -3622,11 +3633,35 @@ mod tests {
 
     #[test]
     fn req_in_9_a_mint_the_issuing_network_refuses_holds_cnd_destination_refused() {
-        let reason = |r: &str| dry_run_condition(&json!({"outcome": "refused", "reason": r}), None);
+        let reason = |r: &str| {
+            dry_run_condition(
+                &json!({"outcome": "refused", "reason": r,
+                        "asset": {"id": "Here(1)", "status": "Live", "supply": "5"}}),
+                None,
+            )
+        };
         assert_eq!(
             reason("Kreivo(Assets(CannotMint))"),
             Some(Condition::DestinationRefused)
         );
+        // Review of PR #136: Kreivo answers CannotMint for the whole asset's errors too. Only a
+        // Live asset's refusal is the destination's; a frozen one, one being destroyed, one gone,
+        // or one whose status the endpoint could not read (or did not record) holds nothing.
+        for asset in [
+            json!({"id": "Here(1)", "status": "Frozen", "supply": "5"}),
+            json!({"id": "Here(1)", "status": "Destroying", "supply": "5"}),
+            json!({"id": "Here(1)", "status": null, "supply": null}),
+            json!({"id": "Here(1)", "status": null, "supply": null, "error": "undecodable"}),
+            json!({"id": "Here(1)", "status": "live"}),
+            json!("Live"),
+            Value::Null,
+        ] {
+            let mut run = json!({"outcome": "refused", "reason": "Kreivo(Assets(CannotMint))"});
+            if !asset.is_null() {
+                run["asset"] = asset.clone();
+            }
+            assert_eq!(dry_run_condition(&run, None), None, "{asset}");
+        }
         // Review M1 of PR #136 (REQ-RF-1, guardrail 4): every other refusal of the assets API, and
         // one with no inner error, is the refusal that names nothing, never the destination's and
         // never a fee shortfall.

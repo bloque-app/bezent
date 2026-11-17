@@ -71,9 +71,9 @@ use sqlx::PgPool;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::chain::{BlockRef, Chain, ChainError, RuntimeVersion, ancestry};
+use crate::chain::{AssetDetails, BlockRef, Chain, ChainError, RuntimeVersion, ancestry};
 use crate::kreivo::{
-    self, AccountId32, AssetId, MAX_ERA, Message, Mortality, Reference, Scheme,
+    self, AccountId32, AssetId, DryRunOutcome, MAX_ERA, Message, Mortality, Reference, Scheme,
     TRANSACTION_VERSIONS, TxParams, blake2_256,
 };
 use crate::signal;
@@ -140,6 +140,8 @@ pub struct Order {
     pub reference: Reference,
     /// What it moves, in minor units.
     pub amount: u128,
+    /// The asset it mints, as the order names it: a mint's always, a refund mint's when it does.
+    pub asset: Option<AssetId>,
     /// The contract message it asks for.
     pub message: Message,
 }
@@ -187,6 +189,7 @@ impl Order {
             .ok_or("the order has no 32-byte on-chain reference")?;
         let amount = amount_field(payload)?;
         let order = payload.get("order").ok_or("the intent is not an order")?;
+        let asset = asset_field(order).ok();
         let message = match purpose {
             "mint" => Message::Mint {
                 asset: asset_field(order)?,
@@ -205,8 +208,24 @@ impl Order {
             purpose: purpose.to_owned(),
             reference,
             amount,
+            asset,
             message,
         })
+    }
+}
+
+/// What a refused dry run's record holds of the asset the order mints (review of PR #136): its id,
+/// and its `status` and `supply` at the dry run's head as `read` answered them; a `null` status when
+/// the asset does not exist there or its details could not be read (`error`). Only `"status":
+/// "Live"` makes a refusal to mint the destination's (`bezent_store::ASSET_LIVE`).
+pub fn asset_record(asset: Option<AssetId>, read: Result<Option<AssetDetails>, String>) -> Value {
+    let id = asset.map(|a| a.text());
+    match read {
+        Ok(Some(d)) => {
+            json!({"id": id, "status": d.status.name(), "supply": d.supply.to_string()})
+        }
+        Ok(None) => json!({"id": id, "status": null, "supply": null}),
+        Err(e) => json!({"id": id, "status": null, "supply": null, "error": e}),
     }
 }
 
@@ -702,10 +721,35 @@ impl<C: Chain> Submitter<'_, C> {
         };
         // The dry run's block time, read from the chain and recorded with it (review L-b of PR
         // #136): a resolution resting on this dry run names it, never a time of its own.
-        let dry_run_time_ms = match self.chain.events(&finalized, &self.contract).await {
-            Ok(e) => e.time_ms,
+        let dry_run_time_ms = match self.chain.block_time(&finalized).await {
+            Ok(t) => t,
             Err(e) => return Ok(Prepared::Unavailable(e.to_string())),
         };
+        let mut dry_run_record = dry_run.to_json();
+        // Kreivo's `mint` answers `CannotMint` for every error of `mint_into`, the whole asset's
+        // too: frozen, being destroyed, or gone (review of PR #136). Such a refusal is recorded with
+        // the asset's status at the same head, and only a `Live` asset's is the destination's
+        // (`REQ-IN-8`; `REQ-IN-9` forbids checking the destination, not the asset). A status that
+        // cannot be read is recorded as unknown: never the destination's (`REQ-RF-1`).
+        if let DryRunOutcome::Refused(reason) = &dry_run.outcome
+            && bezent_store::DESTINATION_REFUSALS.contains(&reason.as_str())
+        {
+            let read = match order.asset {
+                Some(AssetId::Here(index)) => {
+                    match self.chain.asset_details(&finalized, index).await {
+                        Ok(details) => Ok(details),
+                        Err(ChainError::Unavailable(e)) => {
+                            return Ok(Prepared::Unavailable(format!(
+                                "the asset's status, for a refused dry run: {e}"
+                            )));
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                None => Err("the order names no asset".to_owned()),
+            };
+            dry_run_record["asset"] = asset_record(order.asset, read);
+        }
         let call = kreivo::contracts_call(&self.contract, &dry_run.limits(LIMIT_MARGIN), &data);
         let era = Mortality::born_at(finalized.number);
         let params = TxParams {
@@ -749,7 +793,7 @@ impl<C: Chain> Submitter<'_, C> {
         .bind(&message)
         .bind(i64_of(finalized.number)?)
         .bind(dry_run.passed())
-        .bind(dry_run.to_json().to_string())
+        .bind(dry_run_record.to_string())
         .bind(i64_of(dry_run_time_ms)?)
         .fetch_one(&mut *tx)
         .await?;
