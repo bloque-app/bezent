@@ -9,7 +9,11 @@ SPDX-License-Identifier: CC-BY-4.0
 where a ruling removed a task, its identifier is retired and not reused. Sizes are rough, for one engineer with agents, review included. *S* is up to a week,
 *M* one to two weeks, *L* two to three.
 
-## Milestone 1 — the contract (S, about a week, plus an outside review before mainnet)
+## Milestone 1 — the contract (S, about a week)
+
+The outside review is ruled (`d-f018-review`, @pandres95, 2026-11-17): a paid audit comes after the 1 USDC mainnet test
+(T-018-20) and before the web app is announced or any limit is raised. Before mainnet, the contract gets an adversarial
+review in a fresh context, plus fuzz and invariant tests on the Polygon fork.
 
 | ID | Task | Traces | Done when |
 |---|---|---|---|
