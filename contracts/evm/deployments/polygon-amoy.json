@@ -1,0 +1,69 @@
+{
+  "network": "polygon-amoy",
+  "chainId": 80002,
+  "purpose": "Test reserve and directing code for bUSDC on Polygon Amoy (F-018, T-018-04). Test keys and test USDC only.",
+  "config": "contracts/evm/config/polygon-amoy.json",
+  "deployer": "0x53ad5940264f1e3811ea9C2ca70a10976689116E",
+  "vault": {
+    "script": "script/DeployVault.s.sol",
+    "fromBlock": 53060034,
+    "safeCreationBlock": 53060095,
+    "firstTx": "0x12a215b8db5ac13a43016da1e495aed6084414ebb60b1eaa0b1e0f6e4f089913",
+    "safeCreationTx": "0x98f4187f9139da7701006a7ce444d38820fe719b8b022ba3f9ba2c72d4c37bee",
+    "transactions": 31,
+    "safe": "0x3530dBB6986Dc584bf3D83a0ed4cbE027238204a",
+    "roles": "0x50197B45C28b408f0816e34f6aFc83E5d3032217",
+    "guardianRoles": "0x0253E3ca4C90B1eEa45332b63a553B67e4B98C75",
+    "delay": "0x1128CD90684e3E5D626174FB097E7Ed1E8994260",
+    "guard": "0x89fB40b58250626C2879d4EC4E273f80d79D4c96",
+    "emitter": "0xa1Ebae82c6Ebe16beB0864fc73D5350bE71370B9",
+    "unwrapper": "0x4163d01b02a92fe9068dba1562DBdDa89cEbADa7",
+    "moduleSetup": "0x836f4525Eea2bFd05eDf4EE49b6f826D95aFaef3",
+    "governance": {
+      "owners": [
+        "0x49D911da188759Cc3641cB0E6dfEB50703109Da6",
+        "0xf6D31e76AeBdB0471257286e57096F493B2c4eC0",
+        "0x98068A63a14dFdBD061dB44D0822C9626078Be66"
+      ],
+      "threshold": 2,
+      "deliveryMember": "0xCbab40d40646A88570d36a8E0fafcF5b91a9Cd07",
+      "conversionMember": null,
+      "guardian": "0x5C38D42Ec096F5542e7a747701B658FD9227217C",
+      "cooldown": 86400,
+      "expiration": 604800
+    }
+  },
+  "directed": {
+    "script": "script/DeployDirected.s.sol",
+    "address": "0xB8F75BeAE2723637313072fC89C69B7C15EdAec7",
+    "block": 53060139,
+    "tx": "0xa8befdd606a962d637bb06252e18061790f9ef9db1747d87558505d1646366cb",
+    "codeHash": "0x6c32ce3fe773ad4f2bb35e6f83948766d3058c0dbc016ffed003b891489307f0",
+    "token": "0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582",
+    "minimum": "1000000",
+    "maximum": "50000000000",
+    "kreivoPerTransferMax": {
+      "value": "50000000000",
+      "source": "bounds(Here(101)) of the bezent contract 0x361d9535ca78edf68a88c7abd44cdec7086f8e85bcb8aedb724462eb3f2e5821 on Kreivo mainnet, a ContractsApi_call dry run at the finalized head, read from two providers that agreed",
+      "readAt": [
+        { "block": 41026407, "hash": "0x5bd62232e1ba212839bd53de81253e0f1706f80da9712cd5e067d0139849d12d" },
+        { "block": 41026413, "hash": "0x670179618b35bd0bb605ca562c38c88f2f9c51996100c76515e77ee7c0a5706f" }
+      ]
+    }
+  },
+  "verified": {
+    "script": "script/VerifyVault.s.sol",
+    "with": "DIRECTED_DEPOSIT and KREIVO_PER_TRANSFER_MAX=50000000000, VAULT_FROM_BLOCK=53060034, VAULT_TO_BLOCK=53060401, after the smoke deposit",
+    "atBlock": 53060401,
+    "result": "vault matches its configuration (27 Roles events replayed); directing code matches its configuration"
+  },
+  "smoke": {
+    "call": "depositWithPermit(amount, recipient, refund, deadline, v, r, s)",
+    "tx": "0x4ee22acf8f994bf62626d7e5d480fdc3d1d5880bcb49751588e31d1fa2c1b2e9",
+    "block": 53060226,
+    "amount": "1000000",
+    "recipient": "0x8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48",
+    "refund": "0x53ad5940264f1e3811ea9C2ca70a10976689116E",
+    "logs": "Approval (permit) at index 3, the vault's Transfer at 4, Directed at 5, Polygon's fee log at 6"
+  }
+}

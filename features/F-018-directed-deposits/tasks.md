@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # F-018 — tasks
 
-**Accepted.** Amendment 0029 is applied (`SPEC.md` v0.5.13). T-018-01 to T-018-03, T-018-05 and T-018-06 are drafted, in pull requests #121, #122 and #125. Its Open questions are ruled (2026-11-09);
+**Accepted.** Amendment 0029 is applied (`SPEC.md` v0.5.13). T-018-01 to T-018-03, T-018-05 and T-018-06 are drafted, in pull requests #121, #122 and #125; T-018-04 is done (Polygon Amoy). Its Open questions are ruled (2026-11-09);
 where a ruling removed a task, its identifier is retired and not reused. Sizes are rough, for one engineer with agents, review included. *S* is up to a week,
 *M* one to two weeks, *L* two to three.
 
@@ -20,7 +20,29 @@ review in a fresh context, plus fuzz and invariant tests on the Polygon fork.
 | T-018-01 | `DirectedDeposit.sol`: `deposit`, both `depositWithPermit` forms, `try`-permit then allowance check, immutables, `Directed` event; no pause (Open 4, ruled) | `REQ-RN-5`, `REQ-AS-11`, `REQ-LM-2`, `AC-A6.5` | Unit tests: limits, zero recipient, zero or vault or self refund (each its own error), the `refund` in `Directed`, never a balance, no owner, pause or admin function, nothing between `Transfer` and `Directed` |
 | T-018-02 | Fork tests on Polygon (real USDC, the pinned block of `e2e/evm`) | `AC-A6.5`, `AC-A6.6`, `INV-14` | Exact amount from caller to vault; front-run permit still deposits; bytes-signature permit from a Safe; a batch of two deposits gives two adjacent pairs |
 | T-018-03 | `DeployDirected.s.sol` and `VerifyVault.checkDirected`; config in `config/polygon.json` | `REQ-AS-11`, `REQ-GV-3` | Refusals of the plan's "Deployment"; the verifier accepts a fresh deployment and refuses a changed immutable or a maximum above the Kreivo per-transfer maximum |
-| T-018-04 | Deploy on Polygon Amoy (test USDC, domain `USDC`/`2`) | `NFR-9` | Address recorded in the test configuration; verifier passes against Amoy |
+| T-018-04 | Deploy on Polygon Amoy (test USDC, domain `USDC`/`2`). **Done** 2026-11-16, below | `NFR-9` | Address recorded in the test configuration; verifier passes against Amoy |
+
+**T-018-04, done (2026-11-16).** A test reserve vault and `DirectedDeposit` on Polygon Amoy (chain 80002), with test
+keys and test USDC only. Every address, block and transaction is in `contracts/evm/deployments/polygon-amoy.json`; the
+network constants in `contracts/evm/config/polygon-amoy.json`; the endpoint's Amoy configuration in
+`services/evm-endpoint/fixtures/polygon-amoy.toml` (its `[[directing]]` entry waits for #122).
+
+- **Vault:** the full `DeployVault` deployment (SafeL2 1.4.1 with the delivery Roles, the Delay and the guardian's
+  Roles, and `VaultGuard`), Safe `0x3530dBB6986Dc584bf3D83a0ed4cbE027238204a`, 31 transactions from block 53 060 034,
+  the Safe created in `0x98f4187f9139da7701006a7ce444d38820fe719b8b022ba3f9ba2c72d4c37bee`. Every pinned Safe and
+  Zodiac contract is on Amoy at its canonical address with the code hash of F-008 NOTES. It differs from Polygon's
+  vault in one way: no conversion role (venue `none`), since Amoy has neither USDT0 nor the declared pool.
+- **`DirectedDeposit`:** `0xB8F75BeAE2723637313072fC89C69B7C15EdAec7`, deployed in
+  `0xa8befdd606a962d637bb06252e18061790f9ef9db1747d87558505d1646366cb` (block 53 060 139), runtime code hash
+  `0x6c32…07f0`, limits 1 to 50 000 USDC. `KREIVO_PER_TRANSFER_MAX` was read at release time from Kreivo mainnet:
+  `bounds(Here(101))` of the bezent contract, a `ContractsApi_call` dry run at the finalized head, gives
+  `per_transfer_max` 50 000 000 000 on two providers.
+- **Verifier:** `VerifyVault` with `DIRECTED_DEPOSIT` passes against Amoy, every vault check included (27 Roles events
+  replayed; the directing code matches byte for byte), last run to block 53 060 401.
+- **Smoke test:** one directed deposit of 1 USDC with `depositWithPermit` (an EIP-2612 permit on the domain
+  `USDC`/`2`/80002), `0x4ee22acf8f994bf62626d7e5d480fdc3d1d5880bcb49751588e31d1fa2c1b2e9` (block 53 060 226). The
+  vault's `Transfer` (log 4, from the depositor, 1 000 000) is immediately followed by `Directed` (log 5: the same
+  sender and amount, recipient `0x8eaf…6a48`, refund the depositor).
 
 ## Milestone 2 — endpoint and core (L, two to three weeks)
 
