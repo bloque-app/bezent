@@ -100,8 +100,8 @@ async fn m1_inv_2_nothing_without_an_explicit_bindable_kind_binds(pool: PgPool) 
         Some("conversion_input"),
         Some("self_transfer"),
         Some("transaction"),
-        // F-018, T-018-05: recorded, and bound by nothing until T-018-06's carve-outs.
-        Some("directed_arrival"),
+        // F-018, T-018-05: recorded, and bound by nothing (AC-A6.6). A directed arrival is bound by
+        // the core's deposit and return alone: `tests/directed_deposits.rs` (T-018-06, 0144).
         Some("unpaired_direction"),
     ];
     for (i, kind) in never.into_iter().enumerate() {

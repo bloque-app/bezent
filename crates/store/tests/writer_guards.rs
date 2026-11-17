@@ -918,14 +918,23 @@ async fn m1c_a_deposit_takes_its_amount_and_asset_from_its_observation_never_fro
         "777 asset-a"
     );
 
-    // Bound ahead of its observation with an amount of its own: the arrival then observed is 1000,
-    // and the deposit never becomes Source-Final, whoever moves it.
-    run(
+    // Bound ahead of its observation: the ingress may not (review H1 of PR #125, REQ-RQ-3; a
+    // request names an observed arrival). One written there anyway (the owner's, here) with an
+    // amount of its own: the arrival then observed is 1000, and the deposit never becomes
+    // Source-Final, whoever moves it.
+    let err = run(
         &ingress,
         &deposit_at("'bz-d-m1c-ahead'", "3", "5", "'asset-a'"),
     )
     .await
-    .expect("a binding ahead of its observation");
+    .expect_err("the ingress bound a coordinate nothing was observed at");
+    assert_refusal(&err, "REQ-RQ-3", "a binding ahead of its observation");
+    run(
+        &pool,
+        &deposit_at("'bz-d-m1c-ahead'", "3", "5", "'asset-a'"),
+    )
+    .await
+    .expect("a binding ahead of its observation, by the owner");
     finalise_coordinate(&pool, "origin-a", 3, "aa", "log", 0, "asset-a", "1000").await;
     let ahead = transfer_id(&pool, "bz-d-m1c-ahead").await;
     bare_transition(&pool, ahead, "Received", "Accepted")
