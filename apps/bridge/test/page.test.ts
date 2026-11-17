@@ -455,6 +455,19 @@ describe('a signature over another payload, and an unclear outcome', () => {
     expect($('redeem-progress').textContent).toMatch(/no other is sent until Kreivo records it.* Nothing was signed/);
   });
 
+  it('keeps an unclear redemption locked across a change of network (L6)', async () => {
+    const { reference, UnclearOutcome } = await redeeming();
+    fake.head = 1_000;
+    fake.redeems[0]!.reject(new UnclearOutcome('The redemption 0x77… was broadcast, but following it failed.', `0x${'77'.repeat(32)}`, 1_064));
+    await flush();
+    // Switching networks re-reads everything, but must not free the reference or allow a second redemption.
+    $<HTMLSelectElement>('network').dispatchEvent(new Event('change'));
+    await flush();
+    expect($('redeem-reference').textContent).toBe(reference);
+    expect($<HTMLButtonElement>('redeem').disabled).toBe(true);
+    expect($<HTMLButtonElement>('redeem-new-reference').disabled).toBe(true);
+  });
+
   it('frees the reference once Kreivo records the redemption, and links to its status', async () => {
     const { reference, UnclearOutcome } = await redeeming();
     fake.recorded = {

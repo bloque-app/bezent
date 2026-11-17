@@ -510,7 +510,9 @@ export function initRedeem(host: RedeemHost) {
     /** The network or Kreivo changed: what was read is for another chain. */
     reset() {
       r.gen++;
-      r.pending = undefined; // Its watcher stops (`settle`'s `stopped`): it read the chain that has gone.
+      // An unclear redemption stays locked across a change of network: its watcher keeps waiting (its chain
+      // reads nothing while another network is selected) and settles when its network is back. Clearing it here
+      // would let a switch away and back sign a second redemption under a fresh reference.
       r.account = undefined;
       r.facts = undefined;
       r.reading = false;
