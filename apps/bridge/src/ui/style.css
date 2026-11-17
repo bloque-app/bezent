@@ -48,5 +48,11 @@ button.link { border: 0; background: none; color: var(--ink); text-decoration: u
 .muted { color: var(--muted); }
 .error { color: var(--error); }
 .ok { color: var(--ok); }
+.warn { color: var(--error); font-weight: 600; }
 .progress { padding-left: 1.25rem; }
 @media (max-width: 520px) { .facts { grid-template-columns: 1fr; } .facts dd { margin-bottom: 0.4rem; } }
+p.check { display: flex; align-items: center; gap: 0.5rem; }
+p.check input { width: auto; }
+p.check label { display: inline; font-weight: 400; margin: 0; }
+code { font-family: var(--mono); font-size: 0.85rem; overflow-wrap: anywhere; }
+a { color: var(--ink); }

@@ -65,3 +65,19 @@ export function directedArrivals(
   }
   return out;
 }
+
+/** How many logs of `contract` in a receipt decode as `Directed`, paired or not. A deposit emits exactly one; the
+ * review fails loudly on any other count. */
+export function countDirected(logs: readonly Pick<Log, 'address' | 'topics' | 'data'>[], contract: Address): number {
+  let n = 0;
+  for (const l of logs) {
+    if (getAddress(l.address) !== getAddress(contract)) continue;
+    try {
+      decodeEventLog({ abi: directedDepositAbi, eventName: 'Directed', topics: l.topics as [ViemHex], data: l.data });
+      n++;
+    } catch {
+      // Not a Directed log.
+    }
+  }
+  return n;
+}

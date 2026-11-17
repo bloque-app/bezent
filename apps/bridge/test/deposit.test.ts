@@ -8,7 +8,7 @@
 // follow.
 
 import { describe, expect, it } from 'vitest';
-import { getAddress, recoverTypedDataAddress, type Hex } from 'viem';
+import { getAddress, keccak256, numberToHex, recoverTypedDataAddress, type Hex } from 'viem';
 import { connect, deposit, readContract } from '../src/evm/deposit';
 import { permitTypedData } from '../src/evm/permit';
 import { depositReference } from '../src/lib/refs';
@@ -153,6 +153,40 @@ describe('deposit', () => {
     const res = await deposit(s, facts, { amount: 2_500_000n, recipient: RECIPIENT }, quiet);
     expect(res.arrival).toBeUndefined();
     expect(res.arrivals.map((a) => a.refund)).toEqual([other]);
+  });
+
+  it('checks the chain again after the receipt wait: a wallet that switched meanwhile fails, naming the deposit', async () => {
+    const { w, s, facts } = await session({ switchChainOnReceipt: 1 });
+    const err = await deposit(s, facts, { amount: 2_500_000n, recipient: RECIPIENT }, quiet).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    const hash = keccak256(numberToHex(1));
+    expect((err as Error).message).toBe(
+      `The deposit ${hash} was sent, but its receipt cannot be read: The wallet is on chain 1, not Polygon Amoy (test) (80002); nothing more is sent. Switch it back and start again.`,
+    );
+    expect(w.sent).toHaveLength(1);
+  });
+
+  it('names the transaction when the receipt wait itself fails, so it is looked up and not sent again', async () => {
+    const { w, s, facts } = await session({ receiptFails: true });
+    const err = (await deposit(s, facts, { amount: 2_500_000n, recipient: RECIPIENT }, quiet).catch((e: Error) => e)) as Error;
+    const hash = keccak256(numberToHex(1));
+    expect(err.message).toContain(`The deposit ${hash} was sent, but waiting for its receipt failed:`);
+    expect(err.message).toMatch(/Look it up before trying again\.$/);
+    expect(w.sent).toHaveLength(1);
+  });
+
+  it('names the approval when its receipt wait fails, and sends no deposit', async () => {
+    const { w, s, facts } = await session({ typedData: 'unsupported', receiptFails: true });
+    const err = (await deposit(s, facts, { amount: 3_000_000n, recipient: RECIPIENT }, quiet).catch((e: Error) => e)) as Error;
+    expect(err.message).toContain(`The approval ${keccak256(numberToHex(1))} was sent, but waiting for its receipt failed:`);
+    expect(w.sent.map((t) => t.functionName)).toEqual(['approve']);
+  });
+
+  it('counts the contract’s Directed logs in the receipt', async () => {
+    const { s, facts } = await session({ extraDirected: 'unpaired' });
+    const res = await deposit(s, facts, { amount: 2_500_000n, recipient: RECIPIENT }, quiet);
+    expect(res.directedLogs).toBe(2);
+    expect(res.arrivals).toHaveLength(1);
   });
 
   it('sends nothing when the user declines the permit', async () => {

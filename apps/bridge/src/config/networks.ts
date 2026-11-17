@@ -36,6 +36,10 @@ export interface KreivoNetwork {
    * DEC-15 ledger accounts), as hex. A deposit to one would be returned; the app refuses it before signing.
    * `resolveNetwork` refuses a production issuing network whose list is empty. */
   refusedRecipients: readonly string[];
+  /** The bezent contract's account (`contracts/bezent`), 32 bytes as hex: what a redemption calls and a deposit's
+   * mint reference is checked against (T-018-15, T-018-17). `UNSET` refuses the redeem and the Kreivo side of the
+   * status page, never the deposit. */
+  bezent: Pinned<string>;
   /** frame_system's `MaxConsumers`: an account at this many consumer references cannot take the one a first
    * mint of a non-sufficient asset adds (`TooManyConsumers`). It is a `Config` type, not a pallet constant, so
    * the metadata does not carry it and it is pinned here. */
@@ -71,6 +75,12 @@ export interface OriginNetwork {
   codeHash: Pinned<Hex>;
   /** The issuing network its deposits mint on; `UNSET` until one is named for it. */
   kreivo: Pinned<KreivoNetwork>;
+  /** The vault's reference emitter (`ReferenceEmitter`, F-008): every payout from the reserve carries its
+   * `Reference(bytes32)` log in the same transaction (DEC-10). The status page finds a withdrawal's payout, or a
+   * directed deposit's return, by it. `UNSET` leaves the status page without the payout search. */
+  emitter: Pinned<Address>;
+  /** The first block the status page searches for payouts from: the vault's deployment. */
+  payoutsFrom: Pinned<bigint>;
 }
 
 /** Kreivo, read through the light client (its chain specification is `services/kreivo-endpoint/chain-specs/
@@ -85,6 +95,9 @@ export const KREIVO: KreivoNetwork = {
   // Deliberately empty until the mainnet deploy (T-018-18) pins the Kreivo contract's account and the DEC-15
   // ledger accounts here; until then `resolveNetwork` refuses every network that mints on live Kreivo.
   refusedRecipients: [],
+  // The contract on Kreivo mainnet (DoGtfGRPMBd4LHghKAjXAuKB7LY7m8gM1QZsu6mXrwfVdq4; F-015, and
+  // contracts/evm/deployments/polygon-amoy.json, which read its bounds).
+  bezent: '0x361d9535ca78edf68a88c7abd44cdec7086f8e85bcb8aedb724462eb3f2e5821',
   // Kreivo's runtime: `type MaxConsumers = ConstU32<16>` (runtime/kreivo/src/config/system.rs).
   maxConsumers: 16,
 };
@@ -98,6 +111,9 @@ export const KREIVO_TESTBED: KreivoNetwork = {
   asset: { id: 101, symbol: 'bUSDC', decimals: 6 },
   connection: { kind: 'loopback-rpc', url: 'ws://127.0.0.1:9944' },
   refusedRecipients: [],
+  // e2e/kreivo/deploy.mjs deploys the contract afresh on each run: a test bed build pins it
+  // (`BRIDGE_TESTBED_BEZENT`, through `testbed`).
+  bezent: UNSET,
   maxConsumers: 16,
 };
 
@@ -121,6 +137,8 @@ export const POLYGON: OriginNetwork = {
   reserve: UNSET,
   codeHash: UNSET,
   kreivo: KREIVO,
+  emitter: UNSET,
+  payoutsFrom: UNSET,
 };
 
 export const POLYGON_AMOY: OriginNetwork = {
@@ -144,6 +162,9 @@ export const POLYGON_AMOY: OriginNetwork = {
   // No test Kreivo is named yet, so Amoy is still refused until one is. Never live Kreivo: a test deposit must not mint real bUSDC,
   // and `resolveNetwork` refuses a test origin network paired with a production issuing network.
   kreivo: UNSET,
+  // T-018-04's vault (contracts/evm/deployments/polygon-amoy.json): its emitter, and the block its deployment began.
+  emitter: '0xa1Ebae82c6Ebe16beB0864fc73D5350bE71370B9',
+  payoutsFrom: 53_060_034n,
 };
 
 /** What a test bed build pins of the contract the bed deployed. */
@@ -151,6 +172,12 @@ export interface TestbedPins {
   directedDeposit: Pinned<Address>;
   reserve: Pinned<Address>;
   codeHash: Pinned<Hex>;
+  /** The bezent contract the bed's Kreivo deployed (`BRIDGE_TESTBED_BEZENT`). */
+  bezent?: Pinned<string>;
+  /** The bed's reference emitter (`BRIDGE_TESTBED_EMITTER`) and the block to search payouts from
+   * (`BRIDGE_TESTBED_PAYOUTS_FROM`). */
+  emitter?: Pinned<Address>;
+  payoutsFrom?: Pinned<bigint>;
 }
 
 export const NO_TESTBED_PINS: TestbedPins = { directedDeposit: UNSET, reserve: UNSET, codeHash: UNSET };
@@ -179,7 +206,9 @@ export function testbed(pins: TestbedPins): OriginNetwork {
     directedDeposit: pins.directedDeposit,
     reserve: pins.reserve,
     codeHash: pins.codeHash,
-    kreivo: KREIVO_TESTBED,
+    kreivo: { ...KREIVO_TESTBED, bezent: pins.bezent ?? UNSET },
+    emitter: pins.emitter ?? UNSET,
+    payoutsFrom: pins.payoutsFrom ?? UNSET,
   };
 }
 
@@ -253,5 +282,23 @@ export function resolveNetwork(n: OriginNetwork): ResolvedNetwork {
     if (!HEX32.test(r)) throw new UnsetConfiguration(`${k.label}: refused recipient ${r} is not 32 bytes of lowercase hex.`);
   }
   if (!Number.isInteger(k.maxConsumers) || k.maxConsumers <= 0) throw new UnsetConfiguration(`${k.label}: no MaxConsumers.`);
-  return { ...n, token, directedDeposit, reserve, codeHash, kreivo: k };
+  if (k.bezent !== UNSET && k.bezent !== undefined && (!HEX32.test(k.bezent) || /^0x0{64}$/.test(k.bezent))) {
+    throw new UnsetConfiguration(`${k.label}: the bezent contract ${k.bezent} is not a 32-byte account in lowercase hex.`);
+  }
+  const emitter = n.emitter === UNSET || n.emitter === undefined ? UNSET : pinned('reference emitter', n.emitter);
+  if (emitter !== UNSET && [token, directedDeposit, reserve].includes(emitter)) {
+    throw new UnsetConfiguration(`${n.label}: the reference emitter is the token, the DirectedDeposit contract or the reserve.`);
+  }
+  const from = n.payoutsFrom === undefined ? UNSET : n.payoutsFrom;
+  if (from !== UNSET && from < 0n) throw new UnsetConfiguration(`${n.label}: a negative block to search payouts from.`);
+  return { ...n, token, directedDeposit, reserve, codeHash, kreivo: k, emitter, payoutsFrom: from };
+}
+
+/** The bezent contract a redemption calls on `n`'s Kreivo; refuses a build that does not pin it. */
+export function bezentContract(n: ResolvedNetwork): Hex {
+  const c = n.kreivo.bezent;
+  if (c === UNSET || c === undefined) {
+    throw new UnsetConfiguration(`${n.kreivo.label}: the bezent contract is not set in this build, so the app refuses to redeem on it.`);
+  }
+  return c as Hex;
 }

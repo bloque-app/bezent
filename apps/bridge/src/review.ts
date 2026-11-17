@@ -65,7 +65,7 @@ export type Comparison =
 
 /** Compares what the chain recorded with the snapshot. The deposit's arrival must be in the receipt, and its
  * recipient, amount and refund must be the snapshot's; any difference is a failure, named. */
-export function compareArrival(res: Pick<DepositResult, 'arrival' | 'arrivals'>, snap: Snapshot, ss58Prefix: number): Comparison {
+export function compareArrival(res: Pick<DepositResult, 'arrival' | 'arrivals' | 'directedLogs'>, snap: Snapshot, ss58Prefix: number): Comparison {
   const recorded = (a: DirectedArrival): Recorded => ({
     recipient: encodeSs58(fromHex(a.recipient), ss58Prefix),
     recipientAccount: a.recipient,
@@ -83,6 +83,10 @@ export function compareArrival(res: Pick<DepositResult, 'arrival' | 'arrivals'>,
   if (seen.amount !== snap.amount) diffs.push(`amount ${seen.amount}, not ${snap.amount} (minor units)`);
   if (seen.refund !== snap.refund) diffs.push(`refund ${seen.refund}, not ${snap.refund}`);
   if (seen.sender !== snap.refund) diffs.push(`sender ${seen.sender}, not ${snap.refund}`);
+  // A deposit emits one Directed log. More than one, paired or not, is not this deposit alone, whatever the first
+  // says: fail loudly rather than pick one.
+  const count = Math.max(res.directedLogs, res.arrivals.length);
+  if (count > 1) diffs.push(`the receipt holds ${count} Directed logs of this contract, not one`);
   if (diffs.length || !res.arrival) {
     return { ok: false, reason: `The Directed log differs from what you reviewed: ${diffs.join('; ') || 'it is not this deposit'}.`, recorded: r };
   }

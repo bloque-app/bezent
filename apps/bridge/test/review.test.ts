@@ -11,6 +11,7 @@ import { connect, deposit, readContract } from '../src/evm/deposit';
 import { encodeSs58 } from '../src/lib/ss58';
 import { fromHex } from '../src/lib/bytes';
 import { compareArrival, LOCKED_CONTAINERS, LOCKED_IDS, lockControls, runDeposit, takeSnapshot, type RunDeps } from '../src/review';
+import { REDEEM_LOCKED_CONTAINERS, REDEEM_LOCKED_IDS } from '../src/ui/redeem';
 import { CONTRACT, mockWallet, network, OWNER, type MockOptions } from './mock-wallet';
 
 const ALICE: Hex = '0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d';
@@ -33,12 +34,15 @@ describe('the lock', () => {
     expect(cs.every((c) => !c.disabled)).toBe(true);
   });
 
-  it('covers every input, select and button of the page but Deposit, and the wallets’ and accounts’ lists', () => {
+  it('covers every input, select and button of the page but Deposit, Redeem and the status page’s read-only lookups, and the wallets’ and accounts’ lists', () => {
     const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-    const controls = [...html.matchAll(/<(input|select|button)\b[^>]*\bid="([^"]+)"/g)].map((m) => m[2]);
-    expect(controls.length).toBeGreaterThan(3);
-    for (const id of controls) if (id !== 'deposit') expect(LOCKED_IDS).toContain(id);
-    for (const id of LOCKED_CONTAINERS) expect(html).toContain(`id="${id}"`);
+    // The status section reads chain data only: it moves nothing, so it is not locked.
+    const page = html.slice(0, html.indexOf('<section id="status"'));
+    const controls = [...page.matchAll(/<(input|select|button)\b[^>]*\bid="([^"]+)"/g)].map((m) => m[2]);
+    expect(controls.length).toBeGreaterThan(8);
+    const locked: readonly string[] = [...LOCKED_IDS, ...REDEEM_LOCKED_IDS];
+    for (const id of controls) if (id !== 'deposit' && id !== 'redeem') expect(locked).toContain(id);
+    for (const id of [...LOCKED_CONTAINERS, ...REDEEM_LOCKED_CONTAINERS]) expect(page).toContain(`id="${id}"`);
   });
 });
 
@@ -120,8 +124,21 @@ describe('after the receipt', () => {
 
   it('fails when the receipt holds no Directed log at all', () => {
     const snap = takeSnapshot({ recipient: { account: ALICE }, amount: 1n, session: { account: OWNER.address } }, 2)!;
-    const cmp = compareArrival({ arrival: undefined, arrivals: [] }, snap, 2);
+    const cmp = compareArrival({ arrival: undefined, arrivals: [], directedLogs: 0 }, snap, 2);
     expect(cmp.ok).toBe(false);
     expect(!cmp.ok && cmp.reason).toMatch(/no Directed log/);
+  });
+
+  it('fails loudly when the receipt holds more than one Directed log, paired with a Transfer or not', async () => {
+    for (const extraDirected of ['paired', 'unpaired'] as const) {
+      const { s, c } = await session({ extraDirected });
+      const snap = takeSnapshot({ recipient: { account: ALICE }, amount: 2_500_000n, session: s }, 2)!;
+      const { res, comparison: cmp } = await runDeposit(snap, s, c, 2, { recheck: ok, deposit }, quiet);
+      expect(res.directedLogs).toBe(2);
+      expect(cmp.ok).toBe(false);
+      expect(!cmp.ok && cmp.reason).toContain('the receipt holds 2 Directed logs of this contract, not one');
+      // What the chain recorded is still shown.
+      expect(cmp.recorded?.recipientAccount).toBe(ALICE);
+    }
   });
 });

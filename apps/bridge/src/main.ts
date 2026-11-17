@@ -1,14 +1,18 @@
 // Copyright (c) 2026 Pagos Cube LLC
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-// The bridge web app's page (F-018, T-018-14): a deposit of USDC on the origin network through DirectedDeposit,
-// naming a Kreivo recipient. Plain DOM, no framework. The seams for what comes next:
-// - redeem on Kreivo (T-018-15) reuses kreivo/client.ts and lib/ss58.ts, and adds its own section;
-// - the status page (T-018-17) starts from `DepositResult.arrival` (the coordinate) and lib/refs.ts.
+// The bridge web app's page (F-018): a deposit of USDC on the origin network through DirectedDeposit, naming a Kreivo
+// recipient (T-018-14); a redemption of bUSDC on Kreivo (T-018-15, ui/redeem.ts); and the status of either, from
+// chain data (T-018-17, ui/status.ts). Plain DOM, no framework.
+//
+// One value-moving action at a time: while a deposit or a redemption is in flight (`state.busy`) every control that
+// changes what is sent is locked, and wallet events are kept and replayed once it ends. A wallet read is tagged with
+// a generation, so an answer that arrives after the page moved on (another wallet event, or a deposit that started)
+// is dropped, and Deposit stays disabled while a read is in flight.
 
-import { DEPLOYMENT, NETWORKS, REVISION } from './config/build';
+import { DEPLOYMENT, NETWORKS, REVISION, STATUS_ROUTE } from './config/build';
 import { resolveNetwork, type ResolvedNetwork } from './config/networks';
 import { discoverWallets, type Wallet } from './evm/eip6963';
-import { balanceOf, connect, deposit, readContract, type ContractFacts, type Session } from './evm/deposit';
+import { assertChain, balanceOf, connect, deposit, readContract, type ContractFacts, type Session } from './evm/deposit';
 import { checkAmount, formatAmount, parseAmount } from './lib/amount';
 import { assessRecipient, type Assessment } from './lib/recipient';
 import { depositReference, mintReference } from './lib/refs';
@@ -17,28 +21,9 @@ import { fromHex, type Hex } from './lib/bytes';
 import { connectKreivo, type Kreivo } from './kreivo/client';
 import { readRecipient } from './kreivo/recipient';
 import { LOCKED_CONTAINERS, LOCKED_IDS, lockControls, reviewRows, runDeposit, takeSnapshot, type Lockable, type Snapshot } from './review';
-
-const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-
-function facts(dl: HTMLElement, rows: [string, string][]) {
-  dl.replaceChildren(
-    ...rows.flatMap(([k, v]) => {
-      const dt = document.createElement('dt');
-      dt.textContent = k;
-      const dd = document.createElement('dd');
-      dd.textContent = v;
-      return [dt, dd];
-    }),
-  );
-}
-
-function say(el: HTMLElement, text: string, kind: 'muted' | 'error' | 'ok' = 'muted') {
-  el.textContent = text;
-  el.className = kind;
-}
-
-const errorText = (e: unknown) =>
-  (e as { shortMessage?: string }).shortMessage ?? (e instanceof Error ? e.message : String(e));
+import { $, errorText, facts, note, progressList, say } from './ui/dom';
+import { initRedeem, REDEEM_LOCKED_CONTAINERS, REDEEM_LOCKED_IDS } from './ui/redeem';
+import { depositLink, initStatus, withdrawalLink } from './ui/status';
 
 interface State {
   network?: ResolvedNetwork;
@@ -52,30 +37,64 @@ interface State {
   kreivo?: Kreivo;
   /** While a deposit is in flight: what was reviewed, frozen at the click. Every input is locked meanwhile. */
   locked?: Snapshot;
-  /** A wallet event that arrived during a deposit, replayed once it ends. */
+  /** A wallet event that arrived during a deposit or a redemption, or a read that was dropped for one; replayed once
+   * it ends. */
   walletChanged?: Wallet;
+  /** A deposit or a redemption is in flight. */
   busy: boolean;
+  /** A wallet read is in flight: its answer is not in yet, so Deposit waits for it. */
+  reading: boolean;
+  /** The generation of the latest wallet read; an answer of an older one is dropped. */
+  walletGen: number;
 }
-const state: State = { busy: false };
+const state: State = { busy: false, reading: false, walletGen: 0 };
 
-/** Every control that changes what is deposited: the network, the wallets, the recipient, the amount. */
+/** Every control that changes what is deposited or redeemed: the network, the wallets, the recipient, the amounts,
+ * the payout address and the reference. */
 function controls(): Lockable[] {
   return [
-    ...LOCKED_IDS.map((id) => $<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>(id)),
-    ...LOCKED_CONTAINERS.flatMap((id) => [...$(id).querySelectorAll('button')]),
+    ...[...LOCKED_IDS, ...REDEEM_LOCKED_IDS].map((id) => $<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>(id)),
+    ...[...LOCKED_CONTAINERS, ...REDEEM_LOCKED_CONTAINERS].flatMap((id) => [...$(id).querySelectorAll('button')]),
   ];
 }
 
+// The redeem (section 6) and the status page (section 7), wired first: the deposit's code draws them too.
+const redeem = initRedeem({
+  network: () => state.network,
+  networks: () => NETWORKS.flatMap((n) => (n.kreivo ? [{ key: n.key, label: n.label, chainId: n.chainId, kreivo: n.kreivo }] : [])),
+  kreivo: () => state.kreivo,
+  evmAccount: () => state.session?.account,
+  busy: () => state.busy,
+  setBusy: (b) => setBusy(b),
+  statusLink: withdrawalLink,
+  // Through the connected wallet, on the network's own chain only: elsewhere the code is not checked.
+  payoutCode: async (address) => {
+    const s = state.session;
+    if (!s || s.network !== state.network) return undefined;
+    await assertChain(s);
+    return s.public.getCode({ address });
+  },
+});
+const status = initStatus({ network: () => state.network, kreivo: () => state.kreivo, session: () => state.session, route: STATUS_ROUTE });
+window.addEventListener('hashchange', () => status.follow(location.hash));
+
 // 1. Network.
 const select = $<HTMLSelectElement>('network');
-for (const n of NETWORKS) select.add(new Option(n.label, n.key));
+for (const n of NETWORKS) {
+  const o = document.createElement('option');
+  o.value = n.key;
+  o.textContent = n.label;
+  select.append(o);
+}
 $('build').textContent = `${DEPLOYMENT} build · ${REVISION}`;
 select.addEventListener('change', () => void chooseNetwork());
 
 async function chooseNetwork() {
   if (state.busy) return;
   state.kreivo?.close();
-  Object.assign(state, { network: undefined, session: undefined, contract: undefined, kreivo: undefined, check: undefined });
+  state.walletGen++;
+  Object.assign(state, { network: undefined, session: undefined, contract: undefined, kreivo: undefined, check: undefined, reading: false });
+  redeem.reset();
   const n = NETWORKS.find((x) => x.key === select.value)!;
   const err = $('network-error');
   err.hidden = true;
@@ -87,6 +106,9 @@ async function chooseNetwork() {
     ['Reserve', n.reserve ?? 'not set in this build'],
     ['Code hash', n.codeHash ?? 'not set in this build'],
     ['Mints on', n.kreivo ? `${n.kreivo.label}, ${n.kreivo.asset.symbol} (Here(${n.kreivo.asset.id}))` : 'not set in this build'],
+    ['bezent contract (Kreivo)', n.kreivo?.bezent ? encodeSs58(fromHex(n.kreivo.bezent), n.kreivo.ss58Prefix) : 'not set in this build'],
+    ['Reference emitter', n.emitter ?? 'not set in this build'],
+    ['Status route', STATUS_ROUTE ?? 'not set in this build: status from chain data alone'],
   ]);
   try {
     state.network = resolveNetwork(n);
@@ -111,6 +133,7 @@ async function startKreivo(n: ResolvedNetwork) {
     state.kreivo = k;
     say(status, `Reading ${n.kreivo.label} through the ${how}.`);
     void precheck();
+    render();
   } catch (e) {
     say(status, `Kreivo is not reachable: ${errorText(e)}`, 'error');
   }
@@ -137,8 +160,9 @@ discoverWallets((wallets) => {
   );
 });
 setTimeout(() => {
-  if (!$('wallets').querySelector('button')) {
-    $('wallets').innerHTML = '<p class="muted">No EVM wallet announced itself. Install or unlock one (MetaMask, Rabby…), then reload.</p>';
+  const list = document.getElementById('wallets'); // Gone when the page was torn down meanwhile (the tests do).
+  if (list && !list.querySelector('button')) {
+    list.replaceChildren(note('No EVM wallet announced itself. Install or unlock one (MetaMask, Rabby…), then reload.'));
   }
 }, 1500);
 
@@ -146,7 +170,7 @@ const hooked = new WeakSet<object>();
 
 async function useWallet(w: Wallet) {
   if (state.busy) {
-    // Mid-deposit: the deposit runs on what was reviewed; read the wallet again once it ends.
+    // Mid-deposit or mid-redemption: it runs on what was reviewed; read the wallet again once it ends.
     state.walletChanged = w;
     return;
   }
@@ -158,27 +182,47 @@ async function useWallet(w: Wallet) {
     w.provider.on?.('chainChanged', () => void (state.wallet === w && useWallet(w)));
   }
   const n = state.network;
-  if (!n) return;
+  if (!n) return render();
+  const gen = ++state.walletGen;
+  // Dropped when a newer read started, or when a deposit or a redemption started meanwhile: then it is read again
+  // once that ends.
+  const stale = () => {
+    if (gen !== state.walletGen) return true;
+    if (state.busy) {
+      state.walletChanged = w;
+      return true;
+    }
+    return false;
+  };
+  state.reading = true;
+  render();
   const out = $('wallet-facts');
   facts(out, [['Wallet', `${w.info.name}: connecting…`]]);
   try {
     const s = await connect(w.provider, n);
-    state.session = s;
-    state.contract = await readContract(s);
-    state.balance = await balanceOf(s);
-    const c = state.contract;
+    if (stale()) return;
+    const c = await readContract(s);
+    if (stale()) return;
+    const balance = await balanceOf(s);
+    if (stale()) return;
+    Object.assign(state, { session: s, contract: c, balance });
     facts(out, [
       ['Wallet', w.info.name],
       ['Depositor', s.account],
-      ['Balance', `${formatAmount(state.balance, c.decimals)} ${c.symbol}`],
+      ['Balance', `${formatAmount(balance, c.decimals)} ${c.symbol}`],
       ['Limits', `${formatAmount(c.minimum, c.decimals)} to ${formatAmount(c.maximum, c.decimals)} ${c.symbol}, from the contract`],
       ['Permit domain', `${c.tokenName} / ${c.tokenVersion} / ${n.chainId}`],
     ]);
   } catch (e) {
+    if (stale()) return;
     state.session = undefined;
     facts(out, [['Wallet', `${w.info.name}: ${errorText(e)}`]]);
+  } finally {
+    if (gen === state.walletGen) state.reading = false;
   }
+  if (gen !== state.walletGen) return;
   onAmount();
+  redeem.onEvmAccount();
   render();
 }
 
@@ -208,7 +252,7 @@ async function kreivoAccounts() {
   const { getInjectedExtensions, connectInjectedExtension } = await import('polkadot-api/pjs-signer');
   const names = getInjectedExtensions();
   if (names.length === 0) {
-    box.innerHTML = '<p class="muted">No Kreivo wallet (Talisman, SubWallet, Polkadot.js) is installed in this browser.</p>';
+    box.replaceChildren(note('No Kreivo wallet (Talisman, SubWallet, Polkadot.js) is installed in this browser.'));
     return;
   }
   const prefix = state.network?.kreivo.ss58Prefix ?? 2;
@@ -235,8 +279,7 @@ async function kreivoAccounts() {
       // The user declined this extension; the others may still answer.
     }
   }
-  if (buttons.length) box.replaceChildren(...buttons);
-  else box.innerHTML = '<p class="muted">No Kreivo account was shared.</p>';
+  box.replaceChildren(...(buttons.length ? buttons : [note('No Kreivo account was shared.')]));
 }
 
 /** The recipient pre-check (amendment 0029, Open 7): refuses, before signing, an account that cannot
@@ -316,29 +359,23 @@ function render() {
     if (amount !== undefined && c) rows.push(['Amount', `${formatAmount(amount, c.decimals)} ${c.symbol}`]);
   }
   facts($('review'), rows);
-  $<HTMLButtonElement>('deposit').disabled = state.busy || !(n && s && c && r && amount !== undefined && check?.ok);
+  $<HTMLButtonElement>('deposit').disabled = state.busy || state.reading || !(n && s && c && r && amount !== undefined && check?.ok);
+  redeem.render();
 }
 
 $('deposit').addEventListener('click', () => void onDeposit());
 async function onDeposit() {
-  if (state.busy) return;
+  if (state.busy || state.reading) return;
   const { session: s, contract: c, network: n } = state;
   if (!s || !c || !n) return;
   const prefix = n.kreivo.ss58Prefix;
   // The snapshot: from here on the deposit uses only this, never the form.
   const snap = takeSnapshot(state, prefix);
   if (!snap) return;
-  const list = $('progress');
-  list.replaceChildren();
+  const step = progressList($('progress'));
   $('result').replaceChildren();
-  const step = (t: string, kind: 'muted' | 'error' | 'ok' = 'muted') => {
-    const li = document.createElement('li');
-    say(li, t, kind);
-    list.append(li);
-  };
-  state.busy = true;
-  state.locked = snap;
-  render();
+  $('deposit-link').replaceChildren();
+  setBusy(true, snap);
   try {
     const { res, comparison: cmp } = await runDeposit(snap, s, c, prefix, { recheck: (a, m) => recheck(a, m), deposit }, (t) => step(t));
     step(`Sent and included: ${res.hash}.`, cmp.ok ? 'ok' : 'muted');
@@ -362,6 +399,10 @@ async function onDeposit() {
         ['Mint reference', mintReference(co)],
       );
       step('The Directed log matches what you reviewed. bezent mints once Polygon makes this block final; the references above hold for this block.', 'ok');
+      const link = document.createElement('a');
+      link.href = depositLink(res.hash, co.positionIndex);
+      link.textContent = 'Follow this deposit’s status';
+      $('deposit-link').replaceChildren(link);
     } else {
       step(`${cmp.reason} bezent acts on what the chain recorded, shown above, not on what you reviewed. Keep the transaction hash.`, 'error');
     }
@@ -370,13 +411,30 @@ async function onDeposit() {
   } catch (e) {
     step(errorText(e), 'error');
   } finally {
-    state.busy = false;
-    state.locked = undefined;
-    render();
-    const w = state.walletChanged;
-    state.walletChanged = undefined;
-    if (w) void useWallet(w);
+    setBusy(false);
   }
 }
 
-void chooseNetwork();
+/** Locks or unlocks the page for a deposit (with its snapshot) or a redemption. On unlock, a wallet event kept
+ * meanwhile is replayed, and Deposit stays disabled until that read answers. */
+function setBusy(busy: boolean, snap?: Snapshot) {
+  if (busy) {
+    // Any wallet read in flight is for the form, not for what is sent: drop its answer, and read again after.
+    if (state.reading && state.wallet) state.walletChanged = state.wallet;
+    state.walletGen++;
+    state.reading = false;
+    state.busy = true;
+    state.locked = snap;
+    render();
+    return;
+  }
+  state.busy = false;
+  state.locked = undefined;
+  const w = state.walletChanged;
+  state.walletChanged = undefined;
+  if (w) void useWallet(w);
+  else render();
+}
+
+
+void chooseNetwork().then(() => status.follow(location.hash));
