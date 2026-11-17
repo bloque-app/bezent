@@ -26,13 +26,22 @@
 //!   second return, or a deposit after the return, is refused. From there it is paid out as any
 //!   refund of an unassociated arrival is, and the book posts it as one.
 //!
-//! An arrival of a token admitted for no asset cannot be either: nothing is done, it stays listed as
-//! unassociated with its owner (`CND-Unassociated`), and the log says why (`REQ-RF-1`: no refund on
-//! unknown). A recipient or a list that cannot be read is not a refusal by rule either: the deposit
-//! is made, and the core's check before the mint sends it to review (`REQ-IN-5`).
+//! An arrival of a token admitted for no asset can never be minted either (no route can name it), so
+//! it is returned the same way (review L3 of PR #136), its refund naming the observed token and no
+//! asset, as the refund of an unassociated arrival of such a token does (`REQ-IN-6`). A recipient or
+//! a list that cannot be read is not a refusal by rule: the deposit is made, and the core's check
+//! before the mint sends it to review (`REQ-IN-5`), which is never refunded (`REQ-RF-1`).
+//!
+//! An arrival the core cannot decide (its detail lacks a recipient or a refund address, its route's
+//! declaration does not parse, or its step fails) stays as it is and is tried again every cycle; the
+//! log says so once an hour per arrival, not every cycle ([`Undecided`]; review L4).
 //!
 //! Nothing here reads a request, matches by amount or time, or chooses a destination: each decision
 //! is a function of the observation and the declarations (`REQ-OT-2`, `REQ-RF-2`).
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use bezent_core::{Condition, Listing, State};
 use serde_json::{Value, json};
@@ -81,6 +90,44 @@ pub fn decide(amount: u128, limits: Option<&Limits>, recipient: Listing) -> Deci
     Decision::Deposit
 }
 
+/// How often an arrival the core cannot decide is logged again for the same reason (review L4).
+pub const UNDECIDED_LOG_EVERY: Duration = Duration::from_secs(3600);
+
+/// The arrivals the intake could not decide and when it last logged each, so that an arrival that
+/// stays undecidable is logged once an hour for its reason, not once a cycle (review L4). Held by the
+/// core across cycles; an arrival that is decided, or no longer pending, is forgotten.
+#[derive(Debug, Default)]
+pub struct Undecided(Mutex<HashMap<i64, (&'static str, Instant)>>);
+
+impl Undecided {
+    /// Whether to log that observation `id` is undecided for `why` now: the first time, when the
+    /// reason changed, or [`UNDECIDED_LOG_EVERY`] after the last time.
+    pub fn due(&self, id: i64, why: &'static str) -> bool {
+        let mut seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        match seen.get(&id) {
+            Some((last, at)) if *last == why && now.duration_since(*at) < UNDECIDED_LOG_EVERY => {
+                false
+            }
+            _ => {
+                seen.insert(id, (why, now));
+                true
+            }
+        }
+    }
+
+    fn forget(&self, id: i64) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    }
+
+    fn keep_only(&self, pending: &HashSet<i64>) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|id, _| pending.contains(id));
+    }
+}
+
 /// The final, executed directed arrivals that no transfer binds yet, in coordinate order.
 async fn pending(pool: &PgPool) -> sqlx::Result<Vec<Observation>> {
     sqlx::query_as(&format!(
@@ -102,20 +149,26 @@ async fn pending(pool: &PgPool) -> sqlx::Result<Vec<Observation>> {
 }
 
 /// Decides every pending directed arrival (see the module documentation), each in a transaction of
-/// its own. Returns how many it decided; one whose step fails is logged and tried again next cycle.
-pub async fn intake(pool: &PgPool) -> sqlx::Result<usize> {
+/// its own. Returns how many it decided; one whose step fails is logged (once an hour, `undecided`)
+/// and tried again next cycle.
+pub async fn intake(pool: &PgPool, undecided: &Undecided) -> sqlx::Result<usize> {
     let mut decided = 0;
-    for o in pending(pool).await? {
+    let pending = pending(pool).await?;
+    undecided.keep_only(&pending.iter().map(|o| o.id).collect());
+    for o in pending {
         let mut tx = pool.begin().await?;
-        match intake_one(&mut tx, &o).await {
+        match intake_one(&mut tx, &o, undecided).await {
             Ok(true) => {
                 tx.commit().await?;
+                undecided.forget(o.id);
                 decided += 1;
             }
             Ok(false) => tx.rollback().await?,
             Err(e) => {
                 tx.rollback().await?;
-                tracing::warn!(observation = o.id, error = %e, "REQ-IN-10: a directed arrival was not decided; tried again next cycle");
+                if undecided.due(o.id, "step-failed") {
+                    tracing::warn!(observation = o.id, error = %e, "REQ-IN-10: a directed arrival was not decided; tried again next cycle");
+                }
             }
         }
     }
@@ -126,18 +179,30 @@ fn parse(amount: Option<String>) -> Option<u128> {
     amount.and_then(|a| a.parse().ok())
 }
 
-async fn intake_one(conn: &mut PgConnection, o: &Observation) -> sqlx::Result<bool> {
+async fn intake_one(
+    conn: &mut PgConnection,
+    o: &Observation,
+    undecided: &Undecided,
+) -> sqlx::Result<bool> {
     let (Some(token), Some(amount)) = (o.token.as_deref(), o.amount()) else {
+        if undecided.due(o.id, "no-token-or-amount") {
+            tracing::error!(
+                observation = o.id,
+                "REQ-IN-10: a directed arrival with no token or no amount; nothing is done"
+            );
+        }
         return Ok(false);
     };
     let (Some(recipient), Some(refund)) = (
         o.detail.get("recipient").and_then(Value::as_str),
         o.detail.get("refund").and_then(Value::as_str),
     ) else {
-        tracing::error!(
-            observation = o.id,
-            "REQ-IN-10: a directed arrival with no recipient or refund address; nothing is done"
-        );
+        if undecided.due(o.id, "no-recipient-or-refund") {
+            tracing::error!(
+                observation = o.id,
+                "REQ-IN-10: a directed arrival with no recipient or refund address; nothing is done"
+            );
+        }
         return Ok(false);
     };
     let asset: Option<String> =
@@ -147,12 +212,19 @@ async fn intake_one(conn: &mut PgConnection, o: &Observation) -> sqlx::Result<bo
             .fetch_optional(&mut *conn)
             .await?;
     let Some(asset) = asset else {
-        tracing::error!(
-            observation = o.id,
-            token,
-            "REQ-IN-10, REQ-RF-1: a directed arrival of a token admitted for no asset; it stays unassociated"
-        );
-        return Ok(false);
+        // Review L3 of PR #136 (REQ-IN-11): admitted for no asset, it can never be minted under
+        // any route's declaration, so it is returned; the refund names the token, not an asset
+        // (REQ-IN-6), and the store holds it to the observed one (0048).
+        give_back(
+            conn,
+            o,
+            Paid::Token(token),
+            amount,
+            refund,
+            "token-not-admitted",
+        )
+        .await?;
+        return Ok(true);
     };
     type Row = (Option<String>, Option<String>, Option<String>);
     let row: Option<Row> = sqlx::query_as(
@@ -170,8 +242,19 @@ async fn intake_one(conn: &mut PgConnection, o: &Observation) -> sqlx::Result<bo
                 maximum,
                 venue_minimum: parse(venue_minimum),
             }),
-            // A declaration the core cannot read is no route to mint on, and no rule to return by.
-            _ => return Ok(false),
+            // A declaration the core cannot read is no route to mint on, and no rule to return by
+            // (review L4: said in the log, once an hour, not passed over in silence).
+            _ => {
+                if undecided.due(o.id, "route-unreadable") {
+                    tracing::error!(
+                        observation = o.id,
+                        %asset,
+                        network = %o.network,
+                        "REQ-IN-10, REQ-LM-1: the deposit route's minimum or maximum does not parse; the directed arrival waits, undecided"
+                    );
+                }
+                return Ok(false);
+            }
         },
         None => None,
     };
@@ -179,7 +262,7 @@ async fn intake_one(conn: &mut PgConnection, o: &Observation) -> sqlx::Result<bo
     match decide(amount, limits.as_ref(), listing) {
         Decision::Deposit => deposit(conn, o).await,
         Decision::Return(why) => {
-            give_back(conn, o, &asset, amount, refund, why).await?;
+            give_back(conn, o, Paid::Asset(&asset), amount, refund, why).await?;
             Ok(true)
         }
     }
@@ -245,25 +328,37 @@ async fn deposit(conn: &mut PgConnection, o: &Observation) -> sqlx::Result<bool>
     Ok(true)
 }
 
+/// What a return names: the bridged asset its token is admitted for, or, for a token admitted for
+/// none, the token itself (`REQ-IN-6`; review L3).
+#[derive(Clone, Copy, Debug)]
+enum Paid<'a> {
+    Asset(&'a str),
+    Token(&'a str),
+}
+
 /// The return (`REQ-IN-11`, `AC-A6.4`): the refund of an unassociated arrival, bezent's own, to the
 /// recorded refund address, accepted at once with no second approver (Open 3). The store refuses any
 /// other destination, a second return, and a return of an arrival something else binds.
 async fn give_back(
     conn: &mut PgConnection,
     o: &Observation,
-    asset: &str,
+    paid: Paid<'_>,
     amount: u128,
     refund: &str,
     why: &str,
 ) -> sqlx::Result<()> {
     let c = o.coordinate();
     let bridge_reference = refs::unassociated_refund(&c);
+    let (asset, token) = match paid {
+        Paid::Asset(a) => (Some(a), None),
+        Paid::Token(t) => (None, Some(t)),
+    };
     let id: Option<i64> = sqlx::query_scalar(
         "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
              destination_network, destination, source_network, source_block_number, \
-             source_block_hash, source_position_kind, source_position_index, state) \
+             source_block_hash, source_position_kind, source_position_index, state, token) \
          VALUES ($1, $2, 'refund', $3, $4::numeric, $5, $6, $5, $7, $8, $9::position_kind, $10, \
-             'Received') \
+             'Received', $11) \
          ON CONFLICT DO NOTHING RETURNING id",
     )
     .bind(&bridge_reference)
@@ -283,6 +378,7 @@ async fn give_back(
     .bind(&c.block_hash)
     .bind(&c.position_kind)
     .bind(c.position_index)
+    .bind(token)
     .fetch_optional(&mut *conn)
     .await?;
     let Some(id) = id else {
@@ -313,6 +409,31 @@ async fn give_back(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review L4 of PR #136: an arrival that stays undecidable is logged once for its reason, again
+    /// when the reason changes, and not again until [`UNDECIDED_LOG_EVERY`] has passed; one that is
+    /// decided, or no longer pending, is forgotten.
+    #[test]
+    fn req_in_10_an_undecided_arrival_is_logged_once_not_every_cycle() {
+        let u = Undecided::default();
+        assert!(u.due(1, "route-unreadable"));
+        assert!(!u.due(1, "route-unreadable"));
+        assert!(u.due(2, "route-unreadable"), "per arrival");
+        assert!(u.due(1, "step-failed"), "a new reason");
+        assert!(!u.due(1, "step-failed"));
+        u.forget(1);
+        assert!(u.due(1, "step-failed"), "decided, then undecided again");
+        u.keep_only(&HashSet::from([1]));
+        assert!(u.due(2, "route-unreadable"), "no longer pending: forgotten");
+        u.0.lock().unwrap().insert(
+            1,
+            (
+                "step-failed",
+                Instant::now() - UNDECIDED_LOG_EVERY - Duration::from_secs(1),
+            ),
+        );
+        assert!(u.due(1, "step-failed"), "an hour on");
+    }
 
     fn limits() -> Limits {
         Limits {

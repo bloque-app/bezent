@@ -112,6 +112,45 @@ async fn resolution(w: &World, id: i64, to: &str, network: &str, block: i64, by:
     .unwrap()
 }
 
+/// Operator `by` records a resolution of `id` into `Refunding`, resting on the coordinate of attempt
+/// 1's refused dry run on the issuing network, as the endpoint recorded it with the preparation
+/// (`common::prepare`: block 1, hash `\x05`; no head is recorded there on its own): the evidence of
+/// a directed deposit's review exit (review M1 of PR #136).
+async fn resolution_on_refusal(w: &World, id: i64, by: usize) -> i64 {
+    let (network, block, hash): (String, i64, Vec<u8>) = sqlx::query_as(
+        "SELECT p.network, p.dry_run_block_number, p.dry_run_block_hash \
+         FROM prepared_transactions p JOIN intents i ON i.id = p.order_intent_id \
+         WHERE i.transfer_id = $1 AND i.attempt = 1 AND NOT p.dry_run_passed \
+         ORDER BY p.id LIMIT 1",
+    )
+    .bind(id)
+    .fetch_one(&w.admin)
+    .await
+    .unwrap();
+    sqlx::query_scalar(
+        "INSERT INTO manual_actions (kind, transfer_id, to_state, network, block_number, \
+             block_hash, block_time, justification) \
+         VALUES ('review-resolution', $1, 'Refunding', $2, $3, $4, $5, \
+             'the issuing network refused the destination') RETURNING id",
+    )
+    .bind(id)
+    .bind(network)
+    .bind(block)
+    .bind(hash)
+    .bind(t0())
+    .fetch_one(&w.ops[by])
+    .await
+    .unwrap()
+}
+
+async fn evidence_refused(w: &World, action: i64) -> i64 {
+    w.count(&format!(
+        "SELECT count(*) FROM event_log WHERE kind = 'review-evidence-refused' \
+           AND payload ->> 'manual_action_id' = '{action}'"
+    ))
+    .await
+}
+
 /// A payout leg on the origin network, from the reserve to `to`, carrying `reference`, final two
 /// blocks later.
 async fn paid_out(w: &World, block: i64, amount: u128, to: &str, reference: &[u8]) {
@@ -503,7 +542,7 @@ async fn ac_a6_4_a_never_mintable_directed_arrival_is_returned_once_to_its_refun
         "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
              destination_network, destination, state, source_network, source_block_number, \
              source_block_hash, source_position_kind, source_position_index) \
-         VALUES ('{bridge}', 'again', 'refund', '{ASSET}', 2000000000, '{ORIGIN}', '{REFUND}', \
+         VALUES ('{bridge}', 'directed:again', 'refund', '{ASSET}', 2000000000, '{ORIGIN}', '{REFUND}', \
              'Received', '{ORIGIN}', 10, '\\x{}', 'log', 0)",
         hex::encode(hash(ORIGIN, 10))
     ))
@@ -599,7 +638,44 @@ async fn req_rv_2_a_directed_deposit_that_cannot_receive_is_refunded_with_a_seco
 ) {
     let w = World::new(options, connect).await;
     let (id, past) = directed_in_review(&w).await;
-    let action = resolution(&w, id, "Refunding", ISSUING, past, 0).await;
+    // Review M1 of PR #136: a resolution resting on just any final head of the issuing network is
+    // refused, approved or not; the exit's evidence is the network's recorded refusal.
+    let elsewhere = resolution(&w, id, "Refunding", ISSUING, past, 0).await;
+    approve_as(&w, 1, elsewhere).await.unwrap();
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(evidence_refused(&w, elsewhere).await, 1);
+    assert_eq!(returns(&w).await, 0);
+    // The store refuses that edge too, whoever writes it: with the unsigned attempt cancelled
+    // under that resolution (in a transaction rolled back after), the edge itself is refused for
+    // its evidence.
+    let mut tx = w.admin.begin().await.unwrap();
+    sqlx::query(&format!(
+        "INSERT INTO unsigned_attempt_cancellations (transfer_id, attempt, manual_action_id) \
+         VALUES ({id}, 1, {elsewhere})"
+    ))
+    .execute(&mut *tx)
+    .await
+    .expect("the cancellation under the approved resolution");
+    let refused = sqlx::query(&format!(
+        "INSERT INTO transitions (transfer_id, from_state, to_state, network, block_number, \
+             block_hash, block_time, manual_action_id) \
+         SELECT {id}, 'Needs-Review', 'Refunding', network, block_number, block_hash, block_time, id \
+         FROM manual_actions WHERE id = {elsewhere}"
+    ))
+    .execute(&mut *tx)
+    .await
+    .expect_err("the edge on another head");
+    tx.rollback().await.unwrap();
+    assert!(
+        refused
+            .as_database_error()
+            .is_some_and(|e| e.code().as_deref() == Some("BZ001")
+                && e.message().contains("recorded refusal")),
+        "{refused}"
+    );
+
+    let action = resolution_on_refusal(&w, id, 0).await;
     w.settle(t0()).await;
     assert_eq!(
         w.state(id).await.0,
@@ -787,4 +863,291 @@ async fn inv_8_a_directed_deposit_whose_mint_was_signed_never_takes_the_review_e
             .await,
         0
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review M1 of PR #136: no refund on unknown (REQ-RF-1, guardrail 4).
+
+/// `REQ-RF-1`, `REQ-IN-5`, `REQ-IN-9` (review M1 of PR #136): a directed deposit whose destination
+/// the core cannot tell is clear (the declared list does not read back) goes to review holding
+/// `CND-DestinationRefused`, with nothing ordered. That is an unknown, not the issuing network's
+/// refusal: an approved resolution into `Refunding` is refused, and nothing is refunded.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_a_directed_deposit_reviewed_for_an_unknown_is_not_refunded(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let typo = DESTINATION.replace('Q', "R");
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO ledger_accounts (network, address, reason) \
+             VALUES ('{ISSUING}', '{typo}', 'a ledger holds value here')"
+        ),
+    )
+    .await;
+    final_directed(&w.admin, 10, 0, 5_000_000).await;
+    w.settle(t0()).await;
+    let (id, kind) = bound(&w, 10, 0).await.expect("the deposit");
+    assert_eq!(kind, "deposit");
+    assert_eq!(
+        w.state(id).await,
+        ("Needs-Review".into(), Some("CND-DestinationRefused".into()))
+    );
+    assert!(order(&w.admin, id, 1).await.is_none());
+    let open: bool = scalar(
+        &w.admin,
+        &format!("SELECT directed_review_refund_open({id})"),
+    )
+    .await;
+    assert!(!open);
+    let past = 12 + BUDGET + 1;
+    head(&w.admin, ISSUING, past).await;
+    let action = resolution(&w, id, "Refunding", ISSUING, past, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(evidence_refused(&w, action).await, 1);
+    assert_eq!(returns(&w).await, 0);
+}
+
+/// `REQ-RF-1`, `REQ-IN-9` (review M1 of PR #136): even when the issuing network refused the
+/// destination first, a review the deposit entered because the core could not read the declared
+/// list (no coordinate, before the condition's deadline) is a review of an unknown. Resting on the
+/// recorded refusal itself, its resolution into `Refunding` is still refused.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_a_refusal_then_an_unknown_review_is_not_refunded(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    final_directed(&w.admin, 10, 0, 5_000_000).await;
+    w.cycle(t0()).await;
+    let (id, _) = bound(&w, 10, 0).await.expect("the deposit");
+    let (o, _) = order(&w.admin, id, 1).await.expect("the mint order");
+    prepare(&w.admin, o, Some("Kreivo(CannotCreate)")).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Source-Final".into(), Some("CND-DestinationRefused".into()))
+    );
+    let typo = DESTINATION.replace('Q', "R");
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO ledger_accounts (network, address, reason) \
+             VALUES ('{ISSUING}', '{typo}', 'a ledger holds value here')"
+        ),
+    )
+    .await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(id).await,
+        ("Needs-Review".into(), Some("CND-DestinationRefused".into()))
+    );
+    let action = resolution_on_refusal(&w, id, 0).await;
+    approve_as(&w, 1, action).await.unwrap();
+    w.settle(t0()).await;
+    assert_eq!(w.state(id).await.0, "Needs-Review");
+    assert_eq!(evidence_refused(&w, action).await, 1);
+    assert_eq!(returns(&w).await, 0);
+    assert_eq!(
+        w.count("SELECT count(*) FROM unsigned_attempt_cancellations")
+            .await,
+        0
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reviews L2, L3 and L5 of PR #136.
+
+/// A token at the reserve that is admitted for no bridged asset.
+const UNADMITTED: &str = "0x00000000000000000000000000000000000000bb";
+
+/// `REQ-IN-11`, `REQ-IN-6`, `AC-A6.4` (review L3 of PR #136): a directed arrival of a token
+/// admitted for no asset can never be minted, so bezent returns it to its refund address like the
+/// other never-mintable arrivals; the return names the token and no asset, and is paid out in it.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_11_a_directed_arrival_of_an_unadmitted_token_is_returned(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    let arrival = observe(
+        &w.admin,
+        ORIGIN,
+        10,
+        0,
+        UNADMITTED,
+        7_000,
+        Some(FUNDER),
+        Some(RESERVE),
+        None,
+        true,
+        json!({"event": "DirectedArrival", "directing": DIRECTING, "direction_log": 1,
+               "recipient": DESTINATION_ACCOUNT, "refund": REFUND}),
+    )
+    .await;
+    decide(&w.admin, arrival, "final", 12).await;
+    w.cycle(t0()).await;
+    let (id, kind) = bound(&w, 10, 0).await.expect("the return");
+    assert_eq!(kind, "refund");
+    let (asset, token, network, destination): (Option<String>, Option<String>, String, String) =
+        sqlx::query_as(
+            "SELECT asset, token, destination_network, destination FROM transfers WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&w.admin)
+        .await
+        .unwrap();
+    assert_eq!(asset, None);
+    assert_eq!(token.as_deref(), Some(UNADMITTED));
+    assert_eq!((network.as_str(), destination.as_str()), (ORIGIN, REFUND));
+    let why: String = scalar(
+        &w.admin,
+        &format!(
+            "SELECT payload ->> 'reason' FROM event_log WHERE kind = 'directed-return' \
+               AND transfer_id = {id}"
+        ),
+    )
+    .await;
+    assert_eq!(why, "token-not-admitted");
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'deposit'")
+            .await,
+        0
+    );
+    w.settle(t0()).await;
+    let (_, payload) = order(&w.admin, id, 1).await.expect("the payout order");
+    assert_eq!(payload["amount"], "7000");
+    assert_eq!(payload["order"]["to"], REFUND);
+    assert_eq!(
+        payload["order"]["token"].as_str().map(str::to_lowercase),
+        Some(UNADMITTED.to_owned())
+    );
+    assert_eq!(returns(&w).await, 1);
+}
+
+/// `REQ-IN-9`, `CND-DepositWindow` (review L5 of PR #136): a directed deposit that waited for the
+/// route's window gets the whole of the route's deadline for `CND-DestinationRefused`, counted from
+/// when it left the window (on the issuing network's head it rested on then), not from its arrival's
+/// finality, which the wait had already used up.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_9_a_deposit_that_waited_for_the_window_gets_its_whole_refusal_deadline(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET maximum = 6000000, window_limit = 10000000, \
+                 window_seconds = 86400 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    final_directed(&w.admin, 10, 0, 6_000_000).await;
+    final_directed(&w.admin, 11, 0, 6_000_000).await;
+    w.cycle(t0()).await;
+    let (b, _) = bound(&w, 11, 0).await.expect("deposit b");
+    assert_eq!(
+        w.state(b).await,
+        ("Source-Final".into(), Some("CND-DepositWindow".into()))
+    );
+    // It waits past its arrival's deadline; then the window rolls over and it leaves, on this head.
+    let left = 13 + BUDGET + 100;
+    head(&w.admin, ISSUING, left).await;
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET window_seconds = 1 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(b).await, ("Source-Final".into(), None));
+    w.cycle(t0()).await;
+    let (o, _) = order(&w.admin, b, 1).await.expect("the mint order");
+    prepare(&w.admin, o, Some("Kreivo(CannotCreate)")).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(b).await,
+        ("Source-Final".into(), Some("CND-DestinationRefused".into())),
+        "not sent to review at once: its clock started when it left the window"
+    );
+    head(&w.admin, ISSUING, left + BUDGET - 1).await;
+    w.cycle(t0()).await;
+    assert_eq!(w.state(b).await.0, "Source-Final");
+    head(&w.admin, ISSUING, left + BUDGET + 1).await;
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.state(b).await,
+        ("Needs-Review".into(), Some("CND-DestinationRefused".into()))
+    );
+}
+
+/// `CND-DepositWindow`, `REQ-LM-1` (review L2 of PR #136): a directed deposit waiting for a window
+/// that, as its route is declared now, can never take it (the window's limit lowered below its
+/// amount, or the route removed) is not left to wait in silence: it pages (`deposit-window-alert`,
+/// in the event log too), once per reason and then once a day, and nothing else changes: it keeps
+/// waiting, is not returned and not reviewed.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn cnd_deposit_window_a_window_that_can_never_fit_pages(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = World::new(options, connect).await;
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET maximum = 6000000, window_limit = 10000000, \
+                 window_seconds = 86400 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    final_directed(&w.admin, 10, 0, 6_000_000).await;
+    final_directed(&w.admin, 11, 0, 6_000_000).await;
+    w.cycle(t0()).await;
+    let (b, _) = bound(&w, 11, 0).await.expect("deposit b");
+    let pages = |reason: &'static str| {
+        let w = &w;
+        async move {
+            w.count(&format!(
+                "SELECT count(*) FROM event_log WHERE kind = 'deposit-window-alert' \
+                   AND transfer_id = {b} AND payload ->> 'reason' = '{reason}'"
+            ))
+            .await
+        }
+    };
+    // Waiting for a window that will roll over pages nothing.
+    w.cycle(t0()).await;
+    assert_eq!(
+        w.count("SELECT count(*) FROM event_log WHERE kind = 'deposit-window-alert'")
+            .await,
+        0
+    );
+    exec(
+        &w.admin,
+        &format!(
+            "UPDATE routes SET maximum = 5000000, window_limit = 5000000 \
+             WHERE asset = '{ASSET}' AND network = '{ORIGIN}' AND direction = 'deposit'"
+        ),
+    )
+    .await;
+    w.cycle(t0()).await;
+    w.cycle(t0() + Duration::hours(1)).await;
+    assert_eq!(pages("above-window-limit").await, 1, "once");
+    w.cycle(t0() + Duration::hours(25)).await;
+    assert_eq!(pages("above-window-limit").await, 2, "then once a day");
+    assert_eq!(
+        w.state(b).await,
+        ("Source-Final".into(), Some("CND-DepositWindow".into()))
+    );
+    assert!(order(&w.admin, b, 1).await.is_none());
+    assert_eq!(returns(&w).await, 0);
 }

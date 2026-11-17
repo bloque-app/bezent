@@ -129,6 +129,9 @@ pub struct Core {
     /// What the reserve check could not even record (amendment 0028): assets held in memory, or
     /// every asset while the check cannot list them.
     unseen: std::sync::Arc<crate::reserve::check::Unseen>,
+    /// The directed arrivals the intake could not decide, so each is logged once an hour, not once a
+    /// cycle (`F-018`; review L4 of PR #136).
+    undecided: std::sync::Arc<crate::directed::Undecided>,
 }
 
 /// What a step did to a transfer.
@@ -282,6 +285,7 @@ impl Core {
             settings,
             late_mint: Default::default(),
             unseen: Default::default(),
+            undecided: Default::default(),
         }
     }
 
@@ -313,8 +317,16 @@ impl Core {
             ..Report::default()
         };
         // F-018 (amendment 0029, A2, A5): every final directed arrival nothing binds becomes a
-        // deposit or is returned, in coordinate order, before the open transfers are stepped.
-        report.directed = crate::directed::intake(&self.pool).await?;
+        // deposit or is returned, in coordinate order, before the open transfers are stepped. A
+        // failure of the intake is logged and the rest of the cycle runs; it is tried again next
+        // cycle (review L4 of PR #136).
+        report.directed = match crate::directed::intake(&self.pool, &self.undecided).await {
+            Ok(decided) => decided,
+            Err(e) => {
+                tracing::error!(error = %e, "REQ-IN-10: the directed intake failed this cycle; the rest of the cycle runs, and it is tried again next cycle");
+                0
+            }
+        };
         let open: Vec<i64> = sqlx::query_scalar(
             "SELECT id FROM transfers WHERE NOT is_terminal_state(state) ORDER BY id",
         )
@@ -886,8 +898,10 @@ impl Core {
         let state = t.state();
         // A pause or a cut-off is measured for a payout only: the mint keeps the clock it had.
         let payout = purpose(t).0 == "payout";
+        // Leaving CND-DepositWindow rests on the destination's head too: the first attempt's clock
+        // starts there (review L5 of PR #136; `Core::mint_clock_start`).
         let measured = [t.condition(), c].iter().any(|x| match x {
-            Some(Condition::PayoutWindow) => true,
+            Some(Condition::PayoutWindow | Condition::DepositWindow) => true,
             Some(Condition::Paused | Condition::CutOff) => payout,
             _ => false,
         });
@@ -1032,6 +1046,7 @@ impl Core {
                 .fetch_one(&mut *conn)
                 .await?;
             if !fits {
+                self.deposit_window_alert(conn, t, now).await?;
                 return Ok(Did::default());
             }
             tracing::info!(transfer = %t.bridge_reference, "CND-DepositWindow: the window has room; the directed deposit resumes");
@@ -1039,7 +1054,7 @@ impl Core {
             return self.hold(conn, t, next).await;
         }
         if let Some(c) = t.condition().filter(|c| c.blocks_delivery()) {
-            let start = t.source_final_block_time.unwrap_or(now);
+            let start = self.mint_clock_start(conn, t, now).await?;
             let deadline = self.deadline(conn, t, start).await?;
             if let Some(head) = self.past(conn, &t.destination_network, deadline).await? {
                 return self
@@ -1067,6 +1082,78 @@ impl Core {
         }
         self.deliver(conn, t, State::SourceFinal, 1, None, None)
             .await
+    }
+
+    /// When the clock of a deposit's blocking condition (`CND-DestinationRefused`,
+    /// `CND-AwaitingConversion`) starts: the source leg's finality, or, for a directed deposit that
+    /// waited in `CND-DepositWindow`, the later moment it left the condition, on the destination's
+    /// final head it rested on then (its wall time when no head was recorded), so that the wait for
+    /// the window takes nothing from the route's deadline (review L5 of PR #136; `REQ-IN-9`).
+    async fn mint_clock_start(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        now: DateTime<Utc>,
+    ) -> sqlx::Result<DateTime<Utc>> {
+        let finality = t.source_final_block_time.unwrap_or(now);
+        let left: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
+            "SELECT COALESCE(x.block_time, x.seen_at) FROM transitions x \
+             WHERE x.transfer_id = $1 AND x.condition IS DISTINCT FROM 'CND-DepositWindow' \
+               AND x.id > (SELECT max(w.id) FROM transitions w \
+                           WHERE w.transfer_id = $1 AND w.condition = 'CND-DepositWindow') \
+             ORDER BY x.id LIMIT 1",
+        )
+        .bind(t.id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        Ok(left.flatten().map_or(finality, |at| at.max(finality)))
+    }
+
+    /// Pages a human when a directed deposit waiting in `CND-DepositWindow` can never fit as its
+    /// route is declared now: the route was removed, or its window's limit lowered below the
+    /// deposit's amount (review L2 of PR #136). It changes nothing: the deposit keeps waiting, is not
+    /// returned or reviewed for it (amendment 0029, Open 1), and what to do is the operator's under
+    /// the governed process. Once per reason, then once a day of cycle time while it lasts
+    /// (`deposit-window-alert`, in the event log too).
+    async fn deposit_window_alert(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        now: DateTime<Utc>,
+    ) -> sqlx::Result<()> {
+        let why: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT CASE WHEN r.asset IS NULL THEN 'route-not-declared' \
+                         WHEN t.amount > r.window_limit THEN 'above-window-limit' END \
+             FROM transfers t LEFT JOIN routes r ON r.asset = t.asset \
+               AND r.network = t.source_network AND r.direction = 'deposit' \
+             WHERE t.id = $1",
+        )
+        .bind(t.id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(why) = why.flatten() else {
+            return Ok(());
+        };
+        let last: Option<(Option<String>, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT payload ->> 'reason', (payload ->> 'at')::timestamptz FROM event_log \
+             WHERE kind = 'deposit-window-alert' AND transfer_id = $1 ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(t.id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some((Some(reason), Some(at))) = last
+            && reason == why
+            && now < at + Duration::days(1)
+        {
+            return Ok(());
+        }
+        let detail = json!({"spec": "CND-DepositWindow, REQ-LM-1, REQ-IN-11",
+                            "bridge_reference": t.bridge_reference, "reason": why,
+                            "amount": t.amount, "at": now.to_rfc3339()});
+        store::event(conn, "deposit-window-alert", Some(t.id), &detail).await?;
+        tracing::error!(kind = %"deposit-window-alert", transfer = %t.bridge_reference, %detail,
+            "page: a directed deposit waits in CND-DepositWindow that its route, as declared now, can never fit; was the route removed or its window lowered?");
+        Ok(())
     }
 
     /// A deposit that named a convertible arrival (`REQ-CV-1`, `REQ-CV-2`, `REQ-CV-6`; amendment
@@ -3309,8 +3396,11 @@ impl Core {
                 && o.network == evidence.network
         };
         // Every edge but an inclusion rests on a final point the endpoints recorded; an inclusion
-        // rests on the leg's own coordinate, observed at a final block.
-        if to != State::Delivered {
+        // rests on the leg's own coordinate, observed at a final block. The directed review exit
+        // rests on the issuing network's refusal, at the finalized block the endpoint dry-ran the
+        // mint at and recorded with it (below), which need not be a head recorded on its own.
+        let directed_exit = before == State::SourceFinal && to == State::Refunding;
+        if to != State::Delivered && !directed_exit {
             let is_final_head = store::final_point(
                 conn,
                 &evidence.network,
@@ -3377,12 +3467,32 @@ impl Core {
                 };
                 evidence.network == t.destination_network && !on_arrival
             }
-            // F-018 (amendment 0029, Open 2): the directed exit rests, as a resolution's mint does,
-            // on a final point of the deposit's destination, the issuing network whose refusal of
-            // the destination the review is about; nothing was signed, so there is no proof to name.
+            // F-018 (amendment 0029, Open 2): the directed exit rests on the issuing network's own
+            // refusal of the destination, the block of attempt 1's refused dry run as the store
+            // recorded it, not on just any final point there (review M1 of PR #136; REQ-IN-9,
+            // REQ-RF-1). Nothing was signed, so there is no proof of non-execution to name.
             (State::SourceFinal, State::Refunding) => {
+                // A head recorded at that block has the same time as the evidence names.
+                let head_agrees = store::final_point(
+                    conn,
+                    &evidence.network,
+                    evidence.block_number,
+                    &evidence.block_hash,
+                )
+                .await?
+                .is_none_or(|p| p.block_time == evidence.block_time);
                 evidence.network == t.destination_network
+                    && head_agrees
                     && self.directed_review_refund_open(conn, t).await?
+                    && sqlx::query_scalar::<_, bool>(
+                        "SELECT directed_refusal_recorded($1, $2, $3, $4)",
+                    )
+                    .bind(t.id)
+                    .bind(&evidence.network)
+                    .bind(evidence.block_number)
+                    .bind(&evidence.block_hash)
+                    .fetch_one(&mut *conn)
+                    .await?
             }
             (State::Delivering | State::Delivered, State::Delivering | State::Refunding) => {
                 let proven = matches!(store::proof_of(conn, t.id, attempt).await?,

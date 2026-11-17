@@ -52,7 +52,13 @@ correct: the destination is theirs.
    `CND-AwaitingConversion` (a converted deposit), the approval must also name the output it approved, in
    `approved_output_*`; see `CND-AwaitingConversion.md` (Do, step 2) and amendment 0018, Open 6.
 3. A refund of a deposit that cannot be minted is not an operator edge from this review: see F-003 NOTES and the
-   requester's refund path (`REQ-RQ-6`); not established here beyond that.
+   requester's refund path (`REQ-RQ-6`); not established here beyond that. The one exception is a **directed** deposit
+   (amendment 0029, Open 2): when the issuing network itself refused its destination (attempt 1's dry run recorded the
+   refusal) and it reached review at the condition's deadline, a resolution into `Refunding`, with a second approver,
+   returns it to its refund destination. Its evidence is the refused dry run's coordinate:
+   `SELECT p.network, p.dry_run_block_number, p.dry_run_block_hash FROM prepared_transactions p JOIN intents i ON i.id = p.order_intent_id WHERE i.transfer_id = <id> AND i.attempt = 1 AND NOT p.dry_run_passed;`
+   and `SELECT directed_review_refund_open(<id>)` says whether the exit is open. A review entered because the
+   destination or the declared list could not be read is an unknown, and is never refunded (`REQ-RF-1`).
 
 ## Never
 
