@@ -32,9 +32,14 @@ const TEST_KREIVO: KreivoNetwork = { ...KREIVO_TESTBED, network: 'kreivo-test', 
 const AMOY: OriginNetwork = { ...POLYGON_AMOY, ...PINS, kreivo: TEST_KREIVO };
 
 describe('resolveNetwork', () => {
-  it('refuses Polygon while its DirectedDeposit is not deployed, and Amoy while it names no test Kreivo', () => {
-    expect(POLYGON.directedDeposit).toBe(UNSET);
-    expect(() => resolveNetwork(POLYGON)).toThrow(UnsetConfiguration);
+  it('resolves Polygon as T-018-18 pinned it, refuses it with its DirectedDeposit unset, and refuses Amoy while it names no test Kreivo', () => {
+    expect(POLYGON.directedDeposit).toBe('0x35495A8273F7450fb7D25bCe6bcd5Ad4aa3F824E');
+    const n = resolveNetwork(POLYGON);
+    expect(n.directedDeposit).toBe('0x35495A8273F7450fb7D25bCe6bcd5Ad4aa3F824E');
+    expect(n.token).toBe('0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359');
+    expect(n.kreivo).toBe(KREIVO);
+    expect(n.chainId).toBe(137);
+    expect(() => resolveNetwork({ ...POLYGON, directedDeposit: UNSET })).toThrow(/DirectedDeposit address is not set/);
     expect(() => resolveNetwork({ ...AMOY, directedDeposit: UNSET })).toThrow(/DirectedDeposit address is not set/);
     // T-018-04 pinned Amoy's contract; no test Kreivo is named yet, so Amoy is still refused.
     expect(POLYGON_AMOY.directedDeposit).toBe('0xB8F75BeAE2723637313072fC89C69B7C15EdAec7');
@@ -42,9 +47,11 @@ describe('resolveNetwork', () => {
     expect(() => resolveNetwork(POLYGON_AMOY)).toThrow(UnsetConfiguration);
   });
 
-  it('leaves the reserve and the code hash unset for Polygon, pins them for Amoy, and refuses either unset', () => {
-    expect(POLYGON.reserve).toBe(UNSET);
-    expect(POLYGON.codeHash).toBe(UNSET);
+  it('pins the reserve and the code hash for Polygon and for Amoy, and refuses either unset', () => {
+    expect(POLYGON.reserve).toBe('0x584A9E72ebC1cdBA2F20233764eef08d528792ca');
+    expect(POLYGON.codeHash).toBe('0x399c8e357fde99f5f3b8b7db3e77d68dcaad5b71fe705d39f4619674e3feb1ba');
+    expect(() => resolveNetwork({ ...POLYGON, reserve: UNSET })).toThrow(/reserve address is not set/);
+    expect(() => resolveNetwork({ ...POLYGON, codeHash: UNSET })).toThrow(/code hash is not set/);
     expect(POLYGON_AMOY.reserve).toBe('0x3530dBB6986Dc584bf3D83a0ed4cbE027238204a');
     expect(POLYGON_AMOY.codeHash).toBe('0x6c32ce3fe773ad4f2bb35e6f83948766d3058c0dbc016ffed003b891489307f0');
     expect(() => resolveNetwork({ ...AMOY, reserve: UNSET })).toThrow(/reserve address is not set/);
@@ -94,9 +101,19 @@ describe('resolveNetwork', () => {
 describe('a production issuing network', () => {
   const polygon: OriginNetwork = { ...POLYGON, ...PINS };
 
-  it('is refused while its refused recipients are not pinned (T-018-18 pins them at the mainnet deploy)', () => {
-    expect(KREIVO.refusedRecipients).toEqual([]);
-    expect(() => resolveNetwork(polygon)).toThrow(/no refused recipient is pinned/);
+  it('pins the refused recipients T-018-18 names: the bezent contract and aledgent’s two settlement contracts', () => {
+    expect(KREIVO.refusedRecipients).toEqual([
+      '0x361d9535ca78edf68a88c7abd44cdec7086f8e85bcb8aedb724462eb3f2e5821',
+      '0x2c00f55589bda36649aa0fd58fcc282de51bffebee9b17e05b9f0094f5c42dc0',
+      '0xa48c1c004f913d893aaa0c8a4911ba9b3e6abd26499b509d56cb3ff71e29ca0a',
+    ]);
+    // The bezent contract a redemption calls is among them: a deposit to it would credit no one.
+    expect(KREIVO.refusedRecipients).toContain(KREIVO.bezent);
+    expect(resolveNetwork(polygon).kreivo.refusedRecipients).toHaveLength(3);
+  });
+
+  it('is refused while its refused recipients are not pinned', () => {
+    expect(() => resolveNetwork({ ...polygon, kreivo: { ...KREIVO, refusedRecipients: [] } })).toThrow(/no refused recipient is pinned/);
   });
 
   it('resolves once they are', () => {
@@ -165,10 +182,12 @@ describe('the redeem’s and the status page’s pins', () => {
     expect(() => resolveNetwork({ ...AMOY, payoutsFrom: -1n })).toThrow(/negative block/);
   });
 
-  it('pin Amoy’s vault emitter and its first block, and leave Polygon’s unset until T-018-18', () => {
+  it('pin Amoy’s and Polygon’s vault emitters and the blocks their payouts are searched from', () => {
     expect(POLYGON_AMOY.emitter).toBe('0xa1Ebae82c6Ebe16beB0864fc73D5350bE71370B9');
     expect(POLYGON_AMOY.payoutsFrom).toBe(53_060_034n);
-    expect(POLYGON.emitter).toBe(UNSET);
+    expect(POLYGON.emitter).toBe('0xd8a9cfC1993e1B0C7D2FA96561688ca9d5cB4EC3');
+    expect(POLYGON.payoutsFrom).toBe(96_814_452n);
+    expect(resolveNetwork(POLYGON).emitter).toBe('0xd8a9cfC1993e1B0C7D2FA96561688ca9d5cB4EC3');
     expect(resolveNetwork(AMOY).emitter).toBe('0xa1Ebae82c6Ebe16beB0864fc73D5350bE71370B9');
   });
 });

@@ -536,13 +536,19 @@ describe('a stored record checked against reality', () => {
     const withSnap = (o: object): Pending => ({ ...p, snapshot: Object.freeze({ ...s, ...o }) });
     expect(pendingProblem({ ...p, network: 'base' }, [net])).toMatch(/not one this build carries/);
     expect(pendingProblem(p, [])).toMatch(/not one this build carries/);
-    expect(pendingProblem({ ...p, networkLabel: 'Other' }, [net])).toMatch(/label/);
     expect(pendingProblem({ ...p, kreivo: 'kreivo-test' }, [net])).toMatch(/kreivo-test, not kreivo/);
     expect(pendingProblem(withSnap({ redeemer: { account: s.redeemer.account, address: 'HNZata7iMYWmk5RvZRTiAsSDhV8366zq2YGb3tLH5Upf74G' } }), [net])).toMatch(/redeemer address/);
     expect(pendingProblem(withSnap({ asset: { ...s.asset, id: 7 } }), [net])).toMatch(/asset/);
     expect(pendingProblem(withSnap({ asset: { ...s.asset, decimals: 18 } }), [net])).toMatch(/asset/);
     expect(pendingProblem(withSnap({ backend: { kind: 'evm', chainId: 1n } }), [net])).toMatch(/backend/);
     expect(pendingProblem(withSnap({ backend: { kind: 'attested', id: 2 } }), [net])).toMatch(/backend/);
+  });
+
+  it('checks only the stable fields: a renamed network or asset symbol does not make a genuine lock unreadable', () => {
+    const p = good();
+    expect(pendingProblem({ ...p, networkLabel: 'Polygon PoS' }, [net])).toBeUndefined();
+    expect(pendingProblem({ ...p, snapshot: Object.freeze({ ...p.snapshot, asset: { ...p.snapshot.asset, symbol: 'USDC.b' } }) }, [net])).toBeUndefined();
+    expect(pendingProblem(p, [{ ...net, label: 'Polygon PoS', kreivo: { ...net.kreivo, asset: { ...net.kreivo.asset, symbol: 'USDC.b' } } }])).toBeUndefined();
   });
 });
 

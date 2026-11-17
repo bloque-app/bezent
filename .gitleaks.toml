@@ -44,7 +44,7 @@ paths = ['''^apps/bridge/(src/config/networks\.ts|test/[^/]+\.test\.ts)$''']
 regexes = ['''0x(3c499c542cEF5E3811e1192ce70d8cC03d5c3359|41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582)''']
 
 [[allowlists]]
-description = "Public token contract address in a deployment record (Circle's test USDC on Amoy): an on-chain address, no secret"
+description = "Public token contract addresses in a deployment record (Circle's test USDC on Amoy, native USDC on Polygon): on-chain addresses, no secret"
 condition = "AND"
 paths = ['''^contracts/evm/deployments/[^/]+\.json$''']
-regexes = ['''0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582''']
+regexes = ['''0x(41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582|3c499c542cEF5E3811e1192ce70d8cC03d5c3359)''']

@@ -92,9 +92,18 @@ export const KREIVO: KreivoNetwork = {
   ss58Prefix: 2,
   asset: { id: 101, symbol: 'bUSDC', decimals: 6 },
   connection: { kind: 'light-client', relay: 'kusama' },
-  // Deliberately empty until the mainnet deploy (T-018-18) pins the Kreivo contract's account and the DEC-15
-  // ledger accounts here; until then `resolveNetwork` refuses every network that mints on live Kreivo.
-  refusedRecipients: [],
+  // T-018-18: the accounts the core refuses as a directed deposit's recipient, which the production store declares
+  // in `ledger_accounts` (PLAN DEC-15, REQ-IN-5): the bezent contract's own account, and aledgent's settlement
+  // contracts on Kreivo mainnet, Bloque's and Bloque Test's (`PROD` and `TEST` of aledgent's
+  // `contracts/settlement/scripts/fork/common.mjs`, bloque-app/aledgent). Value minted to any of them credits no one.
+  refusedRecipients: [
+    // bezent (DoGtfGRPMBd4LHghKAjXAuKB7LY7m8gM1QZsu6mXrwfVdq4).
+    '0x361d9535ca78edf68a88c7abd44cdec7086f8e85bcb8aedb724462eb3f2e5821',
+    // aledgent's settlement contract, Bloque (Da1uhU5rnKTXtQxZDvkqDsEeS2SUaNBktAxvMa8CTKDjrdk).
+    '0x2c00f55589bda36649aa0fd58fcc282de51bffebee9b17e05b9f0094f5c42dc0',
+    // aledgent's settlement contract, Bloque Test (GJ4zVXnSXNbFJgo3cUXJXf9JYfVMGscukptNsnnfZLwUBr7).
+    '0xa48c1c004f913d893aaa0c8a4911ba9b3e6abd26499b509d56cb3ff71e29ca0a',
+  ],
   // The contract on Kreivo mainnet (DoGtfGRPMBd4LHghKAjXAuKB7LY7m8gM1QZsu6mXrwfVdq4; F-015, and
   // contracts/evm/deployments/polygon-amoy.json, which read its bounds).
   bezent: '0x361d9535ca78edf68a88c7abd44cdec7086f8e85bcb8aedb724462eb3f2e5821',
@@ -132,13 +141,16 @@ export const POLYGON: OriginNetwork = {
   chainId: 137,
   chain: POLYGON_CHAIN,
   token: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
-  // Not deployed yet: T-018-18 deploys it and pins its address, its reserve and its code hash here.
-  directedDeposit: UNSET,
-  reserve: UNSET,
-  codeHash: UNSET,
+  // T-018-18, deployed at block 97485770 (contracts/evm/deployments/polygon.json).
+  directedDeposit: '0x35495A8273F7450fb7D25bCe6bcd5Ad4aa3F824E',
+  // The production vault, the Safe the contract forwards to (its immutable `reserve()`).
+  reserve: '0x584A9E72ebC1cdBA2F20233764eef08d528792ca',
+  codeHash: '0x399c8e357fde99f5f3b8b7db3e77d68dcaad5b71fe705d39f4619674e3feb1ba',
   kreivo: KREIVO,
-  emitter: UNSET,
-  payoutsFrom: UNSET,
+  // The vault's reference emitter (F-008), and the block of the vault's last deployment transaction: no payout
+  // precedes it.
+  emitter: '0xd8a9cfC1993e1B0C7D2FA96561688ca9d5cB4EC3',
+  payoutsFrom: 96_814_452n,
 };
 
 export const POLYGON_AMOY: OriginNetwork = {
