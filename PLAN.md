@@ -312,7 +312,8 @@ evmhot's sweeps; Swaps then requests the deposit by naming the arrival's coordin
 
 *Serves:* deposits bound by coordinate (`REQ-IN-3`, `REQ-RQ-3`, `REQ-IN-4`), arrivals de-duplicated by coordinate
 (`REQ-IN-1`, `INV-10`), unassociated arrivals with an owner (`REQ-IN-6`), and conversions before minting (`REQ-CV-1`,
-`REQ-CV-2`). *Cost:* a deposit needs a request after its arrival; a standing-instruction path no longer exists.
+`REQ-CV-2`). *Cost:* a plain transfer needs a request after its arrival, and a standing-instruction path no longer exists; a directed
+arrival needs none (`DEC-21`).
 
 ### DEC-10 Vault
 

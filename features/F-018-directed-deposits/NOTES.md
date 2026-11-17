@@ -115,3 +115,5 @@ leaves room for a rate-limiting front to the public status route (amendment 0029
   is not personal data (`REQ-PV-1`). The web app says so.
 - The reserve Safe for bUSDC on Polygon is the operator's published vault address. It is a parameter of the deployment
   script, not written into this repository.
+- Besides the core, the migration owner may write the same row (`NFR-7`: drills and restores). It is a third writer, as for
+  every other store-guarded row, and the store's guards apply to it as to the core.

@@ -17,7 +17,7 @@ milestone is added, so the plan's §5 table keeps its six rows, and `M-4` gains 
 - the target versions, which #112 and the withdrawal of 0026 moved;
 - Open 15, ruled;
 - the evmhot sweep's recipient, which is now the bUSDC operator account (part 5 of the plan). Since 2026-11-14, that
-  account is where bezent mints Swaps' deposits (`F-011`).
+  account is where bezent mints Swaps' deposits.
 **Date:** 2026-11-08
 **Needs:** nothing: the design (A1 to A6) is accepted and every item under "Open" is ruled. The feature that builds it is `F-018`
 (`features/F-018-directed-deposits/`). Numbered 0029 because 0027 and 0028 are taken by open pull requests (#111, #112).

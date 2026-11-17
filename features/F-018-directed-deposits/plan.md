@@ -162,9 +162,9 @@ Ruled by @pandres95, 2026-11-08: Bloque's evmhot hot-wallet service sweeps each 
 directing contract's `deposit` from that address (`depositWithPermit`, or `approve` and then `deposit`), instead of a
 plain transfer into the vault. Each sweep then names its Kreivo recipient on chain, in the same transaction as the
 value: a Bloque Kreivo account set per chain and token in evmhot's configuration, with Swaps attributing each sweep to
-its user from the deposit address. For bUSDC that account is the bUSDC operator: test `Ck8DEx7jrqts4rctPtDMpKJJW3JQmi38X2EB3awmS2UVZWP`, prod
-`HWpDkzjD45YDC5AAQAk1EYNDry1TJdxHZR7YAYnfDwVZWeM`. Since `F-011` (2026-11-14), bezent already mints Swaps' deposits to
-it, and Swaps credits each user's ledger account from it. evmhot still reports each sweep to Swaps, which still
+its user from the deposit address. For bUSDC that account is Swaps' bUSDC operator
+account, the one bezent already mints Swaps' deposits to (since 2026-11-14), and from which Swaps credits each user's
+ledger account. evmhot still reports each sweep to Swaps, which still
 attributes it and credits the user (`d-evmhot-requester`). The step that drops out is Swaps' deposit request to bezent. A sweep is a directed arrival: it becomes a
 deposit by itself (part 3) and needs no requester to bind it.
 

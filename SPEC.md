@@ -176,7 +176,7 @@ what was minted, redeemed or destroyed, and against which reference. Supply fact
 and live on the issuing network.
 
 **A requester fact** is everything else. It says who a funder or beneficiary is, which account a
-deposit is for, what was quoted or charged, and whether a holder may transact. Requester facts live with
+deposit is for (except a directed arrival, which records its own destination on chain: `REQ-IN-10`), what was quoted or charged, and whether a holder may transact. Requester facts live with
 the requester. bezent does not hold them or need them.
 
 bezent's own records join the first two kinds: which arrival backs which mint, which redemption funds
@@ -1172,7 +1172,7 @@ outside the ordinary steps (`REQ-GV-5`).
 
 ### 7.E `CTR-PRF` — published addresses and statements
 
-The reserve addresses (`REQ-BK-5`), the statements (`REQ-PR-1`, `REQ-PR-2`), the routes (`REQ-LM-1`), the
+The reserve addresses (`REQ-BK-5`) and the directing code declared for each reserve (`REQ-AS-11`), the statements (`REQ-PR-1`, `REQ-PR-2`), the routes (`REQ-LM-1`), the
 finality rule per network (`REQ-OB-1`), the completion budget per route (`NFR-2`), and the governance of
 each on-chain component and reserve address (`REQ-GV-3`). All public.
 
