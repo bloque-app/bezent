@@ -21,6 +21,9 @@
 //!
 //! - Webhooks (`REQ-ST-5`, `REQ-IC-5`): signed, at-least-once notifications that point at the
 //!   sequenced log, which stays the source of truth ([`webhooks`]).
+//! - The public status route (F-018, `REQ-ST-8`): with no credential, on a listener and a login of
+//!   its own, the state, conditions and coordinates of a directed deposit and of a withdrawal, and
+//!   nothing a requester supplied ([`public`]).
 //!
 //! The ingress moves no transfer past `Received`, `Refused` or `Accepted`, and verifies nothing
 //! against a chain: that is the core's (`F-003`) and the endpoints'.
@@ -34,6 +37,7 @@ mod error;
 pub mod health;
 mod intake;
 pub mod openapi;
+pub mod public;
 mod query;
 mod refs;
 pub mod webhooks;

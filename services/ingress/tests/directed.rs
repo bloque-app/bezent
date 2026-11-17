@@ -32,8 +32,18 @@ fn assert_refused(body: &Value, error: &str) {
 
 /// What the EVM endpoint records for a directed arrival at (`ORIGIN`, `block`, log 0): final, at the
 /// reserve, with the issuing network's recipient and the refund address in its detail. Returns the
-/// coordinate as a request carries it.
+/// coordinate as a request carries it. Its directing code is declared (`REQ-AS-11`; once).
 async fn directed(pool: &PgPool, block: i64, amount: u64) -> Value {
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                 from_block, reference) \
+             VALUES ('{ASSET}', '{ORIGIN}', '{DIRECTING}', '{TOKEN}', 1, 1000000000, 0, \
+                 'test declaration') ON CONFLICT DO NOTHING"
+        ),
+    )
+    .await;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO observations (network, block_number, block_hash, block_time, position_kind, \
              position_index, token, amount, sender, recipient, executed, kind, detail) \

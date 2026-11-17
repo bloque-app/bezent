@@ -57,6 +57,130 @@ pub struct Config {
     /// Webhooks to requesters (`REQ-ST-5`); none without this section.
     #[serde(default)]
     pub webhooks: Option<WebhooksConfig>,
+    /// The public status route (F-018, `REQ-ST-8`): its own listener and its own login; none
+    /// without this section.
+    #[serde(default)]
+    pub public: Option<PublicConfig>,
+}
+
+/// The `[public]` section: the unauthenticated status route of directed deposits and withdrawals
+/// (F-018, T-018-10; `REQ-ST-8`; amendment 0029, Open 8), on a listener of its own.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicConfig {
+    /// The address it listens on: never the request surface's (`listen`). The deployment puts the
+    /// rate-limiting front before it, and exposes nothing else of the ingress.
+    pub listen: SocketAddr,
+    /// The store as the route's own login: a member of `bezent_public` and of nothing else, never
+    /// the ingress's login. Only that role reads the `public_status` view, and it reads nothing
+    /// else. Never printed. Exactly one of `database_url` and `store`.
+    #[serde(default)]
+    pub database_url: Option<String>,
+    /// The route's login as a host and a login and password, in place of `database_url`.
+    #[serde(default)]
+    pub store: Option<StoreSource>,
+    /// Store connections for the route: 4 by default.
+    #[serde(default = "default_public_connections")]
+    pub max_connections: u32,
+    /// Requests answered at once; one more is `ERR-Overloaded` (`REQ-LM-4`): 64 by default.
+    #[serde(default = "default_public_in_flight")]
+    pub max_in_flight: usize,
+    /// The longest one of its statements may run, in milliseconds: 2 s by default. Each is a few
+    /// index reads.
+    #[serde(default = "default_public_statement_timeout_ms")]
+    pub statement_timeout_ms: u64,
+    /// The longest a request may take, from its head read to its answer, in milliseconds: 5 s by
+    /// default; beyond, `ERR-Overloaded` (review M1 of PR #139).
+    #[serde(default = "default_public_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    /// The longest a request's head may take to arrive from its first byte, and a new connection's
+    /// first byte from its accept, in milliseconds: 5 s by default; beyond, the connection is closed
+    /// (review L3 of PR #139).
+    #[serde(default = "default_public_header_read_timeout_ms")]
+    pub header_read_timeout_ms: u64,
+    /// The longest a connection may stay idle between requests, its answers written, in
+    /// milliseconds: 60 s by default; then it is closed. Apart from the header-read timeout, so the
+    /// front's pooled connections are kept (second fix round of PR #139).
+    #[serde(default = "default_public_idle_timeout_ms")]
+    pub idle_timeout_ms: u64,
+    /// The longest one exchange may hold a connection, from a request's first byte to its answer's
+    /// last byte written, in milliseconds: 30 s by default. Beyond, the connection is shut down and
+    /// dropped a second later: a client that never reads its answers holds a connection no longer
+    /// (second fix round of PR #139).
+    #[serde(default = "default_public_connection_timeout_ms")]
+    pub connection_timeout_ms: u64,
+    /// Connections the listener holds open at once: 256 by default. One more is answered
+    /// `ERR-Overloaded` (503, `Retry-After`) and closed (review L3 of PR #139 and its second fix
+    /// round). The origin should accept connections from the rate-limiting front (Cloudflare) only,
+    /// by the network's own rules: these bounds are the listener's own, not a rate limit.
+    #[serde(default = "default_public_http_connections")]
+    pub max_http_connections: usize,
+}
+
+impl PublicConfig {
+    /// The route's store URL: `database_url`, or built from `store`. Never printed.
+    pub async fn store_url(&self, resolver: &Resolver) -> Result<Zeroizing<String>, String> {
+        match (&self.database_url, &self.store) {
+            (Some(url), _) => Ok(Zeroizing::new(url.clone())),
+            (None, Some(store)) => resolver.store_url(store).await.map_err(|e| e.to_string()),
+            (None, None) => Err("[public]: no store is configured".to_owned()),
+        }
+    }
+
+    /// The route's pool: its own statement bound and few connections, with a short wait for one.
+    pub fn pool_options(&self) -> sqlx::postgres::PgPoolOptions {
+        bezent_store::login::pool_options_bounded(
+            bezent_store::login::Bounds::DEFAULT.with_statement_ms(self.statement_timeout_ms),
+        )
+        .max_connections(self.max_connections.max(1))
+        .acquire_timeout(Duration::from_millis(250))
+    }
+}
+
+impl fmt::Debug for PublicConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PublicConfig")
+            .field("listen", &self.listen)
+            .field(
+                "database_url",
+                &self.database_url.as_ref().map(|_| "<redacted>"),
+            )
+            .field("store", &self.store)
+            .field("max_connections", &self.max_connections)
+            .field("max_in_flight", &self.max_in_flight)
+            .field("statement_timeout_ms", &self.statement_timeout_ms)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("header_read_timeout_ms", &self.header_read_timeout_ms)
+            .field("idle_timeout_ms", &self.idle_timeout_ms)
+            .field("connection_timeout_ms", &self.connection_timeout_ms)
+            .field("max_http_connections", &self.max_http_connections)
+            .finish()
+    }
+}
+
+fn default_public_connections() -> u32 {
+    4
+}
+fn default_public_in_flight() -> usize {
+    64
+}
+fn default_public_statement_timeout_ms() -> u64 {
+    2000
+}
+fn default_public_request_timeout_ms() -> u64 {
+    5000
+}
+fn default_public_header_read_timeout_ms() -> u64 {
+    5000
+}
+fn default_public_idle_timeout_ms() -> u64 {
+    60_000
+}
+fn default_public_connection_timeout_ms() -> u64 {
+    30_000
+}
+fn default_public_http_connections() -> usize {
+    256
 }
 
 /// The `[webhooks]` section.
@@ -272,6 +396,20 @@ impl Config {
             }
             stores.push(("[webhooks] store", w.store.as_mut()));
         }
+        if let Some(p) = self.public.as_mut() {
+            if p.database_url.is_some() == p.store.is_some() {
+                return Err("[public]: set exactly one of database_url and store".to_owned());
+            }
+            if p.listen == self.listen {
+                return Err(
+                    "[public] listen must differ from listen: the public route has a listener of its own (REQ-ST-8)"
+                        .to_owned(),
+                );
+            }
+            bezent_store::login::statement_bound(p.statement_timeout_ms)
+                .map_err(|e| format!("[public] {e}"))?;
+            stores.push(("[public] store", p.store.as_mut()));
+        }
         for (name, store) in stores {
             if let Some(store) = store {
                 store.rebase(base);
@@ -320,6 +458,7 @@ impl fmt::Debug for Config {
             .field("max_in_flight", &self.max_in_flight)
             .field("log_page", &self.log_page)
             .field("webhooks", &self.webhooks)
+            .field("public", &self.public)
             .finish()
     }
 }
@@ -404,6 +543,49 @@ mod tests {
         let mut none = w;
         none.allow_hosts.clear();
         assert!(none.confirm_environment(&["polygon".into()]).is_ok());
+    }
+
+    #[test]
+    fn req_st_8_the_public_route_has_its_own_listener_and_login_never_printed() {
+        let base =
+            "listen = \"127.0.0.1:8080\"\ndatabase_url = \"postgres://svc:hunter2@db/bezent\"\n";
+        let config = read(
+            "public",
+            &format!(
+                "{base}[public]\nlisten = \"127.0.0.1:8081\"\ndatabase_url = \"postgres://pub:swordfish@db/bezent\"\n"
+            ),
+        )
+        .unwrap();
+        let p = config.public.as_ref().unwrap();
+        assert_eq!(
+            (p.max_connections, p.max_in_flight, p.statement_timeout_ms),
+            (4, 64, 2000)
+        );
+        assert_eq!(
+            (
+                p.request_timeout_ms,
+                p.header_read_timeout_ms,
+                p.idle_timeout_ms,
+                p.connection_timeout_ms,
+                p.max_http_connections
+            ),
+            (5000, 5000, 60_000, 30_000, 256)
+        );
+        assert!(!format!("{config:?}").contains("swordfish"));
+        let same = read(
+            "public-same",
+            &format!(
+                "{base}[public]\nlisten = \"127.0.0.1:8080\"\ndatabase_url = \"postgres://pub@db/bezent\"\n"
+            ),
+        )
+        .unwrap_err();
+        assert!(same.contains("listener of its own"), "{same}");
+        let none = read(
+            "public-none",
+            &format!("{base}[public]\nlisten = \"127.0.0.1:8081\"\n"),
+        )
+        .unwrap_err();
+        assert!(none.contains("[public]"), "{none}");
     }
 
     const VAULT: &str = "[vault]\naddress = \"https://vault.example:8200\"\nmount = \"bezent\"\nrole = \"bezent-ingress-iam\"\nsts_region = \"us-east-2\"\nserver_id = \"vault.example\"\n";

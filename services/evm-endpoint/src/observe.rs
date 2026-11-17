@@ -35,6 +35,7 @@
 //! | `OtherArrival` | any other token's `Transfer` into the vault | unassociated, with an owner (`REQ-IN-6`) |
 //! | `DirectedArrival` | an admitted origin token's `Transfer` into the vault, **immediately** followed in the same transaction by a declared directing contract's `Directed` log naming the same sender and amount (F-018, `AC-A6.6`) | one observation at the `Transfer`'s coordinate, never also an `Arrival`; sender, amount, and in the detail the issuing network's recipient and the refund address the caller named (`d-refund-dest-swaps`) |
 //! | `UnpairedDirection` | a declared directing contract's `Directed` log with no such `Transfer` before it | an anomaly: recorded at the log, never an arrival, never bindable |
+//! | `TokenUpgraded` | an admitted origin token's `Upgraded(address)` (EIP-1967): its implementation changed (F-018, T-018-11) | recorded at the log with the token and the new implementation, never a movement, never bindable; the core pages it |
 //! | `Payout` | the vault's `Transfer` of an origin token, amount above zero, to an address that is not the vault, **immediately** followed in the same transaction by the emitter's `Reference` | a payout leg: reference, token, amount, sender and recipient from the transfer (`INV-14`, `AC-C1.3`; F-008 NOTES) |
 //! | `Outflow`, `ZeroTransfer`, `SelfTransfer` | any other `Transfer` out of the vault | never a payout; a self transfer has no `recipient` column (it is in the detail), so no deposit can bind it |
 //! | `UnpairedReference` | an emitter's `Reference` not paired as above (a bare emit) | never a payout |
@@ -51,7 +52,7 @@ use alloy::primitives::{Address, B256, U256};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use crate::evm::{self, DIRECTED_TOPIC, REFERENCE_TOPIC, TRANSFER_TOPIC};
+use crate::evm::{self, DIRECTED_TOPIC, REFERENCE_TOPIC, TRANSFER_TOPIC, UPGRADED_TOPIC};
 use crate::fee;
 use crate::network::Declarations;
 use crate::pair::{Pair, Read};
@@ -91,6 +92,7 @@ pub fn kind(event: &str) -> &'static str {
         "Arrival" => "arrival",
         "DirectedArrival" => "directed_arrival",
         "UnpairedDirection" => "unpaired_direction",
+        "TokenUpgraded" => "token_upgrade",
         "OtherArrival" => "other_arrival",
         "ConvertibleArrival" => "convertible_arrival",
         "Conversion" => "conversion_output",
@@ -298,6 +300,26 @@ impl Watch<'_> {
                     }
                     None => {
                         o.detail["reason"] = json!("not a Directed event in its shape");
+                        o.detail["topics"] = json!(l.topics);
+                        o.detail["data"] = json!(hex0x(&l.data));
+                    }
+                }
+                out.push(o);
+                continue;
+            }
+            if l.topics.first() == Some(&UPGRADED_TOPIC)
+                && self.declarations.tokens.contains_key(&l.address)
+            {
+                // F-018: an admitted token's implementation changed. Recorded, with the token and
+                // the new implementation in the detail; never a movement.
+                o.event = "TokenUpgraded";
+                o.detail["token"] = json!(spell(self, l.address));
+                match evm::decode_upgraded(&l.topics, &l.data) {
+                    Some(implementation) => {
+                        o.detail["implementation"] = json!(implementation.to_checksum(None));
+                    }
+                    None => {
+                        o.detail["reason"] = json!("not an Upgraded event in its shape");
                         o.detail["topics"] = json!(l.topics);
                         o.detail["data"] = json!(hex0x(&l.data));
                     }
@@ -581,6 +603,16 @@ impl<R: Rpc> Follower<'_, R> {
                 to: last,
                 address: w.directing.iter().map(|(a, _)| *a).collect(),
                 topics: vec![Some(DIRECTED_TOPIC)],
+            });
+        }
+        if !w.declarations.tokens.is_empty() {
+            // F-018: an admitted origin token's `Upgraded` (EIP-1967), which the core pages. A token
+            // that is no proxy never emits it.
+            queries.push(LogQuery {
+                from: first,
+                to: last,
+                address: w.declarations.tokens.keys().copied().collect(),
+                topics: vec![Some(UPGRADED_TOPIC)],
             });
         }
         let mut logs: BTreeMap<(u64, u64), Log> = BTreeMap::new();

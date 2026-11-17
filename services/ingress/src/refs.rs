@@ -8,13 +8,16 @@
 //! - a deposit that binds an arrival: from the arrival's coordinate (`REQ-IN-3`), `bz-d-…`;
 //! - a refund of an unassociated arrival: from the arrival's coordinate, in its own domain, `bz-u-…`;
 //! - a request refused before it bound anything: from (requester, request reference), `bz-r-…`, so
-//!   it never takes a coordinate's reference.
+//!   it never takes a coordinate's reference;
+//! - a withdrawal: from its redemption's reference, (redeemer, on-chain reference), `bz-w-…`, which
+//!   the core derives when it makes the withdrawal (`services/core/src/refs.rs::withdrawal`); the
+//!   public status route derives it to find one (F-018, `REQ-ST-8`).
 //!
 //! Every derivation is SHA-256 over a domain tag and length-prefixed fields.
 
 use bezent_core::{Coordinate, Position};
-use blake2::Blake2b;
 use blake2::digest::consts::U32;
+use blake2::{Blake2b, Blake2b512};
 use sha2::{Digest, Sha256};
 
 /// SHA-256 over `tag` and each field, each length-prefixed.
@@ -64,6 +67,39 @@ pub fn unassociated_refund(c: &Coordinate) -> String {
         "bz-u-",
         tagged("bezent/refund/v0", &[&coordinate_fields(c)]),
     )
+}
+
+/// The bridge reference of the withdrawal bound to the redemption (`redeemer`, `reference`), the
+/// redeemer as its 32-byte account (`REQ-ID-3`, `REQ-OT-2`, amendment 0008): byte for byte the core's
+/// `refs::withdrawal` for a redeemer that decodes to an account, which every issuing-network
+/// redeemer does. `apps/bridge/test/vectors/core-refs.json`, generated from the core's, pins it.
+pub fn withdrawal(redeemer: &[u8; 32], reference: &[u8]) -> String {
+    short(
+        "bz-w-",
+        tagged("bezent/withdrawal/v1", &[redeemer, reference]),
+    )
+}
+
+/// The 32-byte account of an issuing-network address: SS58 (checksum verified, any prefix) or `0x`
+/// and 64 hex digits; `None` otherwise. The core's `refs::account32`, the same rule.
+pub fn account32(address: &str) -> Option<[u8; 32]> {
+    if let Some(digits) = address.strip_prefix("0x") {
+        return hex::decode(digits).ok()?.try_into().ok();
+    }
+    let bytes = bs58::decode(address).into_vec().ok()?;
+    let prefix_len = match (bytes.len(), bytes.first()) {
+        (35, Some(b)) if *b < 64 => 1,
+        (36, Some(b)) if (64..128).contains(b) => 2,
+        _ => return None,
+    };
+    let (body, checksum) = bytes.split_at(bytes.len() - 2);
+    let mut h = Blake2b512::new();
+    h.update(b"SS58PRE");
+    h.update(body);
+    if h.finalize()[..2] != *checksum {
+        return None;
+    }
+    body[prefix_len..].try_into().ok()
 }
 
 /// The bridge reference of a request refused before it bound anything.
@@ -182,6 +218,43 @@ mod tests {
             unassociated_refund(&at("origin-a", 1, vec![0xab, 1], Position::Transaction(3))),
             "bz-u-00c2a6caea37e16941afee596e77c4dc6dee27a5"
         );
+    }
+
+    /// `REQ-ST-8`, `REQ-OT-2`: a withdrawal's bridge reference, from (redeemer, reference), is the
+    /// core's: every vector the core generated for the web app
+    /// (`apps/bridge/test/vectors/core-refs.json`, `services/core/tests/bridge_app_vectors.rs`)
+    /// derives here to the same, one account written in two SS58 prefixes or in hex to one reference,
+    /// and a redeemer whose checksum fails decodes to none.
+    #[test]
+    fn req_st_8_withdrawal_reference_is_the_cores() {
+        let file = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/bridge/test/vectors/core-refs.json"
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+        let rows = v["withdrawals"].as_array().unwrap();
+        assert!(rows.len() >= 2, "{rows:?}");
+        for w in rows {
+            let account = account32(w["redeemer"].as_str().unwrap()).expect("an account");
+            let reference =
+                hex::decode(w["reference"].as_str().unwrap().trim_start_matches("0x")).unwrap();
+            assert_eq!(
+                withdrawal(&account, &reference),
+                w["bridge_reference"].as_str().unwrap(),
+                "{w}"
+            );
+        }
+        for a in v["accounts"].as_array().unwrap() {
+            let want = a["account"]
+                .as_str()
+                .map(|h| hex::decode(h.trim_start_matches("0x")).unwrap());
+            assert_eq!(
+                account32(a["address"].as_str().unwrap()).map(|x| x.to_vec()),
+                want,
+                "{a}"
+            );
+        }
     }
 
     #[test]

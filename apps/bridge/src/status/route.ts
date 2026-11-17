@@ -1,15 +1,17 @@
 // Copyright (c) 2026 Pagos Cube LLC
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // The public status route (F-018, T-018-10; REQ-ST-8, amendment 0029 Open 8): bezent's own answer for a directed
-// deposit, by its arrival's coordinate, and for a withdrawal, by its redemption's on-chain reference. T-018-10 is
-// not built yet, so its URL is a build setting (`BRIDGE_STATUS_URL`), unset by default, and the status page reads
-// chain data alone without it. When it is set, its answer is shown beside the chain's, as what bezent reports:
-// state, named conditions and coordinates. It is never taken as an outcome (guardrail 3, REQ-RQ-7); a coordinate it
-// names on the origin network is only a pointer the page reads and checks itself.
+// deposit, by its arrival's coordinate, and for a withdrawal, by its redemption's on-chain reference. Its URL is a
+// build setting (`BRIDGE_STATUS_URL`), unset by default, and the status page reads chain data alone without it. When
+// it is set, its answer is shown beside the chain's, as what bezent reports: state, named conditions and coordinates.
+// It is never taken as an outcome (guardrail 3, REQ-RQ-7); a coordinate it names on the origin network is only a
+// pointer the page reads and checks itself.
 //
-// The paths are the plan's (`GET /v0/public/deposits/by-coordinate`, `GET /v0/public/withdrawals/by-redemption`).
-// The query parameters and the answer's fields below are this app's expectation of T-018-10, to be aligned when it
-// lands; a field the answer does not carry is shown as absent, and anything else in it is ignored.
+// The paths, query parameters and fields are the route's (`services/ingress/src/public.rs`): a deposit by `network`,
+// `block_number`, `block_hash`, `position_kind` and `position_index` (the block number is part of the coordinate the
+// bridge reference is derived from); a withdrawal by `redeemer` and `reference`. The answer also carries `kind`,
+// `bridge_reference` and `transfers`, which this page does not read; a field the answer does not carry is shown as
+// absent, and anything else in it is ignored.
 
 import type { Hex } from '../lib/bytes';
 import { withTimeout } from '../lib/timeout';
@@ -77,11 +79,12 @@ async function ask(base: string | null, path: string, query: Record<string, stri
 /** bezent's answer for the directed deposit at the coordinate. */
 export function depositByCoordinate(
   base: string | null,
-  c: { network: string; blockHash: Hex; positionKind: string; positionIndex: number },
+  c: { network: string; blockNumber: bigint; blockHash: Hex; positionKind: string; positionIndex: number },
   fetcher: typeof fetch = fetch,
 ) {
   return ask(base, '/v0/public/deposits/by-coordinate', {
     network: c.network,
+    block_number: c.blockNumber.toString(),
     block_hash: c.blockHash,
     position_kind: c.positionKind,
     position_index: String(c.positionIndex),

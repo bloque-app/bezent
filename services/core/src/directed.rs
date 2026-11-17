@@ -26,11 +26,19 @@
 //!   second return, or a deposit after the return, is refused. From there it is paid out as any
 //!   refund of an unassociated arrival is, and the book posts it as one.
 //!
-//! An arrival of a token admitted for no asset can never be minted either (no route can name it), so
-//! it is returned the same way (review L3 of PR #136), its refund naming the observed token and no
-//! asset, as the refund of an unassociated arrival of such a token does (`REQ-IN-6`). A recipient or
-//! a list that cannot be read is not a refusal by rule: the deposit is made, and the core's check
-//! before the mint sends it to review (`REQ-IN-5`), which is never refunded (`REQ-RF-1`).
+//! A recipient or a list that cannot be read is not a refusal by rule: the deposit is made, and the
+//! core's check before the mint sends it to review (`REQ-IN-5`), which is never refunded
+//! (`REQ-RF-1`).
+//!
+//! An arrival whose directing contract is not declared (`directing_code`, for its token, from its
+//! block; `REQ-AS-11`) is neither: only declared directing code directs. The core neither mints nor
+//! returns it; it waits, final and unbound, and the log says so once an hour (review M3 of PR #139;
+//! the store refuses both, 0148). It leaves only by an operator's release
+//! (`operator_release_directed_arrival()`, 0149, `REQ-IN-6`): its return, to the refund address it
+//! recorded, which the core accepts ([`crate::engine`]) once a second operator approves the release
+//! (`REQ-GV-5`), and pays out as it pays any refund of an unassociated arrival. An arrival of a token
+//! admitted for no asset is one of these: a declaration names a token admitted for its asset, so no
+//! declaration covers it (review L3 of PR #136 returned it; the operator's release does now).
 //!
 //! An arrival the core cannot decide (its detail lacks a recipient or a refund address, its route's
 //! declaration does not parse, or its step fails) stays as it is and is tried again every cycle; the
@@ -244,6 +252,29 @@ async fn intake_one(
         }
         return Ok(false);
     };
+    // REQ-AS-11 (review M3 of PR #139): only declared directing code directs. An arrival whose
+    // directing contract is not declared in `directing_code` for its token, from its block, is
+    // neither minted nor returned (the store refuses both, 0148); it waits, and the log says so.
+    let directing = o.detail.get("directing").and_then(Value::as_str);
+    let declared: bool = sqlx::query_scalar("SELECT directing_declared($1, $2, $3, $4)")
+        .bind(&o.network)
+        .bind(token)
+        .bind(directing)
+        .bind(o.block_number)
+        .fetch_one(&mut *conn)
+        .await?;
+    if !declared {
+        if undecided.due(o.id, "directing-undeclared") {
+            tracing::error!(
+                observation = o.id,
+                network = %o.network,
+                %token,
+                directing = directing.unwrap_or("(none)"),
+                "REQ-AS-11: a directed arrival's directing contract is not declared in directing_code for its token from its block; it is neither minted nor returned, and waits"
+            );
+        }
+        return Ok(false);
+    }
     let asset: Option<String> =
         sqlx::query_scalar("SELECT asset FROM admitted_tokens WHERE network = $1 AND token = $2")
             .bind(&o.network)
@@ -251,19 +282,16 @@ async fn intake_one(
             .fetch_optional(&mut *conn)
             .await?;
     let Some(asset) = asset else {
-        // Review L3 of PR #136 (REQ-IN-11): admitted for no asset, it can never be minted under
-        // any route's declaration, so it is returned; the refund names the token, not an asset
-        // (REQ-IN-6), and the store holds it to the observed one (0048).
-        give_back(
-            conn,
-            o,
-            Paid::Token(token),
-            amount,
-            refund,
-            "token-not-admitted",
-        )
-        .await?;
-        return Ok(true);
+        // Not reached: a declaration names a token admitted for its asset (0147), so an arrival of
+        // a token admitted for none is undeclared, above. Said, not passed over, if it ever is.
+        if undecided.due(o.id, "token-not-admitted") {
+            tracing::error!(
+                observation = o.id,
+                %token,
+                "REQ-AS-11: a declared directed arrival's token is admitted for no asset; nothing is done"
+            );
+        }
+        return Ok(false);
     };
     type Row = (Option<String>, Option<String>, Option<String>);
     let row: Option<Row> = sqlx::query_as(
@@ -301,7 +329,7 @@ async fn intake_one(
     match decide(amount, limits.as_ref(), listing) {
         Decision::Deposit => deposit(conn, o).await,
         Decision::Return(why) => {
-            give_back(conn, o, Paid::Asset(&asset), amount, refund, why).await?;
+            give_back(conn, o, &asset, amount, refund, why).await?;
             Ok(true)
         }
     }
@@ -367,37 +395,25 @@ async fn deposit(conn: &mut PgConnection, o: &Observation) -> sqlx::Result<bool>
     Ok(true)
 }
 
-/// What a return names: the bridged asset its token is admitted for, or, for a token admitted for
-/// none, the token itself (`REQ-IN-6`; review L3).
-#[derive(Clone, Copy, Debug)]
-enum Paid<'a> {
-    Asset(&'a str),
-    Token(&'a str),
-}
-
 /// The return (`REQ-IN-11`, `AC-A6.4`): the refund of an unassociated arrival, bezent's own, to the
 /// recorded refund address, accepted at once with no second approver (Open 3). The store refuses any
 /// other destination, a second return, and a return of an arrival something else binds.
 async fn give_back(
     conn: &mut PgConnection,
     o: &Observation,
-    paid: Paid<'_>,
+    asset: &str,
     amount: u128,
     refund: &str,
     why: &str,
 ) -> sqlx::Result<()> {
     let c = o.coordinate();
     let bridge_reference = refs::unassociated_refund(&c);
-    let (asset, token) = match paid {
-        Paid::Asset(a) => (Some(a), None),
-        Paid::Token(t) => (None, Some(t)),
-    };
     let id: Option<i64> = sqlx::query_scalar(
         "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
              destination_network, destination, source_network, source_block_number, \
-             source_block_hash, source_position_kind, source_position_index, state, token) \
+             source_block_hash, source_position_kind, source_position_index, state) \
          VALUES ($1, $2, 'refund', $3, $4::numeric, $5, $6, $5, $7, $8, $9::position_kind, $10, \
-             'Received', $11) \
+             'Received') \
          ON CONFLICT DO NOTHING RETURNING id",
     )
     .bind(&bridge_reference)
@@ -417,7 +433,6 @@ async fn give_back(
     .bind(&c.block_hash)
     .bind(&c.position_kind)
     .bind(c.position_index)
-    .bind(token)
     .fetch_optional(&mut *conn)
     .await?;
     let Some(id) = id else {

@@ -11,6 +11,9 @@
 //! - Only a directed deposit in review for `CND-DestinationRefused`, entered from `Source-Final`, with
 //!   no signature on any of its intents, may be refunded, by the core, under an approved resolution,
 //!   to its refund destination (`REQ-RV-2`, `REQ-GV-5`, `INV-8`, Open 2).
+//! - A directed arrival of undeclared directing code is never minted; it leaves only by an
+//!   operator's release, its return to the refund address it recorded, accepted once a second
+//!   login approves (`REQ-AS-11`, `REQ-IN-6`, `REQ-GV-5`; migration 0149).
 
 mod common;
 
@@ -47,6 +50,10 @@ async fn declarations(pool: &PgPool) {
                ('origin-a', 'token-a', 'asset-a', 6); \
              INSERT INTO reserves (asset, network, address) VALUES \
                ('asset-a', 'origin-a', '{RESERVE}'); \
+             INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                 from_block, reference) VALUES \
+               ('asset-a', 'origin-a', '{DIRECTING}', 'token-a', 1, 6000000, 0, \
+                'directing code declared for the tests (REQ-AS-11)'); \
              INSERT INTO routes (asset, network, direction, minimum, maximum, window_limit, \
                  window_seconds, capacity, cutoffs, completion_budget_seconds) VALUES \
                ('asset-a', 'origin-a', 'deposit', 1, 6000000, 10000000, 86400, 100, '[]', 3600)"
@@ -58,6 +65,11 @@ async fn declarations(pool: &PgPool) {
 /// A final directed arrival at (`origin-a`, `block`, `\xaa`, log 1), with `kind` its observation's
 /// kind (`directed_arrival`, or `arrival` for a plain one).
 async fn final_arrival(pool: &PgPool, block: i64, kind: &str) {
+    final_arrival_by(pool, block, kind, DIRECTING).await;
+}
+
+/// [`final_arrival`], the directing contract `directing` recorded in its detail.
+async fn final_arrival_by(pool: &PgPool, block: i64, kind: &str, directing: &str) {
     let event = if kind == "directed_arrival" {
         "DirectedArrival"
     } else {
@@ -71,7 +83,7 @@ async fn final_arrival(pool: &PgPool, block: i64, kind: &str) {
                  detail) \
                VALUES ('origin-a', {block}, '\\xaa', '{BLOCK_TIME}', 'log', 1, 'token-a', {AMOUNT}, \
                  '0xfunder', '{RESERVE}', TRUE, '{kind}', \
-                 jsonb_build_object('event', '{event}', 'directing', '{DIRECTING}', \
+                 jsonb_build_object('event', '{event}', 'directing', '{directing}', \
                    'direction_log', 2, 'recipient', '{RECIPIENT}', 'refund', '{REFUND}')) \
                RETURNING id) \
              INSERT INTO observation_outcomes (observation_id, outcome, final_block_number, \
@@ -1049,5 +1061,401 @@ async fn req_lm_1_the_window_is_read_by_its_index(pool: PgPool) {
         )
         .await,
         "20"
+    );
+}
+
+/// `REQ-AS-11` (a MUST; review M3 of PR #139): only declared directing code directs. A directed
+/// arrival whose directing contract is not declared in `directing_code` on its network, for its
+/// token, from a block at or before its own, is neither made a deposit nor returned, whoever writes
+/// (the core, the owner); a declared one is, its address compared without case on an `evm` network.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_as_11_an_undeclared_directing_contracts_arrival_is_neither_deposited_nor_returned(
+    pool: PgPool,
+) {
+    const UNDECLARED: &str = "0x00000000000000000000000000000000000000dd";
+    const LATER: &str = "0x00000000000000000000000000000000000000de";
+    declarations(&pool).await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                 from_block, reference) VALUES \
+               ('asset-a', 'origin-a', '{LATER}', 'token-a', 1, 6000000, 100, \
+                'declared from block 100')"
+        ),
+    )
+    .await;
+    let core = login(&pool, "dc_core_m3_for_tests", bezent_store::CORE_ROLE).await;
+    let deposit = |block: i64| {
+        let core = core.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT directed_deposit('origin-a', $1, '\\xaa', 'log', 1)",
+            )
+            .bind(block)
+            .fetch_one(&core)
+            .await
+        }
+    };
+    let give_back = |block: i64, writer: PgPool| {
+        let owner = pool.clone();
+        async move {
+            let reference = return_reference(&owner, block).await;
+            sqlx::query_scalar::<_, i64>(
+                "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+                     destination_network, destination, state, source_network, \
+                     source_block_number, source_block_hash, source_position_kind, \
+                     source_position_index) \
+                 VALUES ($4, 'directed:return-' || $1, 'refund', 'asset-a', $2, 'origin-a', $3, \
+                     'Received', 'origin-a', $1, '\\xaa', 'log', 1) RETURNING id",
+            )
+            .bind(block)
+            .bind(AMOUNT)
+            .bind(REFUND)
+            .bind(reference)
+            .fetch_one(&writer)
+            .await
+        }
+    };
+
+    // An undeclared contract: no deposit, no return, by the core or by the owner.
+    final_arrival_by(&pool, 7, "directed_arrival", UNDECLARED).await;
+    let err = deposit(7)
+        .await
+        .expect_err("an undeclared contract's deposit");
+    assert_refusal(
+        &err,
+        "REQ-AS-11",
+        "the deposit of an undeclared contract's arrival",
+    );
+    let err = give_back(7, core.clone())
+        .await
+        .expect_err("an undeclared contract's return");
+    assert_refusal(
+        &err,
+        "REQ-AS-11",
+        "the return of an undeclared contract's arrival",
+    );
+    let err = give_back(7, pool.clone())
+        .await
+        .expect_err("the owner's return of it");
+    assert_refusal(
+        &err,
+        "REQ-AS-11",
+        "the owner's return of an undeclared contract's arrival",
+    );
+    // Declared, but from a later block than the arrival's: not declared for it.
+    final_arrival_by(&pool, 9, "directed_arrival", LATER).await;
+    assert_refusal(
+        &deposit(9).await.expect_err("below its from_block"),
+        "REQ-AS-11",
+        "an arrival below the declaration's first block",
+    );
+    assert_refusal(
+        &give_back(9, core.clone())
+            .await
+            .expect_err("below its from_block"),
+        "REQ-AS-11",
+        "the return of an arrival below the declaration's first block",
+    );
+    assert_eq!(
+        text(&pool, "SELECT count(*)::text FROM transfers").await,
+        "0",
+        "nothing binds an undeclared contract's arrival"
+    );
+
+    // Declared: the deposit is made, the address compared without case (the endpoint writes the
+    // checksummed spelling; the declaration is kept in lower case).
+    final_arrival_by(
+        &pool,
+        8,
+        "directed_arrival",
+        &DIRECTING.to_uppercase().replace("0X", "0x"),
+    )
+    .await;
+    assert!(
+        deposit(8)
+            .await
+            .expect("a declared contract's deposit")
+            .is_some()
+    );
+    // From its first block on, the later declaration directs too, and its return is taken.
+    final_arrival_by(&pool, 150, "directed_arrival", LATER).await;
+    let returned = give_back(150, core.clone())
+        .await
+        .expect("a declared contract's return");
+    exec(
+        &core,
+        &format!(
+            "INSERT INTO transitions (transfer_id, from_state, to_state) \
+             VALUES ({returned}, 'Received', 'Accepted')"
+        ),
+    )
+    .await;
+    assert_eq!(
+        text(
+            &pool,
+            &format!("SELECT state::text FROM transfers WHERE id = {returned}")
+        )
+        .await,
+        "Accepted"
+    );
+}
+
+/// `REQ-AS-11`, `REQ-IN-6`, `REQ-GV-5` (review M3 of PR #139, second fix round; migration 0149): a
+/// directed arrival below its contract's declaration (the endpoint's `from_block` lower than the
+/// declaration's) can never be minted, and the core never returns it; an operator's release is its
+/// one way out. It makes the return in `Received`, to the refund address the arrival recorded, with
+/// the coordinate's `bz-u-` reference, and records the release as the operator's; the return is
+/// accepted only once another login approves it. It is released once; a declared arrival, a plain
+/// arrival and a caller who is not an operator are refused; an operator writes no transfer
+/// otherwise.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_6_an_undeclared_directed_arrival_leaves_only_by_a_two_person_release(pool: PgPool) {
+    const LATER: &str = "0x00000000000000000000000000000000000000de";
+    declarations(&pool).await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                 from_block, reference) VALUES \
+               ('asset-a', 'origin-a', '{LATER}', 'token-a', 1, 6000000, 100, \
+                'declared from block 100')"
+        ),
+    )
+    .await;
+    let core = login(&pool, "dc_core_release_for_tests", bezent_store::CORE_ROLE).await;
+    let ops = [
+        login(&pool, "dc_ops_a_for_tests", bezent_store::OPERATOR_ROLE).await,
+        login(&pool, "dc_ops_b_for_tests", bezent_store::OPERATOR_ROLE).await,
+    ];
+    let release = |writer: PgPool, block: i64| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT operator_release_directed_arrival('origin-a', $1, '\\xaa', 'log', 1, \
+                 'below the declaration''s first block: never mintable')",
+        )
+        .bind(block)
+        .fetch_one(&writer)
+        .await
+    };
+    // In the gap: never minted.
+    final_arrival_by(&pool, 9, "directed_arrival", LATER).await;
+    assert_refusal(
+        &sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT directed_deposit('origin-a', 9, '\\xaa', 'log', 1)",
+        )
+        .fetch_one(&core)
+        .await
+        .expect_err("its deposit"),
+        "REQ-AS-11",
+        "the deposit of an arrival below the declaration",
+    );
+
+    // Not the core's to release, and not a declared arrival's, nor a plain one's.
+    let err = release(core.clone(), 9)
+        .await
+        .expect_err("the core's release");
+    assert!(
+        err.to_string().contains("permission denied"),
+        "the core may not call it: {err}"
+    );
+    final_arrival(&pool, 8, "directed_arrival").await;
+    assert_refusal(
+        &release(ops[0].clone(), 8)
+            .await
+            .expect_err("a declared one"),
+        "REQ-IN-10",
+        "the release of a declared arrival",
+    );
+    final_arrival(&pool, 6, "arrival").await;
+    assert_refusal(
+        &release(ops[0].clone(), 6)
+            .await
+            .expect_err("a plain arrival"),
+        "REQ-IN-6",
+        "the release of an arrival that is not directed",
+    );
+
+    // The release: the return, in Received, to the recorded refund address, and the action.
+    let action = release(ops[0].clone(), 9).await.expect("the release");
+    let (id, state, destination, bridge, amount, actor): (
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = sqlx::query_as(
+        "SELECT t.id, t.state::text, t.destination, t.bridge_reference, t.amount::text, a.actor \
+             FROM manual_actions a JOIN transfers t ON t.id = a.transfer_id \
+             WHERE a.id = $1 AND a.kind = 'release-unassociated'",
+    )
+    .bind(action)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "Received");
+    assert_eq!(destination, REFUND);
+    assert_eq!(bridge, return_reference(&pool, 9).await);
+    assert_eq!(amount, AMOUNT.to_string());
+    assert_eq!(actor, "dc_ops_a_for_tests");
+    // Once.
+    assert_refusal(
+        &release(ops[1].clone(), 9)
+            .await
+            .expect_err("a second release"),
+        "INV-2",
+        "a second release",
+    );
+    // An operator writes no transfer of their own.
+    let err = sqlx::query(
+        "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+             destination_network, destination, state) \
+         VALUES ('bz-u-0', 'directed:x', 'refund', 'asset-a', 1, 'origin-a', '0xelse', 'Received')",
+    )
+    .execute(&ops[0])
+    .await
+    .expect_err("an operator's own transfer");
+    assert!(err.to_string().contains("permission denied"), "{err}");
+
+    // Not accepted on the core's word, nor on one person's: on the second login's approval.
+    let accept = |action: Option<i64>| {
+        let core = core.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO transitions (transfer_id, from_state, to_state, manual_action_id) \
+                 VALUES ($1, 'Received', 'Accepted', $2)",
+            )
+            .bind(id)
+            .bind(action)
+            .execute(&core)
+            .await
+        }
+    };
+    assert_refusal(
+        &accept(None).await.expect_err("with no release"),
+        "REQ-IN-6",
+        "the core's acceptance of an undeclared arrival's return with no release",
+    );
+    assert_refusal(
+        &accept(Some(action)).await.expect_err("unapproved"),
+        "REQ-IN-6",
+        "the release not yet approved",
+    );
+    let own =
+        sqlx::query("INSERT INTO manual_approvals (action_id, justification) VALUES ($1, 'mine')")
+            .bind(action)
+            .execute(&ops[0])
+            .await
+            .expect_err("approved by its own login");
+    assert_refusal(&own, "REQ-GV-5", "the release approved by its own login");
+    sqlx::query("INSERT INTO manual_approvals (action_id, justification) VALUES ($1, 'checked')")
+        .bind(action)
+        .execute(&ops[1])
+        .await
+        .expect("the second login's approval");
+    accept(Some(action))
+        .await
+        .expect("accepted under the release");
+    assert_eq!(
+        text(
+            &pool,
+            &format!("SELECT state::text FROM transfers WHERE id = {id}")
+        )
+        .await,
+        "Accepted"
+    );
+    // Still never minted: the arrival is bound by its return.
+    assert_eq!(
+        text(
+            &pool,
+            "SELECT count(*)::text FROM transfers WHERE kind = 'deposit'"
+        )
+        .await,
+        "0"
+    );
+}
+
+/// `REQ-IN-6`, `REQ-GV-5`, `REQ-IN-11` (review M1 of PR #139, third round; migration 0149): the
+/// return an operator's release made is never the core's own return, whatever happens to the
+/// declaration afterwards. A declaration that lands after the release covers the arrival, and the
+/// core's acceptance with no approval is still refused; it takes the second login's approval.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_6_a_declaration_after_a_release_does_not_waive_its_second_approver(pool: PgPool) {
+    const LATE: &str = "0x00000000000000000000000000000000000000d7";
+    declarations(&pool).await;
+    let core = login(&pool, "dc_core_late_for_tests", bezent_store::CORE_ROLE).await;
+    let ops = [
+        login(&pool, "dc_ops_c_for_tests", bezent_store::OPERATOR_ROLE).await,
+        login(&pool, "dc_ops_d_for_tests", bezent_store::OPERATOR_ROLE).await,
+    ];
+    final_arrival_by(&pool, 9, "directed_arrival", LATE).await;
+    let action: i64 = sqlx::query_scalar(
+        "SELECT operator_release_directed_arrival('origin-a', 9, '\\xaa', 'log', 1, \
+             'undeclared at the time: never mintable')",
+    )
+    .fetch_one(&ops[0])
+    .await
+    .expect("the release");
+    let id: i64 = sqlx::query_scalar("SELECT transfer_id FROM manual_actions WHERE id = $1")
+        .bind(action)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // The declaration lands afterwards and covers the arrival.
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                 from_block, reference) VALUES \
+               ('asset-a', 'origin-a', '{LATE}', 'token-a', 1, 6000000, 0, \
+                'declared after the release')"
+        ),
+    )
+    .await;
+    assert_eq!(
+        text(&pool, &format!("SELECT directed_return({id})::text")).await,
+        "false",
+        "the release's return is no core return, declared or not"
+    );
+    let accept = |action: Option<i64>| {
+        let core = core.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO transitions (transfer_id, from_state, to_state, manual_action_id) \
+                 VALUES ($1, 'Received', 'Accepted', $2)",
+            )
+            .bind(id)
+            .bind(action)
+            .execute(&core)
+            .await
+        }
+    };
+    assert_refusal(
+        &accept(None).await.expect_err("with no approval"),
+        "REQ-IN-6",
+        "the core's acceptance of the release's return with no release, once declared",
+    );
+    assert_refusal(
+        &accept(Some(action)).await.expect_err("unapproved"),
+        "REQ-IN-6",
+        "the release not yet approved",
+    );
+    sqlx::query("INSERT INTO manual_approvals (action_id, justification) VALUES ($1, 'checked')")
+        .bind(action)
+        .execute(&ops[1])
+        .await
+        .expect("the second login's approval");
+    accept(Some(action))
+        .await
+        .expect("accepted under the approved release");
+    assert_eq!(
+        text(
+            &pool,
+            &format!("SELECT state::text FROM transfers WHERE id = {id}")
+        )
+        .await,
+        "Accepted"
     );
 }

@@ -35,6 +35,7 @@ pub const ROLES: &[&str] = &[
     crate::KREIVO_ENDPOINT_ROLE,
     crate::EVM_ENDPOINT_ROLE,
     crate::WEBHOOKS_ROLE,
+    crate::PUBLIC_ROLE,
     crate::SIGNER_ROLE,
     crate::OPERATOR_ROLE,
 ];
@@ -66,6 +67,8 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "book_postings",
             "book_quarantine",
             "deposit_conversions",
+            // F-018 (migration 0147): the directing code declared for a reserve, for the statement.
+            "directing_code",
             "endpoint_scopes",
             "event_log",
             "event_log_head",
@@ -154,6 +157,12 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "directed_refusal_recorded(bigint,text,bigint,bytea,timestamp with time zone)",
             "directed_review_refund_open(bigint)",
             "directed_window_fits(bigint)",
+            // F-018 (migration 0148, review M3 of PR #139): whether a directed arrival's directing
+            // contract is declared, asked before the core decides it (REQ-AS-11).
+            "directing_declared(text,text,text,bigint)",
+            // F-018 (migration 0149, review L4 of PR #139): the statement holds the declarations
+            // in SHARE mode while it reads them.
+            "directing_code_hold()",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
             "ops_observables()",
@@ -290,6 +299,14 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         "EXECUTE",
         &["bezent_applied_migrations()"],
     ),
+    // The public status route (F-018, T-018-10; migration 0146): one view, which reads the tables
+    // with its owner's rights and shows nothing a requester supplied (REQ-ST-8), and nothing else.
+    (crate::PUBLIC_ROLE, "SELECT", &["public_status"]),
+    (
+        crate::PUBLIC_ROLE,
+        "EXECUTE",
+        &["bezent_applied_migrations()"],
+    ),
     // The signer (migration 0012): it reads the intent, the core's order and the prepared bytes,
     // and records the signature. Since 0049 (audit must-fix 2) it also reads which token an
     // order's asset is paid in, and which signing intent a signed transaction is of (a cancel's
@@ -368,6 +385,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "ops_observables()",
             "operator_pause(text,text,text,text)",
             "operator_record(text,text,jsonb,text)",
+            // F-018 (migration 0149, review M3 of PR #139): the release of a directed arrival
+            // whose directing contract is not declared, to the refund address it recorded.
+            "operator_release_directed_arrival(text,bigint,bytea,position_kind,bigint,text)",
             "operator_request_unpause(bigint,text)",
             "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
         ],

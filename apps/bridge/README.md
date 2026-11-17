@@ -168,8 +168,8 @@ BEZENT_WRITE_VECTORS=1 cargo test -p bezent-core-service --test bridge_app_vecto
 - On the test bed, a redemption signed and paid out from each of Talisman, SubWallet and Polkadot.js, and a deposit
   from MetaMask that mints, with the page in a browser (T-018-14, T-018-15). The flows are tested against models of
   the chains and the wallets, and the Kreivo adapter read-only against mainnet.
-- The public status route's paths and fields are this app's expectation of T-018-10 (`src/status/route.ts`), to be
-  aligned when it is built.
+- The public status route (T-018-10, `services/ingress/src/public.rs`) is built, and `src/status/route.ts` reads its
+  paths and fields; a deployment of it, and a build that names it in `BRIDGE_STATUS_URL`, are not shown yet.
 
 ## Licence
 

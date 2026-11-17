@@ -37,6 +37,11 @@ sol! {
     /// into the reserve for `recipient`, a 32-byte account on the issuing network. `refund` is the
     /// original depositor the caller named, where a return goes (`d-refund-dest-swaps`).
     event Directed(address indexed sender, uint256 amount, bytes32 indexed recipient, address refund);
+    /// EIP-1967's `Upgraded`: a proxy's implementation changed (F-018, T-018-11; an admitted origin
+    /// token that is a proxy, as native USDC is). Its topic is the same whether `implementation` is
+    /// indexed or not; Circle's `FiatTokenProxy` emits it **not** indexed (the address in the data),
+    /// so [`decode_upgraded`] reads both forms.
+    event Upgraded(address indexed implementation);
     /// ERC-20 `transfer`.
     function transfer(address to, uint256 amount) external returns (bool);
     /// ERC-20 `balanceOf`.
@@ -68,6 +73,9 @@ pub const TRANSFER_TOPIC: B256 = Transfer::SIGNATURE_HASH;
 pub const REFERENCE_TOPIC: B256 = Reference::SIGNATURE_HASH;
 /// `Directed(address,uint256,bytes32,address)`.
 pub const DIRECTED_TOPIC: B256 = Directed::SIGNATURE_HASH;
+
+/// `Upgraded(address)` (EIP-1967).
+pub const UPGRADED_TOPIC: B256 = Upgraded::SIGNATURE_HASH;
 
 /// The EIP-2718 type of an EIP-1559 transaction.
 pub const EIP1559: u8 = 2;
@@ -304,6 +312,28 @@ pub fn decode_directed(topics: &[B256], data: &[u8]) -> Option<(Address, U256, B
     Some((sender, U256::from_be_slice(&data[..32]), topics[2], refund))
 }
 
+/// A decoded `Upgraded(address)` log: the new implementation, in either form the event takes. Its
+/// topic does not say whether `implementation` is indexed, so both are read:
+///
+/// - not indexed, as Circle's `FiatTokenProxy` (native USDC) emits it: one topic and one 32-byte data
+///   word, the address;
+/// - indexed, as OpenZeppelin's `ERC1967Upgrade` emits it: two topics, the second the address, and no
+///   data.
+///
+/// Either word is an address only with twelve zero bytes first; any other shape is `None`.
+pub fn decode_upgraded(topics: &[B256], data: &[u8]) -> Option<Address> {
+    if topics.first() != Some(&UPGRADED_TOPIC) {
+        return None;
+    }
+    let word = match (topics.len(), data.len()) {
+        (1, 32) => B256::from_slice(data),
+        (2, 0) => topics[1],
+        _ => return None,
+    };
+    let implementation = Address::from_word(word);
+    (implementation.into_word() == word).then_some(implementation)
+}
+
 /// A decoded `Reference(bytes32)` log.
 pub fn decode_reference(topics: &[B256], data: &[u8]) -> Option<B256> {
     (topics.len() == 2 && topics[0] == REFERENCE_TOPIC && data.is_empty()).then_some(topics[1])
@@ -476,6 +506,41 @@ mod tests {
         let r = B256::repeat_byte(9);
         assert_eq!(decode_reference(&[REFERENCE_TOPIC, r], &[]), Some(r));
         assert_eq!(decode_reference(&[REFERENCE_TOPIC, r], &[0]), None);
+    }
+
+    /// F-018, T-018-11 (`REQ-AS-11`): `Upgraded(address)` in both forms. Native USDC's proxy
+    /// (`FiatTokenProxy`) emits it not indexed, one topic and the address as a data word; an
+    /// OpenZeppelin proxy indexed, two topics and no data. Both decode to the implementation; a dirty
+    /// word, both at once, or neither, does not.
+    #[test]
+    fn req_as_11_upgraded_decodes_in_both_forms() {
+        let implementation = Address::repeat_byte(0x1e);
+        let word = implementation.into_word();
+        // Not indexed: Circle's FiatTokenProxy, native USDC's real event.
+        assert_eq!(
+            decode_upgraded(&[UPGRADED_TOPIC], word.as_slice()),
+            Some(implementation)
+        );
+        // Indexed: EIP-1967 as OpenZeppelin emits it.
+        assert_eq!(
+            decode_upgraded(&[UPGRADED_TOPIC, word], &[]),
+            Some(implementation)
+        );
+        // Both at once, neither, a short or a long word, or a dirty one: not the shape.
+        assert_eq!(
+            decode_upgraded(&[UPGRADED_TOPIC, word], word.as_slice()),
+            None
+        );
+        assert_eq!(decode_upgraded(&[UPGRADED_TOPIC], &[]), None);
+        assert_eq!(decode_upgraded(&[UPGRADED_TOPIC], &word[..31]), None);
+        let mut long = word.to_vec();
+        long.extend_from_slice(&[0; 32]);
+        assert_eq!(decode_upgraded(&[UPGRADED_TOPIC], &long), None);
+        let mut dirty = word;
+        dirty[0] = 1;
+        assert_eq!(decode_upgraded(&[UPGRADED_TOPIC], dirty.as_slice()), None);
+        assert_eq!(decode_upgraded(&[UPGRADED_TOPIC, dirty], &[]), None);
+        assert_eq!(decode_upgraded(&[TRANSFER_TOPIC, word], &[]), None);
     }
 
     /// The Roles modifier's `ConditionViolation(uint8, bytes32)` revert data.

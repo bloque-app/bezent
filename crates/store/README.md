@@ -23,6 +23,7 @@ or disable a trigger, and none may create in the schema or the database.
 | core | `bezent_core` | `bezent-core` |
 | ingress API | `bezent_ingress` | `bezent-ingress` (`bezent_ingress::connect`) |
 | webhook dispatcher | `bezent_webhooks` | `bezent-ingress`, for `[webhooks] database_url` |
+| public status route (F-018, `REQ-ST-8`) | `bezent_public` | `bezent-ingress`, for `[public] database_url` |
 | Kreivo endpoint | `bezent_kreivo_endpoint` | `bezent-kreivo-endpoint` |
 | EVM endpoint | `bezent_evm_endpoint` | `bezent-evm-endpoint` |
 | signer | `bezent_signer` | `bezent-signer` |
@@ -100,8 +101,8 @@ and no role may DELETE or TRUNCATE anything but the dispatcher's own condition h
 | `signatures` | signer (with the nonce and the asset it decoded from the bytes it signed, 0049) |
 | `webhook_secrets`, `webhook_transfer_urls`, `webhook_condition_urls` | ingress |
 | `webhook_deliveries`, `webhook_condition_holds` (and DELETE), `webhook_cursor(after)` UPDATE, `webhook_deliveries(state, attempts, next_attempt_at, leased_until, last_status, last_error, finished_at)` UPDATE | webhook dispatcher |
-| `manual_actions(kind, transfer_id, to_state, network, block_number, block_hash, block_time, justification)`, `manual_approvals(action_id, justification, approved_output_network, approved_output_block_number, approved_output_block_hash, approved_output_position_kind, approved_output_position_index, approved_output_amount)` (0141: all six `approved_output_*` or none), `ledger_accounts(network, address, kind, reason)`; EXECUTE `operator_pause`, `operator_request_unpause`, `operator_approve_unpause`, `operator_record` (0091: the only way an operator pauses, lifts a pause or records an administrative act) | operators |
-| `networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `endpoint_scopes`, `evm_endpoint_networks` | nobody: the migration owner's declarations |
+| `manual_actions(kind, transfer_id, to_state, network, block_number, block_hash, block_time, justification)`, `manual_approvals(action_id, justification, approved_output_network, approved_output_block_number, approved_output_block_hash, approved_output_position_kind, approved_output_position_index, approved_output_amount)` (0141: all six `approved_output_*` or none), `ledger_accounts(network, address, kind, reason)`; EXECUTE `operator_pause`, `operator_request_unpause`, `operator_approve_unpause`, `operator_record` (0091: the only way an operator pauses, lifts a pause or records an administrative act), `operator_release_directed_arrival` (0149: the return of a directed arrival of undeclared directing code, in `Received`, with its release; a second login approves it) | operators |
+| `networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `endpoint_scopes`, `evm_endpoint_networks`, `directing_code` (0147: the directing code declared for a reserve, `REQ-AS-11`; append-only, its token admitted for the asset, its address in lower case on an `evm` network and never a reserve address or an admitted token there; 0148: only a declared one's arrival is minted or returned by the core; 0149: an undeclared one's leaves only by an operator's release, approved by a second login) | nobody: the migration owner's declarations |
 
 Who **reads** what (SELECT):
 
@@ -111,6 +112,7 @@ Who **reads** what (SELECT):
 | ingress | the declarations (`networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `pauses`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `ledger_accounts_listed`), the requests (`intake`, `intake_answers`, `relayed_instructions`), `transfers`, `transitions`, `attempt_milestones`, `observations`, `observation_outcomes`, `event_log`, `event_log_head`, and the views `transfer_status`, `event_log_position`, `book_balances`; of the webhooks' tables, `webhook_deliveries` and the unsealed columns of the secrets and URLs. **No** intent, signature, signed bytes, proof, reading, book entry or posting, or reserve record (the `book_balances` view gives it the balances only) |
 | Kreivo endpoint, EVM endpoint | (the EVM endpoint also `evm_endpoint_networks`, which logins record which EVM network, migration 0056) `networks`, `assets`, `admitted_tokens`, `reserves`, `endpoint_scopes`, `intents`, `signatures`, their own records (`observations`, `observation_outcomes`, `observation_ranges`, `observation_gaps`, `observation_watermarks`, `final_heads`, `prepared_transactions`, `signed_transactions`, `non_execution_proofs`, `reserve_readings`; the EVM endpoint also `fee_position_readings`) and `event_log`; the Kreivo endpoint also `observation_walk_anchors` (0052: blocks of a long history walk, so it resumes). **No** transfer, request or book |
 | webhook dispatcher | `event_log`, `event_log_head`, `transfers`, `intake`, `intake_answers`, `requester_grants`, and the webhooks' tables, sealed columns included |
+| public status route | the view `public_status` alone (0146, `REQ-ST-8`): a directed deposit's, its return's or refund's, and a withdrawal's or its refund mint's state, condition and coordinates, by bridge reference, with no column a requester supplied; the view reads the tables as its owner, so the role reads **no** table |
 | signer | `intents` (the signing intent and the core's order), `prepared_transactions`, `signatures`, and since 0049 `admitted_tokens` and `signed_transactions(id, intent_id)` (to compare the bytes it decodes with the core's order: the token an asset is paid in, a cancel's target) and `event_log(seq)` (the position of an alert it appends); nothing else |
 | operators | `admin_actions`, `event_log`, `pauses`, `transfer_status`, `manual_actions`, `manual_approvals`, `reviews`, `unassociated_arrivals`, `ledger_accounts`, `ledger_accounts_listed`, `book_quarantine`, `surplus_funding_addresses`, `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_statement_objects`, `reserve_readings` |
 | `bezent_service`, `bezent_endpoint` | nothing |
@@ -119,11 +121,11 @@ Who may **call** what (EXECUTE; the functions that run as the owner are marked *
 
 | Role | Calls |
 |---|---|
-| core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `directed_deposit` *definer* (0144: the deposit of a final directed arrival), `directed_window_fits` and `directed_review_refund_open` (0145: whether a directed deposit fits in its route's window, and whether it may leave its review into `Refunding`), `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
+| core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `directed_deposit` *definer* (0144: the deposit of a final directed arrival), `directed_window_fits` and `directed_review_refund_open` (0145: whether a directed deposit fits in its route's window, and whether it may leave its review into `Refunding`), `directing_declared` (0148), `directing_code_hold` *definer* (0149: the statement holds the declarations while it reads them), `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
 | ingress | `source_bindable`, `funding_arrival`, `bezent_writer_holds` |
 | Kreivo endpoint, EVM endpoint | `bezent_writer_holds`, `bezent_endpoint_writer`, `bezent_evm_endpoint_writer`, `bezent_row_network`, `observation_kind_on_network`, `observation_kind_for_event`, `observation_writer_covers` (the guards' helpers, which run as the inserting login) |
 | signer | `attempt_gate_open` *definer*, `pause_holds_intent` *definer* (0125: whether a pause holds a signing intent whose attempt has no signature, amendment 0022 A1b), `statement_place_refusal` *definer* |
-| operators | `ops_observables` *definer* (0090), `source_bindable`, `funding_arrival`, `one_business_day_after`, `operator_pause` *definer*, `operator_request_unpause` *definer*, `operator_approve_unpause` *definer*, `operator_record` *definer* |
+| operators | `ops_observables` *definer* (0090), `source_bindable`, `funding_arrival`, `one_business_day_after`, `operator_pause` *definer*, `operator_request_unpause` *definer*, `operator_approve_unpause` *definer*, `operator_record` *definer*, `operator_release_directed_arrival` *definer* (0149: the release of a directed arrival whose directing contract is not declared) |
 
 Every service and the operators also call `bezent_applied_migrations()` *definer*, which lists the
 migrations applied to the store, for the start-up check. The trigger functions that run as the owner
@@ -361,7 +363,7 @@ without `ADMIN OPTION`:
 DO $$
 DECLARE
     login TEXT := 'bezent_core_prod';   -- the service's login
-    svc   TEXT := 'bezent_core';        -- its role: bezent_core, bezent_ingress, bezent_webhooks,
+    svc   TEXT := 'bezent_core';        -- its role: bezent_core, bezent_ingress, bezent_webhooks, bezent_public,
                                         -- bezent_kreivo_endpoint, bezent_evm_endpoint, bezent_signer
                                         -- or, for an operator, bezent_operator
     m RECORD;
@@ -416,7 +418,7 @@ This lists every login that breaks any of that, and why; it must return no rows:
 -- deploy: check every login of a store role
 WITH store_roles(name) AS (VALUES ('bezent_service'), ('bezent_core'), ('bezent_ingress'),
          ('bezent_endpoint'), ('bezent_kreivo_endpoint'), ('bezent_evm_endpoint'),
-         ('bezent_webhooks'), ('bezent_signer'), ('bezent_operator')),
+         ('bezent_webhooks'), ('bezent_public'), ('bezent_signer'), ('bezent_operator')),
 logins AS (
     SELECT DISTINCT u.oid, u.rolname FROM pg_auth_members a
     JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles u ON u.oid = a.member
