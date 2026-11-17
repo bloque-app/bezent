@@ -160,6 +160,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             // F-018 (migration 0148, review M3 of PR #139): whether a directed arrival's directing
             // contract is declared, asked before the core decides it (REQ-AS-11).
             "directing_declared(text,text,text,bigint)",
+            // F-018 (migration 0149, review L4 of PR #139): the statement holds the declarations
+            // in SHARE mode while it reads them.
+            "directing_code_hold()",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
             "ops_observables()",
@@ -382,6 +385,9 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "ops_observables()",
             "operator_pause(text,text,text,text)",
             "operator_record(text,text,jsonb,text)",
+            // F-018 (migration 0149, review M3 of PR #139): the release of a directed arrival
+            // whose directing contract is not declared, to the refund address it recorded.
+            "operator_release_directed_arrival(text,bigint,bytea,position_kind,bigint,text)",
             "operator_request_unpause(bigint,text)",
             "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
         ],

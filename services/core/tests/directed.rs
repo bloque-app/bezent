@@ -1399,6 +1399,112 @@ async fn req_as_11_an_undeclared_directing_contracts_arrival_is_never_minted_or_
     );
 }
 
+/// `REQ-AS-11`, `REQ-IN-6`, `REQ-GV-5` (review M3 of PR #139, second fix round; migration 0149): a
+/// directed arrival below its contract's declaration (the endpoint's `[[directing]]` `from_block`
+/// lower than the declaration's) is never minted and the core never returns it; an operator's
+/// release, approved by a second login, returns it, once, to the refund address it recorded, paid
+/// out as the refund of an unassociated arrival is and posted by the book as one.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_in_6_an_undeclared_directed_arrival_is_returned_only_by_a_two_person_release(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    const GAP: &str = "0x00000000000000000000000000000000000000de";
+    let w = World::new(options, connect).await;
+    let now = t0() + Duration::minutes(5);
+    // Declared from block 100; its arrival at block 10, mintable otherwise, is in the gap.
+    sqlx::query(
+        "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+             from_block, reference) \
+         VALUES ($1, $2, $3, $4, 1, 1000000000000000, 100, 'declared from block 100')",
+    )
+    .bind(ASSET)
+    .bind(ORIGIN)
+    .bind(GAP)
+    .bind(TOKEN)
+    .execute(&w.admin)
+    .await
+    .unwrap();
+    let arrival = observe(
+        &w.admin,
+        ORIGIN,
+        10,
+        0,
+        TOKEN,
+        5_000_000,
+        Some(FUNDER),
+        Some(RESERVE),
+        None,
+        true,
+        json!({"event": "DirectedArrival", "directing": GAP, "direction_log": 1,
+               "recipient": DESTINATION_ACCOUNT, "refund": REFUND}),
+    )
+    .await;
+    decide(&w.admin, arrival, "final", 12).await;
+    w.cycle(now).await;
+    w.settle(now).await;
+    assert_eq!(bound(&w, 10, 0).await, None, "never minted, never returned");
+
+    // One operator releases it: its return waits in Received for the second login.
+    let action: i64 = sqlx::query_scalar(&format!(
+        "SELECT operator_release_directed_arrival('{ORIGIN}', 10, '\\x{}', 'log', 0, \
+             'declared from a later block: never mintable')",
+        hex::encode(hash(ORIGIN, 10))
+    ))
+    .fetch_one(&w.ops[0])
+    .await
+    .expect("the release");
+    let (id, kind) = bound(&w, 10, 0).await.expect("the return");
+    assert_eq!(kind, "refund");
+    w.cycle(now).await;
+    w.cycle(now).await;
+    assert_eq!(w.state(id).await.0, "Received", "not on one person's word");
+    approve_as(&w, 0, action)
+        .await
+        .expect_err("approved by its own login");
+    approve_as(&w, 1, action).await.expect("the second login");
+
+    // Accepted under the release, paid to the recorded refund address, once.
+    w.cycle(now).await;
+    w.cycle(now).await;
+    assert_eq!(w.state(id).await.0, "Source-Final");
+    w.cycle(now).await;
+    let (_, payload) = order(&w.admin, id, 1).await.expect("the payout order");
+    assert_eq!(payload["amount"], "5000000");
+    assert_eq!(payload["order"]["to"], REFUND);
+    deliver(&w, id, 1, now).await;
+    let reference = reference_of(&w.admin, id).await;
+    assert_eq!(
+        reference,
+        refs::unassociated_refund_reference(&at(10, 0)).to_vec()
+    );
+    paid_out(&w, 60, 5_000_000, REFUND, &reference).await;
+    w.settle(now).await;
+    assert_eq!(w.state(id).await, ("Completed".into(), None));
+    assert_eq!(
+        w.count("SELECT count(*) FROM book_entries WHERE kind = 'unassociated-refund'")
+            .await,
+        1
+    );
+    let accepted_under: Option<i64> = scalar(
+        &w.admin,
+        &format!(
+            "SELECT manual_action_id FROM transitions WHERE transfer_id = {id} \
+               AND from_state = 'Received' AND to_state = 'Accepted'"
+        ),
+    )
+    .await;
+    assert_eq!(accepted_under, Some(action));
+    w.settle(now).await;
+    assert_eq!(w.count("SELECT count(*) FROM transfers").await, 1, "once");
+    assert_eq!(
+        w.count("SELECT count(*) FROM transfers WHERE kind = 'deposit'")
+            .await,
+        0,
+        "never minted"
+    );
+}
+
 /// `REQ-IN-9`, `CND-DepositWindow` (review L5 of PR #136): a directed deposit that waited for the
 /// route's window gets the whole of the route's deadline for `CND-DestinationRefused`, counted from
 /// when it left the window (on the issuing network's head it rested on then), not from its arrival's

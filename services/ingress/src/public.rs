@@ -33,9 +33,13 @@
 //!   or 66 as `0x` hex) and a reference longer than 66 are refused before they are decoded, so no
 //!   query costs more than a few microseconds of parsing; a request URI is at most
 //!   [`MAX_URI_BYTES`] and a request head at most [`MAX_HEAD_BYTES`] in [`MAX_HEADERS`] headers; a
-//!   request is answered within `request_timeout_ms`, a head must arrive within
-//!   `header_read_timeout_ms`, and at most `max_http_connections` are held open ([`serve`]); and
-//!   `/health` takes a permit like a query. The origin should accept connections from the front
+//!   request is answered within `request_timeout_ms` (`ERR-Overloaded` beyond), a head must arrive
+//!   within `header_read_timeout_ms` of its first byte, an idle connection is kept for
+//!   `idle_timeout_ms`, one exchange (a request's first byte to its answer's last byte written)
+//!   holds a connection for at most `connection_timeout_ms`, so a client that never reads its
+//!   answers is dropped, and at most `max_http_connections` are held open, one more answered
+//!   `ERR-Overloaded` and closed ([`serve`]; second fix round of PR #139); and `/health` takes a
+//!   permit like a query. The origin should accept connections from the front
 //!   (Cloudflare) only, by the network's rules: these bounds are the listener's own, not a rate
 //!   limit.
 
@@ -500,8 +504,8 @@ async fn headers(request: axum::extract::Request, next: axum::middleware::Next) 
     };
     let unavailable = response.status() == StatusCode::SERVICE_UNAVAILABLE;
     let h = response.headers_mut();
-    // The request timeout's answer (review M1 of PR #139) is `ERR-Overloaded`'s status; it says
-    // when to retry as `ERR-Overloaded` does.
+    // Every 503 is `ERR-Overloaded` (the request timeout's too, review M1 of PR #139); each says
+    // when to retry, whichever made it.
     if unavailable && !h.contains_key(header::RETRY_AFTER) {
         h.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
     }
@@ -545,8 +549,10 @@ pub fn public_router(app: PublicApp) -> Router {
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// [`public_router`], answering each request within `timeout` (review M1 of PR #139): beyond it, the
-/// handler is dropped and the answer is 503, retryable, as `ERR-Overloaded` is.
+/// handler is dropped and the answer is `ERR-Overloaded` (503, `Retry-After`), as when the route
+/// answers as many as it can at once (second fix round of PR #139: the body says so too).
 pub fn public_router_with(app: PublicApp, timeout: Duration) -> Router {
+    let timeout = timeout.max(Duration::from_millis(1));
     Router::new()
         .route("/health", get(health))
         .route(
@@ -557,20 +563,41 @@ pub fn public_router_with(app: PublicApp, timeout: Duration) -> Router {
             "/v0/public/withdrawals/by-redemption",
             get(withdrawal_by_redemption),
         )
-        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
-            StatusCode::SERVICE_UNAVAILABLE,
-            timeout.max(Duration::from_millis(1)),
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                match tokio::time::timeout(timeout, next.run(request)).await {
+                    Ok(response) => response,
+                    Err(_) => PublicError::Overloaded.into_response(),
+                }
+            },
         ))
         .layer(axum::middleware::from_fn(headers))
         .with_state(app)
 }
 
-/// The public listener's own bounds (review L3 of PR #139).
+/// What the listener answers on a connection beyond its bound (second fix round of PR #139):
+/// `ERR-Overloaded` with `Retry-After`, with the route's own headers, to any request.
+fn refusal_router() -> Router {
+    Router::new()
+        .fallback(|| async { PublicError::Overloaded })
+        .layer(axum::middleware::from_fn(headers))
+}
+
+/// The public listener's own bounds (review L3 of PR #139 and its second fix round).
 #[derive(Clone, Copy, Debug)]
 pub struct ListenerBounds {
-    /// The longest a connection may take to send a request's head; then it is closed.
+    /// The longest a request's head may take to arrive, from its first byte, and a new connection's
+    /// first byte from its accept; then the connection is closed.
     pub header_read_timeout: Duration,
-    /// Connections held open at once; one more waits to be accepted until one closes.
+    /// The longest a connection may stay idle between requests, its answers all written, before it
+    /// is closed: longer than the header-read timeout, so a front's pooled connections are kept.
+    pub idle_timeout: Duration,
+    /// The longest one exchange may hold a connection, from the first byte of a request to the last
+    /// byte of its answer written, pipelined requests behind it included: a client that never reads
+    /// its answers holds its connection no longer (second fix round of PR #139). Then the connection
+    /// is shut down gracefully and dropped after [`CONNECTION_GRACE`].
+    pub connection_timeout: Duration,
+    /// Connections held open at once; one more is answered `ERR-Overloaded` and closed.
     pub max_connections: usize,
 }
 
@@ -579,8 +606,291 @@ impl ListenerBounds {
     pub fn of(public: &PublicConfig) -> Self {
         Self {
             header_read_timeout: Duration::from_millis(public.header_read_timeout_ms.max(1)),
+            idle_timeout: Duration::from_millis(public.idle_timeout_ms.max(1)),
+            connection_timeout: Duration::from_millis(public.connection_timeout_ms.max(1)),
             max_connections: public.max_http_connections.max(1),
         }
+    }
+}
+
+/// How long a connection past its [`ListenerBounds::connection_timeout`] is given to finish once it
+/// is told to shut down; then it is dropped.
+pub const CONNECTION_GRACE: Duration = Duration::from_secs(1);
+
+/// How long the open connections are given to finish when the listener stops.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// How long a connection beyond the bound is given to read its request and take its refusal.
+const REFUSAL_GRACE: Duration = Duration::from_secs(1);
+
+/// Where a connection is, as its IO and its service see it ([`Pace`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// Nothing read of a next request, and every answer written.
+    Idle,
+    /// Some of a request's head read, and no request taken yet.
+    Head,
+    /// A request taken, and its answer, or one before it, not yet written.
+    Busy,
+}
+
+/// A connection's pace (second fix round of PR #139): hyper bounds neither how long an answer takes
+/// to be written (a client that never reads holds it forever) nor an idle keep-alive apart from the
+/// head's timeout, so the listener keeps its own clock. Its IO ([`Paced`]) reports bytes read and
+/// written and each flush; its service ([`PacedService`]) each request taken and each answer done.
+#[derive(Debug)]
+struct Pace {
+    phase: Phase,
+    /// When the phase began.
+    since: tokio::time::Instant,
+    /// When the exchange began: the first byte read after the connection was idle.
+    exchange: tokio::time::Instant,
+    /// Requests taken whose answers are not yet done.
+    in_flight: usize,
+    /// Bytes written to the socket since its last flush.
+    unflushed: bool,
+    /// Whether a request was ever taken: a new connection waits the head's timeout, not the idle one.
+    served: bool,
+}
+
+#[derive(Debug)]
+struct Watch {
+    pace: std::sync::Mutex<Pace>,
+    moved: tokio::sync::Notify,
+}
+
+impl Watch {
+    fn new() -> Arc<Self> {
+        let now = tokio::time::Instant::now();
+        Arc::new(Self {
+            pace: std::sync::Mutex::new(Pace {
+                phase: Phase::Idle,
+                since: now,
+                exchange: now,
+                in_flight: 0,
+                unflushed: false,
+                served: false,
+            }),
+            moved: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn with(&self, f: impl FnOnce(&mut Pace, tokio::time::Instant) -> bool) {
+        let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        if f(&mut pace, tokio::time::Instant::now()) {
+            self.moved.notify_one();
+        }
+    }
+
+    fn read(&self) {
+        self.with(|p, now| {
+            if p.phase != Phase::Idle {
+                return false;
+            }
+            p.phase = Phase::Head;
+            p.since = now;
+            p.exchange = now;
+            true
+        });
+    }
+
+    fn wrote(&self) {
+        self.with(|p, _| {
+            p.unflushed = true;
+            // The answer's bytes after it was done (see `answered`): still its exchange.
+            if p.phase == Phase::Idle {
+                p.phase = Phase::Busy;
+                return true;
+            }
+            false
+        });
+    }
+
+    fn flushed(&self) {
+        self.with(|p, now| {
+            p.unflushed = false;
+            p.idle_if_done(now)
+        });
+    }
+
+    fn request(&self) {
+        self.with(|p, now| {
+            p.in_flight += 1;
+            p.served = true;
+            match p.phase {
+                Phase::Busy => false,
+                Phase::Head => {
+                    p.phase = Phase::Busy;
+                    true
+                }
+                Phase::Idle => {
+                    // A request hyper had read already, behind the one answered.
+                    p.phase = Phase::Busy;
+                    if !p.unflushed {
+                        p.exchange = now;
+                    }
+                    true
+                }
+            }
+        });
+    }
+
+    fn answered(&self) {
+        self.with(|p, now| {
+            p.in_flight = p.in_flight.saturating_sub(1);
+            p.idle_if_done(now)
+        });
+    }
+
+    /// When the connection's current phase runs out, and what it then is.
+    fn deadline(&self, bounds: &ListenerBounds) -> (tokio::time::Instant, Phase) {
+        let p = self.pace.lock().unwrap_or_else(|e| e.into_inner());
+        let at = match p.phase {
+            Phase::Idle if p.served => p.since + bounds.idle_timeout,
+            Phase::Idle => p.since + bounds.header_read_timeout,
+            Phase::Head => {
+                (p.since + bounds.header_read_timeout).min(p.exchange + bounds.connection_timeout)
+            }
+            Phase::Busy => p.exchange + bounds.connection_timeout,
+        };
+        (at, p.phase)
+    }
+}
+
+impl Pace {
+    fn idle_if_done(&mut self, now: tokio::time::Instant) -> bool {
+        if self.phase == Phase::Busy && self.in_flight == 0 && !self.unflushed {
+            self.phase = Phase::Idle;
+            self.since = now;
+            return true;
+        }
+        false
+    }
+}
+
+/// A connection's socket, reporting what moves on it to its [`Watch`].
+struct Paced {
+    io: tokio::net::TcpStream,
+    watch: Arc<Watch>,
+}
+
+impl tokio::io::AsyncRead for Paced {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let polled = std::pin::Pin::new(&mut self.io).poll_read(cx, buf);
+        if matches!(polled, std::task::Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            self.watch.read();
+        }
+        polled
+    }
+}
+
+impl tokio::io::AsyncWrite for Paced {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.watch.wrote();
+        std::pin::Pin::new(&mut self.io).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.watch.wrote();
+        std::pin::Pin::new(&mut self.io).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.io.is_write_vectored()
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let polled = std::pin::Pin::new(&mut self.io).poll_flush(cx);
+        if matches!(polled, std::task::Poll::Ready(Ok(()))) {
+            self.watch.flushed();
+        }
+        polled
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
+
+/// Held from a request taken until its answer's body is done (dropped by hyper once written to its
+/// buffer, or with the connection).
+struct Answering(Arc<Watch>);
+
+impl Drop for Answering {
+    fn drop(&mut self) {
+        self.0.answered();
+    }
+}
+
+/// An answer's body, holding its [`Answering`].
+struct PacedBody {
+    body: axum::body::Body,
+    _answering: Answering,
+}
+
+impl hyper::body::Body for PacedBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        std::pin::Pin::new(&mut self.body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
+/// The route as hyper serves it on one connection, reporting each request and answer.
+struct PacedService {
+    inner: hyper_util::service::TowerToHyperService<Router>,
+    watch: Arc<Watch>,
+}
+
+impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for PacedService {
+    type Response = hyper::Response<PacedBody>;
+    type Error = std::convert::Infallible;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn call(&self, request: hyper::Request<hyper::body::Incoming>) -> Self::Future {
+        self.watch.request();
+        let answering = Answering(Arc::clone(&self.watch));
+        let answer = self.inner.call(request);
+        Box::pin(async move {
+            let response = answer.await?;
+            Ok(response.map(|body| PacedBody {
+                body,
+                _answering: answering,
+            }))
+        })
     }
 }
 
@@ -589,11 +899,14 @@ async fn stopped(stop: &mut watch::Receiver<bool>) {
     let _ = stop.wait_for(|s| *s).await.map(|_| ());
 }
 
-/// Serves `router` on `listener` until `stop` turns true (review L3 of PR #139): HTTP/1 only, a
-/// request head of at most [`MAX_HEAD_BYTES`] in at most [`MAX_HEADERS`] headers (431 beyond), sent
-/// within the header-read timeout (the connection is closed otherwise, a slow head included), and at
-/// most `max_connections` connections open at once. On `stop` it accepts no more and lets the open
-/// ones finish for up to five seconds.
+/// Serves `router` on `listener` until `stop` turns true (review L3 of PR #139 and its second fix
+/// round): HTTP/1 only, a request head of at most [`MAX_HEAD_BYTES`] in at most [`MAX_HEADERS`]
+/// headers (431 beyond), within the header-read timeout of its first byte (and a new connection's
+/// first byte within it of its accept); an idle connection kept for the idle timeout; one exchange, from a request's first
+/// byte to its answer's last byte written, within the connection timeout, so a client that never
+/// reads its answers is shut down and dropped ([`ListenerBounds`]); and at most `max_connections`
+/// connections open at once, one more answered `ERR-Overloaded` and closed. On `stop` it accepts no
+/// more and lets the open ones finish for up to five seconds.
 pub async fn serve(
     listener: TcpListener,
     router: Router,
@@ -601,21 +914,20 @@ pub async fn serve(
     mut stop: watch::Receiver<bool>,
 ) -> std::io::Result<()> {
     use hyper_util::rt::{TokioIo, TokioTimer};
-    let open = Arc::new(Semaphore::new(bounds.max_connections.max(1)));
-    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let most = bounds.max_connections.max(1);
+    let open = Arc::new(Semaphore::new(most));
+    let refusing = Arc::new(Semaphore::new(most));
     let mut http = hyper::server::conn::http1::Builder::new();
+    // The head's timeout is the listener's own (`Watch`): hyper's starts when a connection goes
+    // idle, so an idle keep-alive would be closed at it.
     http.timer(TokioTimer::new())
-        .header_read_timeout(bounds.header_read_timeout)
+        .header_read_timeout(None)
         .max_buf_size(MAX_HEAD_BYTES)
         .max_headers(MAX_HEADERS);
+    let mut refusal_http = http.clone();
+    refusal_http.keep_alive(false);
+    let refusal = refusal_router();
     loop {
-        let permit = tokio::select! {
-            permit = Arc::clone(&open).acquire_owned() => match permit {
-                Ok(p) => p,
-                Err(_) => break,
-            },
-            () = stopped(&mut stop) => break,
-        };
         let stream = tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => stream,
@@ -628,19 +940,73 @@ pub async fn serve(
             },
             () = stopped(&mut stop) => break,
         };
-        let service = hyper_util::service::TowerToHyperService::new(router.clone());
-        let connection = graceful.watch(http.serve_connection(TokioIo::new(stream), service));
+        let Ok(permit) = Arc::clone(&open).try_acquire_owned() else {
+            // Beyond the bound: refused at once, not queued (second fix round of PR #139). The
+            // refusal reads the request so the answer is not lost to a reset, for a second at most;
+            // beyond as many refusals at once, the connection is dropped.
+            if let Ok(refusing) = Arc::clone(&refusing).try_acquire_owned() {
+                let service = hyper_util::service::TowerToHyperService::new(refusal.clone());
+                let connection = refusal_http.serve_connection(TokioIo::new(stream), service);
+                tokio::spawn(async move {
+                    let _refusing = refusing;
+                    let _ = tokio::time::timeout(REFUSAL_GRACE, connection).await;
+                });
+            }
+            continue;
+        };
+        let watch = Watch::new();
+        let io = TokioIo::new(Paced {
+            io: stream,
+            watch: Arc::clone(&watch),
+        });
+        let service = PacedService {
+            inner: hyper_util::service::TowerToHyperService::new(router.clone()),
+            watch: Arc::clone(&watch),
+        };
+        let connection = http.serve_connection(io, service);
+        let mut stop = stop.clone();
         tokio::spawn(async move {
             let _open = permit;
-            if let Err(e) = connection.await {
-                tracing::debug!(error = %e, "a public connection ended with an error");
+            let mut connection = std::pin::pin!(connection);
+            loop {
+                let (at, phase) = watch.deadline(&bounds);
+                tokio::select! {
+                    ended = connection.as_mut() => {
+                        if let Err(e) = ended {
+                            tracing::debug!(error = %e, "a public connection ended with an error");
+                        }
+                        return;
+                    }
+                    () = watch.moved.notified() => {}
+                    () = tokio::time::sleep_until(at) => {
+                        if watch.deadline(&bounds).0 > tokio::time::Instant::now() {
+                            continue;
+                        }
+                        if phase == Phase::Busy {
+                            tracing::debug!("a public connection held an exchange past its timeout; shutting it down");
+                            connection.as_mut().graceful_shutdown();
+                            let _ = tokio::time::timeout(CONNECTION_GRACE, connection.as_mut()).await;
+                        }
+                        return;
+                    }
+                    () = stopped(&mut stop) => {
+                        connection.as_mut().graceful_shutdown();
+                        let _ = tokio::time::timeout(SHUTDOWN_GRACE, connection.as_mut()).await;
+                        return;
+                    }
+                }
             }
         });
     }
     drop(listener);
-    if tokio::time::timeout(Duration::from_secs(5), graceful.shutdown())
-        .await
-        .is_err()
+    // Every connection holds a permit until it ends: all of them back means all ended.
+    let all = u32::try_from(most).unwrap_or(u32::MAX);
+    if tokio::time::timeout(
+        SHUTDOWN_GRACE + Duration::from_secs(1),
+        open.acquire_many(all),
+    )
+    .await
+    .is_err()
     {
         tracing::warn!("the public listener stopped with connections still open");
     }

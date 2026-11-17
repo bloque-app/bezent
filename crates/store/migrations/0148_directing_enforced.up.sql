@@ -18,11 +18,13 @@
 --   * directed_return() (0145), the lifecycle's question whether a refund is the core's return of a
 --     directed arrival (accepted with no second approver, Open 3), is true only for a declared one.
 --
--- An undeclared directing contract's arrival is therefore neither minted nor returned: it waits,
--- final and unbound, an unassociated arrival an operator sees (`unassociated_arrivals`), until the
--- declaration is made (a declaration is never retroactive below its `from_block`) or a recorded
--- release returns it as any other unassociated arrival (REQ-IN-6). The core says so in its log
--- (`services/core/src/directed.rs`, `directing-undeclared`) and does not try.
+-- An undeclared directing contract's arrival is therefore neither minted nor returned by the core:
+-- it waits, final and unbound, an unassociated arrival an operator sees (`unassociated_arrivals`),
+-- until a declaration covers it (never one from a later block than its own) or an operator releases
+-- it (0149, operator_release_directed_arrival(): its return to the refund address it recorded, in
+-- Received, accepted only once a second login approves the release; REQ-IN-6, REQ-GV-5). Nothing
+-- here allows that release; 0149 does. The core says so in its log (`services/core/src/directed.rs`,
+-- `directing-undeclared`) and does not try.
 
 CREATE FUNCTION directing_declared(
     p_network TEXT, p_token TEXT, p_directing TEXT, p_block BIGINT)

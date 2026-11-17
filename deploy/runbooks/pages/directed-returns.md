@@ -15,8 +15,8 @@ exercised: no
 
 ## What it is
 
-A directed arrival that can never be minted under its route as declared (below the minimum, above the maximum, an
-unadmitted token, a recipient bezent refuses by rule) is returned by bezent to the refund address its caller named, with
+A directed arrival that can never be minted under its route as declared (below the minimum, above the maximum, a
+recipient bezent refuses by rule) is returned by bezent to the refund address its caller named, with
 no second approver (amendment 0029, A5, Open 3; `REQ-IN-11`, `REQ-RF-2`). A directed deposit whose recipient the issuing
 network refuses may also be refunded, through its review, with a second approver (Open 2). Each return is a payout from
 the reserve: it draws on the vault's delivery allowance, which withdrawals share, and its gas is paid against surplus.
@@ -51,7 +51,8 @@ WHERE kind = 'refund' AND request_reference LIKE 'directed:%' ORDER BY bridge_re
 
 1. Read the reasons. One reason over and over points at its cause: amounts below the minimum or above the maximum are a
    client that does not read the contract's limits (the web app reads them); a refused recipient is a client that names the
-   Kreivo contract or a ledger's account; an unadmitted token is a caller of the wrong code.
+   Kreivo contract or a ledger's account. An arrival of undeclared directing code (an unadmitted token among them) is
+   not returned by bezent: it waits, and an operator's release returns it (`conditions/CND-Unassociated.md`).
 2. Check that withdrawals are not waiting on the allowance because of them: transfers in `CND-PayoutWindow`
    (`conditions/CND-PayoutWindow.md`).
 3. If they come from one client, tell its owner, from the deployment's own notes. If the returns themselves fail, follow
@@ -62,7 +63,8 @@ WHERE kind = 'refund' AND request_reference LIKE 'directed:%' ORDER BY bridge_re
 ## Never
 
 - Never return an arrival by hand, to any address: bezent returns it, once, to the refund address its directing code
-  recorded and to no other (`REQ-RF-2`, `INV-2`).
+  recorded and to no other (`REQ-RF-2`, `INV-2`). The one release an operator makes, of an arrival of undeclared
+  directing code, pays that same address only, and needs a second login (`conditions/CND-Unassociated.md`).
 - Never refund a deposit that is unknown or delayed (`REQ-RF-1`, `REQ-RV-1`).
 - No administrative path moves value or edits a status (`REQ-GV-5`).
 

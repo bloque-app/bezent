@@ -142,8 +142,13 @@ part of the coordinate a bridge reference is derived from, and the lookup goes b
   characters, 66 as `0x` hex) and a reference longer than 66 are refused before they are decoded (base58 decoding is
   quadratic: 64 thousand characters took two seconds of a worker). The listener is HTTP/1 only, reads a head of at most
   8 KiB in 32 headers (431 beyond) and a URI of at most 2 KiB (414), closes a connection whose head takes longer than
-  `header_read_timeout_ms` (5 s), holds at most `max_http_connections` (256) open, and answers a request that takes
-  longer than `request_timeout_ms` (5 s) with 503, retryable. `public_status` is a security-barrier view; the route's
+  `header_read_timeout_ms` (5 s) from its first byte, keeps an idle one for `idle_timeout_ms` (60 s, so the front's
+  pooled connections are kept), and shuts down, then drops a second later, one whose exchange (a request's first byte to
+  its answer's last byte written, pipelined requests included) takes longer than `connection_timeout_ms` (30 s): hyper
+  has no write timeout, so a client that pipelines requests and never reads the answers held its slot forever (second
+  fix round). It holds at most `max_http_connections` (256) open and answers one more `ERR-Overloaded` (503,
+  `Retry-After`) at once and closes it, rather than queueing it; and it answers a request that takes longer than
+  `request_timeout_ms` (5 s) `ERR-Overloaded` too, with its body. `public_status` is a security-barrier view; the route's
   keys are leakproof, so its plan still starts at the unique index. **The origin should accept connections from
   Cloudflare only** (security group or firewall): these are the listener's own bounds, not a rate limit.
 - **Public data**: `Access-Control-Allow-Origin: *`, no credentials, `Cache-Control: public, max-age=5` on an answer and on
@@ -159,13 +164,24 @@ review M3 of PR #139 the store holds the declaration to account (`REQ-AS-11` is 
 deposit of a directed arrival and its return are refused, whoever writes, unless the arrival's `detail.directing` is
 declared for its network and token from a block at or before its own (without case on an EVM network), and the core
 does not try one that is not (it logs `directing-undeclared` once an hour). Such an arrival waits, final and unbound,
-an unassociated arrival an operator sees, until it is declared or released by hand. So an arrival of a token admitted
-for no asset, which no declaration can name, now waits too, where review L3 of PR #136 returned it. The endpoint's
+an unassociated arrival an operator sees. A declaration covers it only from its own `from_block`, and is append-only
+and keyed by (network, address), so one declared from a later block than the arrival's never will (the endpoint's
+`[[directing]]` `from_block` lower than the declaration's leaves such a gap). It is never minted; it leaves by an
+operator's release (second fix round, migration `0149`, `REQ-IN-6`, `REQ-GV-5`): one operator calls
+`operator_release_directed_arrival(coordinate, justification)`, which makes its return in `Received`, exactly as the
+core makes one (`bz-u-`, the observed amount, to the refund address it recorded and nowhere else), and records the
+release (`release-unassociated`) as theirs; a second operator login approves it (`manual_approvals`); only then does the
+core accept the return, and it is paid out as any refund of an unassociated arrival is. The function refuses a declared
+arrival (the core decides it), one not final and one already bound. So an arrival of a token admitted for no asset,
+which no declaration can name, waits for such a release too, where review L3 of PR #136 returned it (the core's branch
+for it is gone). A declaration's `from_block` must be at or below the endpoint's `[[directing]]` `from_block` and the
+contract's deployment block (`deploy/runbooks/conditions/CND-Unassociated.md`). The endpoint's
 login does not read `directing_code`, so it does not check its `[[directing]]` against it at start; it refuses a
 `[[directing]]` address that is an admitted token, the vault or one of its contracts. A declaration's address is kept
 in lower case on an EVM network and is none of the network's reserve addresses or admitted tokens, and `declared_at` is
-the clock's at the write, not the transaction's start, so a declaration committing while an evaluation is stated cannot
-make a re-derived statement differ (reviews L4, L5).
+the clock's at the write, not the transaction's start; the publisher takes `directing_code` in SHARE mode before it
+reads the declarations (`directing_code_hold()`, `0149`), so a declaration written at or before the evaluation's time
+and committing after it is waited for, not missed, and a re-derived statement cannot differ (reviews L4, L5).
 
 **The alerts** (`services/core/src/directed_alerts.rs`; `deploy/runbooks/pages/directed-*.md`, `unpaired-direction.md`,
 `token-upgraded.md`). Per deposit route, each minute: directed deposits minted (`Delivered`) in the trailing 24 hours,

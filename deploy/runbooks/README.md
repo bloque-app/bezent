@@ -20,8 +20,11 @@ The same rules bind every runbook (`REQ-GV-5`, guardrails 2 to 6 in `CLAUDE.md`)
 - **No path moves value or edits a status.** There is no tool, SQL statement or function to do either, and a runbook
   never asks for one. What an operator can do is in `crates/store/README.md` ("Who may call what"): pause
   (`operator_pause`), lift a pause with a second person (`operator_request_unpause`, `operator_approve_unpause`), record an
-  act performed elsewhere (`operator_record`), and resolve a review by attaching the coordinate of the ordinary edge
-  (`manual_actions`, `manual_approvals`). Each of them records the login that acted and the justification.
+  act performed elsewhere (`operator_record`), resolve a review by attaching the coordinate of the ordinary edge
+  (`manual_actions`, `manual_approvals`), and release an unassociated arrival with a second person, a directed one of
+  undeclared directing code included (`operator_release_directed_arrival`, `conditions/CND-Unassociated.md`), which
+  moves nothing until the second login approves and then only to the refund address the arrival recorded. Each of them
+  records the login that acted and the justification.
 - **Pause first, then understand.** A pause stops new work only; transfers in flight keep being observed and completed
   (`REQ-GV-1`, `INV-15`). It is always safe and is the first move when the cause is not understood (`REQ-IC-2`).
 - **Unknown is not failed.** Report in-flight transfers as unknown or delayed, never as failed, and never refund them

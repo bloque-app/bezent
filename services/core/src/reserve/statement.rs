@@ -753,6 +753,12 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
             .bind(format!("bezent/statement/{asset}"))
             .execute(&mut *tx)
             .await?;
+        // Review L4 of PR #139 (REQ-BK-5): the declarations held still while they are read, so a
+        // declaration being written when the evaluation was made is waited for, not missed, and a
+        // statement re-derived from the same evaluation lists the directing code this one does.
+        sqlx::query("SELECT directing_code_hold()")
+            .execute(&mut *tx)
+            .await?;
         let Some(a) = Asset::load(&mut tx, asset).await? else {
             return Err(StatementError::NoEvaluation(asset.to_owned()));
         };

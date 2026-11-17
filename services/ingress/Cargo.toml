@@ -32,11 +32,11 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 getrandom = "0.3"
 hex = "0.4"
 hmac = "0.12"
-# The public status route's listener (review M1, L3 of PR #139): a header-read timeout, a bound on
-# the request head and on open connections, which `axum::serve` does not expose; and a request
-# timeout.
+# The public status route's listener (review M1, L3 of PR #139 and its second fix round): its own
+# clock on each connection (a head's, an idle one's, an exchange's), a bound on the request head and
+# on open connections, which `axum::serve` does not expose.
 hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful", "service"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -45,7 +45,6 @@ sha3 = "0.10"
 sqlx = { workspace = true, features = ["json", "chrono"] }
 tokio = { workspace = true, features = ["io-util", "net", "signal", "sync", "time"] }
 toml = "0.8"
-tower-http = { version = "0.6", features = ["timeout"] }
 tracing = "0.1"
 url = "2"
 utoipa = { version = "5", features = ["chrono"] }

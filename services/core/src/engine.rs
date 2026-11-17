@@ -677,7 +677,8 @@ impl Core {
         } else if self.directed_return(conn, t).await? {
             // F-018 (amendment 0029, A5, Open 3): the return of a directed arrival is bezent's own,
             // to the refund address the arrival recorded, and needs no second approver. The core
-            // accepts it when it makes it; this is for one that was made and not accepted.
+            // accepts it when it makes it; this is for one that was made and not accepted. One of
+            // undeclared directing code is an operator's release, and takes the branch below.
             None
         } else {
             let release: Option<i64> = sqlx::query_scalar(
@@ -1342,8 +1343,11 @@ impl Core {
         Ok(Did::moved())
     }
 
-    /// Whether `t` is the return of a directed arrival: the refund of an unassociated arrival bound
-    /// to one (`REQ-IN-11`; the store fixes its destination to the recorded refund address, 0144).
+    /// Whether `t` is bezent's own return of a directed arrival, accepted with no second approver:
+    /// the refund of an unassociated arrival bound to one whose directing contract is declared
+    /// (`REQ-IN-11`, `REQ-AS-11`; the store fixes its destination to the recorded refund address,
+    /// 0144, and asks the same, 0148). The return of an undeclared one is an operator's release
+    /// (0149), accepted only under its approved release (`REQ-IN-6`, `REQ-GV-5`).
     async fn directed_return(&self, conn: &mut PgConnection, t: &Transfer) -> sqlx::Result<bool> {
         if t.kind != "refund" || t.refund_of.is_some() {
             return Ok(false);
@@ -1351,9 +1355,23 @@ impl Core {
         let Some(source) = t.source() else {
             return Ok(false);
         };
-        Ok(store::observation_at(conn, &source)
-            .await?
-            .is_some_and(|o| o.kind == "directed_arrival"))
+        let Some(o) = store::observation_at(conn, &source).await? else {
+            return Ok(false);
+        };
+        if o.kind != "directed_arrival" {
+            return Ok(false);
+        }
+        sqlx::query_scalar("SELECT directing_declared($1, $2, $3, $4)")
+            .bind(&o.network)
+            .bind(o.token.as_deref())
+            .bind(
+                o.detail
+                    .get("directing")
+                    .and_then(serde_json::Value::as_str),
+            )
+            .bind(o.block_number)
+            .fetch_one(conn)
+            .await
     }
 
     /// Whether directed deposit `t` may leave its review into `Refunding` (amendment 0029, Open 2):

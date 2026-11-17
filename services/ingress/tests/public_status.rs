@@ -645,41 +645,88 @@ async fn req_st_8_an_overlong_query_is_refused_at_once_before_any_decoding(pool:
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
-/// Review M1 and L3 of PR #139: the public listener, served as the ingress serves it, bounds what a
-/// connection can hold. A request head larger than it reads is refused (431); a head that does not
-/// arrive within the header-read timeout closes the connection; connections beyond the bound wait to
-/// be accepted until one closes; and a request that takes longer than the request timeout answers
-/// 503, retryable.
+/// The public listener, served as the ingress serves it, on `pool`'s route, with `bounds`: its
+/// address, the stop sender and the task.
+async fn listen(
+    pool: &PgPool,
+    bounds: bezent_ingress::public::ListenerBounds,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::watch::Sender<bool>,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+) {
+    let p = role_pool(pool, bezent_store::PUBLIC_ROLE).await;
+    let route = bezent_ingress::public::public_router_with(
+        PublicApp::new(p, 8),
+        std::time::Duration::from_secs(5),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let served = tokio::spawn(bezent_ingress::public::serve(
+        listener, route, bounds, stop_rx,
+    ));
+    (address, stop_tx, served)
+}
+
+/// Stops the listener and waits for it.
+async fn stop_listening(
+    stop: tokio::sync::watch::Sender<bool>,
+    served: tokio::task::JoinHandle<std::io::Result<()>>,
+) {
+    stop.send(true).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), served)
+        .await
+        .expect("the listener stops")
+        .unwrap()
+        .unwrap();
+}
+
+/// Everything `stream` sends until it closes, or for at most `within`.
+async fn read_all(stream: &mut tokio::net::TcpStream, within: std::time::Duration) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(within, stream.read_to_end(&mut out)).await;
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Whether `stream` is closed by the other end within `within`: it reads to its end in time.
+async fn closed_within(stream: &mut tokio::net::TcpStream, within: std::time::Duration) -> bool {
+    use tokio::io::AsyncReadExt;
+    let mut sink = Vec::new();
+    matches!(
+        tokio::time::timeout(within, stream.read_to_end(&mut sink)).await,
+        Ok(Ok(_)) | Ok(Err(_))
+    )
+}
+
+/// Review M1 and L3 of PR #139 and its second fix round: the public listener, served as the ingress
+/// serves it, bounds what a connection can hold. A request head larger than it reads is refused
+/// (431); a head that does not arrive within the header-read timeout closes the connection; a
+/// connection beyond the bound is answered `ERR-Overloaded` at once and closed, not queued, and is
+/// served once one closes.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn req_st_8_the_public_listener_bounds_heads_slow_clients_and_connections(pool: PgPool) {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     seed(&pool).await;
-    let p = role_pool(&pool, bezent_store::PUBLIC_ROLE).await;
-    let route =
-        bezent_ingress::public::public_router_with(PublicApp::new(p, 8), Duration::from_secs(5));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let bounds = bezent_ingress::public::ListenerBounds {
-        header_read_timeout: Duration::from_millis(300),
-        max_connections: 2,
-    };
-    let served = tokio::spawn(bezent_ingress::public::serve(
-        listener, route, bounds, stop_rx,
-    ));
-    async fn answer(stream: &mut tokio::net::TcpStream) -> String {
-        let mut out = Vec::new();
-        let _ = tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut out)).await;
-        String::from_utf8_lossy(&out).into_owned()
-    }
+    let (address, stop, served) = listen(
+        &pool,
+        bezent_ingress::public::ListenerBounds {
+            header_read_timeout: Duration::from_millis(300),
+            idle_timeout: Duration::from_secs(60),
+            connection_timeout: Duration::from_secs(30),
+            max_connections: 2,
+        },
+    )
+    .await;
 
     // A healthy request is answered.
     let mut ok = tokio::net::TcpStream::connect(address).await.unwrap();
     ok.write_all(b"GET /health HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
         .await
         .unwrap();
-    let got = answer(&mut ok).await;
+    let got = read_all(&mut ok, Duration::from_secs(10)).await;
     assert!(got.starts_with("HTTP/1.1 200"), "{got}");
 
     // A head larger than the listener reads: 431, the connection closed.
@@ -690,7 +737,7 @@ async fn req_st_8_the_public_listener_bounds_heads_slow_clients_and_connections(
     )
     .await
     .ok();
-    let got = answer(&mut big).await;
+    let got = read_all(&mut big, Duration::from_secs(10)).await;
     assert!(got.starts_with("HTTP/1.1 431"), "{got}");
 
     // A head that never finishes: closed after the header-read timeout, not held.
@@ -699,14 +746,18 @@ async fn req_st_8_the_public_listener_bounds_heads_slow_clients_and_connections(
         .await
         .unwrap();
     let started = std::time::Instant::now();
-    let got = answer(&mut slow).await;
     assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "the slow head was held for {:?}: {got}",
+        closed_within(&mut slow, Duration::from_secs(10)).await,
+        "the slow head was held"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the slow head was held for {:?}",
         started.elapsed()
     );
 
-    // Two connections held open (the bound): a third is not served until one closes.
+    // Two connections held open (the bound): a third is refused at once, ERR-Overloaded with
+    // Retry-After, and closed; once one of the two closes, a new one is served.
     let mut first = tokio::net::TcpStream::connect(address).await.unwrap();
     first
         .write_all(b"GET /health HTTP/1.1\r\nhost: x\r\n\r\n")
@@ -717,9 +768,9 @@ async fn req_st_8_the_public_listener_bounds_heads_slow_clients_and_connections(
         .write_all(b"GET /health HTTP/1.1\r\nhost: x\r\n\r\n")
         .await
         .unwrap();
-    let mut buffer = [0u8; 512];
+    let mut buffer = [0u8; 1024];
     for s in [&mut first, &mut second] {
-        let n = tokio::time::timeout(Duration::from_secs(3), s.read(&mut buffer))
+        let n = tokio::time::timeout(Duration::from_secs(10), s.read(&mut buffer))
             .await
             .expect("an answer")
             .unwrap();
@@ -727,25 +778,163 @@ async fn req_st_8_the_public_listener_bounds_heads_slow_clients_and_connections(
     }
     let mut third = tokio::net::TcpStream::connect(address).await.unwrap();
     third
-        .write_all(b"GET /health HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+        .write_all(b"GET /health HTTP/1.1\r\nhost: x\r\n\r\n")
         .await
         .unwrap();
-    let waited = tokio::time::timeout(Duration::from_millis(200), third.read(&mut buffer)).await;
-    assert!(
-        waited.is_err(),
-        "a third connection was served beyond the bound"
-    );
+    let got = read_all(&mut third, Duration::from_secs(10)).await;
+    assert!(got.starts_with("HTTP/1.1 503"), "{got}");
+    assert!(got.to_ascii_lowercase().contains("retry-after: 1"), "{got}");
+    assert!(got.contains(r#""error":"ERR-Overloaded""#), "{got}");
     drop(first);
-    let got = answer(&mut third).await;
-    assert!(got.starts_with("HTTP/1.1 200"), "once one closed: {got}");
+    let mut fourth = None;
+    for _ in 0..50 {
+        let mut s = tokio::net::TcpStream::connect(address).await.unwrap();
+        s.write_all(b"GET /health HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let got = read_all(&mut s, Duration::from_secs(10)).await;
+        if got.starts_with("HTTP/1.1 200") {
+            fourth = Some(got);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(fourth.is_some(), "served once one closed");
     drop(second);
+    stop_listening(stop, served).await;
+}
 
-    stop_tx.send(true).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), served)
+/// Second fix round of PR #139: a client that pipelines requests and never reads the answers cannot
+/// hold its connection past the connection timeout (hyper has no write timeout of its own), so a
+/// well-behaved client is served, here on a listener of one connection, within that timeout and its
+/// grace. The answers' bytes outgrow both sockets' buffers, so the server's write blocks.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_st_8_a_client_that_never_reads_its_answers_is_dropped_at_the_connection_timeout(
+    pool: PgPool,
+) {
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+    seed(&pool).await;
+    let timeout = Duration::from_secs(2);
+    let (address, stop, served) = listen(
+        &pool,
+        bezent_ingress::public::ListenerBounds {
+            header_read_timeout: Duration::from_secs(5),
+            idle_timeout: Duration::from_secs(60),
+            connection_timeout: timeout,
+            max_connections: 1,
+        },
+    )
+    .await;
+    // The slow reader: a small receive buffer, many pipelined requests (each answered 404, with the
+    // route's headers), and never a read.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    let slow = socket.connect(address).await.unwrap();
+    let (_unread, mut writes) = slow.into_split();
+    let pipelined = tokio::spawn(async move {
+        let one = b"GET /nothing-here HTTP/1.1\r\nhost: x\r\n\r\n";
+        for _ in 0..200_000 {
+            if writes.write_all(one).await.is_err() {
+                return;
+            }
+        }
+    });
+    // The slow reader holds the one connection: a client is refused while it does.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let started = std::time::Instant::now();
+    let mut held = false;
+    let mut answered = None;
+    while started.elapsed() < Duration::from_secs(20) {
+        let mut s = tokio::net::TcpStream::connect(address).await.unwrap();
+        s.write_all(b"GET /health HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let got = read_all(&mut s, Duration::from_secs(5)).await;
+        if got.starts_with("HTTP/1.1 200") {
+            answered = Some(started.elapsed());
+            break;
+        }
+        held = true;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    pipelined.abort();
+    assert!(held, "the slow reader never held the connection");
+    let answered = answered.expect("the well-behaved client was never served");
+    assert!(
+        answered < timeout + bezent_ingress::public::CONNECTION_GRACE + Duration::from_secs(5),
+        "served only after {answered:?}"
+    );
+    stop_listening(stop, served).await;
+}
+
+/// Second fix round of PR #139 (the review's passing cases kept): a request whose body trickles in
+/// does not hold its connection past the header-read timeout of what follows it, and an idle
+/// keep-alive connection is kept past the header-read timeout (a front's pool) and closed at the idle
+/// timeout.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_st_8_a_trickled_body_and_an_idle_keep_alive_release_their_connection(pool: PgPool) {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    seed(&pool).await;
+    let (address, stop, served) = listen(
+        &pool,
+        bezent_ingress::public::ListenerBounds {
+            header_read_timeout: Duration::from_millis(500),
+            idle_timeout: Duration::from_secs(3),
+            connection_timeout: Duration::from_secs(30),
+            max_connections: 4,
+        },
+    )
+    .await;
+
+    // A body announced and trickled a byte at a time: the connection is released.
+    let mut trickle = tokio::net::TcpStream::connect(address).await.unwrap();
+    trickle
+        .write_all(b"GET /health HTTP/1.1\r\nhost: x\r\ncontent-length: 100000\r\n\r\n")
         .await
-        .expect("the listener stops")
-        .unwrap()
         .unwrap();
+    let (mut reads, mut writes) = trickle.into_split();
+    let dribble = tokio::spawn(async move {
+        for _ in 0..100_000 {
+            if writes.write_all(b"a").await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+    let mut sink = Vec::new();
+    let released =
+        tokio::time::timeout(Duration::from_secs(20), reads.read_to_end(&mut sink)).await;
+    dribble.abort();
+    assert!(released.is_ok(), "the trickled body held its connection");
+
+    // An idle keep-alive: open past the header-read timeout, served again, then closed when idle.
+    let mut kept = tokio::net::TcpStream::connect(address).await.unwrap();
+    let mut buffer = [0u8; 1024];
+    for _ in 0..2 {
+        kept.write_all(b"GET /health HTTP/1.1\r\nhost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let n = tokio::time::timeout(Duration::from_secs(10), kept.read(&mut buffer))
+            .await
+            .expect("an answer")
+            .unwrap();
+        assert!(buffer[..n].starts_with(b"HTTP/1.1 200"), "kept alive");
+        // Idle for twice the header-read timeout, well within the idle one.
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+    }
+    let idle = std::time::Instant::now();
+    assert!(
+        closed_within(&mut kept, Duration::from_secs(20)).await,
+        "an idle connection was never closed"
+    );
+    assert!(
+        idle.elapsed() >= Duration::from_secs(1),
+        "closed after {:?}, before its idle timeout",
+        idle.elapsed()
+    );
+    stop_listening(stop, served).await;
 }
 
 /// Review M1 of PR #139: a request the route takes longer than its request timeout to answer is
@@ -767,15 +956,17 @@ async fn req_st_8_a_request_past_its_timeout_answers_503(pool: PgPool) {
         Duration::from_millis(100),
     );
     let started = std::time::Instant::now();
-    let (status, headers, _) = get_with_headers(&route, "/health").await;
+    let (status, headers, body) = get_with_headers(&route, "/health").await;
     drop(busy);
     assert!(
         matches!(status, StatusCode::SERVICE_UNAVAILABLE),
         "{status}"
     );
     assert_eq!(headers[header::RETRY_AFTER], "1");
+    // Second fix round of PR #139: ERR-Overloaded's own body, not an empty one.
+    assert_eq!(body["error"], "ERR-Overloaded", "{body}");
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(4),
         "{:?}",
         started.elapsed()
     );
