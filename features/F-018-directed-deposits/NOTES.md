@@ -118,6 +118,50 @@ Cloudflare Workers with static assets, not Pages. Both serve a static app. Cloud
 leaves room for a rate-limiting front to the public status route (amendment 0029, Open 8, ruled yes) in the same deployment.
 `bridge.bloque.network` is the working name.
 
+## The public status route, the statement and the alerts (T-018-10, T-018-11)
+
+**The route** (`services/ingress/src/public.rs`, migration `0146_public_status`). `GET /v0/public/deposits/by-coordinate`
+(`network`, `block_number`, `block_hash`, `position_kind`, `position_index`) and `GET /v0/public/withdrawals/by-redemption`
+(`redeemer`, SS58 of any prefix or `0x` and 64 hex digits, and `reference`, 32 bytes), on the ingress's `[public]` listener,
+apart from the authenticated one, with no credential. The answer is `kind`, `bridge_reference`, `state`, `conditions`,
+`coordinates` (network, role, block, hash, position where bezent holds one, and whether it observed it final),
+`transfers` (each transfer's role, bridge reference, state and condition) and `updated_at`; the web app reads the first
+five it knows (`apps/bridge/src/status/route.ts`, which now sends `block_number`). The block number is required: it is
+part of the coordinate a bridge reference is derived from, and the lookup goes by that reference.
+
+- **A role that reads one view.** The route's login is a member of `bezent_public` only, which holds SELECT on
+  `public_status` and on no table; the view reads as its owner. It has no column a requester supplied, and no row a request
+  made or reached but a withdrawal (whose extras it does not show), so a requester's deposit answers "not found" with the
+  body an unknown coordinate gets (`REQ-ID-4`), whatever the route's code does.
+- **Index reads only.** The coordinate derives `bz-d-` and `bz-u-`, the redemption `bz-w-` (the core's derivation, pinned
+  by `apps/bridge/test/vectors/core-refs.json`), and every branch of the view starts at `transfers`' unique bridge
+  reference; a test holds the plan to that on a few thousand rows. At most `max_in_flight` requests at once (64), on 4
+  connections with a 2 s statement bound; beyond, `ERR-Overloaded` at once. The rate limit itself is Cloudflare's, in front.
+- **Public data**: `Access-Control-Allow-Origin: *`, no credentials, `Cache-Control: public, max-age=5` on an answer and on
+  "not found".
+
+**The statement and published addresses.** The directing code is declared in the store (`directing_code`, migration
+`0147`, written by the migration owner as every declaration is, append-only): network, address, token, the reserve
+(asset, network) it feeds, its limits and first block, with a reference. The statement lists it in `published_addresses`
+beside the reserve (`holds: "nothing"`, `feeds`: the reserve address) and in `directing_code` with its limits; a
+declaration made after the evaluation a statement states is left out of it, so a re-derived statement keeps its bytes.
+The EVM endpoint still watches the contracts its own `[[directing]]` names; the deployment keeps the two equal, and
+nothing checks one against the other yet.
+
+**The alerts** (`services/core/src/directed_alerts.rs`; `deploy/runbooks/pages/directed-*.md`, `unpaired-direction.md`,
+`token-upgraded.md`). Per deposit route, each minute: directed deposits minted (`Delivered`) in the trailing 24 hours,
+returns and refunds of directed deposits made in it, and the share of the window directed deposits hold (counted as
+`route_usage_locked()` counts them, waiting ones included). Thresholds in `[directed_alerts]`, defaults 200 mints, 3
+returns and 50 % (the first is the count Open 6 put as a cap; returns are rare by construction). Above a threshold pages
+once on crossing and daily after; back at or below logs `directed-alert-cleared`. An `UnpairedDirection` pages once per
+observation. Alerts only: nothing is capped, refused or held.
+
+**An origin token's upgrade.** The EVM endpoint now also reads every admitted origin token's `Upgraded(address)` (one
+query per range, the declared tokens' addresses and that topic) and records it as `token_upgrade`, which binds nothing; the
+core pages `origin-token-upgraded` once per observation and pauses nothing. Whether directed intake should hold on it is
+the owner's open ruling `d-f018-usdc-upgrade`; if it rules a hold, `page_observation` in `directed_alerts.rs` is where it
+goes (a hold of the token's asset, which the engine honours), and `token_upgrades_since` already reads what it would.
+
 ## Deployment order (PR #136)
 
 Deploy migration `0145_directed_core` first, then the **Kreivo endpoint, before the core**. The endpoint records two

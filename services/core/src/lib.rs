@@ -16,6 +16,9 @@
 //! - [`cutoff`]: route cut-offs (`CND-CutOff`, amendment 0010 A2).
 //! - [`directed`] (`F-018`): a final directed arrival made into a deposit, or returned to its refund
 //!   address when it can never be minted (amendment 0029, A2, A5).
+//! - [`directed_alerts`] (`F-018`): the alerts on directed deposits (mints, returns, the window's
+//!   share, an unpaired direction, an origin token's upgrade), against thresholds in this
+//!   configuration; alerts only, never a cap (amendment 0029).
 //! - [`late_mint`] (issue #26): a mint of a reference after its proof of non-execution.
 //! - [`reserve`] (`F-004`): the reserve book, the one-minute reserve check and the daily signed
 //!   statement.
@@ -27,6 +30,7 @@
 pub mod config;
 pub mod cutoff;
 pub mod directed;
+pub mod directed_alerts;
 pub mod engine;
 pub mod fees;
 pub mod health;

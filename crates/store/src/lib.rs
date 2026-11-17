@@ -105,6 +105,12 @@ pub const INGRESS_ROLE: &str = "bezent_ingress";
 /// cursor, and writes deliveries. A member of no other role.
 pub const WEBHOOKS_ROLE: &str = "bezent_webhooks";
 
+/// The role the public status route's login holds, and nothing else (F-018, T-018-10; migration
+/// 0146; `REQ-ST-8`): SELECT on the one view `public_status`, which has no column a requester
+/// supplied and no row a request made or reached but a withdrawal, and the migrations' list. It reads
+/// no table. A member of no other role.
+pub const PUBLIC_ROLE: &str = "bezent_public";
+
 /// The dry-run reasons that are the issuing network's refusal of a mint's destination, and no
 /// others (`REQ-IN-8`, `REQ-IN-9`; review M1 of PR #136): what the Kreivo endpoint records for the
 /// contract's `Error::Kreivo(KreivoApiError::Assets(AssetsApiError::CannotMint))`, the assets API

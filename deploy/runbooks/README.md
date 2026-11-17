@@ -102,12 +102,17 @@ Each row: the page that sends you to the runbook, the observable that shows the 
 | Runbook | Page kinds | Observable | A test |
 |---|---|---|---|
 | [attested](pages/attested.md) | `attested-withdrawal-unrelayed`, `attested-withdrawal-awaiting-head`, `attested-report-refused`, `attested-instructions-refused` | `oldest_nonfinal_transfer_age_seconds`, `nonfinal_transfers` | none (not on this base) |
+| [directed-mints](pages/directed-mints.md) | `directed-mints-alert` | `fee_position_amount`, `fee_position_age_seconds`, `nonfinal_transfers` | `req_ic_2_directed_mints_above_the_threshold_page_once_and_clear_and_nothing_is_capped` |
+| [directed-returns](pages/directed-returns.md) | `directed-returns-alert` | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds`, `reserve_amount` | `req_ic_2_directed_returns_above_the_threshold_page` |
+| [directed-window](pages/directed-window.md) | `directed-window-alert` | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | `req_ic_2_directed_deposits_holding_the_window_above_the_threshold_page` |
 | [float-top-up](pages/float-top-up.md) | `fee-position-low` | `fee_short_transfers`, `fee_position_amount`, `fee_position_age_seconds` | `cnd_fee_short_holds_until_the_fee_position_can_pay` |
 | [key-compromise](pages/key-compromise.md) | `key-compromise` | `pauses_in_force` | `req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted` (+3) |
 | [late-mint](pages/late-mint.md) | `late-mint-prover-silent`, `late-mint-watch-failed`, `late-mint-check-failed` | `pauses_in_force` | `services/core/tests/late_mint.rs` |
 | [payout](pages/payout.md) | `payout-window-alert`, `payout-refusal-alert`, `resolution-blocked-by-inclusion`, `resolution-unprepared-alert` | `oldest_nonfinal_transfer_age_seconds`, `nonfinal_transfers`, `reviews_open`, `reviews_oldest_age_seconds` | `req_rv_1_issue_35_a_repeated_refusal_pages_once_and_reaches_review_at_the_deadline` (+2) |
 | [platform](pages/platform.md) | none | `observer_lag_estimate_seconds`, `open_gaps`, `undelivered_notifications`, `undelivered_notifications_oldest_age_seconds`, `dead_notifications` | `services/kreivo-endpoint/tests/network.rs` (+2) |
 | [reserve](pages/reserve.md) | `reserve-divergence`, `reserve-blind`, `reserve-alert`, `reserve-check-incomplete`, `reserve-check-failed`, `reserve-check-stalled`, `supply-mismatch-pause`, `book-quarantine`, `reserve-hold`, `reserve-hold-lifted`, `reserve-divergence-unconfirmed` | `reserve_equation_outcome`, `reserve_equation_age_seconds`, `reserve_amount`, `observer_lag_estimate_seconds`, `open_gaps`, `pauses_in_force`, `holds_in_force`, `hold_age_seconds` | `ac_e2_3_req_ic_2_nfr_5_m2_an_evaluation_that_cannot_be_made_is_held_and_paged_past_the_bound` (+8) |
+| [token-upgraded](pages/token-upgraded.md) | `origin-token-upgraded` | `reserve_equation_outcome`, `pauses_in_force` | `req_as_11_an_origin_tokens_upgrade_pages_and_pauses_nothing` (+1) |
+| [unpaired-direction](pages/unpaired-direction.md) | `unpaired-direction` | `open_gaps`, `observer_lag_estimate_seconds` | `ac_a6_6_an_unpaired_direction_pages_once` (+1) |
 | [statements](pages/statements.md) | `statement-overdue`, `statement-stuck`, `statement-publish-failed`, `statement-abandoned` | `reserve_equation_age_seconds` | `services/core/tests/statement.rs` |
 
 ### Requirements of `REQ-IC`, `REQ-ST-6` and what answers them

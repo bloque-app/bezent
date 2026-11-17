@@ -511,3 +511,66 @@ async fn ac_e2_3_nfr_6_a_long_step_moves_the_watermark_and_records_only_its_own_
             .unwrap();
     assert_eq!(watermark, Some(12));
 }
+
+/// F-018, T-018-11 (`REQ-AS-11`, `REQ-IC-2`): an admitted origin token's `Upgraded(address)` (EIP-1967:
+/// its implementation changed) is recorded once, at its log, as its own kind, `token_upgrade`, with
+/// the token and the new implementation, and is no movement: no amount, sender or recipient, so
+/// nothing binds it. The same event from an address that is no admitted token is not read at all.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_as_11_an_admitted_tokens_upgrade_is_recorded_as_its_own_kind(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect, 3).await;
+    let h = f.chain.mine();
+    let implementation = Address::repeat_byte(0x1e);
+    f.chain.log(
+        h.number,
+        7,
+        tx(h.number as u8),
+        u64::from(h.number as u8),
+        usdc(),
+        vec![evm::UPGRADED_TOPIC, implementation.into_word()],
+        vec![],
+    );
+    f.chain.log(
+        h.number,
+        8,
+        tx(h.number as u8 + 1),
+        u64::from(h.number as u8) + 1,
+        Address::repeat_byte(0x77),
+        vec![evm::UPGRADED_TOPIC, implementation.into_word()],
+        vec![],
+    );
+    f.advance(2);
+    caught_up(&f).await;
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        serde_json::Value,
+    )> = sqlx::query_as(
+        "SELECT kind::text, detail ->> 'event', amount::text, sender, recipient, detail \
+             FROM observations WHERE network = 'polygon' ORDER BY position_index",
+    )
+    .fetch_all(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (kind, event, amount, sender, recipient, detail) = &rows[0];
+    assert_eq!(
+        (kind.as_str(), event.as_str()),
+        ("token_upgrade", "TokenUpgraded")
+    );
+    assert_eq!((amount, sender, recipient), (&None, &None, &None));
+    assert_eq!(detail["token"], usdc().to_string());
+    assert_eq!(detail["implementation"], implementation.to_checksum(None));
+    assert_eq!(
+        f.count("SELECT position_index FROM observations WHERE network = 'polygon'")
+            .await,
+        7
+    );
+}

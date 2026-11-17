@@ -199,7 +199,7 @@ describe('the public status route', () => {
     const fetcher = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
       expect(init?.credentials).toBe('omit');
       expect(String(url)).toBe(
-        `https://status.example/v0/public/deposits/by-coordinate?network=polygon&block_hash=${BLOCK_HASH}&position_kind=log&position_index=41`,
+        `https://status.example/v0/public/deposits/by-coordinate?network=polygon&block_number=100&block_hash=${BLOCK_HASH}&position_kind=log&position_index=41`,
       );
       return new Response(
         JSON.stringify({
@@ -212,10 +212,35 @@ describe('the public status route', () => {
         { status: 200 },
       );
     });
-    const r = await depositByCoordinate('https://status.example', { network: 'polygon', blockHash: BLOCK_HASH, positionKind: 'log', positionIndex: 41 }, fetcher as typeof fetch);
+    const r = await depositByCoordinate('https://status.example', { network: 'polygon', blockNumber: 100n, blockHash: BLOCK_HASH, positionKind: 'log', positionIndex: 41 }, fetcher as typeof fetch);
     expect(r).toEqual({
       kind: 'answer',
       answer: { state: 'Minted', conditions: ['CND-DepositWindow'], coordinates: [{ network: 'kreivo', role: 'mint', block_number: 41, final: true }], updated_at: '2026-11-16T00:00:00Z' },
+    });
+  });
+
+  it('reads the route’s own answer (services/ingress/src/public.rs) and keeps its state, conditions and coordinates', () => {
+    // The shape `PublicStatus` serialises to, as the ingress's tests assert it.
+    const answer = parseAnswer({
+      kind: 'directed_deposit',
+      bridge_reference: 'bz-d-071b8b19756a50ad5929639577cdea067cc85a88',
+      state: 'Source-Final',
+      conditions: ['CND-DepositWindow'],
+      coordinates: [
+        { network: 'polygon', role: 'arrival', block_number: 100, block_hash: BLOCK_HASH, position_kind: 'log', position_index: 41, final: true },
+        { network: 'kreivo', role: 'mint', block_number: 7, block_hash: '0xcc', final: false },
+      ],
+      transfers: [{ role: 'deposit', bridge_reference: 'bz-d-071b8b19756a50ad5929639577cdea067cc85a88', state: 'Source-Final', condition: 'CND-DepositWindow' }],
+      updated_at: '2026-11-17T00:00:00Z',
+    });
+    expect(answer).toEqual({
+      state: 'Source-Final',
+      conditions: ['CND-DepositWindow'],
+      coordinates: [
+        { network: 'polygon', role: 'arrival', block_number: 100, block_hash: BLOCK_HASH, position_kind: 'log', position_index: 41, final: true },
+        { network: 'kreivo', role: 'mint', block_number: 7, block_hash: '0xcc', final: false },
+      ],
+      updated_at: '2026-11-17T00:00:00Z',
     });
   });
 

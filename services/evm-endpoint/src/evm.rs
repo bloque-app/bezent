@@ -37,6 +37,9 @@ sol! {
     /// into the reserve for `recipient`, a 32-byte account on the issuing network. `refund` is the
     /// original depositor the caller named, where a return goes (`d-refund-dest-swaps`).
     event Directed(address indexed sender, uint256 amount, bytes32 indexed recipient, address refund);
+    /// EIP-1967's `Upgraded`: a proxy's implementation changed (F-018, T-018-11; an admitted origin
+    /// token that is a proxy, as native USDC is).
+    event Upgraded(address indexed implementation);
     /// ERC-20 `transfer`.
     function transfer(address to, uint256 amount) external returns (bool);
     /// ERC-20 `balanceOf`.
@@ -68,6 +71,9 @@ pub const TRANSFER_TOPIC: B256 = Transfer::SIGNATURE_HASH;
 pub const REFERENCE_TOPIC: B256 = Reference::SIGNATURE_HASH;
 /// `Directed(address,uint256,bytes32,address)`.
 pub const DIRECTED_TOPIC: B256 = Directed::SIGNATURE_HASH;
+
+/// `Upgraded(address)` (EIP-1967).
+pub const UPGRADED_TOPIC: B256 = Upgraded::SIGNATURE_HASH;
 
 /// The EIP-2718 type of an EIP-1559 transaction.
 pub const EIP1559: u8 = 2;
@@ -302,6 +308,16 @@ pub fn decode_directed(topics: &[B256], data: &[u8]) -> Option<(Address, U256, B
         return None;
     }
     Some((sender, U256::from_be_slice(&data[..32]), topics[2], refund))
+}
+
+/// A decoded `Upgraded(address)` log: the new implementation. Two topics, no data, the topic an
+/// address (twelve zero bytes first).
+pub fn decode_upgraded(topics: &[B256], data: &[u8]) -> Option<Address> {
+    if topics.len() != 2 || topics[0] != UPGRADED_TOPIC || !data.is_empty() {
+        return None;
+    }
+    let implementation = Address::from_word(topics[1]);
+    (implementation.into_word() == topics[1]).then_some(implementation)
 }
 
 /// A decoded `Reference(bytes32)` log.

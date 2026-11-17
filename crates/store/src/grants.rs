@@ -35,6 +35,7 @@ pub const ROLES: &[&str] = &[
     crate::KREIVO_ENDPOINT_ROLE,
     crate::EVM_ENDPOINT_ROLE,
     crate::WEBHOOKS_ROLE,
+    crate::PUBLIC_ROLE,
     crate::SIGNER_ROLE,
     crate::OPERATOR_ROLE,
 ];
@@ -66,6 +67,8 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "book_postings",
             "book_quarantine",
             "deposit_conversions",
+            // F-018 (migration 0147): the directing code declared for a reserve, for the statement.
+            "directing_code",
             "endpoint_scopes",
             "event_log",
             "event_log_head",
@@ -287,6 +290,14 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
     (crate::WEBHOOKS_ROLE, "DELETE", &["webhook_condition_holds"]),
     (
         crate::WEBHOOKS_ROLE,
+        "EXECUTE",
+        &["bezent_applied_migrations()"],
+    ),
+    // The public status route (F-018, T-018-10; migration 0146): one view, which reads the tables
+    // with its owner's rights and shows nothing a requester supplied (REQ-ST-8), and nothing else.
+    (crate::PUBLIC_ROLE, "SELECT", &["public_status"]),
+    (
+        crate::PUBLIC_ROLE,
         "EXECUTE",
         &["bezent_applied_migrations()"],
     ),

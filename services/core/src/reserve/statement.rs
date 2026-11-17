@@ -1515,10 +1515,26 @@ fn compose(
             })).collect::<Vec<_>>(),
             "attested_by": parties,
         },
-        "published_addresses": a.positions.iter().map(|p| json!({
-            "network": p.network, "address": p.address,
-            "token": p.token.as_ref().map(|(t, _)| t), "holds": "reserve",
-        })).collect::<Vec<_>>(),
+        // REQ-BK-5, REQ-AS-11, §7.E: every reserve address, and beside it the directing code declared
+        // for it, which moves the token into it and holds nothing (`feeds` names the reserve).
+        "published_addresses": a.positions.iter().flat_map(|p| {
+            std::iter::once(json!({
+                "network": p.network, "address": p.address,
+                "token": p.token.as_ref().map(|(t, _)| t), "holds": "reserve",
+            }))
+            .chain(p.directing.iter().filter(|d| d.declared_at <= evaluated_at).map(|d| json!({
+                "network": p.network, "address": d.address, "token": d.token,
+                "holds": "nothing", "directing_code": true, "feeds": p.address,
+            })))
+        }).collect::<Vec<_>>(),
+        // REQ-AS-11: each declaration as recorded by the evaluation stated: the network, the code's
+        // address, the token it moves, the reserve it moves it to, the limits it enforces and the
+        // first block it counts.
+        "directing_code": a.positions.iter().flat_map(|p| p.directing.iter()
+            .filter(|d| d.declared_at <= evaluated_at).map(|d| json!({
+            "network": p.network, "address": d.address, "token": d.token, "feeds": p.address,
+            "minimum": d.minimum, "maximum": d.maximum, "from_block": d.from_block,
+        }))).collect::<Vec<_>>(),
         // REQ-BK-5, REQ-BK-6: an arrival at a reserve address from one of these, at or after the
         // block it applies from, is the operator's contribution to surplus; any other arrival is
         // owed mint. A declaration applies from no block (`null`) when it predates the rule.

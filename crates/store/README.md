@@ -23,6 +23,7 @@ or disable a trigger, and none may create in the schema or the database.
 | core | `bezent_core` | `bezent-core` |
 | ingress API | `bezent_ingress` | `bezent-ingress` (`bezent_ingress::connect`) |
 | webhook dispatcher | `bezent_webhooks` | `bezent-ingress`, for `[webhooks] database_url` |
+| public status route (F-018, `REQ-ST-8`) | `bezent_public` | `bezent-ingress`, for `[public] database_url` |
 | Kreivo endpoint | `bezent_kreivo_endpoint` | `bezent-kreivo-endpoint` |
 | EVM endpoint | `bezent_evm_endpoint` | `bezent-evm-endpoint` |
 | signer | `bezent_signer` | `bezent-signer` |
@@ -101,7 +102,7 @@ and no role may DELETE or TRUNCATE anything but the dispatcher's own condition h
 | `webhook_secrets`, `webhook_transfer_urls`, `webhook_condition_urls` | ingress |
 | `webhook_deliveries`, `webhook_condition_holds` (and DELETE), `webhook_cursor(after)` UPDATE, `webhook_deliveries(state, attempts, next_attempt_at, leased_until, last_status, last_error, finished_at)` UPDATE | webhook dispatcher |
 | `manual_actions(kind, transfer_id, to_state, network, block_number, block_hash, block_time, justification)`, `manual_approvals(action_id, justification, approved_output_network, approved_output_block_number, approved_output_block_hash, approved_output_position_kind, approved_output_position_index, approved_output_amount)` (0141: all six `approved_output_*` or none), `ledger_accounts(network, address, kind, reason)`; EXECUTE `operator_pause`, `operator_request_unpause`, `operator_approve_unpause`, `operator_record` (0091: the only way an operator pauses, lifts a pause or records an administrative act) | operators |
-| `networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `endpoint_scopes`, `evm_endpoint_networks` | nobody: the migration owner's declarations |
+| `networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `endpoint_scopes`, `evm_endpoint_networks`, `directing_code` (0147: the directing code declared for a reserve, `REQ-AS-11`; append-only, its token admitted for the asset, never the reserve address) | nobody: the migration owner's declarations |
 
 Who **reads** what (SELECT):
 
@@ -111,6 +112,7 @@ Who **reads** what (SELECT):
 | ingress | the declarations (`networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `pauses`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `ledger_accounts_listed`), the requests (`intake`, `intake_answers`, `relayed_instructions`), `transfers`, `transitions`, `attempt_milestones`, `observations`, `observation_outcomes`, `event_log`, `event_log_head`, and the views `transfer_status`, `event_log_position`, `book_balances`; of the webhooks' tables, `webhook_deliveries` and the unsealed columns of the secrets and URLs. **No** intent, signature, signed bytes, proof, reading, book entry or posting, or reserve record (the `book_balances` view gives it the balances only) |
 | Kreivo endpoint, EVM endpoint | (the EVM endpoint also `evm_endpoint_networks`, which logins record which EVM network, migration 0056) `networks`, `assets`, `admitted_tokens`, `reserves`, `endpoint_scopes`, `intents`, `signatures`, their own records (`observations`, `observation_outcomes`, `observation_ranges`, `observation_gaps`, `observation_watermarks`, `final_heads`, `prepared_transactions`, `signed_transactions`, `non_execution_proofs`, `reserve_readings`; the EVM endpoint also `fee_position_readings`) and `event_log`; the Kreivo endpoint also `observation_walk_anchors` (0052: blocks of a long history walk, so it resumes). **No** transfer, request or book |
 | webhook dispatcher | `event_log`, `event_log_head`, `transfers`, `intake`, `intake_answers`, `requester_grants`, and the webhooks' tables, sealed columns included |
+| public status route | the view `public_status` alone (0146, `REQ-ST-8`): a directed deposit's, its return's or refund's, and a withdrawal's or its refund mint's state, condition and coordinates, by bridge reference, with no column a requester supplied; the view reads the tables as its owner, so the role reads **no** table |
 | signer | `intents` (the signing intent and the core's order), `prepared_transactions`, `signatures`, and since 0049 `admitted_tokens` and `signed_transactions(id, intent_id)` (to compare the bytes it decodes with the core's order: the token an asset is paid in, a cancel's target) and `event_log(seq)` (the position of an alert it appends); nothing else |
 | operators | `admin_actions`, `event_log`, `pauses`, `transfer_status`, `manual_actions`, `manual_approvals`, `reviews`, `unassociated_arrivals`, `ledger_accounts`, `ledger_accounts_listed`, `book_quarantine`, `surplus_funding_addresses`, `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_statement_objects`, `reserve_readings` |
 | `bezent_service`, `bezent_endpoint` | nothing |
@@ -361,7 +363,7 @@ without `ADMIN OPTION`:
 DO $$
 DECLARE
     login TEXT := 'bezent_core_prod';   -- the service's login
-    svc   TEXT := 'bezent_core';        -- its role: bezent_core, bezent_ingress, bezent_webhooks,
+    svc   TEXT := 'bezent_core';        -- its role: bezent_core, bezent_ingress, bezent_webhooks, bezent_public,
                                         -- bezent_kreivo_endpoint, bezent_evm_endpoint, bezent_signer
                                         -- or, for an operator, bezent_operator
     m RECORD;
@@ -416,7 +418,7 @@ This lists every login that breaks any of that, and why; it must return no rows:
 -- deploy: check every login of a store role
 WITH store_roles(name) AS (VALUES ('bezent_service'), ('bezent_core'), ('bezent_ingress'),
          ('bezent_endpoint'), ('bezent_kreivo_endpoint'), ('bezent_evm_endpoint'),
-         ('bezent_webhooks'), ('bezent_signer'), ('bezent_operator')),
+         ('bezent_webhooks'), ('bezent_public'), ('bezent_signer'), ('bezent_operator')),
 logins AS (
     SELECT DISTINCT u.oid, u.rolname FROM pg_auth_members a
     JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles u ON u.oid = a.member

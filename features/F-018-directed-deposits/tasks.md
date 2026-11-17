@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # F-018 — tasks
 
-**Accepted.** Amendment 0029 is applied (`SPEC.md` v0.5.13). T-018-01 to T-018-03, T-018-05 and T-018-06 are drafted, in pull requests #121, #122 and #125; T-018-04 is done (Polygon Amoy). Its Open questions are ruled (2026-11-09);
+**Accepted.** Amendment 0029 is applied (`SPEC.md` v0.5.13). T-018-01 to T-018-03, T-018-05 and T-018-06 are drafted, in pull requests #121, #122 and #125; T-018-04 is done (Polygon Amoy); T-018-10 and T-018-11 are built (`NOTES.md`, "The public status route, the statement and the alerts"). Its Open questions are ruled (2026-11-09);
 where a ruling removed a task, its identifier is retired and not reused. Sizes are rough, for one engineer with agents, review included. *S* is up to a week,
 *M* one to two weeks, *L* two to three.
 

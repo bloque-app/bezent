@@ -104,6 +104,10 @@ pub struct Position {
     /// arrival from one of them, at or after the declaration's block, is a surplus contribution;
     /// any other arrival is owed mint.
     pub funding: Vec<Funding>,
+    /// The directing code declared for this reserve (`REQ-AS-11`; migration 0147): it moves the
+    /// admitted token into the reserve address and holds no value, and is published with it
+    /// (`REQ-BK-5`, §7.E).
+    pub directing: Vec<Directing>,
     /// Whether the network's addresses are EVM addresses, compared without regard to case; any
     /// other format is compared exactly (SS58 is case-significant).
     pub evm: bool,
@@ -117,6 +121,24 @@ pub struct Funding {
     /// The first block the declaration applies to. `None` (declared before migration 0032)
     /// applies to nothing: a declaration is never retroactive (review SF3).
     pub from_block: Option<i64>,
+}
+
+/// Directing code declared for a reserve (`REQ-AS-11`; migration 0147, `directing_code`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Directing {
+    /// The contract's address.
+    pub address: String,
+    /// The admitted origin token it moves.
+    pub token: String,
+    /// The least it takes in one call, in the token's minor units.
+    pub minimum: String,
+    /// The most it takes in one call.
+    pub maximum: String,
+    /// The first block whose events count.
+    pub from_block: i64,
+    /// When it was declared: a statement lists the code declared by its evaluation, so the same
+    /// evaluation always states the same (a re-derived statement keeps its bytes).
+    pub declared_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Position {
@@ -236,9 +258,37 @@ impl Asset {
         .bind(&asset)
         .fetch_all(&mut *conn)
         .await?;
+        #[allow(clippy::type_complexity)]
+        let directing: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            chrono::DateTime<chrono::Utc>,
+        )> = sqlx::query_as(
+            "SELECT network, address, token, minimum::text, maximum::text, from_block, declared_at \
+             FROM directing_code WHERE asset = $1 ORDER BY network, address",
+        )
+        .bind(&asset)
+        .fetch_all(&mut *conn)
+        .await?;
         let positions = rows
             .into_iter()
             .map(|(network, address, backend, token, p, evm)| Position {
+                directing: directing
+                    .iter()
+                    .filter(|(n, ..)| *n == network)
+                    .map(|(_, a, t, min, max, from, at)| Directing {
+                        address: a.clone(),
+                        token: t.clone(),
+                        minimum: min.clone(),
+                        maximum: max.clone(),
+                        from_block: *from,
+                        declared_at: *at,
+                    })
+                    .collect(),
                 funding: funding
                     .iter()
                     .filter(|(n, _, _)| *n == network)

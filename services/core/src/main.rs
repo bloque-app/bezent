@@ -163,6 +163,10 @@ async fn main() -> ExitCode {
     let mut observables = bezent_core_service::observe::Emitter::new();
     // The floors were checked when the configuration was read (`Config::from_file`).
     let mut fees = bezent_core_service::fees::Watch::new(config.fee_floors().unwrap_or_default());
+    // The directed deposits' alerts (F-018), their thresholds checked with the configuration too.
+    let mut directed_alerts = bezent_core_service::directed_alerts::Watch::new(
+        config.directed_alerts().unwrap_or_default(),
+    );
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
@@ -226,6 +230,8 @@ async fn main() -> ExitCode {
                     .await;
                 // A fee position below its floor is a page (REQ-ST-6, DEC-18; amendment 0025).
                 fees.tick(&check_pool, std::time::Instant::now(), chrono::Utc::now()).await;
+                // Directed deposits are watched, not capped (F-018; amendment 0029, Open 5 and 6).
+                directed_alerts.tick(&check_pool, std::time::Instant::now()).await;
                 if let Some(statements) = &statements {
                     // Bounded: a signer or a store that never answers does not freeze the cycle
                     // and the reserve check; a statement it keeps from being published is paged
