@@ -115,7 +115,18 @@ pub const WEBHOOKS_ROLE: &str = "bezent_webhooks";
 /// (`UnknownError`, `ExtQueryError`, `NotAuthorised`, `NotALocalAsset`, `NotAGroupContract`, the
 /// deposit, transfer and burn refusals) and a bare `Kreivo` are a fault of the contract's standing
 /// with the network or an unknown, never the destination's: guardrail 4, no refund on unknown.
+///
+/// Kreivo's `mint` answers `CannotMint` for every error of `pallet-assets`' `mint_into`, the whole
+/// asset's too (frozen, being destroyed, gone; kreivo `apis/src/runtime/api_impls/assets.rs`). So
+/// such a refusal is the destination's only when the endpoint recorded the asset [`ASSET_LIVE`] at
+/// the dry run's head, in the dry run's `asset.status` (review of PR #136): any other status, or none
+/// it could read, is the refusal that names nothing.
 pub const DESTINATION_REFUSALS: &[&str] = &["Kreivo(Assets(CannotMint))"];
+
+/// The asset status (`pallet-assets`' `AssetStatus::Live`, a dry run's `asset.status`) without
+/// which none of [`DESTINATION_REFUSALS`] is the destination's. The core's `dry_run_condition()`
+/// and the store's `directed_refusal_recorded()` (migration 0145) read the same word.
+pub const ASSET_LIVE: &str = "Live";
 
 /// bezent's migrations, embedded at build time. Up migrations only: production never reverts a
 /// migration, so the down migrations are not in this crate's `migrations/` and no service binary

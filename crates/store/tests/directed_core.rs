@@ -134,17 +134,48 @@ async fn refused_dry_run(pool: &PgPool, id: i64, reason: &str) {
 
 /// Attempt 1 of deposit `id` ordered again on the issuing network, and its preparation at
 /// (`issuing`, `block`, `\x<hash>`, [`DRY_RUN_TIME`]): refused with `reason`, or passed (`None`).
+/// A refusal to mint records the asset `Live` at that head, as the Kreivo endpoint records it
+/// ([`dry_run_with`] for another status).
 async fn dry_run(pool: &PgPool, id: i64, reason: Option<&str>, block: i64, hash: &str) {
+    let status = reason
+        .filter(|r| bezent_store::DESTINATION_REFUSALS.contains(r))
+        .map(|_| bezent_store::ASSET_LIVE);
+    dry_run_with(pool, id, reason, status, block, hash, Some(DRY_RUN_TIME)).await;
+}
+
+/// [`dry_run`], the asset of `status` at the dry run's head (`"null"`: a null status, as the
+/// endpoint records one it could not read; `None`: no asset recorded), the dry
+/// run's block time `time` (`None`: none recorded, as on rows before it).
+async fn dry_run_with(
+    pool: &PgPool,
+    id: i64,
+    reason: Option<&str>,
+    status: Option<&str>,
+    block: i64,
+    hash: &str,
+    time: Option<&str>,
+) {
+    let asset = match status {
+        Some("null") => {
+            ", 'asset', jsonb_build_object('id', 'Here(1)', 'status', NULL, 'supply', NULL)"
+                .to_owned()
+        }
+        Some(s) => format!(
+            ", 'asset', jsonb_build_object('id', 'Here(1)', 'status', '{s}'::text, 'supply', '0')"
+        ),
+        None => String::new(),
+    };
     let (passed, outcome) = match reason {
         Some(r) => (
             "FALSE",
-            format!("jsonb_build_object('outcome', 'refused', 'reason', '{r}'::text)"),
+            format!("jsonb_build_object('outcome', 'refused', 'reason', '{r}'::text{asset})"),
         ),
         None => (
             "TRUE",
             "jsonb_build_object('outcome', 'passed', 'reason', NULL)".to_owned(),
         ),
     };
+    let time = time.map_or_else(|| "NULL".to_owned(), |t| format!("'{t}'"));
     exec(
         pool,
         &format!(
@@ -156,7 +187,7 @@ async fn dry_run(pool: &PgPool, id: i64, reason: Option<&str>, block: i64, hash:
                  signing_payload, message, dry_run_block_number, dry_run_block_hash, \
                  dry_run_passed, dry_run, dry_run_block_time) \
              SELECT id, 1, 'issuing', '\\x01', 'mint-key', 0, 0, 0, '\\x02', '\\x03', '\\x04', \
-                 '\\x05', {block}, '\\x{hash}', {passed}, {outcome}, '{DRY_RUN_TIME}' FROM i"
+                 '\\x05', {block}, '\\x{hash}', {passed}, {outcome}, {time} FROM i"
         ),
     )
     .await;
@@ -668,6 +699,166 @@ async fn req_rf_1_a_later_passing_dry_run_closes_the_exit(pool: PgPool) {
     dry_run(&pool, id, Some("Kreivo(UnknownError)"), 99, "c9").await;
     assert!(!open().await, "the latest refusal is an unknown");
     assert!(!evidence(97, "c7").await);
+}
+
+/// `REQ-RF-1`, `REQ-IN-8`, `REQ-IN-9` (review of PR #136): Kreivo answers `CannotMint` for every
+/// error of `mint_into`, the whole asset's too. A refusal to mint is the destination's only when the
+/// endpoint recorded the asset `Live` at the dry run's head (`bezent_store::ASSET_LIVE`): a frozen
+/// asset, one being destroyed, one gone or one whose status could not be read (no status, or no
+/// asset recorded at all) never opens the exit, nor is it evidence.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_a_refusal_to_mint_opens_the_exit_only_while_the_asset_is_live(pool: PgPool) {
+    declarations(&pool).await;
+    exec(
+        &pool,
+        "UPDATE routes SET maximum = 100000000, window_limit = 100000000",
+    )
+    .await;
+    let core = login(&pool, "dc_core_live_for_tests", bezent_store::CORE_ROLE).await;
+    let cases = [
+        (Some(bezent_store::ASSET_LIVE), true),
+        (Some("Frozen"), false),
+        (Some("Destroying"), false),
+        (Some("live"), false),
+        // A status the endpoint could not read (or an asset that does not exist) is recorded as
+        // null, and no asset at all by an endpoint older than this: neither is the destination's.
+        (Some("null"), false),
+        (None, false),
+    ];
+    for (n, (status, open)) in cases.into_iter().enumerate() {
+        let block = 40 + i64::try_from(n).unwrap();
+        final_arrival(&pool, block, "directed_arrival").await;
+        let id = directed_deposit(&core, block).await;
+        dry_run_with(
+            &pool,
+            id,
+            Some("Kreivo(Assets(CannotMint))"),
+            status,
+            90,
+            "cc",
+            Some(DRY_RUN_TIME),
+        )
+        .await;
+        into_review(&pool, id, true).await;
+        assert_eq!(
+            flag(&pool, &format!("SELECT directed_review_refund_open({id})")).await,
+            open,
+            "{status:?}"
+        );
+        assert_eq!(
+            flag(
+                &pool,
+                &format!(
+                    "SELECT directed_refusal_recorded({id}, 'issuing', 90, '\\xcc', '{DRY_RUN_TIME}')"
+                )
+            )
+            .await,
+            open,
+            "{status:?}: evidence"
+        );
+    }
+}
+
+/// `REQ-RF-1` (review L1 and L4 of PR #136): a refused dry run without its block time is no
+/// evidence on any path, the "is it open" question included, so the exit never shows open when it
+/// cannot be taken. The newest dry run is the newest by its block, then by row; and no dry run of
+/// attempt 1 that passed at or after the refusal's block may exist.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_rf_1_the_newest_dry_run_by_block_with_its_time_is_the_evidence(pool: PgPool) {
+    declarations(&pool).await;
+    exec(
+        &pool,
+        "UPDATE routes SET maximum = 100000000, window_limit = 100000000",
+    )
+    .await;
+    let core = login(&pool, "dc_core_l4_for_tests", bezent_store::CORE_ROLE).await;
+    let open = |id: i64| {
+        let pool = pool.clone();
+        async move { flag(&pool, &format!("SELECT directed_review_refund_open({id})")).await }
+    };
+    let refusal = Some("Kreivo(Assets(CannotMint))");
+    let live = Some(bezent_store::ASSET_LIVE);
+
+    // L1: no block time recorded with the refusal.
+    final_arrival(&pool, 60, "directed_arrival").await;
+    let untimed = directed_deposit(&core, 60).await;
+    dry_run_with(&pool, untimed, refusal, live, 90, "cc", None).await;
+    into_review(&pool, untimed, true).await;
+    assert!(!open(untimed).await, "a refusal without its block time");
+
+    // L4: a row recorded later for an earlier block is not the newest; the refusal at the later
+    // block is, and opens the exit.
+    final_arrival(&pool, 61, "directed_arrival").await;
+    let late_row = directed_deposit(&core, 61).await;
+    dry_run_with(&pool, late_row, refusal, live, 97, "c7", Some(DRY_RUN_TIME)).await;
+    dry_run_with(
+        &pool,
+        late_row,
+        Some("Kreivo(UnknownError)"),
+        None,
+        95,
+        "c5",
+        Some(DRY_RUN_TIME),
+    )
+    .await;
+    into_review(&pool, late_row, true).await;
+    assert!(open(late_row).await, "the newest by block is the refusal");
+    assert!(
+        flag(
+            &pool,
+            &format!(
+                "SELECT directed_refusal_recorded({late_row}, 'issuing', 97, '\\xc7', \
+                   '{DRY_RUN_TIME}')"
+            )
+        )
+        .await
+    );
+
+    // L4: the newest by block is a refusal for an unknown, though recorded first: closed.
+    final_arrival(&pool, 62, "directed_arrival").await;
+    let early_row = directed_deposit(&core, 62).await;
+    dry_run_with(
+        &pool,
+        early_row,
+        Some("Kreivo(UnknownError)"),
+        None,
+        97,
+        "c7",
+        Some(DRY_RUN_TIME),
+    )
+    .await;
+    dry_run_with(
+        &pool,
+        early_row,
+        refusal,
+        live,
+        95,
+        "c5",
+        Some(DRY_RUN_TIME),
+    )
+    .await;
+    into_review(&pool, early_row, true).await;
+    assert!(!open(early_row).await, "the newest by block is an unknown");
+
+    // L4: a dry run that passed at the refusal's own block, recorded before it.
+    final_arrival(&pool, 63, "directed_arrival").await;
+    let same_block = directed_deposit(&core, 63).await;
+    dry_run_with(&pool, same_block, None, None, 97, "c7", Some(DRY_RUN_TIME)).await;
+    dry_run_with(
+        &pool,
+        same_block,
+        refusal,
+        live,
+        97,
+        "c7",
+        Some(DRY_RUN_TIME),
+    )
+    .await;
+    into_review(&pool, same_block, true).await;
+    assert!(
+        !open(same_block).await,
+        "a dry run passed at the refusal's block"
+    );
 }
 
 /// `REQ-RF-1`, `INV-8` (review, info, of PR #136): a delivery anomaly recorded for the deposit, one

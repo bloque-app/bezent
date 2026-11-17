@@ -107,13 +107,20 @@ COMMENT ON FUNCTION directed_destination_refusals() IS
     'destination; bezent_store::DESTINATION_REFUSALS, which a test holds equal.';
 
 -- Whether the issuing network refused directed deposit `p_transfer`'s destination, as its first
--- attempt recorded it (REQ-IN-8, REQ-IN-9; review M1 of PR #136): the latest preparation of attempt
--- 1's mint orders on the deposit's destination network (review L-a: a later dry run that passed, or
--- that was refused for anything else, is what the network says now, and the refusal before it is
--- no longer evidence) was refused for a reason in directed_destination_refusals(). With a
--- coordinate, only that dry run, at that block and with the block time it recorded (review L-b):
--- the evidence a resolution of the review into Refunding rests on. A destination or a list bezent
--- cannot read is no such refusal, nor is any other refusal of the assets API.
+-- attempt recorded it (REQ-IN-8, REQ-IN-9; review M1 of PR #136): the newest dry run of attempt 1's
+-- mint orders on the deposit's destination network, newest by the block it ran at and then by row
+-- (review L4; review L-a: a later dry run that passed, or that was refused for anything else, is
+-- what the network says now, and the refusal before it is no longer evidence), was refused for a
+-- reason in directed_destination_refusals(), and no dry run of attempt 1 there passed at or after
+-- its block (review L4). Kreivo's `mint` answers CannotMint for every error of pallet-assets'
+-- mint_into, the whole asset's too (frozen, being destroyed, gone), so the refusal is the
+-- destination's only when the endpoint recorded the asset Live at the same head, in the dry run's
+-- asset.status (bezent_store::ASSET_LIVE; review of PR #136): another status, or none it could
+-- read, is an unknown. The dry run must carry the block time the endpoint read with it, on every
+-- path (review L1): a review exit shown open must be one that can be taken. With a coordinate, only
+-- that dry run, at that block and with that block time (review L-b): the evidence a resolution of
+-- the review into Refunding rests on. A destination or a list bezent cannot read is no such
+-- refusal, nor is any other refusal of the assets API.
 CREATE FUNCTION directed_refusal_recorded(
     p_transfer BIGINT, p_network TEXT, p_block BIGINT, p_hash BYTEA, p_time TIMESTAMPTZ)
     RETURNS BOOLEAN
@@ -125,21 +132,31 @@ CREATE FUNCTION directed_refusal_recorded(
         SELECT NOT p.dry_run_passed
            AND p.dry_run ->> 'outcome' = 'refused'
            AND p.dry_run ->> 'reason' = ANY (directed_destination_refusals())
+           AND p.dry_run -> 'asset' ->> 'status' = 'Live'
+           AND p.dry_run_block_time IS NOT NULL
            AND (p_network IS NULL
                 OR (p.network = p_network AND p.dry_run_block_number = p_block
                     AND p.dry_run_block_hash = p_hash AND p.dry_run_block_time = p_time))
+           AND NOT EXISTS (
+               SELECT 1 FROM intents qi
+               JOIN prepared_transactions q ON q.order_intent_id = qi.id
+               WHERE qi.transfer_id = t.id AND qi.attempt = 1 AND qi.purpose = 'mint'
+                 AND qi.network = t.destination_network AND q.network = t.destination_network
+                 AND q.dry_run_passed AND q.dry_run_block_number >= p.dry_run_block_number)
         FROM transfers t
         JOIN intents i ON i.transfer_id = t.id AND i.attempt = 1 AND i.purpose = 'mint'
         JOIN prepared_transactions p ON p.order_intent_id = i.id
         WHERE t.id = p_transfer AND i.network = t.destination_network
           AND p.network = t.destination_network
-        ORDER BY p.id DESC LIMIT 1), FALSE)
+        ORDER BY p.dry_run_block_number DESC, p.id DESC LIMIT 1), FALSE)
 $$;
 
 COMMENT ON FUNCTION directed_refusal_recorded(BIGINT, TEXT, BIGINT, BYTEA, TIMESTAMPTZ) IS
-    'REQ-IN-8, REQ-IN-9, REQ-RF-1 (amendment 0029, Open 2): whether the latest dry run of attempt 1 '
-    'of a directed deposit recorded the issuing network''s refusal of its destination (at the given '
-    'block and block time, when one is given). Guardrail 4: an unknown is no refusal.';
+    'REQ-IN-8, REQ-IN-9, REQ-RF-1 (amendment 0029, Open 2): whether the newest dry run of attempt 1 '
+    'of a directed deposit (by block, then row), with its block time and none passing at or after '
+    'its block, recorded the issuing network''s refusal of its destination, the asset Live at that '
+    'head (at the given block and block time, when one is given). Guardrail 4: an unknown is no '
+    'refusal.';
 
 -- Whether directed deposit `p_transfer` may be resolved from its review into Refunding (amendment
 -- 0029, Open 2): a deposit bound to a directed arrival, in Needs-Review, entered from Source-Final
