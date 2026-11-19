@@ -616,3 +616,41 @@ async fn req_as_11_an_admitted_tokens_upgrade_is_recorded_as_its_own_kind(
         7
     );
 }
+
+/// Amendment 0032, A5: a step reads at most `max_ranges_per_step` ranges and returns `Read` with
+/// the range it covered, so a long backlog is walked in steps (and the loop beats between them).
+/// Each range is recorded in its own transaction: the watermark is already at the step's last
+/// block when it returns, and the walk ends with `CaughtUp` at the head as before.
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn amendment_0032_a_step_reads_at_most_the_bounded_ranges_and_the_watermark_advances(
+    pool: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let f = Fixture::new(pool, connect, 20).await;
+    f.chain.finalize(19);
+    // The fixture's ranges are 4 blocks wide; the final point is block 19, the start block 1.
+    let mut follower = f.follower();
+    follower.max_ranges_per_step = 2;
+    let watermark = || bezent_evm_endpoint::store::watermark(&f.endpoint, NETWORK);
+    assert_eq!(watermark().await.unwrap(), None);
+    let Step::Read { first, last, .. } = follower.step().await.unwrap() else {
+        panic!("a step with a backlog reads");
+    };
+    assert_eq!((first, last), (1, 8));
+    assert_eq!(watermark().await.unwrap(), Some(8));
+    let Step::Read { first, last, .. } = follower.step().await.unwrap() else {
+        panic!("a step with a backlog reads");
+    };
+    assert_eq!((first, last), (9, 16));
+    assert_eq!(watermark().await.unwrap(), Some(16));
+    // The last step has less than its bound left: it ends at the head.
+    let Step::Read { first, last, .. } = follower.step().await.unwrap() else {
+        panic!("a step with a backlog reads");
+    };
+    assert_eq!((first, last), (17, 19));
+    assert_eq!(watermark().await.unwrap(), Some(19));
+    assert_eq!(
+        follower.step().await.unwrap(),
+        Step::CaughtUp { watermark: 19 }
+    );
+}

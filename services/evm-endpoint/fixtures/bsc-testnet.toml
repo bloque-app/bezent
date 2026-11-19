@@ -30,10 +30,12 @@ broadcast = ["https://data-seed-prebsc-1-s1.bnbchain.org:8545", "https://bsc-tes
 
 [[providers]]
 name = "a"
+operator = "drpc"
 url_file = "/run/secrets/bezent-evm-bsc-testnet-rpc-a"
 
 [[providers]]
 name = "b"
+operator = "tenderly"
 url_file = "/run/secrets/bezent-evm-bsc-testnet-rpc-b"
 
 [lane]

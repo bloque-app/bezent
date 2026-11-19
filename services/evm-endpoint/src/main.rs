@@ -13,12 +13,16 @@
 //! agree on, recently (`health.rs`). It reads a liveness file the pass rewrites and opens no
 //! connection. The path defaults to the image's `/etc/bezent/evm-endpoint.toml`.
 //!
-//! At start-up, before anything is read or built (`AC-I4.1`, `DEC-12`): both providers must serve
-//! the declared chain id, hold the pinned block at its pinned hash, and agree on the finalized head
-//! they both stand on; the store must declare the network as an EVM origin network whose reserves
-//! are the configured vault. Any mismatch exits with status 1. Each public broadcast node (signed
-//! transactions are sent to those and no others, amendment 0023) must serve the declared chain id;
-//! one that cannot be reached is logged and the endpoint starts.
+//! At start-up, before anything is read or built (`AC-I4.1`, `DEC-12`, amendment 0032): every
+//! provider of the pool must serve the declared chain id and hold the pinned block at its pinned
+//! hash. A provider that cannot be checked (it fails to answer) is left out of the pool for this run,
+//! with a warning; one that serves another chain or another hash refuses the start; and the pool
+//! needs a valid pair (two providers of different operators) that agrees on the finalized head. Each
+//! pass of the loop then reads through one pair, and the next pass through the next. The store must
+//! declare the network as an EVM origin network whose reserves are the configured vault. Any
+//! refusal exits with status 1. Each public broadcast node (signed transactions are sent to those and
+//! no others, amendment 0023) must serve the declared chain id; one that cannot be reached is logged
+//! and the endpoint starts.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -27,9 +31,8 @@ use bezent_evm_endpoint::broadcast::Broadcast;
 use bezent_evm_endpoint::config::Config;
 use bezent_evm_endpoint::network::{self, Identity};
 use bezent_evm_endpoint::observe::{Follower, Step, Watch};
-use bezent_evm_endpoint::pair::Pair;
 use bezent_evm_endpoint::proof::Prover;
-use bezent_evm_endpoint::rpc::Http;
+use bezent_evm_endpoint::rpc::{Http, Rpc};
 use bezent_evm_endpoint::submit::{GasBounds, Lane, SignerLink, Submitter};
 
 const NAME: &str = "bezent-evm-endpoint";
@@ -107,32 +110,36 @@ async fn run(config: Config) -> Result<(), String> {
     // One login to Vault for the secrets read at start (issue #64); `--check` never gets here.
     let resolver = config.resolver()?;
     let urls = config.provider_urls(&resolver).await?;
-    let pair = Pair {
-        a: Http::new(&config.providers[0].name, &urls[0])?,
-        b: Http::new(&config.providers[1].name, &urls[1])?,
-    };
+    // Amendment 0032: every provider of the pool, with its operator. Each pass of the loop reads
+    // through one pair of them.
+    let members = config
+        .providers
+        .iter()
+        .zip(&urls)
+        .map(|(p, url)| Ok((p.operator.clone(), Http::new(&p.name, url)?)))
+        .collect::<Result<Vec<_>, String>>()?;
     // Amendment 0023: signed transactions go to the public broadcast nodes and only them. Each must
     // serve this chain; one that cannot be reached is logged, and the endpoint starts.
     let nodes = config.broadcast_nodes()?;
-    let broadcast = Broadcast::new(
-        nodes
-            .iter()
-            .map(|(name, url)| Http::new(name, url))
-            .collect::<Result<Vec<_>, _>>()?,
-    );
+    let broadcast_nodes = nodes
+        .iter()
+        .map(|(name, url)| Http::new(name, url))
+        .collect::<Result<Vec<_>, _>>()?;
+    let broadcast = Broadcast::new(broadcast_nodes.iter().collect());
     broadcast.check_chain(config.chain_id).await?;
-    tracing::info!(network = %config.network, nodes = nodes.len(), "amendment 0023: signed transactions are sent to the public broadcast nodes only; every read stays on the paid pair");
-    // AC-I4.1, DEC-12: the declared network on both providers, or nothing starts.
-    let head = network::check(
-        &pair,
-        &Identity {
-            chain_id: config.chain_id,
-            pinned_number: config.pinned_block,
-            pinned_hash: checked.pinned_hash,
-        },
-    )
-    .await?;
-    tracing::info!(network = %config.network, head = head.number, "AC-I4.1: both providers serve the declared network");
+    tracing::info!(network = %config.network, nodes = nodes.len(), "amendment 0023: signed transactions are sent to the public broadcast nodes only; every read stays on the pool's pairs");
+    // AC-I4.1, DEC-12, amendment 0032: every provider serves the declared network, or is left out
+    // of the pool for this run (a provider that answers the wrong chain or hash refuses the start);
+    // nothing starts without a valid pair.
+    let identity = Identity {
+        chain_id: config.chain_id,
+        pinned_number: config.pinned_block,
+        pinned_hash: checked.pinned_hash,
+    };
+    let mut providers = network::build_pool(members, &identity).await?;
+    let (first_pair, head) = network::pool_head(&providers, &identity).await?;
+    let pair = providers.pair_at(first_pair);
+    tracing::info!(network = %config.network, head = head.number, pairs = providers.pair_count(), "AC-I4.1: the pool serves the declared network; a pass reads through one pair, the next through the next");
     // AC-I4.1 (PR #39 review S4): the Roles modifier is this vault's, enabled; the lane runs no code.
     network::check_vault(
         &pair,
@@ -185,46 +192,6 @@ async fn run(config: Config) -> Result<(), String> {
         dialer: config.signer_dialer().await?,
         token: config.signer_token(&resolver).await?.to_string(),
     };
-    let follower = Follower {
-        pair: &pair,
-        pool: &pool,
-        network: &config.network,
-        watch: Watch {
-            vault: checked.vault,
-            emitter: checked.contracts.emitter,
-            declarations: &declarations,
-            convertibles: &checked.convertibles,
-            delivery: checked.lane_address,
-            directing: &checked.directing,
-        },
-        start_block: config.start_block,
-        max_range: config.max_range,
-    };
-    let submitter = Submitter {
-        pair: &pair,
-        broadcast: &broadcast,
-        pool: &pool,
-        network: &config.network,
-        chain_id: config.chain_id,
-        contracts: checked.contracts,
-        vault: checked.vault,
-        declarations: &declarations,
-        lane: &lane,
-        signer: &signer,
-        gas: GasBounds {
-            max_gas: config.gas.max_gas,
-            max_fee: checked.max_fee_per_gas,
-            margin_percent: config.gas.margin_percent,
-        },
-    };
-    let prover = Prover {
-        pair: &pair,
-        pool: &pool,
-        network: &config.network,
-        lane: &lane,
-        contracts: checked.contracts,
-    };
-
     let mut tick = tokio::time::interval(Duration::from_millis(config.poll_ms));
     // Whether the pass before failed (the store, the prover): while it did, a walk's progress is not
     // health. False at start, so a first backlog walk beats.
@@ -238,7 +205,53 @@ async fn run(config: Config) -> Result<(), String> {
             _ = tick.tick() => {}
         }
         let failed_before = last_pass_failed;
-        let result: Result<bool, sqlx::Error> = async {
+        // Amendment 0032: one pair for everything in this pass, then the rotation moves on.
+        let broadcast = Broadcast::new(broadcast_nodes.iter().collect());
+        let (k, pair) = providers.take();
+        let used = (pair.a.name().to_owned(), pair.b.name().to_owned());
+        tracing::debug!(a = %used.0, b = %used.1, "a pass reads through this pair");
+        let follower = Follower {
+            pair: &pair,
+            pool: &pool,
+            network: &config.network,
+            watch: Watch {
+                vault: checked.vault,
+                emitter: checked.contracts.emitter,
+                declarations: &declarations,
+                convertibles: &checked.convertibles,
+                delivery: checked.lane_address,
+                directing: &checked.directing,
+            },
+            start_block: config.start_block,
+            max_range: config.max_range,
+            max_ranges_per_step: config.max_ranges_per_step,
+        };
+        let submitter = Submitter {
+            pair: &pair,
+            broadcast: &broadcast,
+            pool: &pool,
+            network: &config.network,
+            chain_id: config.chain_id,
+            contracts: checked.contracts,
+            vault: checked.vault,
+            declarations: &declarations,
+            lane: &lane,
+            signer: &signer,
+            gas: GasBounds {
+                max_gas: config.gas.max_gas,
+                max_fee: checked.max_fee_per_gas,
+                margin_percent: config.gas.margin_percent,
+            },
+        };
+        let prover = Prover {
+            pair: &pair,
+            pool: &pool,
+            network: &config.network,
+            lane: &lane,
+            contracts: checked.contracts,
+        };
+        let result: Result<(bool, bool), sqlx::Error> = async {
+            let mut provider_failed = false;
             let caught_up = loop {
                 match follower.step().await? {
                     Step::Read { .. } => {
@@ -252,6 +265,9 @@ async fn run(config: Config) -> Result<(), String> {
                     Step::CaughtUp { .. } => break true,
                     other => {
                         tracing::warn!(?other, "the follower stopped");
+                        // A gap or no final point: a provider of this pair failed or the two
+                        // disagreed (`DEC-12`); the next pass reads through another pair.
+                        provider_failed = true;
                         break false;
                     }
                 }
@@ -273,15 +289,22 @@ async fn run(config: Config) -> Result<(), String> {
             }
             submitter.resend().await?;
             prover.step().await?;
-            Ok(caught_up)
+            Ok((caught_up, provider_failed))
         }
         .await;
         last_pass_failed = result.is_err();
         match result {
             // Healthy: at the final point both providers agree on, and the store answered all
             // the way through (issue #61).
-            Ok(true) => bezent_evm_endpoint::health::beat(&heartbeat),
-            Ok(false) => {}
+            Ok((caught_up, provider_failed)) => {
+                if caught_up {
+                    bezent_evm_endpoint::health::beat(&heartbeat);
+                }
+                if provider_failed && providers.pair_count() > 1 {
+                    let (na, nb) = providers.names(k + 1);
+                    tracing::info!(failed = %format!("{} + {}", used.0, used.1), next = %format!("{na} + {nb}"), "amendment 0032: the pass failed on a provider error; the next pass reads through another pair");
+                }
+            }
             Err(e) => tracing::warn!(error = %e, "the store failed; trying again next cycle"),
         }
     }

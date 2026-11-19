@@ -989,6 +989,7 @@ impl Bed {
             },
             start_block: PINNED_BLOCK + 1,
             max_range: 500,
+            max_ranges_per_step: 1_000,
         }
     }
 

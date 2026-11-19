@@ -15,7 +15,7 @@ use alloy::sol_types::SolCall;
 use sqlx::PgPool;
 
 use crate::evm;
-use crate::pair::{Pair, Read};
+use crate::pair::{Pair, Pool, Read};
 use crate::rpc::{At, Call, Header, Rpc};
 
 /// The declared identity of a network.
@@ -29,45 +29,123 @@ pub struct Identity {
     pub pinned_hash: B256,
 }
 
+/// Why one provider fails the start check (amendment 0032, A4).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// It answers, and the answer is wrong: another chain id, another hash at the pinned block.
+    /// That is misconfiguration, not an outage: the endpoint refuses to start.
+    Wrong(String),
+    /// It cannot be checked: it failed to answer, or lacks the pinned block. An outage: the
+    /// provider is left out of the pool for this run.
+    Unchecked(String),
+}
+
+impl Refusal {
+    /// The words, whichever it is.
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Wrong(s) | Self::Unchecked(s) => s,
+        }
+    }
+}
+
+/// Checks one provider against `id`: the declared chain id, and the pinned block at its pinned
+/// hash.
+pub async fn check_provider<R: Rpc>(p: &R, id: &Identity) -> Result<(), Refusal> {
+    let chain_id = p.chain_id().await.map_err(|e| {
+        Refusal::Unchecked(format!(
+            "AC-I4.1: provider {} cannot be checked: {e}",
+            p.name()
+        ))
+    })?;
+    if chain_id != id.chain_id {
+        return Err(Refusal::Wrong(format!(
+            "AC-I4.1: provider {} serves chain {chain_id}, not the declared {}",
+            p.name(),
+            id.chain_id
+        )));
+    }
+    let pinned = p.header(At::Number(id.pinned_number)).await.map_err(|e| {
+        Refusal::Unchecked(format!(
+            "AC-I4.1: provider {} cannot be checked: {e}",
+            p.name()
+        ))
+    })?;
+    match pinned {
+        Some(h) if h.hash == id.pinned_hash => Ok(()),
+        Some(h) => Err(Refusal::Wrong(format!(
+            "AC-I4.1: provider {}: block {} is {}, not the pinned {}",
+            p.name(),
+            id.pinned_number,
+            h.hash,
+            id.pinned_hash
+        ))),
+        None => Err(Refusal::Unchecked(format!(
+            "AC-I4.1: provider {} has no block {}",
+            p.name(),
+            id.pinned_number
+        ))),
+    }
+}
+
+/// Checks every provider of the pool against `id` and builds the pool of those that pass
+/// (amendment 0032, A4). A provider that cannot be checked is left out for this run, with a
+/// warning naming it and why; one that answers the wrong chain or the wrong pinned hash is a
+/// refusal. The endpoint refuses to start only if no valid pair remains.
+pub async fn build_pool<R: Rpc>(
+    members: Vec<(String, R)>,
+    id: &Identity,
+) -> Result<Pool<R>, String> {
+    let mut kept = Vec::with_capacity(members.len());
+    let mut left_out = Vec::new();
+    for (operator, p) in members {
+        match check_provider(&p, id).await {
+            Ok(()) => kept.push((operator, p)),
+            Err(Refusal::Wrong(e)) => return Err(e),
+            Err(Refusal::Unchecked(e)) => {
+                tracing::warn!(
+                    provider = p.name(),
+                    reason = %e,
+                    "AC-I4.1: a provider failed the start check and is left out of the pool for this run"
+                );
+                left_out.push(e);
+            }
+        }
+    }
+    Pool::new(kept).map_err(|e| {
+        if left_out.is_empty() {
+            format!("AC-I4.1: {e}")
+        } else {
+            format!("AC-I4.1: {e}; left out: {}", left_out.join("; "))
+        }
+    })
+}
+
+/// The final head some pair of the pool agrees on, and the index of that pair: the first that
+/// answers, in rotation order. Errors with the last pair's words if none does.
+pub async fn pool_head<R: Rpc>(pool: &Pool<R>, id: &Identity) -> Result<(usize, Header), String> {
+    let mut last = String::new();
+    for k in 0..pool.pair_count() {
+        match final_head(&pool.pair_at(k), id).await {
+            Ok(h) => return Ok((k, h)),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 /// Checks both providers against `id`, and that they agree at the finalized head; returns that
 /// head. Every error names the spec id that refuses.
 pub async fn check<R: Rpc>(pair: &Pair<R>, id: &Identity) -> Result<Header, String> {
     for p in [&pair.a, &pair.b] {
-        let chain_id = p
-            .chain_id()
+        check_provider(p, id)
             .await
-            .map_err(|e| format!("AC-I4.1: provider {} cannot be checked: {e}", p.name()))?;
-        if chain_id != id.chain_id {
-            return Err(format!(
-                "AC-I4.1: provider {} serves chain {chain_id}, not the declared {}",
-                p.name(),
-                id.chain_id
-            ));
-        }
-        let pinned = p
-            .header(At::Number(id.pinned_number))
-            .await
-            .map_err(|e| format!("AC-I4.1: provider {} cannot be checked: {e}", p.name()))?;
-        match pinned {
-            Some(h) if h.hash == id.pinned_hash => {}
-            Some(h) => {
-                return Err(format!(
-                    "AC-I4.1: provider {}: block {} is {}, not the pinned {}",
-                    p.name(),
-                    id.pinned_number,
-                    h.hash,
-                    id.pinned_hash
-                ));
-            }
-            None => {
-                return Err(format!(
-                    "AC-I4.1: provider {} has no block {}",
-                    p.name(),
-                    id.pinned_number
-                ));
-            }
-        }
+            .map_err(|e| e.text().to_owned())?;
     }
+    final_head(pair, id).await
+}
+
+async fn final_head<R: Rpc>(pair: &Pair<R>, id: &Identity) -> Result<Header, String> {
     let head = pair.final_point().await.map_err(|e| match e {
         Read::Disagree(d) => format!("DEC-12: the providers disagree at the finalized head: {d}"),
         Read::Unavailable(u) => format!("AC-I4.1: the finalized head cannot be read: {u}"),

@@ -29,8 +29,18 @@
 //! # independent operators, so one node dropping a transaction does not hold it back.
 //! broadcast = ["https://polygon-rpc.com", "https://polygon-bor-rpc.publicnode.com", "https://polygon.drpc.org"]
 //!
-//! [[providers]]            # exactly two, independent (DEC-12)
+//! # The pool (DEC-12, amendment 0032): at least two providers, from at least two operators, with
+//! # distinct names and URLs. A pass of the loop reads through one pair (two providers of different
+//! # operators) and the next pass through the next pair. `operator` names the company that runs
+//! # the node.
+//! [[providers]]
 //! name = "a"
+//! operator = "drpc"
+//! url_file = "/run/secrets/…"
+//!
+//! [[providers]]
+//! name = "b"
+//! operator = "tenderly"
 //! url_file = "/run/secrets/…"
 //!
 //! [[convertibles]]         # REQ-CV-4: itemised, never reserve
@@ -90,6 +100,9 @@ use crate::evm::{self, Contracts};
 pub struct Provider {
     /// Its name, for logs and records.
     pub name: String,
+    /// The company that runs the node ("drpc", "tenderly"): free text, required. A pair is two
+    /// providers of different operators (amendment 0032).
+    pub operator: String,
     /// A file holding its URL (which may carry a key).
     #[serde(default)]
     pub url_file: Option<PathBuf>,
@@ -207,6 +220,11 @@ pub struct Config {
     /// retried as a gap for good, so choose a value the provider answers well within 30 s.
     #[serde(default = "default_range")]
     pub max_range: u64,
+    /// The most ranges one step of the follower reads before it returns `Step::Read` and the loop
+    /// beats the health check (amendment 0032, A5). Default 20, at least 1. A long backlog is
+    /// walked in as many steps as it takes.
+    #[serde(default = "default_ranges_per_step")]
+    pub max_ranges_per_step: u64,
     /// How often the endpoint looks, in milliseconds.
     #[serde(default = "default_poll")]
     pub poll_ms: u64,
@@ -233,9 +251,9 @@ pub struct Config {
     pub max_connections: u32,
     /// The public nodes signed transactions are sent to, and the only ones (amendment 0023): at
     /// least one, each `https://` (`http://` only for a loopback address), no two the same. Not
-    /// secret, so written here; the paid `providers` are never sent to. Every read stays on them.
+    /// secret, so written here; the `providers` are never sent to. Every read stays on them.
     pub broadcast: Vec<String>,
-    /// The two providers.
+    /// The pool: at least two providers, from at least two operators (amendment 0032).
     pub providers: Vec<Provider>,
     /// The convertibles.
     #[serde(default)]
@@ -261,6 +279,9 @@ fn default_role() -> String {
 }
 fn default_range() -> u64 {
     500
+}
+fn default_ranges_per_step() -> u64 {
+    20
 }
 fn default_poll() -> u64 {
     2_000
@@ -363,10 +384,11 @@ impl Config {
         if self.network.is_empty() {
             return Err("network: empty".into());
         }
-        // DEC-12: exactly two providers, independent: distinct names and sources.
-        if self.providers.len() != 2 {
+        // DEC-12, amendment 0032: a pool of at least two providers, distinct names and sources,
+        // from at least two operators (so at least one valid pair exists).
+        if self.providers.len() < 2 {
             return Err(format!(
-                "DEC-12: two independent providers are needed; {} declared",
+                "DEC-12: at least two independent providers are needed; {} declared",
                 self.providers.len()
             ));
         }
@@ -382,21 +404,37 @@ impl Config {
                     p.name
                 ));
             }
+            if p.operator.trim().is_empty() {
+                return Err(format!("provider {}: operator is empty", p.name));
+            }
         }
-        let (a, b) = (&self.providers[0], &self.providers[1]);
-        if a.name == b.name
-            || (a.url_file.is_some() && a.url_file == b.url_file)
-            || (a.url.is_some() && a.url == b.url)
-            || (a.url_secret.is_some() && a.url_secret == b.url_secret)
-        {
+        for (i, a) in self.providers.iter().enumerate() {
+            for b in &self.providers[i + 1..] {
+                if a.name == b.name
+                    || (a.url_file.is_some() && a.url_file == b.url_file)
+                    || (a.url.is_some() && a.url == b.url)
+                    || (a.url_secret.is_some() && a.url_secret == b.url_secret)
+                {
+                    return Err(format!(
+                        "DEC-12: the providers must be independent: {} and {} share a name or a URL",
+                        a.name, b.name
+                    ));
+                }
+            }
+        }
+        let operators: Vec<&str> = self.providers.iter().map(|p| p.operator.as_str()).collect();
+        if crate::pair::valid_pairs(&operators).is_empty() {
             return Err(
-                "DEC-12: the two providers must be independent: distinct names and URLs".into(),
+                "DEC-12: the providers must come from at least two operators: no valid pair".into(),
             );
         }
         self.broadcast_nodes()?;
         self.check_secrets()?;
         if self.max_range == 0 {
             return Err("max_range: at least 1".into());
+        }
+        if self.max_ranges_per_step == 0 {
+            return Err("max_ranges_per_step: at least 1".into());
         }
         if self.start_block < self.pinned_block {
             return Err("start_block: at or after the pinned block".into());
@@ -539,15 +577,19 @@ impl Config {
         }
     }
 
-    /// The two providers' URLs, which must differ once read: two references to Vault can name one
-    /// URL, and the checks of [`Config::check`] compare references, not values (`DEC-12`).
-    pub async fn provider_urls(&self, resolver: &Resolver) -> Result<[String; 2], String> {
-        let a = Self::provider_url(&self.providers[0], resolver).await?;
-        let b = Self::provider_url(&self.providers[1], resolver).await?;
-        if a == b {
-            return Err("DEC-12: the two providers must be independent: distinct URLs".into());
+    /// The providers' URLs, in configuration order, which must all differ once read: two
+    /// references to Vault can name one URL, and the checks of [`Config::check`] compare
+    /// references, not values (`DEC-12`).
+    pub async fn provider_urls(&self, resolver: &Resolver) -> Result<Vec<String>, String> {
+        let mut urls: Vec<String> = Vec::with_capacity(self.providers.len());
+        for p in &self.providers {
+            let url = Self::provider_url(p, resolver).await?;
+            if urls.contains(&url) {
+                return Err("DEC-12: the providers must be independent: distinct URLs".into());
+            }
+            urls.push(url);
         }
-        Ok([a, b])
+        Ok(urls)
     }
 
     /// The checks of the secrets' sources, which touch no network: one source for the store and
@@ -692,7 +734,7 @@ mod tests {
     #[test]
     fn dec_12_one_provider_or_the_same_one_twice_is_refused() {
         let one = FIXTURE.replace(
-            "[[providers]]\nname = \"b\"\nurl_file = \"/run/secrets/bezent-evm-polygon-rpc-b\"\n",
+            "[[providers]]\nname = \"b\"\noperator = \"tenderly\"\nurl_file = \"/run/secrets/bezent-evm-polygon-rpc-b\"\n",
             "",
         );
         assert!(Config::parse(&one).unwrap_err().contains("DEC-12"));
@@ -913,5 +955,64 @@ mod tests {
             ["https://rpc.example/KEY", "https://other.example/KEY"]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A third provider, appended to the fixture.
+    fn with_third(name: &str, operator: &str, file: &str) -> String {
+        format!(
+            "{FIXTURE}\n[[providers]]\nname = \"{name}\"\noperator = \"{operator}\"\nurl_file = \"/run/secrets/{file}\"\n"
+        )
+    }
+
+    /// Amendment 0032: the pool is two or more providers, distinct names and URLs, from at least
+    /// two operators.
+    #[test]
+    fn dec_12_the_pool_needs_two_providers_distinct_and_from_two_operators() {
+        // A single operator is no pair.
+        let one_operator = FIXTURE.replace("operator = \"tenderly\"", "operator = \"drpc\"");
+        assert!(
+            Config::parse(&one_operator)
+                .unwrap_err()
+                .contains("two operators")
+        );
+        // The same operator spelled otherwise is the same operator.
+        let spelled = FIXTURE.replace("operator = \"tenderly\"", "operator = \" DRPC \"");
+        assert!(Config::parse(&spelled).is_err());
+        // An empty operator, and a missing one.
+        let empty = FIXTURE.replace("operator = \"tenderly\"", "operator = \"\"");
+        assert!(Config::parse(&empty).unwrap_err().contains("operator"));
+        let missing = FIXTURE.replace("operator = \"tenderly\"\n", "");
+        assert!(Config::parse(&missing).is_err());
+        // Duplicate names, duplicate URLs among three.
+        let name = with_third("a", "publicnode", "rpc-c");
+        assert!(Config::parse(&name).unwrap_err().contains("independent"));
+        let url = with_third("c", "publicnode", "bezent-evm-polygon-rpc-a");
+        assert!(Config::parse(&url).unwrap_err().contains("independent"));
+        // Three providers from three operators are accepted, and there is no upper bound.
+        let three = with_third("c", "publicnode", "rpc-c");
+        assert_eq!(Config::parse(&three).unwrap().providers.len(), 3);
+    }
+
+    /// Three providers from two operators: only the pairs across operators are valid, in order.
+    #[test]
+    fn dec_12_three_providers_of_two_operators_make_two_pairs() {
+        let c = Config::parse(&with_third("c", "drpc", "rpc-c")).unwrap();
+        let ops: Vec<&str> = c.providers.iter().map(|p| p.operator.as_str()).collect();
+        assert_eq!(ops, ["drpc", "tenderly", "drpc"]);
+        assert_eq!(crate::pair::valid_pairs(&ops), [(0, 1), (1, 2)]);
+    }
+
+    /// Amendment 0032, A5: the walk bound is at least one and defaults to 20.
+    #[test]
+    fn max_ranges_per_step_defaults_to_twenty_and_is_at_least_one() {
+        assert_eq!(Config::parse(FIXTURE).unwrap().max_ranges_per_step, 20);
+        let five = format!("max_ranges_per_step = 5\n{FIXTURE}");
+        assert_eq!(Config::parse(&five).unwrap().max_ranges_per_step, 5);
+        let zero = format!("max_ranges_per_step = 0\n{FIXTURE}");
+        assert!(
+            Config::parse(&zero)
+                .unwrap_err()
+                .contains("max_ranges_per_step")
+        );
     }
 }

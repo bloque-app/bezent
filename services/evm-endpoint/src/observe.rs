@@ -455,6 +455,10 @@ pub struct Follower<'a, R> {
     pub start_block: u64,
     /// The most blocks one range covers.
     pub max_range: u64,
+    /// The most ranges one [`Follower::step`] reads before it returns [`Step::Read`] (at least 1;
+    /// amendment 0032, A5): the loop that calls `step` beats the health check after each, so a long
+    /// backlog is walked in steps, not in one.
+    pub max_ranges_per_step: u64,
 }
 
 impl<R: Rpc> Follower<'_, R> {
@@ -538,13 +542,14 @@ impl<R: Rpc> Follower<'_, R> {
                 watermark: watermark.unwrap_or(head.number),
             });
         }
-        let (first, mut recorded) = (next, 0);
-        while next <= head.number {
+        let (first, mut recorded, mut ranges) = (next, 0, 0);
+        while next <= head.number && ranges < self.max_ranges_per_step.max(1) {
             let last = head.number.min(next.saturating_add(self.max_range - 1));
             match self.read_range(next, last).await {
                 Ok(found) => {
                     recorded += self.record_read(next, last, &head, &found).await?;
                     next = last + 1;
+                    ranges += 1;
                 }
                 Err(reason) => {
                     tracing::warn!(
@@ -563,9 +568,10 @@ impl<R: Rpc> Follower<'_, R> {
                 }
             }
         }
+        // The walk reached the head, or the step's bound: `next - 1` is the last block recorded.
         Ok(Step::Read {
             first,
-            last: head.number,
+            last: next - 1,
             observations: recorded,
         })
     }

@@ -24,10 +24,12 @@ broadcast = ["https://polygon-rpc.com", "https://polygon-bor-rpc.publicnode.com"
 
 [[providers]]
 name = "a"
+operator = "drpc"
 url_file = "/run/secrets/bezent-evm-polygon-rpc-a"
 
 [[providers]]
 name = "b"
+operator = "tenderly"
 url_file = "/run/secrets/bezent-evm-polygon-rpc-b"
 
 # USDT0 -> USDC through the declared Uniswap v3 pool (F-008 NOTES, "Pinned pools"). A proposal: no

@@ -27,10 +27,12 @@ broadcast = ["https://sepolia.base.org", "https://base-sepolia-rpc.publicnode.co
 
 [[providers]]
 name = "a"
+operator = "drpc"
 url_file = "/run/secrets/bezent-evm-base-sepolia-rpc-a"
 
 [[providers]]
 name = "b"
+operator = "tenderly"
 url_file = "/run/secrets/bezent-evm-base-sepolia-rpc-b"
 
 [lane]
