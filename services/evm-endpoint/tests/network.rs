@@ -241,3 +241,84 @@ async fn s4_ac_i4_1_the_roles_modifier_must_be_this_vaults_on_both_providers() {
     let e = check_vault(&delegated, &delegated).await.unwrap_err();
     assert!(e.contains("holds code"), "{e}");
 }
+
+/// Amendment 0032, A4: a provider that cannot be checked is left out of the pool with a warning;
+/// the endpoint starts while a valid pair remains.
+#[tokio::test]
+async fn amendment_0032_a_provider_that_fails_the_start_check_is_left_out_of_the_pool() {
+    let chain = MockChain::new(CHAIN_ID, 20);
+    let down = chain.fork();
+    down.fail_all(Some("HTTP 429"));
+    let id = identity(&chain, 5);
+    let member = |op: &str, name: &str, c: &MockChain| (op.to_owned(), MockRpc::new(name, c));
+    let pool = network::build_pool(
+        vec![
+            member("alchemy", "a", &down),
+            member("drpc", "b", &chain),
+            member("tenderly", "c", &chain),
+        ],
+        &id,
+    )
+    .await
+    .unwrap();
+    // Only the pair of the two that answered is left.
+    assert_eq!(pool.pair_count(), 1);
+    assert_eq!(pool.names(0), ("b", "c"));
+    let (k, head) = network::pool_head(&pool, &id).await.unwrap();
+    assert_eq!((k, head.number), (0, 19));
+}
+
+/// No valid pair remains: refused, naming who was left out. Two of one operator are no pair.
+#[tokio::test]
+async fn amendment_0032_the_endpoint_refuses_to_start_when_no_pair_remains() {
+    let chain = MockChain::new(CHAIN_ID, 20);
+    let down = chain.fork();
+    down.fail_all(Some("HTTP 429"));
+    let id = identity(&chain, 5);
+    let member = |op: &str, name: &str, c: &MockChain| (op.to_owned(), MockRpc::new(name, c));
+    let e = network::build_pool(
+        vec![member("drpc", "a", &down), member("tenderly", "b", &chain)],
+        &id,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(
+        e.contains("no valid pair") && e.contains("provider a"),
+        "{e}"
+    );
+    let e = network::build_pool(
+        vec![member("drpc", "a", &chain), member("DRPC", "b", &chain)],
+        &id,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(e.contains("no valid pair"), "{e}");
+}
+
+/// A provider that answers the wrong chain or the wrong pinned hash is misconfiguration, not an
+/// outage: the start is refused with the existing text, never left out.
+#[tokio::test]
+async fn amendment_0032_a_provider_on_the_wrong_chain_or_hash_is_a_hard_refusal() {
+    let chain = MockChain::new(CHAIN_ID, 20);
+    let other = MockChain::new(8453, 20);
+    let forked = chain.fork();
+    forked.replace(5);
+    let id = identity(&chain, 5);
+    let member = |op: &str, name: &str, c: &MockChain| (op.to_owned(), MockRpc::new(name, c));
+    for (bad, want) in [(&other, "serves chain 8453"), (&forked, "not the pinned")] {
+        let e = network::build_pool(
+            vec![
+                member("drpc", "a", &chain),
+                member("tenderly", "b", &chain),
+                member("publicnode", "c", bad),
+            ],
+            &id,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(e.contains("AC-I4.1") && e.contains(want), "{e}");
+    }
+}

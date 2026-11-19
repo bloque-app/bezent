@@ -30,7 +30,7 @@ instance knows whether its store answers and whether it is at the head of its ne
 that, and `health` reads the file's age. The running service removes the file when it starts, so a file
 left on a volume by an earlier run never passes.
 
-An endpoint beats on every step that read and recorded blocks, on each prepared or signed order at the
+An endpoint beats on every step that read and recorded blocks (a step reads at most `max_ranges_per_step` ranges, default 20, so a long backlog beats between steps; amendment 0032), on each prepared or signed order at the
 head, and when a pass reaches the head, but only while the pass before it did not fail: a store or prover
 that keeps failing cannot stay green on a walk's progress. So a
 walk that moves is healthy, a first start that walks a long backlog included, and a walk that is stuck

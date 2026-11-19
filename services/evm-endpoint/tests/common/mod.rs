@@ -426,6 +426,7 @@ impl Fixture {
             },
             start_block: 1,
             max_range: 4,
+            max_ranges_per_step: 1_000,
         }
     }
 
