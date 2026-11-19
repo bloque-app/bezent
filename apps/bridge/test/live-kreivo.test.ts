@@ -29,7 +29,7 @@ describe.skipIf(!url)('Kreivo mainnet, read-only', () => {
   let k: Kreivo;
   beforeAll(() => {
     client = createClient(getWsProvider(url!));
-    k = { client, api: client.getUnsafeApi(), close: () => client.destroy() };
+    k = { client, api: client.getUnsafeApi(), synced: Promise.resolve(), close: () => client.destroy() };
   });
   afterAll(() => client?.destroy());
 

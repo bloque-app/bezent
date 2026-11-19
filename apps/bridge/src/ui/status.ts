@@ -179,7 +179,7 @@ export function initStatus(host: StatusHost) {
       // Kreivo: did the contract record the mint reference?
       const k = host.kreivo();
       const contract = n.kreivo.bezent;
-      if (!k || contract === UNSET) rows.push(['Kreivo', !k ? `${n.kreivo.label} is not connected` : 'the bezent contract is not set in this build']);
+      if (!k || contract === UNSET) rows.push(['Kreivo', !k ? `${n.kreivo.label} is not connected yet (the light client may still be syncing)` : 'the bezent contract is not set in this build']);
       else {
         try {
           minted = await mintReferenceUsed(k, n.kreivo, contract as Hex, mintReference(c));
@@ -247,7 +247,7 @@ export function initStatus(host: StatusHost) {
     show();
     const k = host.kreivo();
     if (!k || n.kreivo.bezent === UNSET) {
-      say(note, !k ? `${n.kreivo.label} is not connected yet.` : 'The bezent contract is not set in this build.', 'error');
+      say(note, !k ? `${n.kreivo.label} is still connecting (the light client is syncing). Try again when the page says it is reading ${n.kreivo.label}.` : 'The bezent contract is not set in this build.', 'error');
       return;
     }
     say(note, `Reading ${n.kreivo.label}…`);
