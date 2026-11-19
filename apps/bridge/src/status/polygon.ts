@@ -41,7 +41,7 @@ async function finality(pc: Reads, blockNumber: bigint, blockHash: Hex): Promise
 }
 
 export type DepositOnPolygon =
-  | { found: false; reason: string }
+  | { found: false; reason: string; /** The Transfer indexes to pick from, when the transaction holds several deposits. */ pick?: number[] }
   | {
       found: true;
       txHash: Hex;
@@ -51,10 +51,15 @@ export type DepositOnPolygon =
       finality: Finality;
       /** Other `Directed` arrivals in the same transaction, if any. */
       others: number;
+      /** The Transfer's index was not given: it was found from the receipt, as the transaction's only directed
+       * arrival. */
+      fromReceipt: boolean;
     };
 
-/** The directed deposit at (`txHash`, `transferLog`): the pair, or why there is none. */
-export async function depositOnPolygon(pc: Reads, n: ResolvedNetwork, txHash: Hex, transferLog: number): Promise<DepositOnPolygon> {
+/** The directed deposit at (`txHash`, `transferLog`): the pair, or why there is none. Without `transferLog`, the
+ * transaction's own directed arrival: the one pair there is, never a guess among several (their indexes are named
+ * for the user to pick one). */
+export async function depositOnPolygon(pc: Reads, n: ResolvedNetwork, txHash: Hex, transferLog?: number): Promise<DepositOnPolygon> {
   let receipt;
   try {
     receipt = await pc.getTransactionReceipt({ hash: txHash });
@@ -63,7 +68,18 @@ export async function depositOnPolygon(pc: Reads, n: ResolvedNetwork, txHash: He
   }
   if (receipt.status !== 'success') return { found: false, reason: `The transaction ${txHash} reverted: it moved nothing.` };
   const arrivals = directedArrivals(receipt.logs, { network: n.network, contract: n.directedDeposit, token: n.token, reserve: n.reserve });
-  const arrival = arrivals.find((a) => a.coordinate.positionIndex === transferLog);
+  const fromReceipt = transferLog === undefined;
+  if (fromReceipt && arrivals.length !== 1) {
+    const at = arrivals.map((a) => a.coordinate.positionIndex);
+    return {
+      found: false,
+      ...(at.length ? { pick: at } : {}),
+      reason: at.length
+        ? `${txHash} holds ${at.length} directed deposits, with Transfer logs at ${at.join(', ')}: enter the index of the one to look up.`
+        : `no directed deposit in this transaction: ${txHash} holds no Transfer of ${n.token} to the reserve paired with a Directed log of ${n.directedDeposit}.`,
+    };
+  }
+  const arrival = fromReceipt ? arrivals[0] : arrivals.find((a) => a.coordinate.positionIndex === transferLog);
   if (!arrival) {
     const at = arrivals.map((a) => a.coordinate.positionIndex);
     return {
@@ -77,9 +93,10 @@ export async function depositOnPolygon(pc: Reads, n: ResolvedNetwork, txHash: He
     found: true,
     txHash,
     arrival,
-    directedLog: transferLog + 1,
+    directedLog: arrival.coordinate.positionIndex + 1,
     finality: await finality(pc, arrival.coordinate.blockNumber, arrival.coordinate.blockHash),
     others: arrivals.length - 1,
+    fromReceipt,
   };
 }
 
