@@ -103,7 +103,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
         <p class="muted">From public chain data: Polygon through your EVM wallet, Kreivo through the light client.</p>
         <label for="status-tx">A deposit: its Polygon transaction</label>
         <input id="status-tx" autocomplete="off" spellcheck="false" placeholder="0x…" />
-        <label for="status-log">and the index of its Transfer log</label>
+        <label for="status-log">and the index of its Transfer log (optional: left empty, the page finds it in the transaction’s receipt)</label>
         <input id="status-log" inputmode="numeric" autocomplete="off" placeholder="41" />
         <p><button id="status-deposit" type="button" class="secondary">Look up the deposit</button></p>
         <label for="status-redeemer">A withdrawal: its redeemer on Kreivo</label>

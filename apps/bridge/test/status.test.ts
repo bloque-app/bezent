@@ -57,6 +57,43 @@ describe('a directed deposit by its coordinate', () => {
   });
 });
 
+describe('a directed deposit by its transaction alone', () => {
+  it('finds the one pair in the receipt, and says it was found there', async () => {
+    const { s, c } = await session({ finalized: 100 });
+    const res = await deposit(s, c, { amount: 2_500_000n, recipient: RECIPIENT }, quiet);
+    const d = await depositOnPolygon(s.public, network, res.hash);
+    expect(d.found).toBe(true);
+    if (!d.found) return;
+    expect(d.arrival.coordinate.positionIndex).toBe(41);
+    expect(d).toMatchObject({ directedLog: 42, fromReceipt: true, others: 0 });
+    const given = await depositOnPolygon(s.public, network, res.hash, 41);
+    expect(given.found && given.fromReceipt).toBe(false);
+  });
+
+  it('says there is no directed deposit when the transaction holds none', async () => {
+    const { s } = await session();
+    const d = await depositOnPolygon(s.public, network, `0x${'00'.repeat(32)}`);
+    expect(d.found).toBe(false);
+    const { s: s2, c } = await session({ extraDirected: 'unpaired' });
+    // An unpaired Directed log is no arrival: the pair is what counts, so the one pair is still found.
+    const res = await deposit(s2, c, { amount: 2_500_000n, recipient: RECIPIENT }, quiet);
+    const one = await depositOnPolygon(s2.public, network, res.hash);
+    expect(one.found).toBe(true);
+  });
+
+  it('lists the indexes and never guesses when the transaction holds several', async () => {
+    const { s, c } = await session({ extraDirected: 'paired' });
+    const res = await deposit(s, c, { amount: 2_500_000n, recipient: RECIPIENT }, quiet);
+    const d = await depositOnPolygon(s.public, network, res.hash);
+    expect(d.found).toBe(false);
+    if (d.found) return;
+    expect(d.pick).toEqual([41, 43]);
+    expect(d.reason).toMatch(/holds 2 directed deposits, with Transfer logs at 41, 43: enter the index/);
+    const second = await depositOnPolygon(s.public, network, res.hash, 43);
+    expect(second.found && second.arrival.coordinate.positionIndex).toBe(43);
+  });
+});
+
 describe('a payout by its reference', () => {
   it('finds the emitter’s Reference log and the reserve’s transfer in the same transaction', async () => {
     const { s } = await session({ payouts: [{ reference: REF, to: TO, amount: 5_000_000n, block: 60 }], finalized: 90 });

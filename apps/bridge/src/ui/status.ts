@@ -143,8 +143,10 @@ export function initStatus(host: StatusHost) {
     const rows: [string, string][] = [];
     const show = () => facts(out, rows);
     if (!HASH.test(tx.trim())) return say(note, 'A transaction hash is 0x and 64 hex digits.', 'error');
-    const log = Number(logText);
-    if (!Number.isInteger(log) || log < 0 || log > 0xffff_ffff) return say(note, 'The log index is the Transfer log’s index in its block: a whole number.', 'error');
+    // Empty: the Transfer is found from the receipt (the transaction's one directed deposit).
+    const given = logText.trim() !== '';
+    const log = given ? Number(logText) : undefined;
+    if (log !== undefined && (!Number.isInteger(log) || log < 0 || log > 0xffff_ffff)) return say(note, 'The log index is the Transfer log’s index in its block: a whole number.', 'error');
     const p = polygon();
     if (typeof p === 'string') return say(note, p, 'error');
     const { n, s } = p;
@@ -154,7 +156,7 @@ export function initStatus(host: StatusHost) {
       await assertChain(s);
       const d = await depositOnPolygon(s.public, n, tx.trim().toLowerCase() as Hex, log);
       if (!d.found) {
-        rows.push(['State', 'not a directed deposit'], ['Why', d.reason]);
+        rows.push(['State', d.pick ? `${d.pick.length} directed deposits in this transaction: pick one` : 'not a directed deposit'], ['Why', d.reason]);
         return show();
       }
       const a = d.arrival;
@@ -164,7 +166,7 @@ export function initStatus(host: StatusHost) {
         ['State', ''],
         ['Arrival (coordinate)', `${c.network} · block ${c.blockNumber} (${c.blockHash}) · log ${c.positionIndex}`],
         ['Polygon', finalText(d.finality)],
-        ['Transfer → Directed', `${d.txHash}: Transfer log ${c.positionIndex}, Directed log ${d.directedLog}`],
+        ['Transfer → Directed', `${d.txHash}: Transfer log ${c.positionIndex}, Directed log ${d.directedLog}${d.fromReceipt ? ' (the Transfer log was found from the receipt: the transaction’s only directed deposit)' : ''}`],
         ['Sender', a.sender],
         ['Recipient (Kreivo)', encodeSs58(fromHex(a.recipient), prefix)],
         ['Amount', `${a.amount} (minor units)`],
@@ -179,7 +181,7 @@ export function initStatus(host: StatusHost) {
       // Kreivo: did the contract record the mint reference?
       const k = host.kreivo();
       const contract = n.kreivo.bezent;
-      if (!k || contract === UNSET) rows.push(['Kreivo', !k ? `${n.kreivo.label} is not connected` : 'the bezent contract is not set in this build']);
+      if (!k || contract === UNSET) rows.push(['Kreivo', !k ? `${n.kreivo.label} is not connected yet (the light client may still be syncing)` : 'the bezent contract is not set in this build']);
       else {
         try {
           minted = await mintReferenceUsed(k, n.kreivo, contract as Hex, mintReference(c));
@@ -247,7 +249,7 @@ export function initStatus(host: StatusHost) {
     show();
     const k = host.kreivo();
     if (!k || n.kreivo.bezent === UNSET) {
-      say(note, !k ? `${n.kreivo.label} is not connected yet.` : 'The bezent contract is not set in this build.', 'error');
+      say(note, !k ? `${n.kreivo.label} is still connecting (the light client is syncing). Try again when the page says it is reading ${n.kreivo.label}.` : 'The bezent contract is not set in this build.', 'error');
       return;
     }
     say(note, `Reading ${n.kreivo.label}…`);

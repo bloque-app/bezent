@@ -281,7 +281,7 @@ export function initRedeem(host: RedeemHost) {
       return errorText(e);
     }
     const k = host.kreivo();
-    if (!k) return `${n.kreivo.label} is not connected yet.`;
+    if (!k) return `${n.kreivo.label} is still connecting (the light client is syncing): wait for the status above to say it is reading Kreivo. Nothing was signed.`;
     return { n, k, c };
   }
 
