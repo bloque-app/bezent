@@ -1,0 +1,126 @@
+<!doctype html>
+<!--
+Copyright (c) 2026 Pagos Cube LLC
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="Content-Security-Policy" content="%BRIDGE_CSP_META%" />
+    <title>bezent bridge</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/src/ui/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>bezent <span>bridge</span></h1>
+      <p id="build" class="muted"></p>
+    </header>
+    <main>
+      <noscript><p class="error">The bridge needs JavaScript: it runs entirely in this page.</p></noscript>
+
+      <section aria-labelledby="h-network">
+        <h2 id="h-network">1. Network</h2>
+        <label for="network">Deposit on</label>
+        <select id="network"></select>
+        <dl id="network-facts" class="facts"></dl>
+        <p id="network-error" class="error" hidden></p>
+      </section>
+
+      <section aria-labelledby="h-wallet">
+        <h2 id="h-wallet">2. EVM wallet</h2>
+        <p class="muted">Wallets in this browser that announce themselves (EIP-6963).</p>
+        <div id="wallets" class="wallets"><p class="muted">Looking for wallets…</p></div>
+        <dl id="wallet-facts" class="facts"></dl>
+      </section>
+
+      <section aria-labelledby="h-recipient">
+        <h2 id="h-recipient">3. Recipient on Kreivo</h2>
+        <label for="recipient">Kreivo address (SS58)</label>
+        <input id="recipient" autocomplete="off" spellcheck="false" placeholder="H…" />
+        <p><button id="from-kreivo-wallet" type="button" class="link">Use an account from a Kreivo wallet</button></p>
+        <div id="kreivo-accounts" class="wallets"></div>
+        <p id="recipient-status" class="muted"></p>
+        <p id="kreivo-status" class="muted"></p>
+      </section>
+
+      <section aria-labelledby="h-amount">
+        <h2 id="h-amount">4. Amount</h2>
+        <label for="amount">USDC</label>
+        <input id="amount" inputmode="decimal" autocomplete="off" placeholder="0.00" />
+        <p id="amount-status" class="muted"></p>
+      </section>
+
+      <section aria-labelledby="h-review">
+        <h2 id="h-review">5. Review and deposit</h2>
+        <dl id="review" class="facts"></dl>
+        <p class="muted">
+          The recipient is written on Polygon next to your address, in public. If the deposit can never be minted,
+          bezent returns it to your address, the refund address above.
+        </p>
+        <button id="deposit" type="button" disabled>Deposit</button>
+        <ol id="progress" class="progress"></ol>
+        <dl id="result" class="facts"></dl>
+        <p id="deposit-link"></p>
+      </section>
+
+      <section id="redeem-section" aria-labelledby="h-redeem">
+        <h2 id="h-redeem">6. Redeem bUSDC on Kreivo</h2>
+        <p class="muted">
+          Anyone holding bUSDC on Kreivo redeems it here for USDC on Polygon. You sign on Kreivo with a browser-extension
+          wallet (Talisman, SubWallet or Polkadot.js) and pay Kreivo’s fee in KSM, so the account needs a little KSM.
+        </p>
+        <p>
+          <button id="redeem-connect" type="button" class="secondary">Connect a Kreivo wallet</button>
+          <button id="redeem-offer-metadata" type="button" class="link">Offer Kreivo’s metadata to the wallets again</button>
+        </p>
+        <div id="redeem-accounts" class="wallets"></div>
+        <p id="redeem-wallet-status" class="muted"></p>
+        <dl id="redeem-facts" class="facts"></dl>
+        <label for="redeem-amount">bUSDC</label>
+        <input id="redeem-amount" inputmode="decimal" autocomplete="off" placeholder="0.00" />
+        <p class="check"><input id="redeem-whole" type="checkbox" /> <label for="redeem-whole">The whole balance</label></p>
+        <p id="redeem-amount-status" class="muted"></p>
+        <label for="redeem-payout">Paid to, on Polygon</label>
+        <input id="redeem-payout" autocomplete="off" spellcheck="false" placeholder="0x…" />
+        <p id="redeem-payout-status" class="muted"></p>
+        <p id="redeem-payout-warning" class="warn"></p>
+        <p class="muted">
+          Reference, picked at random: <code id="redeem-reference"></code>
+          <button id="redeem-new-reference" type="button" class="link">Pick another</button>
+        </p>
+        <dl id="redeem-review" class="facts"></dl>
+        <button id="redeem" type="button" disabled>Redeem</button>
+        <ol id="redeem-progress" class="progress"></ol>
+        <dl id="redeem-result" class="facts"></dl>
+        <p id="redeem-link"></p>
+      </section>
+
+      <section id="status" aria-labelledby="h-status">
+        <h2 id="h-status">7. Status</h2>
+        <p class="muted">From public chain data: Polygon through your EVM wallet, Kreivo through the light client.</p>
+        <label for="status-tx">A deposit: its Polygon transaction</label>
+        <input id="status-tx" autocomplete="off" spellcheck="false" placeholder="0x…" />
+        <label for="status-log">and the index of its Transfer log</label>
+        <input id="status-log" inputmode="numeric" autocomplete="off" placeholder="41" />
+        <p><button id="status-deposit" type="button" class="secondary">Look up the deposit</button></p>
+        <label for="status-redeemer">A withdrawal: its redeemer on Kreivo</label>
+        <input id="status-redeemer" autocomplete="off" spellcheck="false" placeholder="H…" />
+        <label for="status-reference">and the reference it chose</label>
+        <input id="status-reference" autocomplete="off" spellcheck="false" placeholder="0x…" />
+        <p><button id="status-withdrawal" type="button" class="secondary">Look up the withdrawal</button></p>
+        <p id="status-note" class="muted"></p>
+        <dl id="status-result" class="facts"></dl>
+      </section>
+    </main>
+    <footer class="muted">
+      <p>
+        No server, no analytics, no third-party script: this page talks to your wallets and to Kreivo through a light
+        client in your browser.
+      </p>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

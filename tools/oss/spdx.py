@@ -13,7 +13,8 @@ Files that cannot carry a comment (JSON, lock files, SVG, patches, checksums) ar
 The licence a path requires is `policy()` below, and docs/oss/LICENSING.md says why:
 
 - the services, the ink! contract and the store are GPL-3.0-or-later (`GPL_PREFIXES`);
-- prose (Markdown, HTML) is CC-BY-4.0, wherever it lives;
+- prose (Markdown, HTML) is CC-BY-4.0, wherever it lives, except the web apps' HTML pages, which are code
+  (`APP_PREFIXES`);
 - everything else (the reusable crates, the EVM contracts, the test bed, tooling) is Apache-2.0 OR MIT.
 
 It also checks that every Cargo.toml declares the licence its path requires.
@@ -72,12 +73,16 @@ HEAD_LINES = 12  # a header must start within the first lines of the file
 GPL_PREFIXES = ("services/", "contracts/bezent/", "crates/store/")
 
 
+# The web apps (amendment 0029, Open 12): Apache-2.0 OR MIT, their HTML pages included, which are code there.
+APP_PREFIXES = ("apps/",)
+
+
 def code_policy(path: str) -> str:
     return GPL if path.startswith(GPL_PREFIXES) else PERMISSIVE
 
 
 def policy(path: str) -> str:
-    if Path(path).suffix in (".md", ".html"):
+    if Path(path).suffix == ".md" or (Path(path).suffix == ".html" and not path.startswith(APP_PREFIXES)):
         return PROSE
     return code_policy(path)
 

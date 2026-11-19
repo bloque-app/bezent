@@ -236,17 +236,37 @@ impl Driver {
             }
         };
         let passed = failure.is_none();
-        let dry_run = json!({
+        // `outcome` as the Kreivo endpoint spells it (`DryRun::to_json`): the store reads it for the
+        // directed review exit (0145; review I2 of PR #136).
+        let mut dry_run = json!({
             "passed": passed,
+            "outcome": if passed { "passed" } else { "refused" },
             "reason": failure,
             "driver": DRIVER,
             "block": head.number,
         });
+        // The Kreivo endpoint records the asset's status with a refusal to mint (review of PR
+        // #136); the stand-in's asset is always Live, so the refusal named is the destination's.
+        if network != ORIGIN
+            && failure
+                .as_deref()
+                .is_some_and(|f| bezent_store::DESTINATION_REFUSALS.contains(&f))
+        {
+            dry_run["asset"] = json!({
+                "id": payload["order"]["asset"],
+                "status": bezent_store::ASSET_LIVE,
+                "supply": null,
+            });
+        }
+        // The dry run's block time is recorded with it, as the Kreivo endpoint records it (review
+        // L-b of PR #136): the directed review exit rests on a refusal that has one (0145).
         sqlx::query(
             "INSERT INTO prepared_transactions (order_intent_id, attempt, network, lane, key_id, \
                nonce, valid_from_block, valid_until_block, checkpoint_hash, call, signing_payload, \
-               message, dry_run_block_number, dry_run_block_hash, dry_run_passed, dry_run) \
-             VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $13, $6, $8, $11, $12::text::jsonb)",
+               message, dry_run_block_number, dry_run_block_hash, dry_run_passed, dry_run, \
+               dry_run_block_time) \
+             VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $13, $6, $8, $11, $12::text::jsonb, \
+               $14)",
         )
         .bind(order)
         .bind(network)
@@ -261,6 +281,7 @@ impl Driver {
         .bind(passed)
         .bind(dry_run.to_string())
         .bind(&message)
+        .bind(head.time)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;

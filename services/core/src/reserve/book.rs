@@ -15,7 +15,7 @@
 //! | `redemption` | the final `Redeemed` event | supply | owed payout (the withdrawal) |
 //! | `payout` | the final payout leg of a withdrawal, from the reserve | owed payout | reserve |
 //! | `refund-mint` | the final `RefundMinted` event | owed payout | supply |
-//! | `unassociated-refund` | the final payout leg refunding an unassociated arrival | owed mint (the arrival) | reserve |
+//! | `unassociated-refund` | the final payout leg refunding an unassociated arrival (a directed arrival's return, or the refund of a directed deposit out of review, `F-018`, among them) | owed mint (the arrival) | reserve |
 //! | `surplus-contribution` | a final arrival at a reserve address from an address the operator declared it funds the reserve from (`surplus_funding_addresses`) | reserve | surplus (the arrival) |
 //! | `surplus-withdrawal` | a final outflow from a reserve address the operator records | surplus | reserve |
 //! | `network-cost`, `venue-fee` | a cost paid from a reserve position (`REQ-BK-4`) | surplus | reserve |
@@ -691,7 +691,9 @@ async fn payout(
         return Ok(None);
     };
     // A withdrawal's payout carries the withdrawal's own reference (review M1); the refund of an
-    // unassociated arrival carries one derived from the arrival.
+    // unassociated arrival carries one derived from the arrival, and so does the refund of a
+    // directed deposit out of review, which is paid as its arrival's return is (F-018, amendment
+    // 0029 Open 2): either leaves the arrival's owed mint and the reserve.
     let withdrawal: Option<(i64, String, Option<String>)> = sqlx::query_as(
         "SELECT id, bridge_reference, asset FROM transfers \
          WHERE kind = 'withdrawal' AND destination_reference = $1",
@@ -701,8 +703,10 @@ async fn payout(
     .await?;
     let refund: Option<Bound> = if withdrawal.is_none() {
         sqlx::query_as(&format!(
-            "SELECT {BOUND} FROM transfers WHERE kind = 'refund' AND refund_of IS NULL \
-               AND on_chain_reference = $1"
+            "SELECT {BOUND} FROM transfers r WHERE r.kind = 'refund' \
+               AND (r.refund_of IS NULL OR EXISTS (SELECT 1 FROM transfers d \
+                    WHERE d.id = r.refund_of AND d.kind = 'deposit')) \
+               AND r.on_chain_reference = $1"
         ))
         .bind(reference)
         .fetch_optional(&mut *conn)

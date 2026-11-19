@@ -102,6 +102,54 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub fee_floors: BTreeMap<String, String>,
+    /// The thresholds of the alerts on directed deposits (F-018; amendment 0029, Open 5 and 6:
+    /// alerts only, `crate::directed_alerts`). Each count or share **above** its threshold pages, per
+    /// deposit route. Left out, each takes its default.
+    ///
+    /// ```toml
+    /// [directed_alerts]
+    /// mints_per_day = 200          # directed deposits minted in the trailing 24 hours
+    /// returns_per_day = 3          # returns and refunds of directed deposits in the trailing 24 hours
+    /// window_share_percent = 50    # of the route's window, held by directed deposits (1 to 100)
+    /// ```
+    #[serde(default)]
+    pub directed_alerts: DirectedAlerts,
+}
+
+/// The `[directed_alerts]` section: [`crate::directed_alerts::Thresholds`], as written.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DirectedAlerts {
+    /// Directed deposits minted per route in the trailing 24 hours.
+    #[serde(default = "default_directed_mints")]
+    pub mints_per_day: u64,
+    /// Returns and refunds of directed deposits per route in the trailing 24 hours.
+    #[serde(default = "default_directed_returns")]
+    pub returns_per_day: u64,
+    /// The share of a route's window directed deposits hold, in percent: 1 to 100.
+    #[serde(default = "default_directed_window_share")]
+    pub window_share_percent: u32,
+}
+
+impl Default for DirectedAlerts {
+    fn default() -> Self {
+        let t = crate::directed_alerts::Thresholds::default();
+        Self {
+            mints_per_day: t.mints_per_day,
+            returns_per_day: t.returns_per_day,
+            window_share_percent: t.window_share_percent,
+        }
+    }
+}
+
+fn default_directed_mints() -> u64 {
+    crate::directed_alerts::Thresholds::default().mints_per_day
+}
+fn default_directed_returns() -> u64 {
+    crate::directed_alerts::Thresholds::default().returns_per_day
+}
+fn default_directed_window_share() -> u32 {
+    crate::directed_alerts::Thresholds::default().window_share_percent
 }
 
 /// The deployment's environment (PR #50 review M2).
@@ -348,6 +396,9 @@ impl Config {
         config
             .fee_floors()
             .map_err(|e| format!("invalid configuration {}: {e}", path.display()))?;
+        config
+            .directed_alerts()
+            .map_err(|e| format!("invalid configuration {}: {e}", path.display()))?;
         // REQ-PR-1 (PR #50 review M2): a deployment publishes statements; only a test one may
         // say it does not.
         let statement = match config.statement.as_mut() {
@@ -590,6 +641,21 @@ impl Config {
             .collect()
     }
 
+    /// The thresholds of the alerts on directed deposits, checked: a window share of 1 to 100 percent.
+    pub fn directed_alerts(&self) -> Result<crate::directed_alerts::Thresholds, String> {
+        let a = self.directed_alerts;
+        if !(1..=100).contains(&a.window_share_percent) {
+            return Err(
+                "directed_alerts.window_share_percent must be a whole number from 1 to 100".into(),
+            );
+        }
+        Ok(crate::directed_alerts::Thresholds {
+            mints_per_day: a.mints_per_day,
+            returns_per_day: a.returns_per_day,
+            window_share_percent: a.window_share_percent,
+        })
+    }
+
     /// The engine's settings.
     pub fn settings(&self) -> crate::Settings {
         crate::Settings {
@@ -622,6 +688,7 @@ impl fmt::Debug for Config {
             .field("statement", &self.statement)
             .field("health_file", &self.health_file)
             .field("fee_floors", &self.fee_floors)
+            .field("directed_alerts", &self.directed_alerts)
             .finish()
     }
 }
@@ -1048,6 +1115,41 @@ mod tests {
     /// Amendment 0025: the fee position floors are in this configuration, per network, as positive whole numbers in
     /// the network's smallest unit written as strings. A floor of zero (nothing is below it), a number that is not a
     /// string (a TOML integer outgrown by 18 decimals), a decimal or an empty one is refused when the file is read.
+    #[test]
+    fn req_ic_2_directed_alert_thresholds_have_defaults_and_a_bounded_share() {
+        let config: Config =
+            toml::from_str("database_url = \"postgres://core@db/bezent\"\n").unwrap();
+        assert_eq!(
+            config.directed_alerts().unwrap(),
+            crate::directed_alerts::Thresholds::default()
+        );
+        let config: Config = toml::from_str(
+            "database_url = \"postgres://core@db/bezent\"\n[directed_alerts]\nmints_per_day = 10\nreturns_per_day = 0\nwindow_share_percent = 20\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.directed_alerts().unwrap(),
+            crate::directed_alerts::Thresholds {
+                mints_per_day: 10,
+                returns_per_day: 0,
+                window_share_percent: 20
+            }
+        );
+        for bad in ["0", "101"] {
+            let config: Config = toml::from_str(&format!(
+                "database_url = \"postgres://core@db/bezent\"\n[directed_alerts]\nwindow_share_percent = {bad}\n"
+            ))
+            .unwrap();
+            assert!(config.directed_alerts().is_err(), "{bad}");
+        }
+        assert!(
+            toml::from_str::<Config>(
+                "database_url = \"postgres://core@db/bezent\"\n[directed_alerts]\ncap = 1\n"
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn req_st_6_fee_floors_are_positive_whole_numbers_written_as_strings() {
         let dir = std::env::temp_dir().join(format!("bzc-config-fee-{}", std::process::id()));

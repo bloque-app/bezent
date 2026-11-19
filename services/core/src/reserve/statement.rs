@@ -441,6 +441,10 @@ impl StatementStore for DirectoryStore {
     }
 }
 
+/// How long the publisher waits for the declarations' lock (`directing_code_hold()`, 0149) before it
+/// fails the attempt (review S1 of PR #139, third round).
+const DECLARATION_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Why a statement was not published.
 #[derive(Debug)]
 pub enum StatementError {
@@ -455,6 +459,9 @@ pub enum StatementError {
     /// The store holds the statement's name from an earlier attempt that did not finish, and it is
     /// not one bezent can adopt (review S7).
     Stuck(String),
+    /// The declarations stayed locked past [`DECLARATION_LOCK_TIMEOUT`]; nothing was written, and the
+    /// next cycle tries again.
+    Busy(String),
 }
 
 impl fmt::Display for StatementError {
@@ -465,6 +472,7 @@ impl fmt::Display for StatementError {
             Self::Store(e) => write!(f, "{e}"),
             Self::Db(e) => write!(f, "store: {e}"),
             Self::Stuck(why) => write!(f, "statement chain stuck: {why}"),
+            Self::Busy(why) => write!(f, "statement deferred: {why}"),
         }
     }
 }
@@ -753,6 +761,34 @@ impl<S: StatementSigner, T: StatementStore> Statements<S, T> {
             .bind(format!("bezent/statement/{asset}"))
             .execute(&mut *tx)
             .await?;
+        // Review L4 of PR #139 (REQ-BK-5): the declarations held still while they are read, so a
+        // declaration being written when the evaluation was made is waited for, not missed, and a
+        // statement re-derived from the same evaluation lists the directing code this one does.
+        // The wait is bounded (review S1 of PR #139, third round): a declaration's transaction that
+        // holds the table for long fails this attempt, which the next cycle retries, instead of
+        // holding the asset's publisher (and its advisory lock) behind it.
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(format!("{}ms", DECLARATION_LOCK_TIMEOUT.as_millis()))
+            .execute(&mut *tx)
+            .await?;
+        if let Err(e) = sqlx::query("SELECT directing_code_hold()")
+            .execute(&mut *tx)
+            .await
+        {
+            return Err(
+                if e.as_database_error()
+                    .and_then(|d| d.code())
+                    .is_some_and(|c| c == "55P03")
+                {
+                    StatementError::Busy(format!(
+                        "{asset}: the declarations were locked for over {:?}",
+                        DECLARATION_LOCK_TIMEOUT
+                    ))
+                } else {
+                    e.into()
+                },
+            );
+        }
         let Some(a) = Asset::load(&mut tx, asset).await? else {
             return Err(StatementError::NoEvaluation(asset.to_owned()));
         };
@@ -1515,10 +1551,26 @@ fn compose(
             })).collect::<Vec<_>>(),
             "attested_by": parties,
         },
-        "published_addresses": a.positions.iter().map(|p| json!({
-            "network": p.network, "address": p.address,
-            "token": p.token.as_ref().map(|(t, _)| t), "holds": "reserve",
-        })).collect::<Vec<_>>(),
+        // REQ-BK-5, REQ-AS-11, §7.E: every reserve address, and beside it the directing code declared
+        // for it, which moves the token into it and holds nothing (`feeds` names the reserve).
+        "published_addresses": a.positions.iter().flat_map(|p| {
+            std::iter::once(json!({
+                "network": p.network, "address": p.address,
+                "token": p.token.as_ref().map(|(t, _)| t), "holds": "reserve",
+            }))
+            .chain(p.directing.iter().filter(|d| d.declared_at <= evaluated_at).map(|d| json!({
+                "network": p.network, "address": d.address, "token": d.token,
+                "holds": "nothing", "directing_code": true, "feeds": p.address,
+            })))
+        }).collect::<Vec<_>>(),
+        // REQ-AS-11: each declaration as recorded by the evaluation stated: the network, the code's
+        // address, the token it moves, the reserve it moves it to, the limits it enforces and the
+        // first block it counts.
+        "directing_code": a.positions.iter().flat_map(|p| p.directing.iter()
+            .filter(|d| d.declared_at <= evaluated_at).map(|d| json!({
+            "network": p.network, "address": d.address, "token": d.token, "feeds": p.address,
+            "minimum": d.minimum, "maximum": d.maximum, "from_block": d.from_block,
+        }))).collect::<Vec<_>>(),
         // REQ-BK-5, REQ-BK-6: an arrival at a reserve address from one of these, at or after the
         // block it applies from, is the operator's contribution to surplus; any other arrival is
         // owed mint. A declaration applies from no block (`null`) when it predates the rule.

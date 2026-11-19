@@ -1096,3 +1096,61 @@ async fn issue_58_what_the_core_writes_is_retained_and_cannot_be_shortened_or_de
         assert!(st.delete_version(&version, chrono::Utc::now()).is_err());
     }
 }
+
+/// `REQ-AS-11`, `REQ-BK-5`, §7.E (F-018, T-018-11): the statement publishes the directing code
+/// declared for the reserve beside the reserve address: its network, its address, the token it moves
+/// and the reserve it feeds, holding nothing, with the declaration's limits and first block. A
+/// verifier who sums the published reserve terms is unchanged by it (it holds no reserve). A
+/// declaration made after the evaluation the statement states is not in it, so a statement re-derived
+/// from that evaluation keeps its bytes. The address is published as the store keeps it, in lower
+/// case on an `evm` network (review L5 of PR #139).
+#[sqlx::test(migrator = "bezent_store::MIGRATOR")]
+async fn req_as_11_req_bk_5_the_statement_publishes_the_directing_code_beside_the_reserve(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    const DIRECTING: &str = "0xD1Ec7ed00000000000000000000000000000d1ec";
+    const LATER: &str = "0xD1Ec7ed00000000000000000000000000000d1ed";
+    let w = World::new(options, connect).await;
+    stated_world(&w).await;
+    exec(
+        &w.admin,
+        &format!(
+            "INSERT INTO directing_code (asset, network, address, token, minimum, maximum, \
+                 from_block, reference, declared_at) VALUES \
+               ('{ASSET}', '{ORIGIN}', '{DIRECTING}', '{TOKEN}', 1000000, 50000000000, 4, \
+                'directed deposits, test declaration', '{}'), \
+               ('{ASSET}', '{ORIGIN}', '{LATER}', '{TOKEN}', 1000000, 50000000000, 400, \
+                'declared after the evaluation', '{}')",
+            (t0() - Duration::days(1)).to_rfc3339(),
+            (t0() + Duration::days(1)).to_rfc3339(),
+        ),
+    )
+    .await;
+    let dir = store_dir();
+    let (statements, public) = publisher(&w, &dir);
+    let p = statements.publish(ASSET, t0()).await.unwrap();
+    let doc = verify(
+        &read(statements.store(), &p.name).await,
+        &read(statements.store(), &p.signature_name).await,
+        &public,
+    )
+    .unwrap();
+    assert_eq!(
+        doc["published_addresses"],
+        json!([
+            {"network": ORIGIN, "address": RESERVE, "token": TOKEN, "holds": "reserve"},
+            {"network": ORIGIN, "address": DIRECTING.to_lowercase(), "token": TOKEN,
+             "holds": "nothing", "directing_code": true, "feeds": RESERVE},
+        ])
+    );
+    assert_eq!(
+        doc["directing_code"],
+        json!([{"network": ORIGIN, "address": DIRECTING.to_lowercase(), "token": TOKEN, "feeds": RESERVE,
+                "minimum": "1000000", "maximum": "50000000000", "from_block": 4}])
+    );
+    // The reserve terms name the reserve address only: the directing code holds no reserve.
+    for r in doc["terms"]["reserve"].as_array().unwrap() {
+        assert_eq!(r["address"], RESERVE);
+    }
+}

@@ -20,8 +20,13 @@ The same rules bind every runbook (`REQ-GV-5`, guardrails 2 to 6 in `CLAUDE.md`)
 - **No path moves value or edits a status.** There is no tool, SQL statement or function to do either, and a runbook
   never asks for one. What an operator can do is in `crates/store/README.md` ("Who may call what"): pause
   (`operator_pause`), lift a pause with a second person (`operator_request_unpause`, `operator_approve_unpause`), record an
-  act performed elsewhere (`operator_record`), and resolve a review by attaching the coordinate of the ordinary edge
-  (`manual_actions`, `manual_approvals`). Each of them records the login that acted and the justification.
+  act performed elsewhere (`operator_record`), resolve a review by attaching the coordinate of the ordinary edge
+  (`manual_actions`, `manual_approvals`), and release an unassociated arrival with a second person, a directed one of
+  undeclared directing code included (`operator_release_directed_arrival`, `conditions/CND-Unassociated.md`), which
+  moves nothing until the second login approves and then only to the refund address the arrival recorded; and lift
+  the hold an upgrade of an origin token puts on directed intake, with a second person
+  (`operator_request_token_hold_lift`, `operator_approve_token_hold_lift`, `conditions/CND-TokenUpgraded.md`). Each of them
+  records the login that acted and the justification.
 - **Pause first, then understand.** A pause stops new work only; transfers in flight keep being observed and completed
   (`REQ-GV-1`, `INV-15`). It is always safe and is the first move when the cause is not understood (`REQ-IC-2`).
 - **Unknown is not failed.** Report in-flight transfers as unknown or delayed, never as failed, and never refund them
@@ -50,10 +55,12 @@ exercised: no                   # yes only when a live exercise is recorded in "
 
 ## Exercised?
 
-`NFR-9` asks that each runbook be exercised on a test network before bezent carries value. **None has been.** What exists
-today is the test that proves the behaviour the runbook relies on (`tests:`), not a person following the runbook against a
-running deployment. `exercised: no` stays until a dated entry in the runbook's `Exercise` section records who ran it, on
-which environment, and what they found. `deploy/runbooks/EXERCISES.md` lists them all; it is empty.
+`NFR-9` asks that each runbook be exercised on a test network before bezent carries value. **Five have been**, F-018's
+(`directed-return-failed`, `directed-spam`, `unpaired-direction`, `directed-mints`, `directed-returns`), each by an
+automated scenario of the full-chain bed, whose Polygon is a fork and whose Kreivo is a model; none on Kreivo's own
+runtime. For every other runbook what exists is the test that proves the behaviour it relies on (`tests:`), not a run of
+the runbook against a running deployment. `exercised: no` stays until a dated line in `deploy/runbooks/EXERCISES.md`
+records who ran it, on which environment, and what they found, and the runbook's `Exercise` section says so.
 
 ## Index
 
@@ -66,13 +73,16 @@ Each row: the page that sends you to the runbook, the observable that shows the 
 | `CND-AmountMismatch` | none | `reviews_open`, `reviews_oldest_age_seconds` | [CND-AmountMismatch](conditions/CND-AmountMismatch.md) | `req_tr_5_a_delivery_of_another_amount_goes_to_review_reporting_both` (+2) |
 | `CND-AwaitingConversion` | none | `reviews_open`, `reviews_oldest_age_seconds`, `unassociated_arrivals`, `unassociated_arrivals_oldest_age_seconds` | [CND-AwaitingConversion](conditions/CND-AwaitingConversion.md) | `cnd_awaiting_conversion_mints_nothing_and_goes_to_review_past_its_deadline` (+3) |
 | `CND-CutOff` | none | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | [CND-CutOff](conditions/CND-CutOff.md) | `cnd_cutoff_a_step_past_the_route_cut_off_holds_until_it_reopens` (+3) |
+| `CND-DepositCapacity` | `deposit-capacity-alert`, `directed-wait-alert` | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | [CND-DepositCapacity](conditions/CND-DepositCapacity.md) | `ac_a6_3_cnd_deposit_capacity_waits_in_order_resumes_and_is_never_returned` (+3) |
+| `CND-DepositWindow` | `deposit-window-alert`, `directed-wait-alert` | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | [CND-DepositWindow](conditions/CND-DepositWindow.md) | `ac_a6_3_cnd_deposit_window_waits_first_come_first_served_and_resumes_as_it_rolls_over` (+6) |
 | `CND-DestinationRefused` | none | `reviews_open`, `reviews_oldest_age_seconds`, `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | [CND-DestinationRefused](conditions/CND-DestinationRefused.md) | `cnd_destination_refused_mints_nothing_and_resumes_when_the_mint_applies` (+4) |
 | `CND-FeeShort` | none | `fee_short_transfers`, `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | [CND-FeeShort](conditions/CND-FeeShort.md) | `cnd_fee_short_holds_until_the_fee_position_can_pay` |
 | `CND-MintWindow` | none | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | [CND-MintWindow](conditions/CND-MintWindow.md) | `cnd_mint_window_holds_until_the_window_rolls_over` |
 | `CND-Paused` | `reserve-divergence`, `reserve-blind`, `reserve-check-incomplete`, `supply-mismatch-pause`, `book-quarantine` | `pauses_in_force`, `holds_in_force`, `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | [CND-Paused](conditions/CND-Paused.md) | `cnd_paused_new_work_waits_and_resumes_when_the_route_reopens` (+3) |
 | `CND-PayoutWindow` | `payout-window-alert` | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds`, `reserve_amount` | [CND-PayoutWindow](conditions/CND-PayoutWindow.md) | `cnd_payout_window_m1_a_spent_allowance_holds_the_withdrawal_never_review_never_refund` (+4) |
 | `CND-ReserveShort` | none | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds`, `reserve_amount`, `reserve_equation_outcome` | [CND-ReserveShort](conditions/CND-ReserveShort.md) | `cnd_reserve_short_ac_b3_1_holds_and_raises_one_condition_per_asset_and_network` (+1) |
-| `CND-Unassociated` | none | `unassociated_arrivals`, `unassociated_arrivals_oldest_age_seconds` | [CND-Unassociated](conditions/CND-Unassociated.md) | `ac_a4_1_an_arrival_that_cannot_become_a_deposit_is_unassociated_with_an_owner` (+2) |
+| `CND-TokenUpgraded` | `origin-token-upgraded`, `directed-wait-alert` | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds`, `unassociated_arrivals` | [CND-TokenUpgraded](conditions/CND-TokenUpgraded.md) | `ac_a6_8_an_upgrade_holds_directed_intake_until_two_operators_lift_it` (+4) |
+| `CND-Unassociated` | `directed-binding-alert` | `unassociated_arrivals`, `unassociated_arrivals_oldest_age_seconds` | [CND-Unassociated](conditions/CND-Unassociated.md) | `ac_a4_1_an_arrival_that_cannot_become_a_deposit_is_unassociated_with_an_owner` (+3) |
 | `CND-Withdrawn` | none | `reviews_open`, `reviews_oldest_age_seconds`, `open_gaps`, `nonfinal_transfers` | [CND-Withdrawn](conditions/CND-Withdrawn.md) | `cnd_withdrawn_an_inclusion_that_stops_matching_the_chain_goes_to_review` (+1) |
 
 ### Incident classes (`notes/BRIDGE-REQUIREMENTS.md` §5)
@@ -101,12 +111,20 @@ Each row: the page that sends you to the runbook, the observable that shows the 
 | Runbook | Page kinds | Observable | A test |
 |---|---|---|---|
 | [attested](pages/attested.md) | `attested-withdrawal-unrelayed`, `attested-withdrawal-awaiting-head`, `attested-report-refused`, `attested-instructions-refused` | `oldest_nonfinal_transfer_age_seconds`, `nonfinal_transfers` | none (not on this base) |
+| [directed-mints](pages/directed-mints.md) | `directed-mints-alert` | `fee_position_amount`, `fee_position_age_seconds`, `nonfinal_transfers` | `req_ic_2_directed_mints_above_the_threshold_page_once_and_clear_and_nothing_is_capped` (+1) |
+| [directed-returns](pages/directed-returns.md) | `directed-returns-alert` | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds`, `reserve_amount` | `req_ic_2_directed_returns_above_the_threshold_page` (+1) |
+| [directed-return-failed](procedures/directed-return-failed.md) | `payout-refusal-alert`, `directed-returns-alert` | `reviews_open`, `reviews_oldest_age_seconds`, `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds`, `reserve_amount` | `s8_req_rf_2_a_return_that_fails_waits_in_review_and_is_paid_once_to_its_refund_address` (+2) |
+| [directed-spam](procedures/directed-spam.md) | `directed-mints-alert`, `directed-window-alert`, `fee-position-low` | `fee_position_amount`, `fee_position_age_seconds`, `nonfinal_transfers`, `pauses_in_force` | `s9_ac_a6_6_spam_at_the_minimum_only_pages_and_an_unpaired_direction_pages_once` (+2) |
+| [directed-wait](pages/directed-wait.md) | `directed-wait-alert` | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | `req_ic_2_directed_deposits_held_or_waiting_past_a_window_page_daily` (+1) |
+| [directed-window](pages/directed-window.md) | `directed-window-alert` | `nonfinal_transfers`, `oldest_nonfinal_transfer_age_seconds` | `req_ic_2_directed_deposits_holding_the_window_above_the_threshold_page` |
 | [float-top-up](pages/float-top-up.md) | `fee-position-low` | `fee_short_transfers`, `fee_position_amount`, `fee_position_age_seconds` | `cnd_fee_short_holds_until_the_fee_position_can_pay` |
 | [key-compromise](pages/key-compromise.md) | `key-compromise` | `pauses_in_force` | `req_ic_4_an_alert_in_the_log_becomes_one_page_with_kind_unquoted` (+3) |
 | [late-mint](pages/late-mint.md) | `late-mint-prover-silent`, `late-mint-watch-failed`, `late-mint-check-failed` | `pauses_in_force` | `services/core/tests/late_mint.rs` |
 | [payout](pages/payout.md) | `payout-window-alert`, `payout-refusal-alert`, `resolution-blocked-by-inclusion`, `resolution-unprepared-alert` | `oldest_nonfinal_transfer_age_seconds`, `nonfinal_transfers`, `reviews_open`, `reviews_oldest_age_seconds` | `req_rv_1_issue_35_a_repeated_refusal_pages_once_and_reaches_review_at_the_deadline` (+2) |
 | [platform](pages/platform.md) | none | `observer_lag_estimate_seconds`, `open_gaps`, `undelivered_notifications`, `undelivered_notifications_oldest_age_seconds`, `dead_notifications` | `services/kreivo-endpoint/tests/network.rs` (+2) |
 | [reserve](pages/reserve.md) | `reserve-divergence`, `reserve-blind`, `reserve-alert`, `reserve-check-incomplete`, `reserve-check-failed`, `reserve-check-stalled`, `supply-mismatch-pause`, `book-quarantine`, `reserve-hold`, `reserve-hold-lifted`, `reserve-divergence-unconfirmed` | `reserve_equation_outcome`, `reserve_equation_age_seconds`, `reserve_amount`, `observer_lag_estimate_seconds`, `open_gaps`, `pauses_in_force`, `holds_in_force`, `hold_age_seconds` | `ac_e2_3_req_ic_2_nfr_5_m2_an_evaluation_that_cannot_be_made_is_held_and_paged_past_the_bound` (+8) |
+| [token-upgraded](pages/token-upgraded.md) | `origin-token-upgraded` | `reserve_equation_outcome`, `pauses_in_force` | `req_as_12_an_origin_tokens_upgrade_pages_once_and_holds_directed_intake` (+2) |
+| [unpaired-direction](pages/unpaired-direction.md) | `unpaired-direction` | `open_gaps`, `observer_lag_estimate_seconds` | `ac_a6_6_an_unpaired_direction_pages_once` (+2) |
 | [statements](pages/statements.md) | `statement-overdue`, `statement-stuck`, `statement-publish-failed`, `statement-abandoned` | `reserve_equation_age_seconds` | `services/core/tests/statement.rs` |
 
 ### Requirements of `REQ-IC`, `REQ-ST-6` and what answers them

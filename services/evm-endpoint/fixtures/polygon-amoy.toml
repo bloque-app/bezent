@@ -1,0 +1,53 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The configuration of the Polygon Amoy instance (F-018, T-018-04; PLAN DEC-8: one instance per network, with its
+# own configuration, key lane and signer binding). For `--check` in CI and the tests. No secret is here: the files it
+# names hold them, and they need not exist for --check.
+# The vault is the test reserve deployed on Amoy by script/DeployVault.s.sol and checked by script/VerifyVault.s.sol
+# (contracts/evm/deployments/polygon-amoy.json). The lane's public key is the vault's delivery member, a test key made
+# for this vault only (REQ-KY-6). The origin token (Circle's Amoy test USDC, 6 decimals, for bUSDC) is not here: it
+# is admitted in the store (REQ-AS-2).
+network = "polygon-amoy"
+chain_id = 80002
+# Block 53060034, the vault deployment's first block, finalized when it was chosen; its hash was read from two
+# public providers (polygon-amoy-bor-rpc.publicnode.com, polygon-amoy.drpc.org), which agreed.
+pinned_block = 53060034
+pinned_hash = "0xabd8f6d73c4e26baced9542c4d2d9ec7efb4f848c01afefbc8c250b177b4c655"
+vault = "0x3530dBB6986Dc584bf3D83a0ed4cbE027238204a"
+roles = "0x50197B45C28b408f0816e34f6aFc83E5d3032217"
+emitter = "0xa1Ebae82c6Ebe16beB0864fc73D5350bE71370B9"
+# MultiSendCallOnly 1.4.1 (the same address on Amoy, checked by its code).
+multisend = "0x9641d764fc13c8B624c04430C7356C1C7C8102e2"
+delivery_role = "bezent.delivery"
+start_block = 53060034
+max_range = 500
+database_url_file = "/run/secrets/bezent-evm-polygon-amoy-db"
+
+# Public nodes signed transactions are sent to, and only those (amendment 0023). No secret: written here.
+broadcast = ["https://rpc-amoy.polygon.technology", "https://polygon-amoy-bor-rpc.publicnode.com", "https://polygon-amoy.drpc.org"]
+
+# The directing code in front of the vault (F-018, T-018-04), deployed at block 53060139.
+[[directing]]
+address = "0xB8F75BeAE2723637313072fC89C69B7C15EdAec7"
+from_block = 53060139
+
+[[providers]]
+name = "a"
+url_file = "/run/secrets/bezent-evm-polygon-amoy-rpc-a"
+
+[[providers]]
+name = "b"
+url_file = "/run/secrets/bezent-evm-polygon-amoy-rpc-b"
+
+[lane]
+key = "polygon-amoy-payout"
+public_key = "0x03004e2f089c3047254276416ceb82edb14d8488116ae456969eb3f2d974b8620d"
+
+[gas]
+max_gas = 500000
+max_fee_per_gas = "3000000000000"
+
+[signer]
+socket = "/run/bezent-signer/signer.sock"
+uid = 1001
+token_file = "/run/secrets/bezent-evm-polygon-amoy-signer-token"

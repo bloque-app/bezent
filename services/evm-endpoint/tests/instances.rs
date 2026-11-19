@@ -1,16 +1,21 @@
 // Copyright (c) 2026 Pagos Cube LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! `M-2` (issue #30): one evm-endpoint instance per network (`DEC-8`), each with its own
-//! configuration, key lane and signer binding. The three example configurations (Polygon, Base
-//! Sepolia, BNB Chain testnet) are checked together: they must share nothing that would let one
-//! instance act for another (`REQ-KY-1`, `REQ-AR-3`, `AC-I4.1`). No database, no network.
+//! configuration, key lane and signer binding. The four example configurations (Polygon, Polygon
+//! Amoy, Base Sepolia, BNB Chain testnet) are checked together: they must share nothing that would
+//! let one instance act for another (`REQ-KY-1`, `REQ-AR-3`, `AC-I4.1`). No database, no network.
 
 use std::collections::BTreeSet;
 
 use bezent_evm_endpoint::config::Config;
 
-const FIXTURES: [(&str, &str, u64); 3] = [
+const FIXTURES: [(&str, &str, u64); 4] = [
     (include_str!("../fixtures/endpoint.toml"), "polygon", 137),
+    (
+        include_str!("../fixtures/polygon-amoy.toml"),
+        "polygon-amoy",
+        80002,
+    ),
     (
         include_str!("../fixtures/base-sepolia.toml"),
         "base-sepolia",

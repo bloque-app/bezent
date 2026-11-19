@@ -231,6 +231,48 @@ fn req_hn_5_status_codes_decode_as_kreivo_writes_them() {
     );
 }
 
+/// The bytes the Kreivo endpoint decodes a refusal from (`services/kreivo-endpoint/src/kreivo.rs`,
+/// `CONTRACT_ERRORS`, `KREIVO_ERROR`, `ASSETS_API_ERRORS`): `Error::Kreivo` is the error at index 29
+/// and carries its inner error, and `Kreivo(Assets(CannotMint))`, the only refusal that can be the
+/// destination's (`bezent_store::DESTINATION_REFUSALS`), is `[29, 2, 2]`. Pinned so that reordering
+/// either enum breaks CI rather than what the endpoint records (review of PR #136; `REQ-IN-9`).
+#[test]
+fn req_in_9_a_kreivo_refusal_encodes_as_the_endpoint_decodes_it() {
+    assert_eq!(
+        Error::Kreivo(KreivoApiError::Assets(AssetsApiError::CannotMint)).encode(),
+        [29, 2, 2]
+    );
+    assert_eq!(
+        Error::Kreivo(KreivoApiError::UnknownError).encode(),
+        [29, 0]
+    );
+    assert_eq!(
+        Error::Kreivo(KreivoApiError::ExtQueryError).encode(),
+        [29, 1]
+    );
+    let assets = [
+        AssetsApiError::CannotDeposit,
+        AssetsApiError::CannotTransfer,
+        AssetsApiError::CannotMint,
+        AssetsApiError::CannotBurn,
+        AssetsApiError::NotAGroupContract,
+        AssetsApiError::NotAuthorised,
+        AssetsApiError::NotALocalAsset,
+    ];
+    for (index, e) in assets.into_iter().enumerate() {
+        assert_eq!(
+            Error::Kreivo(KreivoApiError::Assets(e)).encode(),
+            [29, 2, u8::try_from(index).unwrap()],
+            "{e:?}"
+        );
+    }
+    // Its neighbours, as the endpoint names them by index.
+    assert_eq!(Error::AboveWindow.encode(), [6]);
+    assert_eq!(Error::Overflow.encode(), [28]);
+    assert_eq!(Error::DepositMismatch.encode(), [30]);
+    assert_eq!(Error::BurnShort.encode(), [32]);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Storage and roles (T-006-02)
 // ---------------------------------------------------------------------------------------------

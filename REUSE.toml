@@ -65,3 +65,17 @@ path = "brand/*.svg"
 precedence = "override"
 SPDX-FileCopyrightText = "Copyright (c) 2026 Pagos Cube LLC"
 SPDX-License-Identifier = "LicenseRef-Trademark-Marks"
+
+# Third parties' notices the bridge web app's build copies into THIRD-PARTY-NOTICES.txt (apps/bridge/vite.config.ts),
+# for bundled packages that ship no licence file of their own (docs/oss/LICENSING.md §4.4).
+[[annotations]]
+path = "apps/bridge/notices/smoldot.txt"
+precedence = "override"
+SPDX-FileCopyrightText = ["Copyright (C) 2019-2022 Parity Technologies (UK) Ltd.", "Copyright (C) 2023 Pierre Krieger"]
+SPDX-License-Identifier = "GPL-3.0-or-later WITH Classpath-exception-2.0"
+
+[[annotations]]
+path = "apps/bridge/notices/scale-ts.txt"
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright (c) 2021 Josep M Sobrepere"
+SPDX-License-Identifier = "MIT"

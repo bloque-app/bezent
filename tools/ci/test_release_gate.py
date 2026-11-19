@@ -453,8 +453,10 @@ class Gate(unittest.TestCase):
             cfg = real_load()
             cfg["known_unmet"] = {}
             return cfg
+        # The criteria excepted in exceptions.toml (amendment 0029's, until F-018's tests land) fail the gate on their
+        # own line; leave that line out, so this still shows nothing else fails it.
         with mock.patch.object(rg.criteria_map, "load_config", emptied):
-            self.assertEqual(rg.mechanical_map(), [])
+            self.assertEqual([e for e in rg.mechanical_map() if "are excepted" not in e], [])
 
     # Release classes (amendment 0024, `d-gate-scope`).
     @staticmethod

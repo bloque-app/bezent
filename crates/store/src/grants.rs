@@ -35,6 +35,7 @@ pub const ROLES: &[&str] = &[
     crate::KREIVO_ENDPOINT_ROLE,
     crate::EVM_ENDPOINT_ROLE,
     crate::WEBHOOKS_ROLE,
+    crate::PUBLIC_ROLE,
     crate::SIGNER_ROLE,
     crate::OPERATOR_ROLE,
 ];
@@ -45,6 +46,8 @@ pub const ROLES: &[&str] = &[
 pub const PUBLIC_FUNCTIONS: &[&str] = &[
     "is_terminal_state(transfer_state)",
     "route_usage_locked(text,text,text,bigint)",
+    // F-018 (migration 0150, amendment 0031): what a route's window has used as a request sees it.
+    "route_window_used(text,text,text,bigint)",
     "transfer_edge_needs_coordinate(transfer_state,transfer_state)",
 ];
 
@@ -66,6 +69,8 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "book_postings",
             "book_quarantine",
             "deposit_conversions",
+            // F-018 (migration 0147): the directing code declared for a reserve, for the statement.
+            "directing_code",
             "endpoint_scopes",
             "event_log",
             "event_log_head",
@@ -145,6 +150,26 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "attempts_unproven(bigint)",
             "bezent_applied_migrations()",
             "bezent_writer_holds(text,oid)",
+            // F-018 (migration 0150, amendment 0031): whether an upgrade of a directed arrival's
+            // token holds it, and whether a directed deposit fits in its route's capacity.
+            "directed_arrival_token_held(text,text,bigint)",
+            "directed_capacity_fits(bigint)",
+            // F-018 (migration 0144): the core's deposit for a final directed arrival.
+            "directed_deposit(text,bigint,bytea,position_kind,bigint)",
+            // F-018 (migration 0145): whether the issuing network's refusal of a directed
+            // deposit's destination is recorded (the evidence of its review exit), whether the
+            // deposit may leave its review into Refunding, and whether it fits in what its route's
+            // window has left.
+            "directed_refusal_recorded(bigint,text,bigint,bytea,timestamp with time zone)",
+            "directed_review_refund_open(bigint)",
+            "directed_token_held(bigint)",
+            "directed_window_fits(bigint)",
+            // F-018 (migration 0148, review M3 of PR #139): whether a directed arrival's directing
+            // contract is declared, asked before the core decides it (REQ-AS-11).
+            "directing_declared(text,text,text,bigint)",
+            // F-018 (migration 0149, review L4 of PR #139): the statement holds the declarations
+            // in SHARE mode while it reads them.
+            "directing_code_hold()",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
             "ops_observables()",
@@ -281,6 +306,14 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
         "EXECUTE",
         &["bezent_applied_migrations()"],
     ),
+    // The public status route (F-018, T-018-10; migration 0146): one view, which reads the tables
+    // with its owner's rights and shows nothing a requester supplied (REQ-ST-8), and nothing else.
+    (crate::PUBLIC_ROLE, "SELECT", &["public_status"]),
+    (
+        crate::PUBLIC_ROLE,
+        "EXECUTE",
+        &["bezent_applied_migrations()"],
+    ),
     // The signer (migration 0012): it reads the intent, the core's order and the prepared bytes,
     // and records the signature. Since 0049 (audit must-fix 2) it also reads which token an
     // order's asset is paid in, and which signing intent a signed transaction is of (a cancel's
@@ -355,10 +388,17 @@ pub const MATRIX: &[(&str, &str, &[&str])] = &[
             "bezent_applied_migrations()",
             "funding_arrival(text,text,text,bigint)",
             "one_business_day_after(timestamp with time zone)",
+            // F-018 (migration 0150, amendment 0031): the two-person lift of the hold on an upgrade
+            // of an origin token.
+            "operator_approve_token_hold_lift(bigint,text)",
             "operator_approve_unpause(bigint,text)",
             "ops_observables()",
             "operator_pause(text,text,text,text)",
             "operator_record(text,text,jsonb,text)",
+            // F-018 (migration 0149, review M3 of PR #139): the release of a directed arrival
+            // whose directing contract is not declared, to the refund address it recorded.
+            "operator_release_directed_arrival(text,bigint,bytea,position_kind,bigint,text)",
+            "operator_request_token_hold_lift(bigint,text)",
             "operator_request_unpause(bigint,text)",
             "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
         ],

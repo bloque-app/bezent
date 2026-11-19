@@ -281,7 +281,27 @@ pub async fn serve(
             .await
             .map_err(|e| format!("[webhooks] database_url: {e}"))?;
         let d = Dispatcher::new(dispatch_pool.clone(), hooks)?;
-        dispatcher = Some((tokio::spawn(d.run(stop_rx)), dispatch_pool));
+        dispatcher = Some((tokio::spawn(d.run(stop_rx.clone())), dispatch_pool));
+    }
+    // The public status route (F-018, REQ-ST-8): its own login, its own listener, served beside the
+    // request surface and stopped with it. It fails closed: no [public] login, no ingress.
+    let mut public = None;
+    if let Some(p) = &config.public {
+        let public_pool = crate::public::connect(p, &resolver).await?;
+        let public_listener = TcpListener::bind(p.listen)
+            .await
+            .map_err(|e| format!("[public]: cannot listen on {}: {e}", p.listen))?;
+        tracing::info!(listen = %p.listen, "bezent-ingress serving the public status route (REQ-ST-8)");
+        // Its listener bounds what an unauthenticated caller can hold open (review M1, L3 of PR
+        // #139): a request timeout, a header-read timeout, a bounded head and connections.
+        let router = crate::public::public_router_with(
+            crate::public::PublicApp::new(public_pool.clone(), p.max_in_flight),
+            Duration::from_millis(p.request_timeout_ms.max(1)),
+        );
+        let bounds = crate::public::ListenerBounds::of(p);
+        let stop = stop_rx.clone();
+        let task = tokio::spawn(crate::public::serve(public_listener, router, bounds, stop));
+        public = Some((task, public_pool));
     }
     let stopping = async move {
         shutdown.await;
@@ -293,6 +313,16 @@ pub async fn serve(
     if let Some((task, dispatch_pool)) = dispatcher {
         let _ = task.await;
         dispatch_pool.close().await;
+    }
+    if let Some((task, public_pool)) = public {
+        match task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "the public status route stopped with an error")
+            }
+            Err(e) => tracing::error!(error = %e, "the public status route's task failed"),
+        }
+        public_pool.close().await;
     }
     pool.close().await;
     tracing::info!("bezent-ingress stopped");

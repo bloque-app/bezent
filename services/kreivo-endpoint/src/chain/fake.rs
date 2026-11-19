@@ -20,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{
-    Balances, BlockEvents, BlockRef, Chain, ChainError, ChainResult, Emitted, ExtrinsicResult,
-    Header, RuntimeVersion,
+    AssetDetails, AssetStatus, Balances, BlockEvents, BlockRef, Chain, ChainError, ChainResult,
+    Emitted, ExtrinsicResult, Header, RuntimeVersion,
 };
 use parity_scale_codec::{Decode, Encode};
 
@@ -42,6 +42,9 @@ struct Block {
     redeemed: HashMap<(AccountId32, [u8; 32]), kreivo::Redemption>,
     /// Per local asset: the contract's own supply count, and the asset's issuance (issue #42).
     supply: HashMap<u32, (u128, u128)>,
+    /// Per local asset given one, its status at this block; any other asset with a supply is
+    /// `Live`.
+    statuses: HashMap<u32, AssetStatus>,
     /// Each account's balances at this block (issue #14); an account not listed holds nothing.
     balances: HashMap<AccountId32, Balances>,
 }
@@ -53,6 +56,9 @@ pub enum DryRunMode {
     Pass,
     /// The contract refuses it with the error of this index.
     Refuse(u8),
+    /// The contract refuses it with the error of these bytes: its index and its fields, as
+    /// `Kreivo(Assets(CannotMint))` is `[29, 2, 2]`.
+    RefuseWith(Vec<u8>),
     /// The call fails to dispatch.
     Trap,
 }
@@ -85,6 +91,8 @@ struct State {
     code_hash: Option<[u8; 32]>,
     /// What blocks produced from now on hold of each local asset: (contract count, issuance).
     supply: HashMap<u32, (u128, u128)>,
+    /// What blocks produced from now on hold of each local asset's status.
+    statuses: HashMap<u32, AssetStatus>,
     /// What blocks produced from now on hold of each account's balances (issue #14).
     balances: HashMap<AccountId32, Balances>,
     /// A balance read fails, as if `System::Account` could not be read, while every other read answers.
@@ -98,6 +106,8 @@ struct State {
     metadata: Option<Vec<u8>>,
     /// What `runtime_metadata` fails with instead of answering, if anything (issue #104).
     metadata_error: Option<ChainError>,
+    /// What `asset_details` fails with instead of answering, if anything (review I1 of PR #136).
+    asset_error: Option<ChainError>,
     /// What the contract's `roles()` answers; none fails the getter (issue #104).
     roles: Option<kreivo::Roles>,
     /// Whether [`Chain::header_hint`] answers, and the blocks whose hint is a lie.
@@ -155,6 +165,7 @@ impl FakeChain {
                     used: HashSet::new(),
                     redeemed: HashMap::new(),
                     supply: HashMap::new(),
+                    statuses: HashMap::new(),
                     balances: HashMap::new(),
                 }],
                 finalized: 0,
@@ -177,12 +188,14 @@ impl FakeChain {
                 unavailable: false,
                 code_hash: None,
                 supply: HashMap::new(),
+                statuses: HashMap::new(),
                 balances: HashMap::new(),
                 balance_unavailable: false,
                 balance_hangs: false,
                 balance_log: Vec::new(),
                 metadata: None,
                 metadata_error: None,
+                asset_error: None,
                 roles: None,
                 hints: false,
                 lying_hints: HashSet::new(),
@@ -377,6 +390,18 @@ impl FakeChain {
         self.lock().supply.insert(asset, (contract, issuance));
     }
 
+    /// Makes `asset_details` fail with `error` (`None` answers again): `Unavailable` is a chain that
+    /// did not answer, `Invalid` one whose answer cannot be used (review I1 of PR #136).
+    pub fn set_asset_error(&self, error: Option<ChainError>) {
+        self.lock().asset_error = error;
+    }
+
+    /// From the next block on, local asset `Here(asset)` has status `status` (and exists, with
+    /// no issuance if none was set).
+    pub fn set_asset_status(&self, asset: u32, status: AssetStatus) {
+        self.lock().statuses.insert(asset, status);
+    }
+
     /// From the next block on, `account` holds `balances` (issue #14).
     pub fn set_balances(&self, account: AccountId32, balances: Balances) {
         self.lock().balances.insert(account, balances);
@@ -432,6 +457,7 @@ impl FakeChain {
             used: parent.used.clone(),
             redeemed: parent.redeemed.clone(),
             supply: s.supply.clone(),
+            statuses: s.statuses.clone(),
             balances: s.balances.clone(),
         };
         for reference in std::mem::take(&mut s.outside_uses) {
@@ -887,6 +913,23 @@ impl Chain for FakeChain {
         })
     }
 
+    async fn asset_details(&self, at: &BlockRef, asset: u32) -> ChainResult<Option<AssetDetails>> {
+        self.answer(|s| {
+            if let Some(e) = &s.asset_error {
+                return Err(e.clone());
+            }
+            let block = Self::block_at(s, at)?;
+            let supply = block.supply.get(&asset).map(|(_, issuance)| *issuance);
+            let status = block.statuses.get(&asset).copied();
+            Ok(
+                (supply.is_some() || status.is_some()).then(|| AssetDetails {
+                    supply: supply.unwrap_or(0),
+                    status: status.unwrap_or(AssetStatus::Live),
+                }),
+            )
+        })
+    }
+
     async fn contract_code_hash(
         &self,
         at: &BlockRef,
@@ -946,6 +989,11 @@ impl Chain for FakeChain {
             Ok(match s.dry_run {
                 DryRunMode::Pass => kreivo::encode_dry_run(gas, 1_000, Ok((false, vec![0, 0]))),
                 DryRunMode::Refuse(e) => kreivo::encode_dry_run(gas, 0, Ok((true, vec![0, 1, e]))),
+                DryRunMode::RefuseWith(ref e) => {
+                    let mut data = vec![0, 1];
+                    data.extend_from_slice(e);
+                    kreivo::encode_dry_run(gas, 0, Ok((true, data)))
+                }
                 DryRunMode::Trap => kreivo::encode_dry_run(gas, 0, Err(())),
             })
         })

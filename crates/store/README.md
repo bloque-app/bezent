@@ -23,6 +23,7 @@ or disable a trigger, and none may create in the schema or the database.
 | core | `bezent_core` | `bezent-core` |
 | ingress API | `bezent_ingress` | `bezent-ingress` (`bezent_ingress::connect`) |
 | webhook dispatcher | `bezent_webhooks` | `bezent-ingress`, for `[webhooks] database_url` |
+| public status route (F-018, `REQ-ST-8`) | `bezent_public` | `bezent-ingress`, for `[public] database_url` |
 | Kreivo endpoint | `bezent_kreivo_endpoint` | `bezent-kreivo-endpoint` |
 | EVM endpoint | `bezent_evm_endpoint` | `bezent-evm-endpoint` |
 | signer | `bezent_signer` | `bezent-signer` |
@@ -100,8 +101,8 @@ and no role may DELETE or TRUNCATE anything but the dispatcher's own condition h
 | `signatures` | signer (with the nonce and the asset it decoded from the bytes it signed, 0049) |
 | `webhook_secrets`, `webhook_transfer_urls`, `webhook_condition_urls` | ingress |
 | `webhook_deliveries`, `webhook_condition_holds` (and DELETE), `webhook_cursor(after)` UPDATE, `webhook_deliveries(state, attempts, next_attempt_at, leased_until, last_status, last_error, finished_at)` UPDATE | webhook dispatcher |
-| `manual_actions(kind, transfer_id, to_state, network, block_number, block_hash, block_time, justification)`, `manual_approvals(action_id, justification, approved_output_network, approved_output_block_number, approved_output_block_hash, approved_output_position_kind, approved_output_position_index, approved_output_amount)` (0141: all six `approved_output_*` or none), `ledger_accounts(network, address, kind, reason)`; EXECUTE `operator_pause`, `operator_request_unpause`, `operator_approve_unpause`, `operator_record` (0091: the only way an operator pauses, lifts a pause or records an administrative act) | operators |
-| `networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `endpoint_scopes`, `evm_endpoint_networks` | nobody: the migration owner's declarations |
+| `manual_actions(kind, transfer_id, to_state, network, block_number, block_hash, block_time, justification)`, `manual_approvals(action_id, justification, approved_output_network, approved_output_block_number, approved_output_block_hash, approved_output_position_kind, approved_output_position_index, approved_output_amount)` (0141: all six `approved_output_*` or none), `ledger_accounts(network, address, kind, reason)`; EXECUTE `operator_pause`, `operator_request_unpause`, `operator_approve_unpause`, `operator_record` (0091: the only way an operator pauses, lifts a pause or records an administrative act), `operator_release_directed_arrival` (0149: the return of a directed arrival of undeclared directing code, in `Received`, with its release; a second login approves it) | operators |
+| `networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `endpoint_scopes`, `evm_endpoint_networks`, `directing_code` (0147: the directing code declared for a reserve, `REQ-AS-11`; append-only, its token admitted for the asset, its address in lower case on an `evm` network and never a reserve address or an admitted token there; 0148: only a declared one's arrival is minted or returned by the core; 0149: an undeclared one's leaves only by an operator's release, approved by a second login) | nobody: the migration owner's declarations |
 
 Who **reads** what (SELECT):
 
@@ -111,6 +112,7 @@ Who **reads** what (SELECT):
 | ingress | the declarations (`networks`, `assets`, `admitted_tokens`, `reserves`, `routes`, `pauses`, `requesters`, `requester_grants`, `requester_credentials`, `surplus_funding_addresses`, `ledger_accounts_listed`), the requests (`intake`, `intake_answers`, `relayed_instructions`), `transfers`, `transitions`, `attempt_milestones`, `observations`, `observation_outcomes`, `event_log`, `event_log_head`, and the views `transfer_status`, `event_log_position`, `book_balances`; of the webhooks' tables, `webhook_deliveries` and the unsealed columns of the secrets and URLs. **No** intent, signature, signed bytes, proof, reading, book entry or posting, or reserve record (the `book_balances` view gives it the balances only) |
 | Kreivo endpoint, EVM endpoint | (the EVM endpoint also `evm_endpoint_networks`, which logins record which EVM network, migration 0056) `networks`, `assets`, `admitted_tokens`, `reserves`, `endpoint_scopes`, `intents`, `signatures`, their own records (`observations`, `observation_outcomes`, `observation_ranges`, `observation_gaps`, `observation_watermarks`, `final_heads`, `prepared_transactions`, `signed_transactions`, `non_execution_proofs`, `reserve_readings`; the EVM endpoint also `fee_position_readings`) and `event_log`; the Kreivo endpoint also `observation_walk_anchors` (0052: blocks of a long history walk, so it resumes). **No** transfer, request or book |
 | webhook dispatcher | `event_log`, `event_log_head`, `transfers`, `intake`, `intake_answers`, `requester_grants`, and the webhooks' tables, sealed columns included |
+| public status route | the view `public_status` alone (0146, `REQ-ST-8`): a directed deposit's, its return's or refund's, and a withdrawal's or its refund mint's state, condition and coordinates, by bridge reference, with no column a requester supplied; the view reads the tables as its owner, so the role reads **no** table |
 | signer | `intents` (the signing intent and the core's order), `prepared_transactions`, `signatures`, and since 0049 `admitted_tokens` and `signed_transactions(id, intent_id)` (to compare the bytes it decodes with the core's order: the token an asset is paid in, a cancel's target) and `event_log(seq)` (the position of an alert it appends); nothing else |
 | operators | `admin_actions`, `event_log`, `pauses`, `transfer_status`, `manual_actions`, `manual_approvals`, `reviews`, `unassociated_arrivals`, `ledger_accounts`, `ledger_accounts_listed`, `book_quarantine`, `surplus_funding_addresses`, `reserve_evaluations`, `reserve_statements`, `reserve_statement_abandoned`, `reserve_statement_objects`, `reserve_readings` |
 | `bezent_service`, `bezent_endpoint` | nothing |
@@ -119,11 +121,11 @@ Who may **call** what (EXECUTE; the functions that run as the owner are marked *
 
 | Role | Calls |
 |---|---|
-| core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
+| core | `ops_observables` *definer* (0090), `attempt_proof` *definer*, `attempts_unproven` *definer*, `pause_reading_is_supply_mismatch` *definer*, `directed_deposit` *definer* (0144: the deposit of a final directed arrival), `directed_window_fits` and `directed_review_refund_open` (0145: whether a directed deposit fits in its route's window, and whether it may leave its review into `Refunding`), `directing_declared` (0148), `directed_capacity_fits`, `directed_token_held` *definer* and `directed_arrival_token_held` *definer* (0150: whether a directed deposit fits in its route's capacity, and whether an upgrade of its token holds it), `directing_code_hold` *definer* (0149: the statement holds the declarations while it reads them), `source_bindable`, `funding_arrival`, `one_business_day_after`, `bezent_writer_holds` |
 | ingress | `source_bindable`, `funding_arrival`, `bezent_writer_holds` |
 | Kreivo endpoint, EVM endpoint | `bezent_writer_holds`, `bezent_endpoint_writer`, `bezent_evm_endpoint_writer`, `bezent_row_network`, `observation_kind_on_network`, `observation_kind_for_event`, `observation_writer_covers` (the guards' helpers, which run as the inserting login) |
 | signer | `attempt_gate_open` *definer*, `pause_holds_intent` *definer* (0125: whether a pause holds a signing intent whose attempt has no signature, amendment 0022 A1b), `statement_place_refusal` *definer* |
-| operators | `ops_observables` *definer* (0090), `source_bindable`, `funding_arrival`, `one_business_day_after`, `operator_pause` *definer*, `operator_request_unpause` *definer*, `operator_approve_unpause` *definer*, `operator_record` *definer* |
+| operators | `ops_observables` *definer* (0090), `source_bindable`, `funding_arrival`, `one_business_day_after`, `operator_pause` *definer*, `operator_request_unpause` *definer*, `operator_approve_unpause` *definer*, `operator_record` *definer*, `operator_release_directed_arrival` *definer* (0149: the release of a directed arrival whose directing contract is not declared), `operator_request_token_hold_lift` *definer* and `operator_approve_token_hold_lift` *definer* (0150: the two-person lift of the hold an upgrade of an origin token puts on directed intake) |
 
 Every service and the operators also call `bezent_applied_migrations()` *definer*, which lists the
 migrations applied to the store, for the start-up check. The trigger functions that run as the owner
@@ -181,6 +183,47 @@ The audit of PR #56 added these (0049), for every login but the owner:
 - A bound deposit's destination is on the issuing network and its refund destination on its arrival's
   network; an unassociated arrival's refund pays out on the arrival's network; neither is accepted
   otherwise.
+
+Since 0144 (F-018 T-018-06, amendment 0029), whoever writes it, the owner included: a directed arrival (`directed_arrival`, 0143)
+is bound by no request. `source_bindable()` keeps `deposit` and `refund` false for it, so the ingress's lookup never offers it
+(`ERR-SourceNotFound`), and has two further purposes, `directed_deposit` and `directed_return`, each true for a directed arrival and
+for nothing else. A transfer bound to one is the core's deposit or the core's return, written by the core's login (or the owner's):
+the deposit by `directed_deposit()`, at `Source-Final`, with a bridge reference derived from the coordinate, the observation's
+`detail.recipient` as destination on the issuing network, its `detail.refund` as refund destination on the arrival's network, and no
+intake row; the return (the refund of an unassociated arrival) to the observed `detail.refund`, with no refund destination of its
+own. Any other destination, refund destination or writer is refused, as is a refund that is empty, the zero address, a reserve
+address or the directing contract (compared without case on an `evm` network), and no request's answer names such a transfer. An
+`unpaired_direction` is bound by nothing. A deposit made this way carries a `request_reference` that is a label of its coordinate
+(`directed:<network>:<block>:<hash>:<kind>:<index>`), since the column is not null; the requests' readers reach a transfer through
+`intake_answers`, so none of them reads it. `transfers_source_bindable()` became `SECURITY DEFINER` (it only reads) so the core, which
+may not call the coordinate lock, binds without a wider grant.
+
+Since 0145 (F-018 T-018-07 to T-018-09, amendment 0029 A5, Open 1 to 3) a directed arrival's deposit and return can move. A
+deposit may hold `CND-DepositWindow` (Open 1: a directed deposit over what its route's window has left waits): a route's window
+(`route_usage_locked()`) counts a deposit from when it was made, or, if it waited, from when it left the condition, and every
+deposit still waiting as a claim on it, so first come first served by coordinate holds against requesters' deposits too (Open 5: no
+separate share); `directed_window_fits()` is the core's question for one deposit, under the route's lock. The core's return of a
+directed arrival is accepted `Received -> Accepted` by the core with no recorded release (Open 3: no second approver); any other
+refund of an unassociated arrival still needs one. And a directed deposit in review, entered from `Source-Final` holding
+`CND-DestinationRefused` with no signature or signed bytes on any of its intents (`directed_review_refund_open()`), may be resolved
+into `Refunding` by an approved resolution (Open 2): its first attempt, ordered and never signed, is cancelled under it (the 0051
+table now takes a first attempt of such a deposit), and its refund is a transfer with `refund_of` the deposit, its asset and
+amount, to its refund destination, with the return's `bz-u-` bridge reference and payout reference, so the arrival is returned
+once whichever way. No other transfer gains that edge.
+
+Since 0150 (F-018 T-018-22 to T-018-25, amendment 0031) a directed deposit over its route's capacity holds
+`CND-DepositCapacity` and leaves it in coordinate order (`directed_capacity_fits()`, under the route's lock; while it waits it is
+in flight for `route_usage_locked()`, but a deposit waiting at `Source-Final` in `CND-DepositWindow` or held there in
+`CND-TokenUpgraded` is in flight for neither count; one held in `CND-TokenUpgraded` later, in `Delivering` or `Needs-Review`, stays in flight); what a request sees of the window is `route_window_used()`, which counts a waiting directed deposit only for one
+window from when it began to wait, and the waiting ones together for at most the window's limit (`directed_window_fits()` still
+counts every one waiting ahead, so the queue drains in order; `routes.request_reserve`, which would bound a deposit that is, or waits
+behind, one that began to wait more than a window ago to (1 - `request_reserve`) of the limit, is 0, not in force, until the owner
+rules on `d-f018-window-reserve`); an upgrade of an admitted origin
+token (`token_upgrade`, 0147), not withdrawn, holds every directed deposit of it at or after its block in `CND-TokenUpgraded`
+(`directed_token_held()`; `intents_guard_token_hold()` refuses a mint order for one) until one operator requests the lift and
+another approves it (`admin_actions` kinds `token-hold-lift-request` and `token-hold-lift`); and `directed_review_refund_open()` is
+judged on the evidence at resolution: the newest attempt-1 dry run must be the destination's refusal with the asset Live, either
+the one whose deadline began the review or one ordered after it began, never a refusal older than an unknown.
 
 An attempt that was ordered and never signed (issue #25, 0051) stood in the way of a withdrawal's refund for
 good: it has an intent and, there being no signed transaction, no proof of non-execution to record. The core
@@ -334,7 +377,7 @@ without `ADMIN OPTION`:
 DO $$
 DECLARE
     login TEXT := 'bezent_core_prod';   -- the service's login
-    svc   TEXT := 'bezent_core';        -- its role: bezent_core, bezent_ingress, bezent_webhooks,
+    svc   TEXT := 'bezent_core';        -- its role: bezent_core, bezent_ingress, bezent_webhooks, bezent_public,
                                         -- bezent_kreivo_endpoint, bezent_evm_endpoint, bezent_signer
                                         -- or, for an operator, bezent_operator
     m RECORD;
@@ -389,7 +432,7 @@ This lists every login that breaks any of that, and why; it must return no rows:
 -- deploy: check every login of a store role
 WITH store_roles(name) AS (VALUES ('bezent_service'), ('bezent_core'), ('bezent_ingress'),
          ('bezent_endpoint'), ('bezent_kreivo_endpoint'), ('bezent_evm_endpoint'),
-         ('bezent_webhooks'), ('bezent_signer'), ('bezent_operator')),
+         ('bezent_webhooks'), ('bezent_public'), ('bezent_signer'), ('bezent_operator')),
 logins AS (
     SELECT DISTINCT u.oid, u.rolname FROM pg_auth_members a
     JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles u ON u.oid = a.member

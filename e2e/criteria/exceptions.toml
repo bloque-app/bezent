@@ -7,8 +7,9 @@
 # that only names a criterion is never the way out: a test named for a criterion MUST verify it.
 # Reviewed by the spec owner (CODEOWNERS).
 
-# No criterion is an exception at the moment: each has a test at its layer. A criterion with a test can still be
-# partial or failing: that is listed in known_unmet.toml.
+# Amendment 0029 (SPEC v0.5.13) adds US-A6 to V0 before F-018's tests land. Each entry is removed in the pull
+# request that adds the criterion's test. A criterion with a test can still be partial or failing: that is listed in
+# known_unmet.toml.
 [exception]
 
 # A V0 story that SPEC section 6 gives no acceptance criterion. Listed so that a new one cannot appear silently.

@@ -10,6 +10,9 @@
 //!   `REQ-OT-2`), and the 32 bytes its payout writes on the origin network, derived from that
 //!   bridge reference, so unique to the withdrawal (PLAN `DEC-10`, the reference emitter);
 //! - the refund of a transfer: `bz-f-…`, from the original's bridge reference (`REQ-RF-3`);
+//! - a directed deposit, `bz-d-…`, and the return of a directed arrival, `bz-u-…`: from the
+//!   arrival's coordinate, as the ingress derives a deposit's and an unassociated refund's
+//!   (`REQ-IN-10`, `REQ-IN-11`);
 //! - a deposit's mint reference, the 32 bytes the mint writes on chain: from the arrival's
 //!   coordinate, so it is fixed by the arrival and consumed once (`REQ-IN-4`, `INV-2`). It is
 //!   derivable from public data, which is why a redemption's reference is scoped to its redeemer
@@ -114,6 +117,26 @@ pub fn mint_reference(c: &Coordinate) -> [u8; 32] {
     tagged("bezent/mint-reference/v0", &[&coordinate_fields(c)])
 }
 
+/// The bridge reference of the deposit that binds the arrival at `c`: `bz-d-…`, as the ingress
+/// derives it (`services/ingress/src/refs.rs::deposit`) and the store does for a directed deposit
+/// (`deposit_reference()`, migration 0144; `REQ-IN-3`, `REQ-IN-10`).
+pub fn deposit(c: &Coordinate) -> String {
+    short(
+        "bz-d-",
+        tagged("bezent/deposit/v0", &[&coordinate_fields(c)]),
+    )
+}
+
+/// The bridge reference of the refund of the unassociated arrival at `c`: `bz-u-…`, as the ingress
+/// derives it (`services/ingress/src/refs.rs::unassociated_refund`) and the store checks it for the
+/// return of a directed arrival (`refund_reference()`, migration 0144; `REQ-RQ-6`, `REQ-IN-11`).
+pub fn unassociated_refund(c: &Coordinate) -> String {
+    short(
+        "bz-u-",
+        tagged("bezent/refund/v0", &[&coordinate_fields(c)]),
+    )
+}
+
 /// The 32-byte on-chain reference the payout of the refund of the unassociated arrival at `c`
 /// carries (`REQ-RQ-6`, `REQ-ID-2`), in a domain of its own.
 pub fn unassociated_refund_reference(c: &Coordinate) -> [u8; 32] {
@@ -172,6 +195,68 @@ mod tests {
         assert_eq!(mint_reference(&c(0)), mint_reference(&c(0)));
         assert_ne!(mint_reference(&c(0)), mint_reference(&c(1)));
         assert_ne!(mint_reference(&c(0)), unassociated_refund_reference(&c(0)));
+    }
+
+    /// `REQ-IN-10`, `REQ-IN-11`: the core derives a directed deposit's and its return's bridge
+    /// references as the ingress and the store do. The vectors are the ones
+    /// `services/ingress/src/refs.rs` and `crates/store/tests/directed_deposits.rs` pin.
+    #[test]
+    fn req_in_11_bridge_references_match_the_ingress_and_the_store() {
+        let at = |network: &str, block: i64, hash: Vec<u8>, kind: &str, index: i64| Coordinate {
+            network: network.into(),
+            block_number: block,
+            block_hash: hash,
+            position_kind: kind.into(),
+            position_index: index,
+        };
+        assert_eq!(
+            deposit(&at("origin-a", 7, vec![0xaa], "log", 0)),
+            "bz-d-f974333c8ffbef8f6e0e9b3bd970def281dd7767"
+        );
+        assert_eq!(
+            deposit(&at(
+                "polygon",
+                96_983_980,
+                vec![0x11; 32],
+                "log",
+                4_294_967_295
+            )),
+            "bz-d-668330a314e9d999ee65c91f51fb6dedd62becfe"
+        );
+        assert_eq!(
+            deposit(&at("origin-a", 1, vec![0xab, 1], "transaction", 3)),
+            "bz-d-d1321a13639f570b72f526e3b141f8770dbcd76b"
+        );
+        assert_eq!(
+            unassociated_refund(&at("origin-a", 7, vec![0xaa], "log", 1)),
+            "bz-u-38661c655e8905bb6befb155263552f8bd0d1000"
+        );
+        assert_eq!(
+            unassociated_refund(&at(
+                "polygon",
+                96_983_980,
+                vec![0x11; 32],
+                "log",
+                4_294_967_295
+            )),
+            "bz-u-32a768ecd707102dccbf4e9ddc6156624b235afe"
+        );
+        assert_eq!(
+            unassociated_refund(&at("origin-a", 1, vec![0xab, 1], "transaction", 3)),
+            "bz-u-00c2a6caea37e16941afee596e77c4dc6dee27a5"
+        );
+        // The payout reference of the return, as the store's `directed_return_reference()`
+        // (migration 0145) derives it; pinned in `crates/store/tests/directed_core.rs` too.
+        assert_eq!(
+            hex::encode(unassociated_refund_reference(&at(
+                "origin-a",
+                7,
+                vec![0xaa],
+                "log",
+                1
+            ))),
+            "d56cb2ff42543eae4fc551d92778ae1e65d180bc21dbe7a46a2556691ddc0edb"
+        );
     }
 
     #[test]

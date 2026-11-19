@@ -563,7 +563,8 @@ async fn ac_i2_1_lifting_a_pause_needs_a_second_person_and_a_pause_holds_its_sco
 /// The catalogue: no operator privilege on any table is an UPDATE, a DELETE or a TRUNCATE; the
 /// INSERTs are exactly the three records (and the ledger-account declaration); every function an
 /// operator may call is on the list below, and each of those is read-only or writes only the
-/// record or `pauses`.
+/// record or `pauses`, but the release of a directed arrival of undeclared directing code (0149),
+/// which writes its return in `Received` and the release, and edits nothing.
 #[sqlx::test(migrator = "bezent_store::MIGRATOR")]
 async fn ac_i3_2_no_operator_privilege_edits_a_status_or_moves_value(pool: PgPool) {
     // Table-level: nothing but SELECT, and nothing at all on the tables that hold value and status.
@@ -628,9 +629,12 @@ async fn ac_i3_2_no_operator_privilege_edits_a_status_or_moves_value(pool: PgPoo
         "bezent_applied_migrations()",
         "funding_arrival(text,text,text,bigint)",
         "one_business_day_after(timestamp with time zone)",
+        "operator_approve_token_hold_lift(bigint,text)",
         "operator_approve_unpause(bigint,text)",
         "operator_pause(text,text,text,text)",
         "operator_record(text,text,jsonb,text)",
+        "operator_release_directed_arrival(text,bigint,bytea,position_kind,bigint,text)",
+        "operator_request_token_hold_lift(bigint,text)",
         "operator_request_unpause(bigint,text)",
         "ops_observables()",
         "source_bindable(text,text,bigint,bytea,position_kind,bigint)",
@@ -669,6 +673,78 @@ async fn ac_i3_2_no_operator_privilege_edits_a_status_or_moves_value(pool: PgPoo
                 "an operator function touches {forbidden}: {src}"
             );
         }
+    }
+
+    // The two steps of lifting the hold on an origin token's upgrade (migration 0150, amendment
+    // 0031; REQ-AS-12, REQ-GV-5) write one row each, to the record, and edit nothing; the hold lifts
+    // because the store reads the approval, not because anything is changed.
+    let lifts: Vec<String> = sqlx::query_scalar(
+        "SELECT prosrc FROM pg_proc WHERE proname IN \
+           ('operator_request_token_hold_lift', 'operator_approve_token_hold_lift')",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lifts.len(), 2);
+    for src in lifts {
+        let src = src.to_lowercase();
+        assert_eq!(src.matches("insert into").count(), 1, "{src}");
+        assert!(src.contains("insert into admin_actions ("), "{src}");
+        for forbidden in [
+            "update ",
+            "delete ",
+            "truncate",
+            "transfers",
+            "transitions",
+            "intents",
+        ] {
+            assert!(
+                !src.contains(forbidden),
+                "a lift touches {forbidden}: {src}"
+            );
+        }
+    }
+
+    // The release of a directed arrival of undeclared directing code (migration 0149; REQ-IN-6,
+    // REQ-GV-5) writes two rows and edits nothing: the arrival's return, in Received, and the
+    // release, recorded as the caller's. The return moves nothing until another login approves the
+    // release and the core accepts it (crates/store/tests/directed_core.rs).
+    let release: String = sqlx::query_scalar(
+        "SELECT prosrc FROM pg_proc WHERE proname = 'operator_release_directed_arrival'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let release = release.to_lowercase();
+    assert_eq!(release.matches("insert into").count(), 2, "{release}");
+    assert!(release.contains("insert into transfers ("), "{release}");
+    assert!(
+        release.contains("insert into manual_actions ("),
+        "{release}"
+    );
+    assert!(
+        release.contains("'received')"),
+        "its return starts in Received: {release}"
+    );
+    for forbidden in [
+        "update ",
+        "delete ",
+        "truncate",
+        "transitions",
+        "book_",
+        "reserve_",
+        "intents",
+        "signatures",
+        "event_log",
+        "final_heads",
+        "routes",
+        "manual_approvals",
+        "pauses",
+    ] {
+        assert!(
+            !release.contains(forbidden),
+            "the release touches {forbidden}: {release}"
+        );
     }
 }
 

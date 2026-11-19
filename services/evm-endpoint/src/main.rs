@@ -158,6 +158,19 @@ async fn run(config: Config) -> Result<(), String> {
         .await
         .map_err(|e| format!("refusing to start: {e}"))?;
     let declarations = network::declarations(&pool, &config.network, checked.vault).await?;
+    // REQ-AS-11 (review L5 of PR #139): directing code moves an admitted token; it is none. (Its
+    // declaration in the store's `directing_code` is not checked here: this login does not read
+    // that table. The store refuses an undeclared one's arrival, 0148.)
+    if let Some((a, _)) = checked
+        .directing
+        .iter()
+        .find(|(a, _)| declarations.tokens.contains_key(a))
+    {
+        return Err(format!(
+            "refusing to start: directing.address {a} is an origin token admitted on {} (REQ-AS-11)",
+            config.network
+        ));
+    }
     let lane = Lane {
         key: config.lane.key.clone(),
         public_key: checked.lane_public_key.clone(),
@@ -182,6 +195,7 @@ async fn run(config: Config) -> Result<(), String> {
             declarations: &declarations,
             convertibles: &checked.convertibles,
             delivery: checked.lane_address,
+            directing: &checked.directing,
         },
         start_block: config.start_block,
         max_range: config.max_range,

@@ -43,6 +43,8 @@ bezent-signer = { path = "../signer" }
 bezent-store = { path = "../../crates/store" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 hex = "0.4"
+# Signs the EIP-2612 permit a user gives the directing contract (F-018), with a published test key.
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 serde_json = "1"
 sha2 = "0.10"
 sqlx = { workspace = true, features = ["json", "chrono"] }

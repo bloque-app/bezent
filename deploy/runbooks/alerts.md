@@ -65,7 +65,16 @@ kind exists on `develop` at this commit.
 | `statement-abandoned` | statements | `pages/statements.md` | yes | yes (StatementPages) |
 | `statement-publish-failed` | statements | `pages/statements.md` | yes | **no** |
 | `payout-window-alert` | engine | `pages/payout.md`, `conditions/CND-PayoutWindow.md` | yes | yes, by message text |
-| `payout-refusal-alert` | engine | `pages/payout.md` | yes | **no** (and quoted before `F-014`) |
+| `payout-refusal-alert` | engine | `pages/payout.md`; a directed return's: `procedures/directed-return-failed.md` | yes | **no** (and quoted before `F-014`) |
+| `deposit-window-alert` | engine: a directed deposit in `CND-DepositWindow` its route can never fit (`F-018`) | `conditions/CND-DepositWindow.md` | yes | **no**: the filter must be added |
+| `deposit-capacity-alert` | engine: a directed deposit in `CND-DepositCapacity` its route can never carry (route removed, capacity zero; `F-018`, amendment 0031) | `conditions/CND-DepositCapacity.md` | yes | **no**: the filter must be added |
+| `directed-wait-alert` | core (`services/core/src/directed_alerts.rs`): directed deposits on a route that have held `CND-TokenUpgraded` or `CND-DepositCapacity` for longer than one of its windows, or `CND-DepositWindow` for longer than two; once, then daily while it stands (`F-018`, amendment 0031) | `pages/directed-wait.md`, `conditions/CND-TokenUpgraded.md`, `conditions/CND-DepositCapacity.md`, `conditions/CND-DepositWindow.md` | yes | **no**: the filter must be added |
+| `directed-binding-alert` | engine: a directed arrival bound by a transfer that is not bezent's own (`F-018`) | `conditions/CND-Unassociated.md` | yes | **no**: the filter must be added |
+| `directed-mints-alert` | core (`services/core/src/directed_alerts.rs`): directed deposits minted on a route in the trailing day above `[directed_alerts] mints_per_day` (`F-018`) | `pages/directed-mints.md`, `procedures/directed-spam.md` | yes | **no**: the filter must be added |
+| `directed-returns-alert` | core: returns of directed arrivals and refunds of directed deposits on a route in the trailing day above `returns_per_day` (`F-018`) | `pages/directed-returns.md` | yes | **no**: the filter must be added |
+| `directed-window-alert` | core: the share of a route's window directed deposits hold, waiting ones included, above `window_share_percent` (`F-018`) | `pages/directed-window.md` | yes | **no**: the filter must be added |
+| `unpaired-direction` | core: an `UnpairedDirection` the EVM endpoint recorded, once per observation (`F-018`, `AC-A6.6`) | `pages/unpaired-direction.md` | yes | **no**: the filter must be added |
+| `origin-token-upgraded` | core: an admitted origin token's proxy emitted `Upgraded`, once per observation; pages and pauses nothing; directed intake of the token is held (`CND-TokenUpgraded`) until two operators lift it (`F-018`, amendment 0031, `d-f018-usdc-upgrade`) | `pages/token-upgraded.md` | yes | **no**: the filter must be added |
 | `resolution-blocked-by-inclusion` | engine | `pages/payout.md` | yes | **no** (and quoted before `F-014`) |
 | `resolution-unprepared-alert` | engine | `pages/payout.md` | yes | **no** |
 | `attested-withdrawal-unrelayed` | engine | `pages/attested.md` | **no, PR #66** | no |
@@ -80,6 +89,13 @@ kind exists on `develop` at this commit.
 The kinds of PR #66 are written in the code of that open pull request, quoted (`kind = "..."`), so it will fail
 `pages.rs` and `runbooks.rs` when it rebases until it records the kind with `%` and the runbook drops its
 `not_on_base` marker. That is intended. The late-mint kinds of PR #72 (on `develop`) were quoted too and are fixed in this change.
+
+The F-018 alerts on directed deposits are alerts only, never a cap (amendment 0029, Open 5 and 6). Their thresholds are the
+core's configuration, `[directed_alerts]`: `mints_per_day` (200 by default), `returns_per_day` (3) and
+`window_share_percent` (50, of the route's window). Each is checked once a minute per deposit route, and a value **above**
+its threshold pages once on crossing, then once a day while it stays above; back at or below, `directed-alert-cleared` is
+logged (an `event_log` entry, no page), and the next crossing pages at once. `unpaired-direction` and
+`origin-token-upgraded` have no threshold: each observation pages once.
 
 Platform alarms with no kind (`pages/platform.md`): a service not running, the store unreachable, the signer refusing an
 unauthenticated caller, the database's storage and CPU.
@@ -174,8 +190,9 @@ Stated as needs; this repository changes none of it.
    actions on.
 2. Add filters for `"kind=statement-publish-failed"`, `"kind=payout-refusal-alert"`,
    `"kind=resolution-blocked-by-inclusion"`, `"kind=resolution-unprepared-alert"`, `"kind=late-mint-"` (a prefix pattern; the late-mint pages of PR #72 are on
-   `develop`), `"kind=lane-use-unknown"` (on the EVM endpoint's log group) and, when its pull request merges,
-   `"kind=attested-"` (also a prefix).
+   `develop`), `"kind=lane-use-unknown"` (on the EVM endpoint's log group), the F-018 pages `"kind=directed-"` (a prefix:
+   the mints, returns and window alerts), `"kind=unpaired-direction"` and `"kind=origin-token-upgraded"`, and, when its pull
+   request merges, `"kind=attested-"` (also a prefix).
 3. Alarm on the metrics above, with missing data treated as breaching.
 4. Give the alarm topic a destination that reaches a person: an on-call service with acknowledgement and escalation, or at
    least a phone-reaching subscription, chosen by the owner. A chat post is not a page.

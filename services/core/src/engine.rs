@@ -109,6 +109,8 @@ const REFUSAL_PAGE_AFTER: usize = 10;
 pub struct Report {
     /// Withdrawals made from redemptions.
     pub withdrawals: usize,
+    /// Directed arrivals decided: made into deposits or returned (`F-018`).
+    pub directed: usize,
     /// Transfers that moved or changed condition.
     pub moved: usize,
     /// Intents recorded (orders and signing intents).
@@ -127,6 +129,9 @@ pub struct Core {
     /// What the reserve check could not even record (amendment 0028): assets held in memory, or
     /// every asset while the check cannot list them.
     unseen: std::sync::Arc<crate::reserve::check::Unseen>,
+    /// The directed arrivals the intake could not decide, so each is logged once an hour, not once a
+    /// cycle (`F-018`; review L4 of PR #136).
+    undecided: std::sync::Arc<crate::directed::Undecided>,
 }
 
 /// What a step did to a transfer.
@@ -175,9 +180,12 @@ struct Mismatch {
 fn purpose(t: &Transfer) -> (&'static str, &'static str) {
     match (t.kind.as_str(), t.refund_of.is_some()) {
         ("deposit", _) => ("mint", "Minted"),
-        ("refund", true) => ("refund-mint", "RefundMinted"),
-        // A withdrawal's payout, and the refund of an unassociated arrival, are payouts on an
-        // origin network (F-009).
+        // A withdrawal's refund is a refund mint to its redeemer (REQ-RF-4).
+        ("refund", true) if t.redeemer.is_some() => ("refund-mint", "RefundMinted"),
+        // A withdrawal's payout, the refund of an unassociated arrival (a directed arrival's return
+        // among them), and the refund of a directed deposit out of review (amendment 0029, Open 2:
+        // paid as its arrival's return is; it has no redeemer) are payouts on an origin network
+        // (F-009).
         _ => ("payout", "Payout"),
     }
 }
@@ -195,9 +203,14 @@ fn pow10(exp: i16) -> Option<u128> {
 fn gate_condition(c: Condition) -> bool {
     matches!(
         c,
-        Condition::Paused | Condition::CutOff | Condition::ReserveShort
+        Condition::Paused | Condition::CutOff | Condition::ReserveShort | Condition::TokenUpgraded
     )
 }
+
+/// The waits of a directed deposit whose time the route's deadline leaves out (amendment 0031;
+/// `REQ-IN-11`): the window, the capacity and the hold on an upgrade of its token. The first mint
+/// attempt's clock starts when the deposit left the last of them ([`Core::mint_clock_start`]).
+const DIRECTED_WAITS: &str = "('CND-DepositWindow', 'CND-DepositCapacity', 'CND-TokenUpgraded')";
 
 /// The Roles modifier's `Status.AllowanceExceeded` (Zodiac Roles v2): the status of its
 /// `ConditionViolation(uint8 status, bytes32 info)` when a call is over an allowance, whose key is
@@ -254,10 +267,25 @@ fn dry_run_condition(dry_run: &Value, allowance: Option<&[u8; 32]>) -> Option<Co
         None
     } else if reason.contains("AboveWindow") || reason.contains("AboveCeiling") {
         Some(Condition::MintWindow)
-    } else if reason.starts_with("Kreivo") {
-        // Kreivo's assets API refused the mint: the destination cannot receive the asset
-        // (REQ-IN-8, REQ-IN-9). bezent never checks the destination itself.
+    } else if bezent_store::DESTINATION_REFUSALS.contains(&reason)
+        && dry_run.pointer("/asset/status").and_then(Value::as_str)
+            == Some(bezent_store::ASSET_LIVE)
+    {
+        // Kreivo's assets API refused to mint to the destination, the asset Live at the dry run's
+        // head as the endpoint read it: the destination cannot receive the asset (REQ-IN-8,
+        // REQ-IN-9). bezent never checks the destination itself; the asset's status is not the
+        // destination.
         Some(Condition::DestinationRefused)
+    } else if reason == "Kreivo" || reason.starts_with("Kreivo(") {
+        // Any other refusal of the assets API (an unknown error, a context the runtime could not
+        // read, the contract's community not authorised, an asset that is not local), or one whose
+        // inner error the endpoint could not read, is no refusal of the destination (review M1 of
+        // PR #136; REQ-RF-1, guardrail 4); and so is the refusal to mint while the asset is not
+        // Live (frozen, being destroyed, gone) or its status is unknown, since Kreivo answers
+        // CannotMint for the whole asset's errors too (review of PR #136). No condition, so it is
+        // the refusal that names nothing, which pages and goes to review at its deadline, and
+        // never the fee rule below.
+        None
     } else if reason.to_ascii_lowercase().contains("fee")
         || reason.contains("Payment")
         || reason.contains("InsufficientBalance")
@@ -277,6 +305,7 @@ impl Core {
             settings,
             late_mint: Default::default(),
             unseen: Default::default(),
+            undecided: Default::default(),
         }
     }
 
@@ -306,6 +335,17 @@ impl Core {
         let mut report = Report {
             withdrawals: self.withdrawals_from_redemptions().await?,
             ..Report::default()
+        };
+        // F-018 (amendment 0029, A2, A5): every final directed arrival nothing binds becomes a
+        // deposit or is returned, in coordinate order, before the open transfers are stepped. A
+        // failure of the intake is logged and the rest of the cycle runs; it is tried again next
+        // cycle (review L4 of PR #136).
+        report.directed = match crate::directed::intake(&self.pool, &self.undecided).await {
+            Ok(decided) => decided,
+            Err(e) => {
+                tracing::error!(error = %e, "REQ-IN-10: the directed intake failed this cycle; the rest of the cycle runs, and it is tried again next cycle");
+                0
+            }
         };
         let open: Vec<i64> = sqlx::query_scalar(
             "SELECT id FROM transfers WHERE NOT is_terminal_state(state) ORDER BY id",
@@ -625,9 +665,11 @@ impl Core {
             // Review M1b of PR #56: a refund of a withdrawal is accepted only once the withdrawal
             // it replaces is `Refunding`, the edge that proved every attempt not executed at
             // finality (INV-8, REQ-RF-1); the store lets only the core create it (0047).
+            // F-018 (amendment 0029, Open 2): so is the refund of a directed deposit, once the
+            // deposit is Refunding out of its review.
             let refunding: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM transfers WHERE id = $1 AND kind = 'withdrawal' \
-                   AND state = 'Refunding')",
+                "SELECT EXISTS (SELECT 1 FROM transfers WHERE id = $1 \
+                   AND kind IN ('withdrawal', 'deposit') AND state = 'Refunding')",
             )
             .bind(original)
             .fetch_one(&mut *conn)
@@ -636,6 +678,12 @@ impl Core {
                 tracing::error!(transfer = %t.bridge_reference, original, "INV-8: a refund whose withdrawal is not Refunding; not accepted");
                 return Ok(Did::default());
             }
+            None
+        } else if self.directed_return(conn, t).await? {
+            // F-018 (amendment 0029, A5, Open 3): the return of a directed arrival is bezent's own,
+            // to the refund address the arrival recorded, and needs no second approver. The core
+            // accepts it when it makes it; this is for one that was made and not accepted. One of
+            // undeclared directing code is an operator's release, and takes the branch below.
             None
         } else {
             let release: Option<i64> = sqlx::query_scalar(
@@ -710,23 +758,30 @@ impl Core {
     /// the payout clock, so a mint (a deposit's or a refund mint) keeps the clock it had, and time
     /// under a pause counts toward its deadline (amendment 0019, open question). Time under any
     /// other condition counts.
+    ///
+    /// `since` is where the attempt's clock starts, when it starts later than the holds may have
+    /// ([`Core::unprepared_deadline`]: the later of the attempt's point and the first final head
+    /// seen after it was ordered): a hold, or the part of one, from before it was never on the
+    /// clock, so it is not left out again (reviews L-a of PR #136 and of its fifth fix round).
     async fn deadline_held(
         &self,
         conn: &mut PgConnection,
         t: &Transfer,
         attempt: i32,
         start: DateTime<Utc>,
+        since: Option<DateTime<Utc>>,
     ) -> sqlx::Result<DateTime<Utc>> {
         // Payouts only (`d-payout-late-signing`): a mint's clock is what it was before A1d.
         let gated = if purpose(t).0 == "payout" {
-            store::held_under_pause_or_cutoff(conn, t.id, attempt - 1).await?
+            store::held_under_pause_or_cutoff(conn, t.id, attempt - 1, since).await?
         } else {
             chrono::Duration::zero()
         };
-        let deadline = match store::held_under_window(conn, t.id, attempt - 1, Some(start)).await? {
-            Some((first, held)) => self.deadline(conn, t, first.max(start)).await? + held,
-            None => self.deadline(conn, t, start).await?,
-        };
+        let deadline =
+            match store::held_under_window(conn, t.id, attempt - 1, Some(start), since).await? {
+                Some((first, held)) => self.deadline(conn, t, first.max(start)).await? + held,
+                None => self.deadline(conn, t, start).await?,
+            };
         Ok(deadline + gated)
     }
 
@@ -896,8 +951,16 @@ impl Core {
         let state = t.state();
         // A pause or a cut-off is measured for a payout only: the mint keeps the clock it had.
         let payout = purpose(t).0 == "payout";
+        // Leaving CND-DepositWindow rests on the destination's head too: the first attempt's clock
+        // starts there (review L5 of PR #136; `Core::mint_clock_start`); and so does leaving the
+        // other waits a directed deposit's deadline leaves out (amendment 0031).
         let measured = [t.condition(), c].iter().any(|x| match x {
-            Some(Condition::PayoutWindow) => true,
+            Some(
+                Condition::PayoutWindow
+                | Condition::DepositWindow
+                | Condition::DepositCapacity
+                | Condition::TokenUpgraded,
+            ) => true,
             Some(Condition::Paused | Condition::CutOff) => payout,
             _ => false,
         });
@@ -983,7 +1046,7 @@ impl Core {
         // The holds of this attempt already left count too: a provider that flaps in and out of
         // the hold does not start the page over (issue #35).
         let after = store::current_attempt(conn, t.id).await?;
-        let before = store::held_under_window(conn, t.id, after, None)
+        let before = store::held_under_window(conn, t.id, after, None, None)
             .await?
             .map_or(Duration::zero(), |(_, held)| held);
         if head.block_time <= since + bound - before.min(bound) {
@@ -1031,8 +1094,44 @@ impl Core {
         if let Some(did) = self.conversion(conn, t, now).await? {
             return Ok(did);
         }
+        // F-018 (amendment 0029, Open 1): a directed deposit over what its route's window had left
+        // waits in CND-DepositWindow, and leaves it by itself once it fits, behind every one waiting
+        // ahead of it by coordinate (the store's `directed_window_fits()`, under the route's lock,
+        // held until this step commits). Leaving it goes to CND-DepositCapacity when the route has no
+        // room (amendment 0031, `d-f018-capacity`), or else straight to the gates' condition, if one
+        // holds it; it is never returned for the window, and never reviewed for it.
+        if t.condition() == Some(Condition::DepositWindow) {
+            let fits: bool = sqlx::query_scalar("SELECT directed_window_fits($1)")
+                .bind(t.id)
+                .fetch_one(&mut *conn)
+                .await?;
+            if !fits {
+                self.deposit_window_alert(conn, t, now).await?;
+                return Ok(Did::default());
+            }
+            tracing::info!(transfer = %t.bridge_reference, "CND-DepositWindow: the window has room; the directed deposit resumes");
+            if !self.capacity_fits(conn, t).await? {
+                tracing::info!(transfer = %t.bridge_reference, "CND-DepositCapacity: the route is at its capacity; the directed deposit waits for room");
+                return self.hold(conn, t, Some(Condition::DepositCapacity)).await;
+            }
+            let next = self.gate(conn, t, 1, now).await?;
+            return self.hold(conn, t, next).await;
+        }
+        // F-018 (amendment 0031, `d-f018-capacity`, ruled: wait): a directed deposit over its route's
+        // capacity waits in CND-DepositCapacity, and leaves it by itself once the route has room,
+        // behind every one waiting ahead of it by coordinate (the store's `directed_capacity_fits()`,
+        // under the route's lock). It is never returned for capacity, and never reviewed for it.
+        if t.condition() == Some(Condition::DepositCapacity) {
+            if !self.capacity_fits(conn, t).await? {
+                self.deposit_capacity_alert(conn, t, now).await?;
+                return Ok(Did::default());
+            }
+            tracing::info!(transfer = %t.bridge_reference, "CND-DepositCapacity: the route has room; the directed deposit resumes");
+            let next = self.gate(conn, t, 1, now).await?;
+            return self.hold(conn, t, next).await;
+        }
         if let Some(c) = t.condition().filter(|c| c.blocks_delivery()) {
-            let start = t.source_final_block_time.unwrap_or(now);
+            let start = self.mint_clock_start(conn, t, now).await?;
             let deadline = self.deadline(conn, t, start).await?;
             if let Some(head) = self.past(conn, &t.destination_network, deadline).await? {
                 return self
@@ -1051,7 +1150,19 @@ impl Core {
         if let Some(why) = self.destination_unbindable(conn, t).await? {
             return self.destination_review(conn, t, why).await;
         }
-        if let Some(c) = self.gate(conn, t, 1, now).await? {
+        let next = self.gate(conn, t, 1, now).await?;
+        // F-018 (amendment 0031; review M2 of PR #142): a directed deposit held by an upgrade of
+        // its token carries nothing, so it was not in flight; leaving the hold, it takes its place
+        // in flight only if the route has room, and otherwise waits for it in CND-DepositCapacity,
+        // behind every one waiting ahead of it (the store's `directed_capacity_fits()`).
+        if t.condition() == Some(Condition::TokenUpgraded)
+            && next != Some(Condition::TokenUpgraded)
+            && !self.capacity_fits(conn, t).await?
+        {
+            tracing::info!(transfer = %t.bridge_reference, "CND-DepositCapacity: the hold on the token is lifted, and the route is at its capacity; the directed deposit waits for room");
+            return self.hold(conn, t, Some(Condition::DepositCapacity)).await;
+        }
+        if let Some(c) = next {
             return self.hold(conn, t, Some(c)).await;
         }
         // The gate opened: its condition clears by itself (§10), then the delivery starts.
@@ -1060,6 +1171,175 @@ impl Core {
         }
         self.deliver(conn, t, State::SourceFinal, 1, None, None)
             .await
+    }
+
+    /// The newest dry run of `t`'s first mint attempt, across its orders, as the store orders
+    /// them for the directed review exit (`directed_refusal_recorded()`, 0145: by block, then row),
+    /// if it is a refusal (review L1 of PR #136).
+    async fn newest_first_mint_refusal(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+    ) -> sqlx::Result<Option<Value>> {
+        let newest: Option<(Value, bool)> = sqlx::query_as(
+            "SELECT p.dry_run, p.dry_run_passed FROM prepared_transactions p \
+             JOIN intents i ON i.id = p.order_intent_id \
+             WHERE i.transfer_id = $1 AND i.attempt = 1 AND i.purpose = 'mint' \
+               AND i.network = $2 AND p.network = $2 \
+             ORDER BY p.dry_run_block_number DESC, p.id DESC LIMIT 1",
+        )
+        .bind(t.id)
+        .bind(&t.destination_network)
+        .fetch_optional(&mut *conn)
+        .await?;
+        Ok(newest.and_then(|(dry_run, passed)| (!passed).then_some(dry_run)))
+    }
+
+    /// The store's answer: whether that dry run recorded the issuing network's refusal of the
+    /// destination, the asset Live at its head (`directed_refusal_recorded()`, 0145). The core holds
+    /// `CND-DestinationRefused` on a first mint attempt only when it did (review L1 of PR #136).
+    async fn first_mint_refusal_recorded(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+    ) -> sqlx::Result<bool> {
+        sqlx::query_scalar("SELECT directed_refusal_recorded($1, NULL, NULL, NULL, NULL)")
+            .bind(t.id)
+            .fetch_one(&mut *conn)
+            .await
+    }
+
+    /// When the clock of a deposit's blocking condition (`CND-DestinationRefused`,
+    /// `CND-AwaitingConversion`), and of its first attempt's refusal that names nothing
+    /// ([`Core::unprepared_deadline`]), starts: the source leg's finality, or, for a directed
+    /// deposit that waited ([`DIRECTED_WAITS`]: `CND-DepositWindow`, `CND-DepositCapacity`,
+    /// `CND-TokenUpgraded`), the later moment it left the last of them, on the destination's final
+    /// head it rested on then (its wall time when no head was recorded), so that the wait takes
+    /// nothing from the route's deadline (reviews L5 and M1 of PR #136; amendment 0031;
+    /// `REQ-IN-9`, `REQ-IN-11`).
+    async fn mint_clock_start(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        now: DateTime<Utc>,
+    ) -> sqlx::Result<DateTime<Utc>> {
+        let finality = t.source_final_block_time.unwrap_or(now);
+        let left: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(&format!(
+            "SELECT COALESCE(x.block_time, x.seen_at) FROM transitions x \
+             WHERE x.transfer_id = $1 \
+               AND (x.condition IS NULL OR x.condition NOT IN {DIRECTED_WAITS}) \
+               AND x.id > (SELECT max(w.id) FROM transitions w \
+                           WHERE w.transfer_id = $1 AND w.condition IN {DIRECTED_WAITS}) \
+             ORDER BY x.id LIMIT 1"
+        ))
+        .bind(t.id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        Ok(left.flatten().map_or(finality, |at| at.max(finality)))
+    }
+
+    /// Whether directed deposit `t` fits in its route's capacity, behind every deposit waiting for it
+    /// ahead by coordinate (the store's `directed_capacity_fits()`, migration 0150, which takes the
+    /// route's lock until this step commits; amendment 0031, `d-f018-capacity`).
+    async fn capacity_fits(&self, conn: &mut PgConnection, t: &Transfer) -> sqlx::Result<bool> {
+        sqlx::query_scalar("SELECT directed_capacity_fits($1)")
+            .bind(t.id)
+            .fetch_one(conn)
+            .await
+    }
+
+    /// Pages a human when a directed deposit waiting in `CND-DepositCapacity` can never have room as
+    /// its route is declared now: the route was removed, or its capacity declared zero. It changes
+    /// nothing: the deposit keeps waiting, is not returned or reviewed for it (amendment 0031,
+    /// `d-f018-capacity`), and what to do is the operator's under the governed process. Once per
+    /// reason, then once a day of cycle time while it lasts (`deposit-capacity-alert`, in the event
+    /// log too).
+    async fn deposit_capacity_alert(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        now: DateTime<Utc>,
+    ) -> sqlx::Result<()> {
+        let why: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT CASE WHEN r.asset IS NULL THEN 'route-not-declared' \
+                         WHEN r.capacity < 1 THEN 'capacity-zero' END \
+             FROM transfers t LEFT JOIN routes r ON r.asset = t.asset \
+               AND r.network = t.source_network AND r.direction = 'deposit' \
+             WHERE t.id = $1",
+        )
+        .bind(t.id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(why) = why.flatten() else {
+            return Ok(());
+        };
+        let last: Option<(Option<String>, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT payload ->> 'reason', (payload ->> 'at')::timestamptz FROM event_log \
+             WHERE kind = 'deposit-capacity-alert' AND transfer_id = $1 ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(t.id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some((Some(reason), Some(at))) = last
+            && reason == why
+            && now < at + Duration::days(1)
+        {
+            return Ok(());
+        }
+        let detail = json!({"spec": "CND-DepositCapacity, REQ-LM-4, REQ-IN-11",
+                            "bridge_reference": t.bridge_reference, "reason": why,
+                            "at": now.to_rfc3339()});
+        store::event(conn, "deposit-capacity-alert", Some(t.id), &detail).await?;
+        tracing::error!(kind = %"deposit-capacity-alert", transfer = %t.bridge_reference, %detail,
+            "page: a directed deposit waits in CND-DepositCapacity that its route, as declared now, can never carry; was the route removed or its capacity set to zero?");
+        Ok(())
+    }
+
+    /// Pages a human when a directed deposit waiting in `CND-DepositWindow` can never fit as its
+    /// route is declared now: the route was removed, or its window's limit lowered below the
+    /// deposit's amount (review L2 of PR #136). It changes nothing: the deposit keeps waiting, is not
+    /// returned or reviewed for it (amendment 0029, Open 1), and what to do is the operator's under
+    /// the governed process. Once per reason, then once a day of cycle time while it lasts
+    /// (`deposit-window-alert`, in the event log too).
+    async fn deposit_window_alert(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        now: DateTime<Utc>,
+    ) -> sqlx::Result<()> {
+        let why: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT CASE WHEN r.asset IS NULL THEN 'route-not-declared' \
+                         WHEN t.amount > r.window_limit THEN 'above-window-limit' END \
+             FROM transfers t LEFT JOIN routes r ON r.asset = t.asset \
+               AND r.network = t.source_network AND r.direction = 'deposit' \
+             WHERE t.id = $1",
+        )
+        .bind(t.id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(why) = why.flatten() else {
+            return Ok(());
+        };
+        let last: Option<(Option<String>, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT payload ->> 'reason', (payload ->> 'at')::timestamptz FROM event_log \
+             WHERE kind = 'deposit-window-alert' AND transfer_id = $1 ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(t.id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some((Some(reason), Some(at))) = last
+            && reason == why
+            && now < at + Duration::days(1)
+        {
+            return Ok(());
+        }
+        let detail = json!({"spec": "CND-DepositWindow, REQ-LM-1, REQ-IN-11",
+                            "bridge_reference": t.bridge_reference, "reason": why,
+                            "amount": t.amount, "at": now.to_rfc3339()});
+        store::event(conn, "deposit-window-alert", Some(t.id), &detail).await?;
+        tracing::error!(kind = %"deposit-window-alert", transfer = %t.bridge_reference, %detail,
+            "page: a directed deposit waits in CND-DepositWindow that its route, as declared now, can never fit; was the route removed or its window lowered?");
+        Ok(())
     }
 
     /// A deposit that named a convertible arrival (`REQ-CV-1`, `REQ-CV-2`, `REQ-CV-6`; amendment
@@ -1188,6 +1468,72 @@ impl Core {
         Ok(Did::moved())
     }
 
+    /// Whether `t` is bezent's own return of a directed arrival, accepted with no second approver:
+    /// the refund of an unassociated arrival bound to one whose directing contract is declared
+    /// (`REQ-IN-11`, `REQ-AS-11`; the store fixes its destination to the recorded refund address,
+    /// 0144, and asks the same, 0148). The return of an undeclared one is an operator's release
+    /// (0149), accepted only under its approved release (`REQ-IN-6`, `REQ-GV-5`), and a return with a
+    /// release recorded on it stays one, whatever is declared afterwards.
+    async fn directed_return(&self, conn: &mut PgConnection, t: &Transfer) -> sqlx::Result<bool> {
+        if t.kind != "refund" || t.refund_of.is_some() {
+            return Ok(false);
+        }
+        let Some(source) = t.source() else {
+            return Ok(false);
+        };
+        let Some(o) = store::observation_at(conn, &source).await? else {
+            return Ok(false);
+        };
+        if o.kind != "directed_arrival" {
+            return Ok(false);
+        }
+        // Review M1 of PR #139, third round: not one an operator released. A declaration that lands
+        // after the release must not make its return the core's own and waive its approver; the
+        // store asks the same (`directed_return()`, 0149).
+        let released: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM manual_actions \
+               WHERE transfer_id = $1 AND kind = 'release-unassociated')",
+        )
+        .bind(t.id)
+        .fetch_one(&mut *conn)
+        .await?;
+        if released {
+            return Ok(false);
+        }
+        sqlx::query_scalar("SELECT directing_declared($1, $2, $3, $4)")
+            .bind(&o.network)
+            .bind(o.token.as_deref())
+            .bind(
+                o.detail
+                    .get("directing")
+                    .and_then(serde_json::Value::as_str),
+            )
+            .bind(o.block_number)
+            .fetch_one(conn)
+            .await
+    }
+
+    /// Whether directed deposit `t` may leave its review into `Refunding` (amendment 0029, Open 2;
+    /// amendment 0031, `d-f018-review-exit-later`): it entered review from `Source-Final`, no mint
+    /// attempt of it was ever signed, and, judged on the evidence as the review stands, the newest
+    /// dry run of its first mint is the issuing network's refusal of its destination with the asset
+    /// Live, made after the review began or the one whose deadline began it. The store's own answer
+    /// (`directed_review_refund_open()`, 0150), which it asks again of every row the resolution
+    /// writes.
+    async fn directed_review_refund_open(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+    ) -> sqlx::Result<bool> {
+        if t.kind != "deposit" {
+            return Ok(false);
+        }
+        sqlx::query_scalar("SELECT directed_review_refund_open($1)")
+            .bind(t.id)
+            .fetch_one(conn)
+            .await
+    }
+
     /// The conditions that hold new work before a delivery (`REQ-GV-1`, `REQ-LM-1`, `REQ-OT-5`).
     /// A refund completes work in flight: no pause or cut-off holds it (F-006 NOTES). `attempt` is
     /// the attempt it would let through: one the signer has signed is in flight whatever the store
@@ -1209,6 +1555,19 @@ impl Core {
         if held || (t.kind == "deposit" && crate::reserve::book::mints_paused(conn, &asset).await?)
         {
             return Ok(Some(Condition::Paused));
+        }
+        // F-018 (amendment 0031, `d-f018-usdc-upgrade`; REQ-AS-12): an upgrade of a directed
+        // deposit's origin token, at or before its arrival and not lifted by two operators, holds its
+        // mint, as a pause holds new work: an attempt already signed is in flight and goes on
+        // (INV-15). A requester's deposit is never held by it (`directed_token_held()`, 0150).
+        if t.kind == "deposit"
+            && sqlx::query_scalar::<_, bool>("SELECT directed_token_held($1)")
+                .bind(t.id)
+                .fetch_one(&mut *conn)
+                .await?
+            && !self.attempt_signed(conn, t, attempt).await?
+        {
+            return Ok(Some(Condition::TokenUpgraded));
         }
         let cutoffs: Option<Value> = sqlx::query_scalar(
             "SELECT cutoffs FROM routes WHERE asset = $1 AND network = $2 AND direction = $3",
@@ -1733,7 +2092,7 @@ impl Core {
             // Ordered, and the endpoint has prepared nothing (it is down): the same deadline as a
             // refused preparation (issue #48). Only this endpoint path reads it.
             return self
-                .unprepared_deadline(conn, t, None, from, attempt, Some(order_id))
+                .unprepared_deadline(conn, t, None, from, attempt, Some(order_id), manual)
                 .await;
         };
         if prepared_network != order_network || order_network != t.destination_network {
@@ -1744,19 +2103,45 @@ impl Core {
         if passed && prepared_order != order_id {
             // A passing row of an earlier order (it arrived late) is never signed over.
             return self
-                .unprepared_deadline(conn, t, None, from, attempt, Some(order_id))
+                .unprepared_deadline(conn, t, None, from, attempt, Some(order_id), manual)
                 .await;
         }
         if !passed {
-            // A refusal that is not the allowance's does not keep a payout window hold (S-2).
+            // A refusal that is not the allowance's does not keep a payout window hold (S-2), nor
+            // one that is not the destination's a destination hold: a refusal to mint while the
+            // asset is not Live is no evidence against the destination (review of PR #136).
             let allowance = self.delivery_allowance(conn, t).await?;
-            let held = dry_run_condition(&dry_run, allowance.as_ref())
-                .or(t.condition().filter(|c| *c != Condition::PayoutWindow));
+            let kept = t
+                .condition()
+                .filter(|c| !matches!(c, Condition::PayoutWindow | Condition::DestinationRefused));
+            // Every deposit's first mint attempt, a requester's as well as a directed one, decides
+            // its hold on the dry run the store reads for the directed review exit
+            // (`directed_refusal_recorded()`, 0145, which asks nothing of how the deposit was made):
+            // the newest refusal across the attempt's orders by block, then row, so a late row of a
+            // superseded order cannot hold the destination's condition the store will not accept,
+            // or drop one it would (review L1 of PR #136). A refund mint (`refund-mint`) and later
+            // attempts keep the current order's own row. A resolution's delivery reads no row from
+            // before it (INV-9).
+            let first_mint = attempt == 1 && purpose == "mint" && manual.is_none();
+            let dry_run = if first_mint {
+                self.newest_first_mint_refusal(conn, t)
+                    .await?
+                    .unwrap_or(dry_run)
+            } else {
+                dry_run
+            };
+            let mut held = dry_run_condition(&dry_run, allowance.as_ref()).or(kept);
+            if first_mint
+                && held == Some(Condition::DestinationRefused)
+                && !self.first_mint_refusal_recorded(conn, t).await?
+            {
+                held = kept;
+            }
             if prepared_order != order_id {
                 // A new order waits for its preparation; a refusal that keeps coming back still
                 // has its deadline (issue #25).
                 return self
-                    .unprepared_deadline(conn, t, held, from, attempt, None)
+                    .unprepared_deadline(conn, t, held, from, attempt, None, manual)
                     .await;
             }
             if from != State::NeedsReview {
@@ -1781,7 +2166,7 @@ impl Core {
             }
             if !did.moved {
                 let due = self
-                    .unprepared_deadline(conn, t, held, from, attempt, None)
+                    .unprepared_deadline(conn, t, held, from, attempt, None, manual)
                     .await?;
                 did.moved |= due.moved;
             }
@@ -2079,8 +2464,10 @@ impl Core {
 
     /// `Delivering`, unknown: review past its deadline, never a refund or a retry (`REQ-RV-1`,
     /// `AC-B1.4`). The attempt's clock is the chain's: it starts at the final point it rests on
-    /// (the previous attempt's proof), or at the source leg's finality for the first; and it
-    /// restarts at the final head where the transfer last left `CND-PayoutWindow`, so a payout
+    /// (the previous attempt's proof), or for the first at the source leg's finality, or when a
+    /// directed deposit left its last wait (`CND-DepositWindow`, `CND-DepositCapacity`, `CND-TokenUpgraded`) if it waited ([`Core::mint_clock_start`];
+    /// review M-a of PR #136); and it restarts at the final head where the transfer last left
+    /// `CND-PayoutWindow`, so a payout
     /// released after its original deadline is neither reviewed nor cancelled for the time it
     /// waited (amendment 0012; review M-1); the time it waited under a pause or a cut-off is left
     /// out the same way (amendment 0019, A1d; [`Core::deadline_held`]). On a network
@@ -2103,8 +2490,17 @@ impl Core {
         .bind(attempt)
         .fetch_one(&mut *conn)
         .await?;
-        let started = started.or(t.source_final_block_time).unwrap_or(now);
-        let deadline = self.deadline_held(conn, t, attempt, started).await?;
+        let started = match started {
+            Some(at) => at,
+            // The first attempt out of `Source-Final` records no point of its own: its clock is the
+            // mint's, the source leg's finality, or, for a directed deposit that waited in
+            // `CND-DepositWindow`, when it left the window, so the wait takes nothing from the
+            // signed mint's deadline either (review M-a of PR #136; `REQ-IN-9`). A transfer that
+            // never waited (a withdrawal, a requester's deposit) starts at its finality, as before.
+            None if attempt == 1 => self.mint_clock_start(conn, t, now).await?,
+            None => t.source_final_block_time.unwrap_or(now),
+        };
+        let deadline = self.deadline_held(conn, t, attempt, started, None).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
         };
@@ -2174,23 +2570,28 @@ impl Core {
     /// withdrawal, the refund: the cancellation in [`Core::refund`]). It is never refunded or failed on its
     /// own (`REQ-RF-1`).
     ///
-    /// The clock is the attempt's: the source leg's finality for the first attempt, the previous
-    /// attempt's proof of non-execution for a later one, with the time held in `CND-PayoutWindow`
-    /// left out (amendment 0012), and the time held under a pause or a cut-off (amendment 0019,
-    /// A1d). Time under the other conditions counts, since only a
+    /// The clock is the attempt's: for the first attempt, the source leg's finality, or when a
+    /// directed deposit left its last wait (`CND-DepositWindow`, `CND-DepositCapacity`, `CND-TokenUpgraded`) if it waited ([`Core::mint_clock_start`];
+    /// review M1 of PR #136); the previous attempt's proof of non-execution for a later one; with
+    /// the time held in `CND-PayoutWindow` left out (amendment 0012), and the time held under a
+    /// pause or a cut-off (amendment 0019, A1d). Time under the other conditions counts, since only a
     /// refusal that names nothing is measured: `CND-FeeShort`, `CND-MintWindow` and the gates
     /// resume by themselves (§10), and `CND-DestinationRefused` has its own deadline.
     ///
     /// A preparation that never happens (the endpoint is down, so no row exists) has the same
-    /// deadline (issue #48), counted from the later of the attempt's clock and the first final head
-    /// the core saw at or after the order (`ordered`). The budget is the route's time on the
+    /// deadline (issue #48). Both are counted from the later of the attempt's clock and the first
+    /// final head the core saw at or after the attempt's first order (after the resolution's action
+    /// `manual`, for a delivery a resolution runs), as §5.4 words it for both (review L-a of PR #136):
+    /// a retry's new order does not restart it. The budget is the route's time on the
     /// destination's clock from that head; it is not promised to be the whole of it in wall time: a
     /// head older than the order (an observer that lags) or a stall after that head both count.
-    /// Only the endpoint path in [`Core::deliver`] asks.
+    /// `ordered` is the order with no preparation, which only the endpoint path in [`Core::deliver`]
+    /// names.
     ///
     /// A delivery a review resolution runs is not moved to review again: the transfer is in review
     /// already. Where such an order has no preparation after the same time it pages, once per order
     /// ([`Core::resolution_unprepared_page`]).
+    #[allow(clippy::too_many_arguments)]
     async fn unprepared_deadline(
         &self,
         conn: &mut PgConnection,
@@ -2199,6 +2600,7 @@ impl Core {
         from: State,
         attempt: i32,
         ordered: Option<i64>,
+        manual: Option<i64>,
     ) -> sqlx::Result<Did> {
         if held.is_some() || t.condition().is_some() {
             return Ok(Did::default());
@@ -2209,7 +2611,14 @@ impl Core {
             return Ok(Did::default());
         }
         let start = if attempt <= 1 {
-            t.source_final_block_time
+            // The first attempt's clock is the mint's (review M1 of PR #136, L5; §5.4): the source
+            // leg's finality, or, for a directed deposit that waited in `CND-DepositWindow`, when it
+            // left the window, so the wait takes nothing from the route's deadline here either. A
+            // deposit that never waited (a requester's, say) starts at its finality, as before.
+            match t.source_final_block_time {
+                Some(finality) => Some(self.mint_clock_start(conn, t, finality).await?),
+                None => None,
+            }
         } else {
             match store::proof_of(conn, t.id, attempt - 1).await? {
                 Some(ProofPoint::Final(p)) => Some(p.block_time),
@@ -2219,28 +2628,41 @@ impl Core {
         let Some(start) = start else {
             return Ok(Did::default());
         };
-        let mut start = start;
-        if let Some(order) = ordered {
-            // The endpoint is given the route's time from the first final head the core sees at or
-            // after the order, on the destination's clock. A head read before the order would count
-            // the time the head feed stood still against an endpoint that was never asked: after a
-            // stall of the route's length the first head would send a healthy order to review. No
-            // such head yet: the order has not started to age.
-            let at: Option<DateTime<Utc>> = sqlx::query_scalar(
-                "SELECT h.block_time FROM final_heads h JOIN intents o ON o.id = $1 \
-                 WHERE h.network = $2 AND h.seen_at >= o.recorded_at \
-                 ORDER BY h.seen_at, h.block_number LIMIT 1",
-            )
-            .bind(order)
-            .bind(&t.destination_network)
-            .fetch_optional(&mut *conn)
+        // §5.4 (amendment 0020), for a preparation refused without a named condition and for one that
+        // never happened alike: the route's time counts from the later of the attempt's clock and the
+        // first final head the core sees at or after the attempt was ordered, on the destination's
+        // clock. A head read before the order would count the time the head feed stood still against
+        // an endpoint that was never asked: after a stall of the route's length the first head would
+        // send a healthy order to review. The attempt's FIRST order sets it, so the new order each
+        // refusal makes after its retry interval does not restart the clock; for a resolution's
+        // delivery, its first order after the action (INV-9: nothing from before it is read). No
+        // such head yet: the attempt has not started to age (review L-a of PR #136).
+        let (purpose, _) = purpose(t);
+        let at: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT h.block_time FROM final_heads h, \
+                 (SELECT o.recorded_at FROM intents o \
+                  WHERE o.transfer_id = $1 AND o.attempt = $2 AND o.purpose = $3 \
+                    AND o.payload ? 'order' \
+                    AND ($5::bigint IS NULL OR o.recorded_at >= \
+                         (SELECT recorded_at FROM manual_actions WHERE id = $5)) \
+                  ORDER BY o.id LIMIT 1) first \
+             WHERE h.network = $4 AND h.seen_at >= first.recorded_at \
+             ORDER BY h.seen_at, h.block_number LIMIT 1",
+        )
+        .bind(t.id)
+        .bind(attempt)
+        .bind(purpose)
+        .bind(&t.destination_network)
+        .bind(manual)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(at) = at else {
+            return Ok(Did::default());
+        };
+        let start = at.max(start);
+        let deadline = self
+            .deadline_held(conn, t, attempt, start, Some(start))
             .await?;
-            let Some(at) = at else {
-                return Ok(Did::default());
-            };
-            start = at.max(start);
-        }
-        let deadline = self.deadline_held(conn, t, attempt, start).await?;
         let Some(head) = self.past(conn, &t.destination_network, deadline).await? else {
             return Ok(Did::default());
         };
@@ -2755,6 +3177,99 @@ impl Core {
         Ok(Did::moved())
     }
 
+    /// Runs the approved resolution of directed deposit `t`'s review into `Refunding` (amendment
+    /// 0029, A5, Open 2; `REQ-RV-2`, `REQ-GV-5`). The deposit is closed to minting first: its
+    /// attempt 1, ordered and never signed, is cancelled under the resolution, so the store records
+    /// nothing for it again (amendment 0014's reading; `INV-8`). Then its refund, a transfer of its
+    /// own (`REQ-RF-3`), paid as its arrival's return is (`REQ-IN-11`): its asset and amount, on the
+    /// arrival's network, to the refund destination the deposit took from the arrival (`REQ-RF-2`),
+    /// with the return's bridge reference (`bz-u-…`, so the arrival is returned once whichever way)
+    /// and payout reference. The store checks every one of these again.
+    async fn directed_refund(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        point: &Point,
+        action: i64,
+    ) -> sqlx::Result<Did> {
+        let unsigned: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM intents WHERE transfer_id = $1 AND attempt = 1) \
+                AND NOT EXISTS (SELECT 1 FROM unsigned_attempt_cancellations \
+                                WHERE transfer_id = $1 AND attempt = 1)",
+        )
+        .bind(t.id)
+        .fetch_one(&mut *conn)
+        .await?;
+        if unsigned {
+            store::cancel_unsigned_attempt(conn, t.id, 1, action).await?;
+            tracing::info!(transfer = %t.bridge_reference, action, "INV-8, REQ-RF-1: the directed deposit's mint, ordered and never signed, is cancelled under the approved resolution");
+        }
+        // The supersede of earlier resolutions ([`Core::supersede_for_directed_refund`]) and the
+        // cancellation above are in this step's transaction: when the refund cannot be made, the
+        // step fails, so the transaction rolls back and none of them is committed without the
+        // refund (review L1 of PR #142). The step is tried again next cycle.
+        let unproven = store::attempts_unproven(conn, t.id).await?;
+        if !unproven.is_empty() {
+            tracing::error!(transfer = %t.bridge_reference, attempts = ?unproven, "INV-8: an attempt of the directed deposit is not closed; no refund, and nothing of the resolution is committed");
+            return Err(sqlx::Error::InvalidArgument(format!(
+                "INV-8: directed deposit {}: attempts {unproven:?} are not closed; no refund",
+                t.bridge_reference
+            )));
+        }
+        let refund_to: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT refund_destination_network, refund_destination FROM transfers WHERE id = $1",
+        )
+        .bind(t.id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let (Some((Some(network), Some(destination))), Some(source)) = (refund_to, t.source())
+        else {
+            tracing::error!(transfer = %t.bridge_reference, "REQ-RF-2: the directed deposit has no refund destination; no refund, and nothing of the resolution is committed");
+            return Err(sqlx::Error::InvalidArgument(format!(
+                "REQ-RF-2: directed deposit {}: no refund destination; no refund",
+                t.bridge_reference
+            )));
+        };
+        sqlx::query(
+            "INSERT INTO transfers (bridge_reference, request_reference, kind, asset, amount, \
+                 destination_network, destination, refund_of, source_network, source_block_number, \
+                 source_block_hash, source_position_kind, source_position_index, \
+                 on_chain_reference, state) \
+             VALUES ($1, $2, 'refund', $3, $4::numeric, $5, $6, $7, $8, $9, $10, $11::position_kind, \
+                 $12, $13, 'Received') \
+             ON CONFLICT (bridge_reference) DO NOTHING",
+        )
+        .bind(refs::unassociated_refund(&source))
+        .bind(format!("{}:refund", t.request_reference))
+        .bind(&t.asset)
+        .bind(&t.amount)
+        .bind(&network)
+        .bind(&destination)
+        .bind(t.id)
+        .bind(&source.network)
+        .bind(source.block_number)
+        .bind(&source.block_hash)
+        .bind(&source.position_kind)
+        .bind(source.position_index)
+        .bind(refs::unassociated_refund_reference(&source).to_vec())
+        .execute(&mut *conn)
+        .await?;
+        store::append(
+            conn,
+            t.id,
+            &Move {
+                from: State::NeedsReview,
+                to: State::Refunding,
+                condition: None,
+                point: Some(point),
+                attempt: None,
+                manual_action: Some(action),
+            },
+        )
+        .await?;
+        Ok(Did::moved())
+    }
+
     /// `Delivered`: final and executed in full, withdrawn, proven not executed, or unknown past
     /// its deadline.
     async fn delivered(
@@ -3018,6 +3533,14 @@ impl Core {
                 self.withheld(conn, t, Some(action), &to, now).await?;
             }
         }
+        // F-018 (amendment 0031, `d-f018-review-exit-later`): while the directed exit is open, an
+        // approved resolution into Refunding is reached past the earlier resolutions into Delivering
+        // that have not run (each waits on a refused preparation), so that it is judged next. They
+        // are superseded only once it passes its own checks, the edge's and the evidence's
+        // ([`Core::supersede_for_directed_refund`], in the Refunding arm below; review L1 of
+        // PR #142); a refund refused for its evidence leaves them as they were.
+        let directed_open =
+            before == State::SourceFinal && self.directed_review_refund_open(conn, t).await?;
         let action: Option<Action> = sqlx::query_as(
             "SELECT a.id, a.to_state::text, a.network, a.block_number, a.block_hash, a.block_time, \
                     EXISTS (SELECT 1 FROM manual_approvals p WHERE p.action_id = a.id) \
@@ -3027,12 +3550,22 @@ impl Core {
                AND NOT EXISTS (SELECT 1 FROM transitions x WHERE x.manual_action_id = a.id) \
                AND NOT EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'review-evidence-refused' \
                                AND e.payload ->> 'manual_action_id' = a.id::text) \
+               AND NOT ($5 AND a.to_state = 'Delivering' AND EXISTS ( \
+                   SELECT 1 FROM manual_actions r \
+                   WHERE r.transfer_id = a.transfer_id AND r.kind = 'review-resolution' \
+                     AND r.recorded_at >= $2 AND r.to_state = 'Refunding' AND r.id > a.id \
+                     AND EXISTS (SELECT 1 FROM manual_approvals p WHERE p.action_id = r.id) \
+                     AND NOT EXISTS (SELECT 1 FROM transitions x WHERE x.manual_action_id = r.id) \
+                     AND NOT EXISTS (SELECT 1 FROM event_log e \
+                                     WHERE e.kind = 'review-evidence-refused' \
+                                       AND e.payload ->> 'manual_action_id' = r.id::text))) \
              ORDER BY a.id LIMIT 1",
         )
         .bind(t.id)
         .bind(entered_at)
         .bind(blocked)
         .bind(&withheld)
+        .bind(directed_open)
         .fetch_optional(&mut *conn)
         .await?;
         let Some((action, to, network, number, hash, time, approved)) = action else {
@@ -3050,7 +3583,13 @@ impl Core {
         };
         let attempt = store::current_attempt(conn, t.id).await?;
         let new_attempt = to == State::Delivering && before != State::SourceFinal;
-        if !review_exit(before, to, new_attempt) {
+        // F-018 (amendment 0029, A5, Open 2): the one exit a directed deposit gains, and no other
+        // transfer: out of a review entered from Source-Final, with no mint attempt ever signed, into
+        // Refunding, to its refund destination, judged on the evidence as the review stands
+        // (amendment 0031, `d-f018-review-exit-later`).
+        let directed = bezent_core::directed_review_exit(before, to)
+            && self.directed_review_refund_open(conn, t).await?;
+        if !directed && !review_exit(before, to, new_attempt) {
             return self
                 .refuse_evidence(
                     conn,
@@ -3154,6 +3693,11 @@ impl Core {
                 )
                 .await
             }
+            State::Refunding if directed => {
+                self.supersede_for_directed_refund(conn, t, entered_at, action)
+                    .await?;
+                self.directed_refund(conn, t, &point, action).await
+            }
             State::Refunding => {
                 self.refund(conn, t, State::NeedsReview, &point, Some(action))
                     .await
@@ -3186,6 +3730,48 @@ impl Core {
         }
     }
 
+    /// Amendment 0031 (`d-f018-review-exit-later`): once the directed review exit is open and the
+    /// approved resolution `refund` into `Refunding` of this review has passed the edge's and the
+    /// evidence's checks, each earlier resolution into `Delivering` that has not run (its delivery
+    /// waits on a refused preparation) is superseded: it is recorded as refused, with that reason,
+    /// in the transaction of the refund (review L1 of PR #142). Its order was never signed (the exit
+    /// is open only so), and the refund cancels it (`unsigned_attempt_cancellations`, amendment
+    /// 0014's reading).
+    async fn supersede_for_directed_refund(
+        &self,
+        conn: &mut PgConnection,
+        t: &Transfer,
+        entered_at: DateTime<Utc>,
+        refund: i64,
+    ) -> sqlx::Result<()> {
+        let earlier: Vec<i64> = sqlx::query_scalar(
+            "SELECT a.id FROM manual_actions a \
+             WHERE a.transfer_id = $1 AND a.kind = 'review-resolution' AND a.recorded_at >= $2 \
+               AND a.to_state = 'Delivering' AND a.id < $3 \
+               AND NOT EXISTS (SELECT 1 FROM transitions x WHERE x.manual_action_id = a.id) \
+               AND NOT EXISTS (SELECT 1 FROM event_log e WHERE e.kind = 'review-evidence-refused' \
+                               AND e.payload ->> 'manual_action_id' = a.id::text) \
+             ORDER BY a.id",
+        )
+        .bind(t.id)
+        .bind(entered_at)
+        .bind(refund)
+        .fetch_all(&mut *conn)
+        .await?;
+        for action in earlier {
+            tracing::info!(transfer = %t.bridge_reference, action, refund,
+                "REQ-RV-2: a resolution into Delivering is superseded by an approved refund; the issuing network refused the destination since");
+            self.refuse_evidence(
+                conn,
+                t,
+                action,
+                "superseded: the issuing network refused the destination since, and a later resolution into Refunding is approved",
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Whether `evidence` is the coordinate of the edge `before -> to`, from what the endpoints
     /// recorded at final blocks (`REQ-RV-2`: verified by bezent, never taken from the caller).
     async fn evidence_holds(
@@ -3203,8 +3789,11 @@ impl Core {
                 && o.network == evidence.network
         };
         // Every edge but an inclusion rests on a final point the endpoints recorded; an inclusion
-        // rests on the leg's own coordinate, observed at a final block.
-        if to != State::Delivered {
+        // rests on the leg's own coordinate, observed at a final block. The directed review exit
+        // rests on the issuing network's refusal, at the finalized block the endpoint dry-ran the
+        // mint at and recorded with it (below), which need not be a head recorded on its own.
+        let directed_exit = before == State::SourceFinal && to == State::Refunding;
+        if to != State::Delivered && !directed_exit {
             let is_final_head = store::final_point(
                 conn,
                 &evidence.network,
@@ -3270,6 +3859,36 @@ impl Core {
                     _ => false,
                 };
                 evidence.network == t.destination_network && !on_arrival
+            }
+            // F-018 (amendment 0029, Open 2): the directed exit rests on the issuing network's own
+            // refusal of the destination, the block of attempt 1's latest dry run, refused for it,
+            // with the block time the endpoint read from the chain and recorded with it, as the
+            // store holds them; not on just any final point there, nor on a time the resolution
+            // names (review M1, L-a and L-b of PR #136; REQ-IN-9, REQ-RF-1). Nothing was signed,
+            // so there is no proof of non-execution to name.
+            (State::SourceFinal, State::Refunding) => {
+                // A head recorded at that block has the same time as the evidence names.
+                let head_agrees = store::final_point(
+                    conn,
+                    &evidence.network,
+                    evidence.block_number,
+                    &evidence.block_hash,
+                )
+                .await?
+                .is_none_or(|p| p.block_time == evidence.block_time);
+                evidence.network == t.destination_network
+                    && head_agrees
+                    && self.directed_review_refund_open(conn, t).await?
+                    && sqlx::query_scalar::<_, bool>(
+                        "SELECT directed_refusal_recorded($1, $2, $3, $4, $5)",
+                    )
+                    .bind(t.id)
+                    .bind(&evidence.network)
+                    .bind(evidence.block_number)
+                    .bind(&evidence.block_hash)
+                    .bind(evidence.block_time)
+                    .fetch_one(&mut *conn)
+                    .await?
             }
             (State::Delivering | State::Delivered, State::Delivering | State::Refunding) => {
                 let proven = matches!(store::proof_of(conn, t.id, attempt).await?,
@@ -3389,11 +4008,53 @@ mod tests {
 
     #[test]
     fn req_in_9_a_mint_the_issuing_network_refuses_holds_cnd_destination_refused() {
-        let reason = |r: &str| dry_run_condition(&json!({"outcome": "refused", "reason": r}), None);
+        let reason = |r: &str| {
+            dry_run_condition(
+                &json!({"outcome": "refused", "reason": r,
+                        "asset": {"id": "Here(1)", "status": "Live", "supply": "5"}}),
+                None,
+            )
+        };
         assert_eq!(
-            reason("Kreivo(Unknown)"),
+            reason("Kreivo(Assets(CannotMint))"),
             Some(Condition::DestinationRefused)
         );
+        // Review of PR #136: Kreivo answers CannotMint for the whole asset's errors too. Only a
+        // Live asset's refusal is the destination's; a frozen one, one being destroyed, one gone,
+        // or one whose status the endpoint could not read (or did not record) holds nothing.
+        for asset in [
+            json!({"id": "Here(1)", "status": "Frozen", "supply": "5"}),
+            json!({"id": "Here(1)", "status": "Destroying", "supply": "5"}),
+            json!({"id": "Here(1)", "status": null, "supply": null}),
+            json!({"id": "Here(1)", "status": null, "supply": null, "error": "undecodable"}),
+            json!({"id": "Here(1)", "status": "live"}),
+            json!("Live"),
+            Value::Null,
+        ] {
+            let mut run = json!({"outcome": "refused", "reason": "Kreivo(Assets(CannotMint))"});
+            if !asset.is_null() {
+                run["asset"] = asset.clone();
+            }
+            assert_eq!(dry_run_condition(&run, None), None, "{asset}");
+        }
+        // Review M1 of PR #136 (REQ-RF-1, guardrail 4): every other refusal of the assets API, and
+        // one with no inner error, is the refusal that names nothing, never the destination's and
+        // never a fee shortfall.
+        for other in [
+            "Kreivo",
+            "Kreivo(UnknownError)",
+            "Kreivo(ExtQueryError)",
+            "Kreivo(Assets(CannotDeposit))",
+            "Kreivo(Assets(CannotTransfer))",
+            "Kreivo(Assets(CannotBurn))",
+            "Kreivo(Assets(NotAGroupContract))",
+            "Kreivo(Assets(NotAuthorised))",
+            "Kreivo(Assets(NotALocalAsset))",
+            "Kreivo(0x0209)",
+            "Kreivo(Assets(CannotMint)) fee",
+        ] {
+            assert_eq!(reason(other), None, "{other}");
+        }
         assert_eq!(reason("AboveWindow"), Some(Condition::MintWindow));
         // A pause is bezent's own declaration (the gate); a contract that refuses as paused when
         // bezent declares no pause holds nothing and is retried.

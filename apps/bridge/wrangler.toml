@@ -1,0 +1,12 @@
+# Copyright (c) 2026 Pagos Cube LLC
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# The bridge web app on Cloudflare Workers static assets (F-018 plan part 4; NOTES.md, "Hosting"): an
+# assets-only Worker, with no script of its own, serving the reproducible build in dist/ and its _headers
+# (the CSP). No binding, no variable, no secret. Deploying is not part of CI: a release deploys the dist/ whose
+# hash CI published (`npx wrangler deploy` from this directory, by whoever holds the Cloudflare account).
+name = "bezent-bridge"
+compatibility_date = "2026-11-01"
+
+[assets]
+directory = "./dist"
+not_found_handling = "404-page"

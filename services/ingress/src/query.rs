@@ -370,7 +370,14 @@ struct RouteRow {
 
 /// The routes, with what each one's trailing window has used and what it carries now. A route's
 /// transfers are those of its asset and kind on its origin network: the source network of a
-/// deposit, the destination network of a withdrawal.
+/// deposit, the destination network of a withdrawal. What the window has used is the store's
+/// `route_window_used()` (migration 0150), the same count a request is checked against: the shares
+/// taken in it, plus the claims of directed deposits that began to wait for it within the window,
+/// together at most one window's limit (amendment 0031, `d-f018-window-queue`). What it carries is
+/// counted as `route_usage_locked()` counts it for a request: every transfer not terminal, but a
+/// directed deposit waiting in `Source-Final` for the window or held there by an upgrade of its
+/// token, which carries nothing yet (review M1 and M2 of PR #142); one held by an upgrade later, in
+/// `Delivering` or `Needs-Review`, was in flight already and is counted (review L-a of PR #142).
 const ROUTES: &str = "\
     SELECT r.asset, r.network, r.direction, r.minimum::text AS minimum, r.maximum::text AS maximum, \
            r.venue_minimum::text AS venue_minimum, r.window_limit::text AS window_limit, \
@@ -382,10 +389,13 @@ const ROUTES: &str = "\
            u.used::text AS used, u.in_flight \
     FROM routes r \
     CROSS JOIN LATERAL ( \
-        SELECT COALESCE(sum(t.amount) FILTER ( \
-                   WHERE t.state NOT IN ('Refused', 'Expired', 'Withdrawn') \
-                     AND t.created_at > now() - make_interval(secs => r.window_seconds)), 0) AS used, \
-               count(*) FILTER (WHERE NOT is_terminal_state(t.state)) AS in_flight \
+        SELECT route_window_used(r.asset, r.network, r.direction, r.window_seconds) AS used, \
+               count(*) FILTER (WHERE NOT is_terminal_state(t.state) \
+                                  AND NOT (t.state = 'Source-Final' \
+                                           AND t.condition IS NOT NULL \
+                                           AND t.condition IN \
+                                               ('CND-DepositWindow', 'CND-TokenUpgraded'))) \
+                   AS in_flight \
         FROM transfers t \
         WHERE t.asset = r.asset AND t.kind = r.direction \
           AND CASE r.direction WHEN 'deposit' THEN t.source_network \
