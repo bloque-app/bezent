@@ -231,6 +231,50 @@ pub trait Rpc {
     async fn send_raw(&self, bytes: &[u8]) -> Result<B256, RpcError>;
 }
 
+/// A borrowed provider is a provider: a pass of the endpoint's loop reads through a
+/// `Pair<&Http>` taken from the pool (amendment 0032).
+impl<T: Rpc> Rpc for &T {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+    async fn chain_id(&self) -> Result<u64, RpcError> {
+        (**self).chain_id().await
+    }
+    async fn header(&self, at: At) -> Result<Option<Header>, RpcError> {
+        (**self).header(at).await
+    }
+    async fn logs(&self, query: &LogQuery) -> Result<Vec<Log>, RpcError> {
+        (**self).logs(query).await
+    }
+    async fn nonce(&self, address: Address, at: At) -> Result<u64, RpcError> {
+        (**self).nonce(address, at).await
+    }
+    async fn balance(&self, address: Address, at: At) -> Result<U256, RpcError> {
+        (**self).balance(address, at).await
+    }
+    async fn code(&self, address: Address, at: At) -> Result<Bytes, RpcError> {
+        (**self).code(address, at).await
+    }
+    async fn block_transactions(&self, number: u64) -> Result<Option<(Header, Vec<Tx>)>, RpcError> {
+        (**self).block_transactions(number).await
+    }
+    async fn receipt(&self, hash: B256) -> Result<Option<Receipt>, RpcError> {
+        (**self).receipt(hash).await
+    }
+    async fn call(&self, call: &Call, at: At) -> Result<Bytes, CallError> {
+        (**self).call(call, at).await
+    }
+    async fn estimate_gas(&self, call: &Call) -> Result<u64, CallError> {
+        (**self).estimate_gas(call).await
+    }
+    async fn priority_fee(&self) -> Result<u128, RpcError> {
+        (**self).priority_fee().await
+    }
+    async fn send_raw(&self, bytes: &[u8]) -> Result<B256, RpcError> {
+        (**self).send_raw(bytes).await
+    }
+}
+
 /// How long one request to a provider may take, from the send to the end of the answer. alloy's
 /// client sets no timeout of its own (it builds a plain `reqwest::Client`, which sets none), so
 /// without this a provider that accepts the connection and never answers would stall the call

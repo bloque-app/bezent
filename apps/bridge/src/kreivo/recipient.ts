@@ -38,6 +38,8 @@ export async function readRecipient(
   timeoutMs: number = READ_TIMEOUT_MS,
 ): Promise<RecipientFacts> {
   const api = k.api as Narrow;
+  // The deadline is for the read, not for the light client's first sync: that has its own (kreivo/client.ts).
+  await k.synced;
   const who = encodeSs58(fromHex(account), n.ss58Prefix);
   const asset = { type: 'Here', value: n.asset.id };
   const [acc, a, aa, ed] = await withTimeout(

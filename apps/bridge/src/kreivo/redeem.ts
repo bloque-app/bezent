@@ -229,7 +229,10 @@ export function redeemChain(k: Kreivo, n: KreivoNetwork, contract: Hex, timeoutM
   const dest = ss58(contract);
   const asset = { type: 'Here', value: n.asset.id };
   const late = `${n.label} did not answer within ${Math.round(timeoutMs / 1000)} s (the light client may still be syncing). Nothing was signed; try again in a moment.`;
-  const read = <T>(f: () => Promise<T>) => withTimeout(timeoutMs, late, f);
+  const read = async <T>(f: () => Promise<T>) => {
+    await k.synced; // the deadline starts after the light client's first finalized block
+    return withTimeout(timeoutMs, late, f);
+  };
   const call = async (origin: Hex, data: Uint8Array) => toDryRun(await api.apis.ContractsApi.call(ss58(origin), dest, 0n, undefined, undefined, data));
 
   return {
@@ -391,6 +394,7 @@ export function explainSigningError(message: string): string {
 export async function mintReferenceUsed(k: Kreivo, n: KreivoNetwork, contract: Hex, reference: Hex, timeoutMs = READ_TIMEOUT_MS): Promise<boolean> {
   const api = k.api as Api;
   const contractSs58 = encodeSs58(fromHex(contract), n.ss58Prefix);
+  await k.synced;
   return withTimeout(timeoutMs, `${n.label} did not answer within ${Math.round(timeoutMs / 1000)} s.`, async () =>
     decodeBool(toDryRun(await api.apis.ContractsApi.call(contractSs58, contractSs58, 0n, undefined, undefined, mintReferenceUsedData(reference))), 'mint_reference_used'),
   );
@@ -405,6 +409,7 @@ export async function readRedemption(k: Kreivo, n: KreivoNetwork, contract: Hex,
  * registered by the app) and the initialisation metadata to give the wallet. */
 export async function kreivoRuntime(k: Kreivo, n: KreivoNetwork): Promise<{ extensions: string[]; def: MetadataDef }> {
   const api = k.api as Api;
+  await k.synced;
   return withTimeout(READ_TIMEOUT_MS, `${n.label} did not answer within ${READ_TIMEOUT_MS / 1000} s.`, async () => {
     const at = await k.client.getFinalizedBlock();
     const [metadata, spec, version, v15] = await Promise.all([

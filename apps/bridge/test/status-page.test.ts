@@ -287,3 +287,34 @@ describe('a second payout that is included but not final', () => {
     expect(searchRows('Payout', search(payout(60n, true), [payout(50n, false, false)]), check).paid).toBe('yes');
   });
 });
+
+describe('a deposit’s status from its transaction alone', () => {
+  it('one directed deposit: uses its Transfer index, shows it, and says it came from the receipt', async () => {
+    const { s, status } = await page({ finalized: 100 });
+    const res = await deposited(s);
+    await status.deposit(res.hash, '');
+    const r = rows();
+    expect(r['Arrival (coordinate)']).toMatch(/ · log 41$/);
+    expect(r['Transfer → Directed']).toBe(`${res.hash}: Transfer log 41, Directed log 42 (the Transfer log was found from the receipt: the transaction’s only directed deposit)`);
+    expect(r['State (from chain data)']).toBe('final on Polygon, not minted yet');
+  });
+
+  it('none: says there is no directed deposit in the transaction', async () => {
+    const { status } = await page();
+    await status.deposit(`0x${'00'.repeat(32)}`, '  ');
+    expect(rows()['State']).toBe('not a directed deposit');
+    expect(rows()['Why']).toMatch(/No receipt|no directed deposit in this transaction/);
+  });
+
+  it('many: lists their indexes, asks for one, and reads none', async () => {
+    const { s, status } = await page({ extraDirected: 'paired' });
+    const res = await deposited(s);
+    await status.deposit(res.hash, '');
+    const r = rows();
+    expect(r['State']).toBe('2 directed deposits in this transaction: pick one');
+    expect(r['Why']).toMatch(/Transfer logs at 41, 43: enter the index/);
+    expect(r['Arrival (coordinate)']).toBeUndefined();
+    await status.deposit(res.hash, '43');
+    expect(rows()['Arrival (coordinate)']).toMatch(/ · log 43$/);
+  });
+});

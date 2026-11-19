@@ -38,6 +38,7 @@ describe('readRecipient', () => {
     };
     const k = {
       client: undefined,
+      synced: Promise.resolve(),
       close: () => undefined,
       api: {
         query: { System: { Account: hang }, Assets: { Asset: hang, Account: hang } },
@@ -47,5 +48,41 @@ describe('readRecipient', () => {
     await expect(readRecipient(k, KREIVO_TESTBED, ALICE, 1n, 10)).rejects.toThrow(/did not answer within .* Nothing was signed/);
     expect(signals).toHaveLength(3);
     expect(signals.every((s) => s.aborted)).toBe(true);
+  });
+
+  it('starts its deadline only after the light client has its first finalized block', async () => {
+    let asked = 0;
+    const value = { getValue: async () => (asked++, { providers: 1, consumers: 0, sufficients: 0, data: { free: 0n } }) };
+    let synced!: () => void;
+    const k = {
+      client: undefined,
+      close: () => undefined,
+      synced: new Promise<void>((resolve) => (synced = resolve)),
+      api: { query: { System: { Account: value }, Assets: { Asset: { getValue: async () => undefined }, Account: { getValue: async () => undefined } } }, constants: { Balances: { ExistentialDeposit: async () => 1n } } },
+    } as unknown as Kreivo;
+    let outcome: string | undefined;
+    const read = readRecipient(k, KREIVO_TESTBED, ALICE, 1n, 20).then(
+      () => (outcome = 'answered'),
+      (e: Error) => (outcome = e.message),
+    );
+    // Far longer than the deadline: the sync, not the read, is what is being waited for.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(outcome).toBeUndefined();
+    expect(asked).toBe(0);
+    synced();
+    await read;
+    expect(outcome).toBe('answered');
+    expect(asked).toBe(1);
+  });
+
+  it('then fails closed on its own deadline when Kreivo does not answer after the sync', async () => {
+    const hang = { getValue: () => new Promise(() => undefined) };
+    const k = {
+      client: undefined,
+      close: () => undefined,
+      synced: Promise.resolve(),
+      api: { query: { System: { Account: hang }, Assets: { Asset: hang, Account: hang } }, constants: { Balances: { ExistentialDeposit: async () => 1n } } },
+    } as unknown as Kreivo;
+    await expect(readRecipient(k, KREIVO_TESTBED, ALICE, 1n, 10)).rejects.toThrow(/did not answer/);
   });
 });

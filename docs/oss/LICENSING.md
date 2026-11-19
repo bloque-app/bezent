@@ -67,8 +67,8 @@ GPL-3.0-or-later, the combination is distributed under GPL-3.0-only, the narrowe
 
 Checked on 2026-11-16 for `T-018-12` (amendment 0029, Open 12), against the build of `apps/bridge` at that date.
 
-- **What ships.** The npm package `smoldot` 3.3.2, which `polkadot-api` 2.1.8 pulls in through
-  `@polkadot-api/smoldot`, licensed `GPL-3.0-or-later WITH Classpath-exception-2.0`. It is upstream smoldot, not
+- **What ships.** The npm package `smoldot` 3.7.0, which `polkadot-api` 2.1.8 pulls in through
+  `@polkadot-api/smoldot` (0.4.9, pinned in `apps/bridge/package.json` with an npm override), licensed `GPL-3.0-or-later WITH Classpath-exception-2.0`. It is upstream smoldot, not
   `bloque-app/smoldot` (§4.1): the fork's fix is for dry runs of contract calls that write child storage, and the app
   only reads storage. It is bundled, as WebAssembly inside JavaScript, into the light client's worker
   (`assets/smoldot_worker-*.js`), a file of its own that the page starts and talks to by messages through smoldot's

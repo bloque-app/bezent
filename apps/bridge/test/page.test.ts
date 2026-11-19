@@ -50,6 +50,10 @@ const fake = vi.hoisted(() => ({
   held: new Set<string>(),
   /** The names of the Web Locks the page asked for, in order. */
   asked: [] as string[],
+  /** Kreivo's light client has no finalized block until the test says so (`load({ hold: true })`). */
+  hold: false,
+  sync: undefined as { resolve: () => void; reject: (e: unknown) => void } | undefined,
+  connects2: 0,
 }));
 
 vi.mock('../src/config/build', async () => {
@@ -61,7 +65,15 @@ vi.mock('../src/config/build', async () => {
 });
 
 vi.mock('../src/kreivo/client', () => ({
-  connectKreivo: async () => ({ client: {}, api: {}, close: () => undefined }),
+  connectKreivo: async () => {
+    fake.connects2++;
+    return {
+      client: {},
+      api: {},
+      synced: fake.hold ? new Promise<void>((resolve, reject) => (fake.sync = { resolve, reject })) : Promise.resolve(),
+      close: () => undefined,
+    };
+  },
 }));
 
 vi.mock('../src/kreivo/recipient', () => ({ readRecipient: async () => ({}) }));
@@ -189,8 +201,11 @@ const webLocks = {
   },
 };
 
-async function load(o: { keep?: boolean; blocked?: boolean; stuck?: boolean; unreadableKey?: string; noLocks?: boolean; full?: boolean } = {}) {
+async function load(o: { keep?: boolean; blocked?: boolean; stuck?: boolean; unreadableKey?: string; noLocks?: boolean; full?: boolean; hold?: boolean } = {}) {
   vi.resetModules();
+  fake.hold = !!o.hold;
+  fake.sync = undefined;
+  fake.connects2 = 0;
   fake.connects.length = 0;
   fake.deposits.length = 0;
   fake.redeems.length = 0;
@@ -1034,5 +1049,58 @@ describe('status links', () => {
     await flush();
     expect($<HTMLInputElement>('status-redeemer').value).toBe(ALICE_SS58);
     expect($<HTMLInputElement>('status-reference').value).toBe(reference);
+  });
+});
+
+describe('Kreivo before the light client has a finalized block', () => {
+  // The mock network is the local test bed's (a loopback node); these tests give it the light client Kreivo's live
+  // networks use, and put the test bed back.
+  type Net = { kreivo: { connection: unknown } };
+  let loopback: unknown;
+  beforeEach(() => {
+    const net = fake.network as Net;
+    loopback = net.kreivo.connection;
+    net.kreivo.connection = { kind: 'light-client', relay: 'kusama' };
+  });
+  afterEach(() => {
+    (fake.network as Net).kreivo.connection = loopback;
+  });
+
+  it('says it is syncing, refuses the Kreivo actions in plain words, and reads Kreivo once it has synced', async () => {
+    await load({ hold: true });
+    expect($('kreivo-status').textContent).toMatch(/Connecting to .* \(light client\): syncing Kusama, about a minute on a first visit/);
+    expect($('kreivo-status').textContent).not.toMatch(/Reading/);
+
+    type('recipient', ALICE_SS58);
+    type('amount', '2.5');
+    await flush();
+    expect(depositButton().disabled).toBe(true);
+    expect($('recipient-status').textContent).toMatch(/still connecting .*Nothing was signed/);
+
+    $('redeem-connect').click();
+    await flush();
+    expect($('redeem-wallet-status').textContent).toMatch(/still connecting .*Nothing was signed/);
+
+    fake.sync!.resolve();
+    await flush();
+    expect($('kreivo-status').textContent).toMatch(/^Reading .* through the light client\./);
+    expect(depositButton().disabled).toBe(false);
+  });
+
+  it('shows an error with a retry when the sync fails, and tries again on it', async () => {
+    await load({ hold: true });
+    fake.sync!.reject(new Error('Kreivo did not sync within 3 minutes. Nothing was signed.'));
+    await flush();
+    expect($('kreivo-status').textContent).toMatch(/Kreivo is not reachable: Kreivo did not sync within 3 minutes/);
+    const retry = $('kreivo-status').querySelector('button') as HTMLButtonElement;
+    expect(retry.textContent).toBe('Retry');
+    expect(fake.connects2).toBe(1);
+    retry.click();
+    await flush();
+    expect(fake.connects2).toBe(2);
+    expect($('kreivo-status').textContent).toMatch(/syncing Kusama/);
+    fake.sync!.resolve();
+    await flush();
+    expect($('kreivo-status').textContent).toMatch(/^Reading/);
   });
 });

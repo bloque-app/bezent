@@ -123,19 +123,43 @@ async function chooseNetwork() {
   render();
 }
 
+/** What the Kreivo status says while the light client has no finalized block yet. A first visit warp-syncs Kusama;
+ * a later one starts from the database the browser kept. */
+const SYNCING = (label: string) => `Connecting to ${label} (light client): syncing Kusama, about a minute on a first visit…`;
+
 async function startKreivo(n: ResolvedNetwork) {
   const status = $('kreivo-status');
-  const how = n.kreivo.connection.kind === 'light-client' ? 'light client' : 'local node';
-  say(status, `Connecting to ${n.kreivo.label} (${how})…`);
+  const light = n.kreivo.connection.kind === 'light-client';
+  const how = light ? 'light client' : 'local node';
+  say(status, light ? SYNCING(n.kreivo.label) : `Connecting to ${n.kreivo.label} (${how})…`);
+  const fail = (e: unknown) => {
+    say(status, `Kreivo is not reachable: ${errorText(e)}`, 'error');
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', () => state.network === n && void startKreivo(n));
+    status.append(' ', retry);
+  };
   try {
     const k = await connectKreivo(n.kreivo);
+    if (state.network !== n) return k.close();
+    // Nothing reads Kreivo until its first finalized block: state.kreivo stays unset, so the recipient check, the
+    // redeem and the status page say that Kreivo is still connecting instead of starting a deadline that the sync
+    // would eat.
+    try {
+      await k.synced;
+    } catch (e) {
+      k.close();
+      if (state.network === n) fail(e);
+      return;
+    }
     if (state.network !== n) return k.close();
     state.kreivo = k;
     say(status, `Reading ${n.kreivo.label} through the ${how}.`);
     void precheck();
     render();
   } catch (e) {
-    say(status, `Kreivo is not reachable: ${errorText(e)}`, 'error');
+    fail(e);
   }
 }
 
@@ -305,7 +329,7 @@ async function recheck(account: Hex, amount: bigint, current: () => boolean = ()
   const out = $('recipient-status');
   const tell = (text: string, kind: 'muted' | 'error' | 'ok') => current() && say(out, text, kind);
   if (!k || !n) {
-    tell('Kreivo is not connected yet, so the account cannot be checked.', 'error');
+    tell('Kreivo is still connecting (the light client is syncing), so the account cannot be checked yet. Nothing was signed.', 'error');
     return undefined;
   }
   try {

@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Pagos Cube LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Two independent providers, cross-checked (PLAN `DEC-12`).
+//! Two independent providers, cross-checked (PLAN `DEC-12`), drawn from a pool (amendment 0032).
 //!
 //! There is no light client for these networks in bezent's stack, so one provider could lie or
 //! fail unseen. Every read that decides anything is made through both, at a block both report
@@ -11,6 +11,10 @@
 //! Only reads that prepare a transaction (fees, the latest nonce, the dry run) are not decisions;
 //! those use both providers where both answer, as each method says. The pair never sends: signed
 //! transactions go to public nodes only ([`crate::broadcast`], amendment 0023).
+//!
+//! The endpoint holds a [`Pool`] of at least two providers from at least two operators. A pass of
+//! its loop takes one pair from the pool and uses it for everything in that pass; the next pass
+//! takes the next pair, round-robin. A pair is two providers of different operators.
 
 use std::fmt;
 
@@ -48,6 +52,87 @@ pub struct Pair<R> {
     pub a: R,
     /// The second.
     pub b: R,
+}
+
+/// The valid pairs of a list of operators, as indexes `(i, j)` with `i < j`, in list order: two
+/// providers form a pair only when their operators differ (amendment 0032, A2). Operators are
+/// compared ignoring case and surrounding space.
+pub fn valid_pairs<S: AsRef<str>>(operators: &[S]) -> Vec<(usize, usize)> {
+    let key = |s: &S| s.as_ref().trim().to_lowercase();
+    let mut out = Vec::new();
+    for i in 0..operators.len() {
+        for j in i + 1..operators.len() {
+            if key(&operators[i]) != key(&operators[j]) {
+                out.push((i, j));
+            }
+        }
+    }
+    out
+}
+
+/// The providers of one network and the rotation among their pairs (amendment 0032).
+///
+/// [`Pool::take`] hands out the next pair and moves the rotation on, whether or not the pass that
+/// uses it succeeds: a pass that fails on a provider is followed by a pass on another pair
+/// (while another pair exists). Within a pass the pair never changes, so every rule of `DEC-12`
+/// holds as it did with a fixed pair.
+pub struct Pool<R> {
+    members: Vec<(String, R)>,
+    pairs: Vec<(usize, usize)>,
+    next: usize,
+}
+
+impl<R: Rpc> Pool<R> {
+    /// A pool of `members`, each `(operator, provider)`. Refused if no valid pair exists.
+    pub fn new(members: Vec<(String, R)>) -> Result<Self, String> {
+        let operators: Vec<&str> = members.iter().map(|(o, _)| o.as_str()).collect();
+        let pairs = valid_pairs(&operators);
+        if pairs.is_empty() {
+            return Err(format!(
+                "DEC-12: no valid pair of providers: {} provider(s) from {} operator(s); a pair needs two operators",
+                members.len(),
+                {
+                    let mut o: Vec<String> =
+                        operators.iter().map(|s| s.trim().to_lowercase()).collect();
+                    o.sort();
+                    o.dedup();
+                    o.len()
+                }
+            ));
+        }
+        Ok(Self {
+            members,
+            pairs,
+            next: 0,
+        })
+    }
+
+    /// How many valid pairs the pool has.
+    pub fn pair_count(&self) -> usize {
+        self.pairs.len()
+    }
+
+    /// The names of pair `k` (modulo the count), `(a, b)`.
+    pub fn names(&self, k: usize) -> (&str, &str) {
+        let (i, j) = self.pairs[k % self.pairs.len()];
+        (self.members[i].1.name(), self.members[j].1.name())
+    }
+
+    /// Pair `k` (modulo the count), without moving the rotation.
+    pub fn pair_at(&self, k: usize) -> Pair<&R> {
+        let (i, j) = self.pairs[k % self.pairs.len()];
+        Pair {
+            a: &self.members[i].1,
+            b: &self.members[j].1,
+        }
+    }
+
+    /// The next pair of the rotation and its index, and the rotation moves on. One pass, one pair.
+    pub fn take(&mut self) -> (usize, Pair<&R>) {
+        let k = self.next % self.pairs.len();
+        self.next = (k + 1) % self.pairs.len();
+        (k, self.pair_at(k))
+    }
 }
 
 impl<R: Rpc> Pair<R> {
@@ -268,5 +353,86 @@ impl DryRun {
         self.runs
             .iter()
             .find_map(|(_, _, r)| r.as_ref().err().map(String::as_str))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rpc::mock::{MockChain, MockRpc};
+
+    fn pool(ops: &[&str], chain: &MockChain) -> Pool<MockRpc> {
+        Pool::new(
+            ops.iter()
+                .enumerate()
+                .map(|(i, o)| ((*o).to_owned(), MockRpc::new(&format!("p{i}"), chain)))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pair_is_two_providers_of_different_operators_in_config_order() {
+        assert_eq!(valid_pairs(&["a", "b", "c"]), [(0, 1), (0, 2), (1, 2)]);
+        assert_eq!(valid_pairs(&["a", "b", "a"]), [(0, 1), (1, 2)]);
+        assert_eq!(valid_pairs(&["a", "A "]), []);
+        assert_eq!(valid_pairs(&["a"]), []);
+    }
+
+    #[test]
+    fn a_pool_without_a_valid_pair_is_refused() {
+        let chain = MockChain::new(137, 3);
+        let e = Pool::new(vec![
+            ("x".to_owned(), MockRpc::new("a", &chain)),
+            ("x".to_owned(), MockRpc::new("b", &chain)),
+        ])
+        .err()
+        .unwrap();
+        assert!(e.contains("no valid pair"), "{e}");
+    }
+
+    /// Amendment 0032, A2: each pass takes the next pair, round-robin, and wraps.
+    #[test]
+    fn each_pass_takes_the_next_pair_round_robin() {
+        let chain = MockChain::new(137, 3);
+        let mut pool = pool(&["a", "b", "a"], &chain);
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            let (k, pair) = pool.take();
+            seen.push((k, pair.a.name().to_owned(), pair.b.name().to_owned()));
+        }
+        let want = |k: usize, a: &str, b: &str| (k, a.to_owned(), b.to_owned());
+        assert_eq!(
+            seen,
+            [
+                want(0, "p0", "p1"),
+                want(1, "p1", "p2"),
+                want(0, "p0", "p1"),
+                want(1, "p1", "p2"),
+                want(0, "p0", "p1"),
+            ]
+        );
+    }
+
+    /// A pass that fails on a provider is followed by a pass on another pair, which reads.
+    #[tokio::test]
+    async fn a_pass_that_fails_moves_the_next_pass_to_another_pair() {
+        let chain = MockChain::new(137, 10);
+        let down = chain.fork();
+        down.fail_all(Some("HTTP 429"));
+        let mut pool = Pool::new(vec![
+            ("one".to_owned(), MockRpc::new("p0", &chain)),
+            ("two".to_owned(), MockRpc::new("p1", &down)),
+            ("three".to_owned(), MockRpc::new("p2", &chain)),
+        ])
+        .unwrap();
+        // Pairs: (p0, p1), (p0, p2), (p1, p2). The first holds the failing provider.
+        let (k, pair) = pool.take();
+        let first = pair.final_point().await;
+        assert_eq!(k, 0);
+        assert!(matches!(first, Err(Read::Unavailable(_))), "{first:?}");
+        let (k, pair) = pool.take();
+        assert_eq!(k, 1);
+        assert_eq!(pair.final_point().await.unwrap().number, 9);
     }
 }
