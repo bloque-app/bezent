@@ -49,7 +49,7 @@ def complete_evidence():
         "runbook": {i: dict(ok) for i in items},
         "exit": {"divergence": {"window_hours": 48, "divergences": 0, "evidence": "https://example.test/d", "by": "someone"},
                  "legs": {"unresolved": 0, "evidence": "https://example.test/l", "by": "someone"}},
-        "soak": {"hours": 48, "statements_verified": 4, "divergences": 0, "evidence": "https://example.test/s", "by": "someone"},
+        "soak": {"hours": 48, "statements_verified": 2, "divergences": 0, "evidence": "https://example.test/s", "by": "someone"},
         "signoff": {"spec-owner": {"by": "a", "pr": 1, "on": "2026-11-02"}, "maintainer": {"by": "b", "pr": 1, "on": "2026-11-02"}},
     }
 
@@ -135,6 +135,20 @@ class Gate(unittest.TestCase):
         ev = complete_evidence()
         ev["soak"]["statements_verified"] = 1
         self.assertTrue(any("statements" in e for e in human(ev=ev)))
+
+    def test_the_soak_needs_one_verified_statement_a_day_and_at_least_two(self):
+        # The core issues one statement a day (REQ-PR-1): 48 hours with two verified passes (DEC-19), and a longer soak
+        # needs one for each full day it ran.
+        ev = complete_evidence()
+        ev["soak"]["statements_verified"] = 2
+        self.assertEqual([e for e in human(ev=ev) if e.startswith("soak")], [])
+        ev["soak"]["hours"], ev["soak"]["statements_verified"] = 97, 4
+        self.assertEqual([e for e in human(ev=ev) if e.startswith("soak")], [])
+        ev["soak"]["statements_verified"] = 3
+        self.assertTrue(any(e.startswith("soak") and "needs 4" in e for e in human(ev=ev)))
+        gate = complete_gate()
+        del gate["soak"]["statements"]
+        self.assertTrue(any("`statements`" in e for e in human(gate=gate)))
 
     def test_a_missing_signoff_fails(self):
         ev = complete_evidence()

@@ -69,10 +69,12 @@ name = "Kreivo test bed"
 sustained_divergence_free_hours = 24
 
 # The soak of DEC-19 (ruled 2026-10-15, option A of 2026-10-22): on mainnet, before bUSDC goes live. Needed by a
-# value-moving release only.
+# value-moving release only. The core issues one statement a day (REQ-PR-1), so the soak needs one verified statement
+# for each full day it ran, and never fewer than `statements` (PLAN DEC-19: "at least two daily statements published
+# and verified").
 [soak]
 hours = 48
-statements_per_day = 2
+statements = 2
 
 # Which releases the full gate applies to (ruled by @pandres95, 2026-11-06, `d-gate-scope`, "As recommended"; amendment
 # 0024; SPEC section 15). release/evidence.toml names the release's class in its top-level `class`, and nothing else

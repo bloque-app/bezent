@@ -210,14 +210,16 @@ def human(gate, ev, release, conds, incidents, cls=None):
         need(legs, "by", errors, "exit.legs", is_name, "a name (a string)")
 
         soak, want = sub(ev, "soak", errors, "evidence"), sub(gate, "soak", errors, "release/gate.toml")
-        hours, per_day = want.get("hours"), want.get("statements_per_day")
-        if not is_int(hours) or not is_int(per_day):
-            errors.append("soak: release/gate.toml [soak] needs integer `hours` and `statements_per_day` (DEC-19: 48, 2)")
+        hours, least = want.get("hours"), want.get("statements")
+        if not is_int(hours) or not is_int(least):
+            errors.append("soak: release/gate.toml [soak] needs integer `hours` and `statements` (DEC-19: 48, 2)")
         else:
             if not is_int(soak.get("hours")) or soak["hours"] < hours:
                 errors.append(f"soak: {soak.get('hours')!r} h on mainnet, {hours} h required (DEC-19)")
-            elif not is_int(soak.get("statements_verified")) or soak["statements_verified"] < per_day * (soak["hours"] // 24):
-                errors.append(f"soak: {soak.get('statements_verified')!r} verified statements, at least {per_day} a day required")
+            elif not is_int(soak.get("statements_verified")) or soak["statements_verified"] < max(least, soak["hours"] // 24):
+                # One statement a day (REQ-PR-1): one verified for each full day of the soak, and at least `statements`.
+                errors.append(f"soak: {soak.get('statements_verified')!r} verified statements; {soak['hours']} h needs "
+                              f"{max(least, soak['hours'] // 24)}, one for each full day and at least {least} (DEC-19)")
             if not is_zero(soak.get("divergences")):
                 errors.append(f"soak: `divergences` is {soak.get('divergences')!r}; a divergence restarts the clock (DEC-19)")
         need(soak, "evidence", errors, "soak", is_url, "an https link")
