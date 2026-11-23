@@ -17,6 +17,8 @@
 //! takes the next pair, round-robin. A pair is two providers of different operators.
 
 use std::fmt;
+use std::future::Future;
+use std::time::Duration;
 
 use alloy::primitives::{Address, B256, Bytes, U256};
 
@@ -43,6 +45,37 @@ impl fmt::Display for Read {
 impl From<RpcError> for Read {
     fn from(e: RpcError) -> Self {
         Self::Unavailable(e.0)
+    }
+}
+
+/// The pauses before a provider's second and third try of a reading at a final block (issue #154).
+///
+/// A reading of the reserve or of the fee position is made once per final head and recorded with
+/// it, so a provider's passing failure (a rate limit, a dropped connection) made it unknown until
+/// the next head, and the reserve check held the asset meanwhile. Each provider is now asked up to
+/// three times, at the same block, before its answer is an error. Only a provider's failure is
+/// asked again. An answer is never asked again: a revert, a malformed answer and a disagreement
+/// between the two stay what they are. The pair does not change (amendment 0032), and a reading
+/// is still known only when both providers of the pair give the same answer (`DEC-12`).
+pub const READ_RETRY_PAUSES: [Duration; 2] =
+    [Duration::from_millis(300), Duration::from_millis(1200)];
+
+/// `read` until it succeeds or fails with an error `again` does not accept, at most once more per
+/// pause of [`READ_RETRY_PAUSES`]; the last error otherwise.
+pub async fn with_retries<T, E, F, Fut>(mut read: F, again: impl Fn(&E) -> bool) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let mut pauses = READ_RETRY_PAUSES.iter();
+    loop {
+        match read().await {
+            Err(e) if again(&e) => match pauses.next() {
+                Some(pause) => tokio::time::sleep(*pause).await,
+                None => return Err(e),
+            },
+            done => return done,
+        }
     }
 }
 

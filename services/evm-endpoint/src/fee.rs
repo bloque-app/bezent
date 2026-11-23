@@ -18,7 +18,7 @@ use std::time::Duration;
 use alloy::primitives::{Address, U256};
 use serde_json::{Value, json};
 
-use crate::pair::Pair;
+use crate::pair::{Pair, with_retries};
 use crate::rpc::{At, Rpc};
 
 /// One reading of the delivery account's native balance.
@@ -43,7 +43,7 @@ pub struct Reading {
 pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn ask<R: Rpc>(p: &R, holder: Address, number: u64) -> Result<U256, String> {
-    p.balance(holder, At::Number(number))
+    with_retries(|| p.balance(holder, At::Number(number)), |_| true)
         .await
         .map_err(|e| format!("{}: {e}", p.name()))
 }

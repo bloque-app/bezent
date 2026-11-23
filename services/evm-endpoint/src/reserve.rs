@@ -9,7 +9,9 @@
 //! (the reserve) and of every admitted convertible (itemised outside the equation, `REQ-CV-4`), at
 //! that block number. Both answers are recorded. When they agree the reading is that balance; when
 //! they disagree, or either fails, the reading is **unknown**, with the reason (`DEC-12`): never
-//! the higher, never the lower, never one provider's word. The check takes an evaluation with an
+//! the higher, never the lower, never one provider's word. A provider that fails is asked again at
+//! the same block, twice at most, before its failure counts ([`crate::pair::READ_RETRY_PAUSES`],
+//! issue #154); an answer is never asked again. The check takes an evaluation with an
 //! unknown reading as incomplete, and holds the asset's routes until an evaluation holds
 //! (`REQ-IC-2`, amendment 0028).
 //!
@@ -20,11 +22,11 @@ use alloy::primitives::{Address, Bytes, U256};
 use serde_json::{Value, json};
 
 use crate::observe::Watch;
-use crate::pair::Pair;
-use crate::rpc::{At, Call, Rpc};
+use crate::pair::{Pair, with_retries};
+use crate::rpc::{At, Call, CallError, Rpc};
 
 /// `balanceOf(address)`.
-const BALANCE_OF: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
+pub const BALANCE_OF: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
 
 /// One reading of the vault's balance of a token.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,10 +59,12 @@ async fn ask<R: Rpc>(p: &R, token: Address, holder: Address, number: u64) -> Res
         to: token,
         data: balance_of(holder),
     };
-    let out = p
-        .call(&call, At::Number(number))
-        .await
-        .map_err(|e| format!("{}: {e}", p.name()))?;
+    let out = with_retries(
+        || p.call(&call, At::Number(number)),
+        |e| matches!(e, CallError::Rpc(_)),
+    )
+    .await
+    .map_err(|e| format!("{}: {e}", p.name()))?;
     if out.len() != 32 {
         return Err(format!(
             "{}: balanceOf answered {} bytes, not 32",
