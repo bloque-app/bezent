@@ -6,7 +6,7 @@
 
 use alloy::primitives::{Address, U256, address};
 use bezent_evm_endpoint::fee;
-use bezent_evm_endpoint::pair::{Pair, READ_RETRY_PAUSES};
+use bezent_evm_endpoint::pair::{Pair, READ_RETRY_PAUSES, passing_failure};
 use bezent_evm_endpoint::reserve::{self, balance_of};
 use bezent_evm_endpoint::rpc::mock::{MockChain, MockRpc};
 
@@ -113,4 +113,32 @@ async fn issue_154_req_st_6_the_fee_position_is_retried_the_same_way() {
     // Both providers were still asked at the same block, and both answered.
     assert_eq!(r.detail["providers"][0]["answer"]["balance"], "7");
     assert_eq!(r.detail["providers"][1]["answer"]["balance"], "7");
+}
+
+#[tokio::test]
+async fn issue_154_a_timeout_or_an_answer_that_does_not_decode_is_not_asked_again() {
+    // A hung provider would cost three timeouts; an undecodable answer would not change.
+    for reason in [
+        "eth_call: the request timed out",
+        "eth_call: an answer that does not decode: x",
+        "eth_call: the answer has no bytes",
+    ] {
+        assert!(!passing_failure(reason), "{reason}");
+        let (a, _b, p) = pair();
+        a.fail_next_reads(1, reason);
+        let started = std::time::Instant::now();
+        let r = reading(&p).await;
+        assert!(r.amount.is_none(), "{reason}: {r:?}");
+        assert!(
+            started.elapsed() < READ_RETRY_PAUSES[0],
+            "{reason}: {:?}",
+            started.elapsed()
+        );
+    }
+    for reason in ["HTTP 429", "HTTP 502", "HTTP 503", "transport error"] {
+        assert!(
+            passing_failure(&format!("tenderly: eth_call: {reason}")),
+            "{reason}"
+        );
+    }
 }

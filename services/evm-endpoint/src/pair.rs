@@ -51,14 +51,31 @@ impl From<RpcError> for Read {
 /// The pauses before a provider's second and third try of a reading at a final block (issue #154).
 ///
 /// A reading of the reserve or of the fee position is made once per final head and recorded with
-/// it, so a provider's passing failure (a rate limit, a dropped connection) made it unknown until
-/// the next head, and the reserve check held the asset meanwhile. Each provider is now asked up to
-/// three times, at the same block, before its answer is an error. Only a provider's failure is
-/// asked again. An answer is never asked again: a revert, a malformed answer and a disagreement
-/// between the two stay what they are. The pair does not change (amendment 0032), and a reading
-/// is still known only when both providers of the pair give the same answer (`DEC-12`).
+/// it, so a provider's passing failure made it unknown until the next head, and the reserve check
+/// held the asset meanwhile. Each provider is now asked up to three times, at the same block,
+/// when its failure is one that fails fast and passes ([`passing_failure`]). Nothing else is asked
+/// again: not a timeout (a hung provider would cost three timeouts), not an answer that does not
+/// decode or lacks a field, not a revert, not a wrong-length answer, and never a disagreement
+/// between the two. The pair does not change (amendment 0032), and a reading is still known only
+/// when both providers of the pair give the same answer (`DEC-12`).
 pub const READ_RETRY_PAUSES: [Duration; 2] =
     [Duration::from_millis(300), Duration::from_millis(1200)];
+
+/// Whether a provider's error is one worth asking again after a pause: a rate limit (HTTP 429), a
+/// gateway or server error (HTTP 500 to 504), or a failed connection (`transport error`: a reset
+/// or a refusal). Read from the error's text as [`crate::rpc`] spells it.
+pub fn passing_failure(error: &str) -> bool {
+    [
+        "HTTP 429",
+        "HTTP 500",
+        "HTTP 502",
+        "HTTP 503",
+        "HTTP 504",
+        "transport error",
+    ]
+    .iter()
+    .any(|k| error.contains(k))
+}
 
 /// `read` until it succeeds or fails with an error `again` does not accept, at most once more per
 /// pause of [`READ_RETRY_PAUSES`]; the last error otherwise.

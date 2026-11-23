@@ -18,7 +18,7 @@ use std::time::Duration;
 use alloy::primitives::{Address, U256};
 use serde_json::{Value, json};
 
-use crate::pair::{Pair, with_retries};
+use crate::pair::{Pair, passing_failure, with_retries};
 use crate::rpc::{At, Rpc};
 
 /// One reading of the delivery account's native balance.
@@ -39,13 +39,17 @@ pub struct Reading {
 /// reserve readings already collected from being recorded. Past it the reading is unknown, like any
 /// other failed read. alloy's HTTP client sets no timeout of its own (it builds a plain
 /// `reqwest::Client`), and nothing else in this endpoint bounds a read; five seconds is a few
-/// polls' worth of slack at most, and a healthy provider answers a balance in milliseconds.
+/// polls' worth of slack at most, and a healthy provider answers a balance in milliseconds. It also
+/// bounds a provider's retries of a passing failure (issue #154): a retry past it is cut short.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn ask<R: Rpc>(p: &R, holder: Address, number: u64) -> Result<U256, String> {
-    with_retries(|| p.balance(holder, At::Number(number)), |_| true)
-        .await
-        .map_err(|e| format!("{}: {e}", p.name()))
+    with_retries(
+        || p.balance(holder, At::Number(number)),
+        |e| passing_failure(&e.0),
+    )
+    .await
+    .map_err(|e| format!("{}: {e}", p.name()))
 }
 
 /// `holder`'s native balance at block `number`, from both providers (`DEC-12`).
