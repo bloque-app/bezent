@@ -32,6 +32,8 @@ struct State {
     fail_logs: Option<String>,
     fail_all: Option<String>,
     fail_balance: Option<String>,
+    /// The next reads of `eth_call` and `eth_getBalance` that fail, and with what.
+    fail_next_reads: Option<(usize, String)>,
     hang_balance: bool,
     balance_reads: Vec<At>,
     salt: u8,
@@ -200,6 +202,20 @@ impl MockChain {
     /// The block of every `eth_getBalance` asked so far, in order.
     pub fn balance_reads(&self) -> Vec<At> {
         self.state().balance_reads.clone()
+    }
+
+    /// The next `n` reads of `eth_call` and `eth_getBalance` fail with `reason`; later ones answer.
+    pub fn fail_next_reads(&self, n: usize, reason: &str) {
+        self.state().fail_next_reads = (n > 0).then(|| (n, reason.to_owned()));
+    }
+
+    fn take_failed_read(&self) -> Option<RpcError> {
+        let mut s = self.state();
+        let (n, reason) = s.fail_next_reads.take()?;
+        if n > 1 {
+            s.fail_next_reads = Some((n - 1, reason.clone()));
+        }
+        Some(RpcError(reason))
     }
 
     /// Every read fails with `reason` until cleared.
@@ -373,6 +389,9 @@ impl Rpc for MockRpc {
         if let Some(reason) = self.chain.state().fail_balance.clone() {
             return Err(RpcError(reason));
         }
+        if let Some(e) = self.chain.take_failed_read() {
+            return Err(e);
+        }
         Ok(self
             .chain
             .state()
@@ -408,6 +427,9 @@ impl Rpc for MockRpc {
 
     async fn call(&self, call: &Call, _at: At) -> Result<Bytes, CallError> {
         self.chain.check().map_err(CallError::Rpc)?;
+        if let Some(e) = self.chain.take_failed_read() {
+            return Err(CallError::Rpc(e));
+        }
         let s = self.chain.state();
         if let Some(out) = s.views.get(&(call.to, call.data.clone())) {
             return Ok(out.clone());
@@ -415,6 +437,9 @@ impl Rpc for MockRpc {
         match s.call.clone() {
             Some(Ok(b)) => Ok(b),
             Some(Err((message, data))) => Err(CallError::Reverted { message, data }),
+            // A `balanceOf` no test set answers nothing, as a node does for an address with no
+            // code: the reading is unknown at once, never a provider failure retried (#154).
+            None if call.data.starts_with(&crate::reserve::BALANCE_OF) => Ok(Bytes::new()),
             None => Err(CallError::Rpc(RpcError("no call result".into()))),
         }
     }
