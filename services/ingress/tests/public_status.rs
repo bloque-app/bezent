@@ -192,7 +192,11 @@ fn words(v: &Value, out: &mut Vec<String>) {
         Value::Object(o) => {
             for (k, x) in o {
                 out.push(k.clone());
-                words(x, out);
+                // The answer's own timestamp is bezent's, never a requester's, and its digits
+                // could hold any absent number ("500" at 05:38:35.500847Z, bezent#157's CI).
+                if k != "updated_at" {
+                    words(x, out);
+                }
             }
         }
         _ => {}
