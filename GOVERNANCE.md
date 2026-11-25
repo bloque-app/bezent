@@ -59,7 +59,8 @@ and has every runbook exercised (`PLAN.md`, `M-4`); its notes name the licence o
 
 "bezent" and "Bloque" are names used by Pagos Cube LLC (Bloque). The open-source licences cover the code and the
 documents. They do not grant the right to use those names to endorse or promote a derived product. A fork should use a
-different name. The IP and trademark position of "bezent" was signed off by @olanod on 2026-10-17.
+different name. The IP and trademark position of "bezent" was signed off by David Barinas (@S0c5), for Pagos Cube
+LLC, on 2026-10-17.
 
 ## Changes to this document
 

@@ -8,7 +8,7 @@ SPDX-License-Identifier: CC-BY-4.0
 Which licence covers which part of bezent, and why. Every tracked file carries an SPDX header
 (`tools/oss/spdx.py --check`) or, where its format takes no comment, an annotation in `REUSE.toml` (`reuse lint`). The
 copyright holder is Pagos Cube LLC, Bloque's operating company, as in aledgent. **Status: DEC-20's table, signed off
-by @olanod on 2026-10-17.**
+by David Barinas (@S0c5), for Pagos Cube LLC, on 2026-10-17.**
 
 ## 1. The table
 
