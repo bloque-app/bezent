@@ -659,15 +659,15 @@ import.**
 - Licence: GPL-3.0-or-later for the services and the ink! contract; Apache-2.0 OR MIT for reusable crates and the
   EVM contracts; CC-BY-4.0 for documents; GPL-3.0-only for Kreivo's chain specification, kept verbatim. Every file
   carries an SPDX header and the tree a `REUSE.toml`. The services and the contract are GPL rather than AGPL: @pandres95's rule is the GPL wherever it is
-  possible. The built ink! contract is a GPL-3.0-only combined work (`docs/oss/LICENSING.md` §4.3). @olanod signed
+  possible. The built ink! contract is a GPL-3.0-only combined work (`docs/oss/LICENSING.md` §4.3). @S0c5 signed
   the table off on 2026-10-17.
 - The bridge web app (`apps/bridge/**`, `DEC-22`) departs from that rule: it is Apache-2.0 OR MIT, permissive as the
   reusable crates are, by @pandres95's ruling (amendment 0029, Open 12, `d-0029-licence`, 2026-11-09), which did not
   take the GPL recommended for it. It ships smoldot (GPL-3.0-or-later with the Classpath exception), so whether that
   fits an Apache-2.0 OR MIT bundle is checked, and recorded in `docs/oss/LICENSING.md`, before its first release.
 - IP: the same review aledgent had (2026-10-12): one chain of title to Pagos Cube LLC, AI co-authorship noted, third-party code and pinned forks listed with their licences. A DCO check is required on `main` once
-  public. @olanod signed off the IP review and the trademark position on 2026-10-17.
-- Trademark: @olanod's sign-off (2026-10-17) covers the name "bezent" on the repository.
+  public. @S0c5 signed off the IP review and the trademark position on 2026-10-17.
+- Trademark: @S0c5's sign-off (2026-10-17) covers the name "bezent" on the repository.
 
 *Serves:* nothing in the spec requires it; it is @pandres95's direction, and it adds no behaviour. Being
 public also lets holders check the contract and the statement format themselves (`REQ-PR-*`). *Cost:* a redaction
@@ -854,7 +854,7 @@ published p99 target and ceiling (`NFR-2`).
 
 **`F-017` Open-source release.** The public tree, licence headers and `REUSE.toml`, the IP review, the trademark
 check, the public repository, and a private companion that holds the internal documents and deployment definitions,
-following aledgent's run-book (`DEC-20`). Done when the IP and trademark sign-off (@olanod, 2026-10-17) is recorded, the public tree builds and passes
+following aledgent's run-book (`DEC-20`). Done when the IP and trademark sign-off (@S0c5, 2026-10-17) is recorded, the public tree builds and passes
 its tests on its own, and the public repository is open with the DCO check on `main`. **Done on 2026-10-17.** What continues is ordinary work in the
 public repository, and the private repository's deployment from the pinned digest of a public release (`DEC-1`).
 
@@ -872,7 +872,7 @@ EVM endpoint, directed deposits and their returns in the store and the core, the
 | `M-2` More assets, after the bUSDC launch | bEURC and bBTC work | `F-009` (Base, BNB Chain) | bEURC on Base Sepolia and bBTC on BNB Chain testnet pass the `M-1` criteria. A bBTC deposit's remainder lands in surplus and a payout scales exactly (`REQ-AS-9`, `REQ-AS-10`) |
 | `M-3` Attested fiat | COPM, MXNB and BRLB move through Swaps' reports and commitments | `F-011`, `F-012` (reports) | A reversal is exercised end to end (`REQ-BE-6`). Reports become observations with Swaps' ids. Relayed instructions match their commitment. The statement says the reserve is attested and names Swaps |
 | `M-4` Production | bezent carries value on Kreivo mainnet, bUSDC first | `F-010` (Polygon conversions), `F-013` (gate), `F-014`, `F-015` (mainnet, done), `F-016`, `F-018` | Bounds and budgets measured and recorded (`DEC-17`). Every runbook exercised (`NFR-9`). Kreivo 0.17.1 or later enacted on mainnet. The community owns the asset roles (done 2026-10-20). Every `[PENDING]` decision in this plan ruled. The §15 criteria hold on the test bed: zero divergence, sustained; every final source leg delivered, refunded, or held with an owner; every runbook exercised. A convertible deposit reports both amounts and is minted for what Swaps' swap delivered (`AC-A5.1`–`AC-A5.3`). Only bUSDC mints at launch (`DEC-17`). The 48-hour soak of `DEC-19` has passed on mainnet. Anyone bridges USDC on Polygon to bUSDC on Kreivo and back from the web app, with no requester: a round trip on mainnet starting with a 1 USDC deposit (amendment 0029, Open 14), a directed return exercised, the alerts for directed mints and returns in force, and every new runbook exercised. The release that opens directed deposits on mainnet is value-moving under amendment 0024 (amendment 0029, Open 11), so it runs inside the 48-hour soak of `DEC-19` |
-| `M-5` Open source | bezent's code and design are public (reached 2026-10-17) | `F-017` | The public tree builds and passes its tests alone. The IP review and trademark sign-off are recorded (@olanod, 2026-10-17). The public repository is open under the licences of `DEC-20`, with the DCO check on `main`. The private companion keeps every internal document and deploys from the public code by pinned commit |
+| `M-5` Open source | bezent's code and design are public (reached 2026-10-17) | `F-017` | The public tree builds and passes its tests alone. The IP review and trademark sign-off are recorded (@S0c5, 2026-10-17). The public repository is open under the licences of `DEC-20`, with the DCO check on `main`. The private companion keeps every internal document and deploys from the public code by pinned commit |
 
 **Order in time** (@pandres95, `pl-busdc-first`, 2026-10-15; the milestones keep their numbers): `M-0`, `M-1`, then `M-4` with bUSDC
 alone, then `M-2` and `M-3`. `M-4` depends on the Polygon part of `F-009`, on `F-010` and on `F-018` (amendment 0029, Open 10), and on nothing in `M-2` or `M-3`.
