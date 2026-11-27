@@ -11,3 +11,18 @@
 #
 # It is left out of this file on purpose: a file without it is refused, and so no release passes until its evidence
 # says which kind it is, in a pull request the spec owner approves.
+
+class = "value-moving"
+release_commit = "527610e7658401719047d20aa401ec641f426c59"
+
+# The 48-hour mainnet soak of v0.5.2 (DEC-19): 2026-11-24 06:33Z to 2026-11-26 06:33Z. Daily statements #17
+# (2026-11-24) and #18 (2026-11-25) were fetched from the prod statements bucket and each verified: the document's
+# SHA-256 equals the one recorded, the ed25519 signature is valid under the statement key, and #18 chains to #17.
+# The reserve check held on every evaluation in the window, with no divergence and no pause. The output is on the
+# pull request below.
+[soak]
+hours = 48
+statements_verified = 2
+divergences = 0
+evidence = "https://github.com/bloque-app/bezent/pull/160"
+by = "pandres95"
